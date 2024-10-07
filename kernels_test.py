@@ -1,8 +1,4 @@
-import math
-
 import torch
-import triton
-import triton.language as tl
 from transformers.activations import ACT2FN
 import pytest
 
@@ -31,14 +27,9 @@ def torch_ffn(x, w, b=None, r=None):
 def test_fused_ffn(M, N, K):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     x_torch, w_torch, _, _ = _get_inputs(M, K, N, device)
-    x, w, b, r = _get_inputs(M, K, N, device)
-
-    # if not add_bias:
-    #     b_torch = None
-    #     b = None
+    x, w, _, _ = _get_inputs(M, K, N, device)
 
     z_torch = torch_ffn(x_torch, w_torch, b=None, r=None)
-
     z = fused_ffn(x, w)
     assert torch.allclose(z, z_torch, atol=1e-2), (z - z_torch).abs().max()
     
