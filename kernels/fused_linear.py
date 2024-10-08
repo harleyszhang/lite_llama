@@ -55,7 +55,7 @@ def fused_linear_kernel(
     z = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, K, BLOCK_SIZE_K):
         x_k = tl.arange(0, BLOCK_SIZE_K)[None,:] + k
-        # (BLOCK_SIZE_M, BLOCK_SIZE_K), offs_m * K + x_k 计算子块矩阵中元素的线性地址
+        # (BLOCK_SIZE_M, BLOCK_SIZE_K)
         x = tl.load(x_ptr + offs_m * K + x_k, mask=(offs_m < M) & (x_k < K), other=0.0)
         x = x.to(tl.float16)
         
@@ -120,9 +120,9 @@ def fused_ffn(
         residual = residual.view(z.shape)
         assert residual.is_contiguous()
         
-    BLOCK_SIZE_M = 32
-    BLOCK_SIZE_N = 32
-    BLOCK_SIZE_K = 32
+    BLOCK_SIZE_M = 128
+    BLOCK_SIZE_N = 128
+    BLOCK_SIZE_K = 64
     
     # 2D launch kernel where each block gets its own program.
     grid = (triton.cdiv(M, BLOCK_SIZE_M), triton.cdiv(N, BLOCK_SIZE_N), 1)
