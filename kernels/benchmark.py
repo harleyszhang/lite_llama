@@ -1,5 +1,6 @@
 import torch, triton
 from fused_linear import fused_ffn
+from rmsnorm import rmsnorm
 
 def is_cuda():
     return triton.runtime.driver.active.get_current_target().backend == "cuda"
@@ -47,4 +48,55 @@ def benchmark(M, N, K, provider, fp8_inputs):
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
-benchmark.run(show_plots=True, print_data=True, save_path="/gemini/code/pytriton_llama/benchmark_result/")
+try:
+    # This is https://github.com/NVIDIA/apex, NOT the apex on PyPi, so it
+    # should not be added to extras_require in setup.py.
+    import apex
+    HAS_APEX = True
+except ModuleNotFoundError:
+    HAS_APEX = False
+    
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=['N'],
+        x_vals=[512 * i for i in range(2, 32)],
+        line_arg='provider',
+        line_vals=['triton', 'torch'] + (['apex'] if HAS_APEX else []),
+        line_names=['Triton', 'Torch'] + (['Apex'] if HAS_APEX else []),
+        styles=[('blue', '-'), ('green', '-'), ('orange', '-')],
+        ylabel='GB/s',
+        plot_name='layer-norm-backward',
+        args={'M': 4096, 'dtype': torch.float16, 'mode': 'backward'},
+    ))
+def bench_layer_norm(M, N, dtype, provider, mode='backward', eps=1e-5, device='cuda'):
+    # create data
+    x_shape = (M, N)
+    w_shape = (x_shape[-1], )
+    weight = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
+    bias = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
+    x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device=device)
+    dy = .1 * torch.randn_like(x)
+    x.requires_grad_(True)
+    quantiles = [0.5, 0.2, 0.8]
+
+    def y_fwd():
+        if provider == "triton":
+            return rmsnorm(x, weight, bias, eps)  # noqa: F811, E704
+
+        if provider == "torch":
+            return torch.nn.functional.layer_norm(x, w_shape, weight, bias, eps)  # noqa: F811, E704
+
+        if provider == "apex":
+            apex_layer_norm = (apex.normalization.FusedLayerNorm(w_shape).to(x.device).to(x.dtype))
+            return apex_layer_norm(x)  # noqa: F811, E704
+
+    # forward pass
+    if mode == 'forward':
+        gbps = lambda ms: 2 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
+        ms, min_ms, max_ms = triton.testing.do_bench(y_fwd, quantiles=quantiles, rep=500)
+        
+    return gbps(ms), gbps(max_ms), gbps(min_ms)
+
+result_path = "/gemini/code/pytriton_llama/benchmark_result/"
+bench_layer_norm.run(save_path='.', print_data=True, save_path=result_path)
+# benchmark.run(show_plots=True, print_data=True, save_path=result_path)

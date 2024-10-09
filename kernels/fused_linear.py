@@ -100,19 +100,20 @@ def fused_ffn(
     # bias: (N,)
     # f = dropout(gelu(x @ w + b)) + residual
     
+    # 将 x 形状去除最后一个维度，保存为 out_shape_0
     out_shape_0 = x.shape[:-1]
+    # 将 x 的所有维度压缩为二维张量, [B, L, K] -> [M, K], K 是隐藏层的维度。
     x = x.view((-1, x.shape[-1]))
-    
-    M, K = x.shape # k is hiddenlayer dimension; M is batch_size * sequence_length
+    M, K = x.shape
     N = weight.shape[1]
     
     # Allocates output.
-    x = x.view((M, K))
     z = torch.empty((M, N), device=x.device, dtype=x.dtype)
     
+    assert x.shape[1] == weight.shape[0]
     assert x.is_contiguous()
     assert weight.is_contiguous()
-    assert x.shape[1] == weight.shape[0]
+
     if bias is not None:
         assert bias.is_contiguous()
         assert weight.shape[1] == bias.shape[0]
@@ -120,9 +121,9 @@ def fused_ffn(
         residual = residual.view(z.shape)
         assert residual.is_contiguous()
         
-    BLOCK_SIZE_M = 128
-    BLOCK_SIZE_N = 128
-    BLOCK_SIZE_K = 64
+    BLOCK_SIZE_M = 64
+    BLOCK_SIZE_N = 64
+    BLOCK_SIZE_K = 32
     
     # 2D launch kernel where each block gets its own program.
     grid = (triton.cdiv(M, BLOCK_SIZE_M), triton.cdiv(N, BLOCK_SIZE_N), 1)
@@ -141,6 +142,3 @@ def fused_ffn(
     )
     return z.view((*out_shape_0, N))
    
-
-
-
