@@ -7,7 +7,7 @@ def rmsnorm_kernel(
     w_ptr, # gamma 参数地址
     z_ptr, # 输出结果首元素指针
     K,
-    eps=1e-12,  # epsilon to avoid division by zero
+    eps=1e-5,  # epsilon to avoid division by zero
     BLOCK_SIZE: tl.constexpr = 8,
 ):
     # z = (x / (rms + eps)) * w
@@ -44,8 +44,9 @@ def rmsnorm_kernel(
 def rmsnorm(
     x,
     weight,
-    eps=1e-12
+    eps=1e-5
 ):
+    # 只针对 nlp 领域的 layernorm，省去了 normalized_shape 参数
     assert x.is_contiguous()
     assert weight.is_contiguous()
     assert x.shape[-1] == weight.shape[0]

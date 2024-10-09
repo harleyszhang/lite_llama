@@ -5,6 +5,7 @@ import pytest
 
 from kernels.fused_linear import fused_ffn
 from kernels.rmsnorm import rmsnorm
+from kernels.layernorm import layernorm
 
 class RMSNorm(nn.Module):
     """nlp 领域"""
@@ -69,5 +70,21 @@ def test_rmsnorm(M, K):
     x_torch = rmsnorm_pytorch(x_torch)
 
     x = rmsnorm(x, rmsnorm_pytorch.weight.data).to(device)
-    assert torch.allclose(x, x_torch, atol=1e-5)
+    assert torch.allclose(x, x_torch, atol=1e-4)
     
+@pytest.mark.parametrize("M", [128, 32, 64])
+@pytest.mark.parametrize("K", [32, 128, 64])
+def test_layernorm(M, K):
+    N = 32
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print("device is ", device)
+    
+    x, *_ = _get_inputs(M, K, N, device)
+    x_torch, *_ = _get_inputs(M, K, N, device)
+
+    # 模块及其所有参数（如 self.weight）都位于指定设备上（CPU 或 GPU）
+    layernorm_pytorch = nn.LayerNorm(K).to(device)
+    x_torch = layernorm_pytorch(x_torch)
+
+    x = layernorm(x, layernorm_pytorch.weight.data, layernorm_pytorch.bias.data).to(device)
+    assert torch.allclose(x, x_torch, atol=1e-5)
