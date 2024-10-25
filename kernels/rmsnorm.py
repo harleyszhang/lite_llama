@@ -7,10 +7,9 @@ def _rmsnorm_kernel_fwd(
     w_ptr, # gamma 参数地址
     z_ptr, # 输出结果首元素指针
     K,
-    eps=1e-5,  # epsilon to avoid division by zero
     BLOCK_SIZE: tl.constexpr = 8,
 ):
-    # z = (x / (rms + eps)) * w
+    # z = (x / (rms)) * w
     
     row_idx = tl.program_id(0)
     x_row_ptr = x_ptr + row_idx * K # 一行有 K 个元素，K 是最后一维
@@ -27,7 +26,7 @@ def _rmsnorm_kernel_fwd(
         _var += x*x
     
     var = tl.sum(_var, axis=0) / K
-    rsqrt =  1 / tl.sqrt(var + eps)
+    rsqrt =  1 / tl.sqrt(var)
     
     # Normalize and apply rmsnorm
     for col_index in range(0, K, BLOCK_SIZE):
@@ -44,7 +43,6 @@ def _rmsnorm_kernel_fwd(
 def rmsnorm(
     x,
     weight,
-    eps=1e-5
 ):
     # 只针对 nlp 领域的 layernorm，省去了 normalized_shape 参数
     assert x.is_contiguous()
@@ -68,7 +66,6 @@ def rmsnorm(
         weight,
         z,
         K, 
-        eps,
         BLOCK_SIZE=BLOCK_SIZE,    
     )  
     return z.view(out_shape)

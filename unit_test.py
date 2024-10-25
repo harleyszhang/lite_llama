@@ -8,23 +8,21 @@ from kernels.rmsnorm import rmsnorm
 from kernels.layernorm import layernorm
 from kernels.softmax import naive_softmax, softmax
 from kernels.flashattention import flash_attention_v1
-from pytriton_llama.kernels.attention import attention_forward
 
 class RMSNorm(nn.Module):
     """nlp 领域"""
-    def __init__(self, dim, eps=1e-8):
+    def __init__(self, dim):
         """
         :param dim: 输入的维度
         :param eps: 防止除以0的稳定项
         """
         super(RMSNorm, self).__init__()
-        self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))  # 可学习的缩放参数
     
     def forward(self, x):
         # x 的形状为 [batch_size, seq_len, dim]        
         var = torch.mean(x ** 2, dim=-1, keepdim=True)
-        rms = torch.sqrt( var + self.eps)
+        rms = torch.sqrt( var)
         return x / rms * self.weight # 归一化，并应用缩放参数
 
 def _get_attn_inputs(B, N, L, H, device):
