@@ -29,7 +29,7 @@ def dropout(x, p, seed, offset):
     return tl.where(random > p, x / (1 - p), 0.0)
 
 @triton.jit
-def fused_linear_kernel(
+def _fused_linear_kernel_fwd(
     x_ptr,   # 输入数据矩阵首元素指针
     w_ptr,   # 权重矩阵首元素指针
     z_ptr,   # 输出结果地址
@@ -127,7 +127,7 @@ def fused_ffn(
     
     # 2D launch kernel where each block gets its own program.
     grid = (triton.cdiv(M, BLOCK_SIZE_M), triton.cdiv(N, BLOCK_SIZE_N), 1)
-    fused_linear_kernel[grid](
+    _fused_linear_kernel_fwd[grid](
         x, 
         weight, 
         z,

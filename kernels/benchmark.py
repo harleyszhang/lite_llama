@@ -1,8 +1,8 @@
-import torch, triton
+import torch, triton, math
 from fused_linear import fused_ffn
 from rmsnorm import rmsnorm
 from layernorm import layernorm
-from softmax import softmax, naive_softmax
+from softmax import softmax, naive_softmax, online_softmax
 
 try:
     # This is https://github.com/NVIDIA/apex, NOT the apex on PyPi, so it
@@ -148,40 +148,43 @@ TORCH_HAS_FP8 = hasattr(torch, "float8_e5m2")
 # bench_layer_norm.run(print_data=True, save_path=result_path)
 
 ################################benchamrk softmax################################
-# 对 softmax 操作的不同实现（Triton、PyTorch、PyTorch JIT）进行性能基准测试（Benchmark）
-@triton.testing.perf_report(
-    triton.testing.Benchmark(
-        x_names=['N'],  # argument names to use as an x-axis for the plot
-        x_vals=[128 * i for i in range(2, 100)],  # different possible values for `x_name`
-        line_arg='provider',  # argument name whose value corresponds to a different line in the plot
-        line_vals=['triton', 'torch', 'torch_jit'],  # possible values for `line_arg``
-        line_names=[
-            "Triton",
-            "Torch",
-            'torch_jit'
-        ],  # label name for the lines
-        styles=[('blue', '-'), ('green', '-'), ('yellow', '-')],  # line styles
-        ylabel="GB/s",  # label name for the y-axis
-        plot_name="softmax-performance",  # name for the plot. Used also as a file name for saving the plot.
-        args={'M': 4096},  # values for function arguments not in `x_names` and `y_name`
-    ))
+# # 对 softmax 操作的不同实现（Triton、PyTorch、PyTorch JIT）进行性能基准测试（Benchmark）
+# @triton.testing.perf_report(
+#     triton.testing.Benchmark(
+#         x_names=['N'],  # argument names to use as an x-axis for the plot
+#         x_vals=[128 * i for i in range(2, 100)],  # different possible values for `x_name`
+#         line_arg='provider',  # argument name whose value corresponds to a different line in the plot
+#         line_vals=['triton', 'torch', 'torch_jit', 'torch_online_softmax'],  # possible values for `line_arg``
+#         line_names=[
+#             "Triton",
+#             "Torch",
+#             'torch_jit',
+#             'torch_online_softmax'
+#         ],  # label name for the lines
+#         styles=[('blue', '-'), ('green', '-'), ('yellow', '-'), ('red', '-')],  # line styles
+#         ylabel="GB/s",  # label name for the y-axis
+#         plot_name="softmax-performance",  # name for the plot. Used also as a file name for saving the plot.
+#         args={'M': 4096},  # values for function arguments not in `x_names` and `y_name`
+#     ))
 
-def benchmark(M, N, provider):
-    x = torch.randn(M, N, device='cuda', dtype=torch.float32)
-    quantiles = [0.5, 0.2, 0.8]
-    stream = torch.cuda.Stream()
-    torch.cuda.set_stream(stream)
+# def benchmark(M, N, provider):
+#     x = torch.randn(M, N, device='cuda', dtype=torch.float32)
+#     quantiles = [0.5, 0.2, 0.8]
+#     stream = torch.cuda.Stream()
+#     torch.cuda.set_stream(stream)
     
-    if provider == 'torch':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.softmax(x, axis=-1), quantiles=quantiles)
-    if provider == 'torch_jit':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: naive_softmax(x), quantiles=quantiles)
-    if provider == 'triton':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: softmax(x), quantiles=quantiles)
+#     if provider == 'torch':
+#         ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.softmax(x, axis=-1), quantiles=quantiles)
+#     if provider == 'torch_jit':
+#         ms, min_ms, max_ms = triton.testing.do_bench(lambda: naive_softmax(x), quantiles=quantiles)
+#     if provider == 'torch_online_softmax':
+#         ms, min_ms, max_ms = triton.testing.do_bench(lambda: online_softmax(x), quantiles=quantiles)
+#     if provider == 'triton':
+#         ms, min_ms, max_ms = triton.testing.do_bench(lambda: softmax(x), quantiles=quantiles)
     
-    # * 3e-9 是将 bytes 转换为 gb 单位，* 1e-3 是将 s 转换成 ms 单位
-    gbps = lambda ms: 2 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
-    return gbps(ms), gbps(max_ms), gbps(min_ms)
+#     # * 3e-9 是将 bytes 转换为 gb 单位，* 1e-3 是将 s 转换成 ms 单位
+#     gbps = lambda ms: 2 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
+#     return gbps(ms), gbps(max_ms), gbps(min_ms)
 
 """
 1. gbps(ms): 基于中位数 (median) 执行时间计算的 GB/s。通常用于表示典型性能。
@@ -189,6 +192,93 @@ def benchmark(M, N, provider):
 3.	gbps(min_ms)：基于最小执行时间计算的 GB/s。表示在最佳情况下的性能。
 gbps(ms): 这是基于中位数(median) 执行时间计算的 GB/s, 代表了典型的性能表现。
 gbps(max_ms) 和 gbps(min_ms)：这些值通常用于表示性能的波动范围（例如，通过误差条或阴影区域），但在主要的 y 轴上显示的还是 gbps(ms)。
-
 """
-benchmark.run(show_plots=True, print_data=True, save_path=result_path)
+# benchmark.run(show_plots=True, print_data=True, save_path=result_path)
+
+################################benchamrk flashattention################################
+try:
+    from attention import attention_forward
+    from flashattention import flash_attention_v1
+    from fused_flashattention import attention
+    HAS_FLASH = True
+except BaseException:
+    HAS_FLASH = False
+
+print("HAS_FLASH", HAS_FLASH)
+FLASH_NEW = True
+
+BATCH, N_HEADS, HEAD_DIM = 8, 64, 64
+# vary seq length for fixed head and batch=4
+configs = []
+for mode in ["fwd"]:
+    for causal in [False]:
+        configs.append(
+            triton.testing.Benchmark(
+                x_names=["N_CTX"],
+                x_vals=[2**i for i in range(4, 12)],
+                line_arg="provider",
+                line_vals=["triton-official"] + (["flash_me"] if FLASH_NEW else []) + (["flash-kernels"] if HAS_FLASH else []),
+                line_names=["triton-official-fp16"] + (["flash-me-fp16"] if FLASH_NEW else []) + (["flash-kernels-fp16"] if HAS_FLASH else []),
+                styles=[("red", "-"), ("blue", "-"), ("green", "-")],
+                ylabel="TFLOPS",
+                plot_name=f"fused-attention-batch{BATCH}-head{N_HEADS}-d{HEAD_DIM}-{mode}-causal={causal}",
+                args={
+                    "H": N_HEADS,
+                    "BATCH": BATCH,
+                    "HEAD_DIM": HEAD_DIM,
+                    "mode": mode,
+                    "causal": causal,
+                },
+            ))
+
+
+@triton.testing.perf_report(configs)
+def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider, device="cuda"):
+    assert mode in ["fwd"]
+    dtype = torch.float16
+    if "triton" in provider:
+        q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
+        k = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
+        v = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
+    
+        sm_scale = 1.3
+        fn = lambda: attention(q, k, v, causal, sm_scale)
+        if mode == "bwd":
+            o = fn()
+            do = torch.randn_like(o)
+            fn = lambda: o.backward(do, retain_graph=True)
+        ms = triton.testing.do_bench(fn)
+    if provider == "flash-kernels":
+        q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
+        k = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
+        v = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
+        batch, heads, m_size, head_dim = q.shape
+        sm_scale = 1 / math.sqrt(head_dim)
+        output = torch.empty_like(q)
+        
+        fn = lambda: attention_forward(q, k, v, output, sm_scale, attention_mask=None)
+        # fn = lambda: attention_forward(q, k, v, sm_scale)
+        ms = triton.testing.do_bench(fn)
+    if provider == "flash_me":
+        q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
+        k = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
+        v = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
+        batch, heads, m_size, head_dim = q.shape
+        sm_scale = 1 / math.sqrt(head_dim)
+        output = torch.empty_like(q)
+        
+        fn = lambda: flash_attention_v1(q, k, v, sm_scale)
+        ms = triton.testing.do_bench(fn)
+
+    flops_per_matmul = 2.0 * BATCH * H * N_CTX * N_CTX * HEAD_DIM
+    total_flops = 2 * flops_per_matmul
+    if causal:
+        total_flops *= 0.5
+    if mode == "bwd":
+        total_flops *= 2.5  # 2.0(bwd) + 0.5(recompute)
+    return total_flops * 1e-12 / (ms * 1e-3)
+
+
+if __name__ == "__main__":
+    # only works on post-Ampere GPUs right now
+    bench_flash_attention.run(save_path=".", print_data=True)

@@ -2,7 +2,7 @@ import triton,torch, os
 import triton.language as tl 
 
 @triton.jit
-def rmsnorm_kernel(
+def _rmsnorm_kernel_fwd(
     x_ptr, # shape is [M, N]
     w_ptr, # gamma 参数地址
     z_ptr, # 输出结果首元素指针
@@ -27,7 +27,7 @@ def rmsnorm_kernel(
         _var += x*x
     
     var = tl.sum(_var, axis=0) / K
-    rms =  1 / tl.sqrt(var + eps)
+    rsqrt =  1 / tl.sqrt(var + eps)
     
     # Normalize and apply rmsnorm
     for col_index in range(0, K, BLOCK_SIZE):
@@ -37,7 +37,7 @@ def rmsnorm_kernel(
         x = tl.load(x_row_ptr + col_offsets, mask = mask, other=0.0)
         w = tl.load(w_ptr + col_offsets, mask = mask).to(tl.float32)
         
-        z = x * rms * w
+        z = x * rsqrt * w
         tl.store(z_row_ptr + col_offsets, z, mask = mask)
         
 @torch.no_grad()
@@ -63,7 +63,7 @@ def rmsnorm(
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(K))
 
     grid = (triton.cdiv(K, BLOCK_SIZE), 1)
-    rmsnorm_kernel[M, ](
+    _rmsnorm_kernel_fwd[M, ](
         x,
         weight,
         z,

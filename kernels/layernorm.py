@@ -1,8 +1,9 @@
 import triton, torch
 import triton.language as tl
 
+
 @triton.jit
-def layernorm_kernel(
+def _layernorm_kernel_fwd(
     x_ptr,
     weight_ptr,
     bias_ptr,
@@ -61,7 +62,7 @@ def layernorm(
     
     assert x.shape[-1] == weight.shape[0] == bias.shape[0]
     out_shape = x.shape
-    x = x.view(-1, x.shape[-1]) # [B, L, H] -> [B*L, H]
+    x = x.view(-1, x.shape[-1]) # if: [B, L, H] then -> [B*L, H]
     BL, H = x.shape
     z = torch.empty(x.shape, device=x.device, dtype=x.dtype)
     
@@ -70,7 +71,7 @@ def layernorm(
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(H))
     num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
     
-    layernorm_kernel[BL,](
+    _layernorm_kernel_fwd[BL,](
         x,
         weight,
         bias,
