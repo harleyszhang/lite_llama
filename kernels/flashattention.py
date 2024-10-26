@@ -7,6 +7,7 @@ import triton.language as tl
 from torch.cuda.amp import custom_fwd
 from typing import List, Optional, Union
 
+# TODO: integrating rope with flash-attn
 @triton.jit
 def flash_attention_v1_kernel(
     q_ptr,
