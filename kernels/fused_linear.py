@@ -1,3 +1,5 @@
+# reference: https://github.com/fpgaminer/GPTQ-triton/blob/main/src/gptq_triton/quant_linear.py
+
 import math
 
 import torch
@@ -20,6 +22,9 @@ def gelu_new(x):
     b = x + 0.044715 * x * x * x
     return 0.5 * x * (1.0 + tanh(a * b))
 
+@triton.jit
+def silu(x):
+    return x * tl.sigmoid(x)
 
 # TODO: fixed seed would hurt the performance
 # but how do we modify seed design wise?
@@ -36,7 +41,7 @@ def _fused_linear_kernel_fwd(
     M, N, K, # Matrix dimensions
     b_ptr=None,
     r_ptr=None,
-    apply_gelu=False, # gelu 激活和 dropout
+    apply_silu=False, # gelu 激活和 dropout
     dropout_prob=0.0,
     seed=1337,
     BLOCK_SIZE_M: tl.constexpr = 128,  # 块大小
@@ -75,8 +80,8 @@ def _fused_linear_kernel_fwd(
     z_offset = offs_m * N + offs_n
     z_mask = (offs_m < M) & (offs_n < N)
     
-    if apply_gelu:
-        z = gelu_new(z)
+    if apply_silu:
+        z = silu(z)
     if dropout_prob > 0.0:
         z = dropout(z, dropout_prob, seed, z_offset)
 
@@ -87,12 +92,12 @@ def _fused_linear_kernel_fwd(
     tl.store(z_ptr + z_offset, z, mask=z_mask)
 
 @torch.no_grad()
-def fused_ffn(
+def fused_linear(
     x,
     weight,
     bias=None,
     residual=None, # 残差输入项
-    add_gelu=False,
+    add_silu=False,
     dropout_prob=0.0,
 ):
     # x: (*, K)
@@ -132,7 +137,7 @@ def fused_ffn(
         weight, 
         z,
         M, N, K,
-        apply_gelu=add_gelu,
+        apply_silu=add_silu,
         dropout_prob=dropout_prob,
         b_ptr=bias,
         r_ptr=residual,

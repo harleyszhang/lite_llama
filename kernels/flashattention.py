@@ -136,7 +136,6 @@ def flash_attention_v1(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    sm_scale,
     attention_mask: Optional[torch.Tensor] = None,
     ):
     """Compute Flash-attention, can't support fp32 input
@@ -156,7 +155,7 @@ def flash_attention_v1(
     # sequence length of q, also be rows of Q matrix
     bs, n_heads, m_size, head_dim = q.size()
     n_size = k.shape[2]
-    # sm_scale = 1 / math.sqrt(head_dim)
+    sm_scale = 1 / math.sqrt(head_dim)
     # BLOCK_M_SIZE = 128
     grid = lambda meta: (triton.cdiv(m_size, meta["BLOCK_M_SIZE"]), bs*n_heads, 1) # 二维 grid
 

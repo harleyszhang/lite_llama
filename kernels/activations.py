@@ -37,3 +37,7 @@ def tanh(x):
 def gelu(x):
     """Gaussian Error Linear Unit (GELU), only support inference."""
     return x * 0.5 * (1.0 + tl.libdevice.erf(x / sqrt2))
+
+@triton.jit
+def silu(x):
+    return x * tl.sigmoid(x)

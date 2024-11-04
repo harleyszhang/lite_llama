@@ -88,3 +88,50 @@ def rope(
         return output.transpose(0, 1)
     return output
     
+def precompute_theta_pos_frequencies(head_dim: int, seq_len: int, device: str, theta: float = 10000.0):
+    # As written in the paragraph 3.2.2 of the paper
+    # >> In order to generalize our results in 2D to any xi ∈ Rd where **d is even**, [...]
+    assert head_dim % 2 == 0, "Dimension must be divisible by 2"
+    # Build the theta parameter
+    # According to the formula theta_i = 10000^(-2(i-1)/dim) for i = [1, 2, ... dim/2]
+    # Shape: (Head_Dim / 2)
+    theta_numerator = torch.arange(0, head_dim, 2).float()
+    # Shape: (Head_Dim / 2)
+    theta = 1.0 / (theta ** (theta_numerator / head_dim)).to(device) # (Dim / 2)
+    # Construct the positions (the "m" parameter)
+    # Shape: (Seq_Len)
+    m = torch.arange(seq_len, device=device)
+    # Multiply each theta by each position using the outer product.
+    # Shape: (Seq_Len) outer_product* (Head_Dim / 2) -> (Seq_Len, Head_Dim / 2)
+    freqs = torch.outer(m, theta).float()
+    # We can compute complex numbers in the polar form c = R * exp(m * theta), where R = 1 as follows:
+    # (Seq_Len, Head_Dim / 2) -> (Seq_Len, Head_Dim / 2)
+    freqs_complex = torch.polar(torch.ones_like(freqs), freqs)
+    return freqs_complex
+
+def compute_theta(dim: int, base: float = 10000.0, device: torch.device = torch.device('cpu')) -> torch.Tensor:
+    """
+    计算旋转位置编码中的 Theta 角度值。
+
+    参数：
+    - d (int): 嵌入向量的维度（必须为偶数）。
+    - base (float): 基础频率参数, 默认为10000.0。
+    - device (torch.device): 计算设备, 默认为CPU。
+
+    返回：
+    - torch.Tensor: 包含Theta值的1D张量, 形状为 [d/2]。
+    """
+    if dim % 2 != 0:
+        print("嵌入维度 dim 必须为偶数")
+    i = torch.arange(1, (dim//2) + 1, dtype=torch.float32, device=device)
+    theta_i = base ** (-2*(i - 1) / dim)
+
+    return theta_i
+
+def precompute_freqs_cis(dim: int, seq_len: int, base: float = 10000.0, device: torch.device = torch.device('cpu')):
+    theta = compute_theta(dim, base, device) # theta 角度值序列，向量, 大小为 dim // 2
+    m = torch.arange(seq_len, device=device) # # token 位置值序列，向量，大小为 seq_len
+    m_theta = torch.outer(m, theta) # 所有 token 位置的所有 Theta 值范围, 矩阵，尺寸为 [seq_len, dim // 2]
+    freqs_cis = torch.polar(torch.ones_like(m_theta), m_theta) # e^{i*m*\theta}，本质上是旋转矩阵
+    
+    return freqs_cis
