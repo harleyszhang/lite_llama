@@ -17,7 +17,7 @@ def tanh(x):
 
 @triton.jit
 def gelu_new(x):
-    pi = math.pi
+    pi = tl.constexpr(tl.float32(math.pi))
     a = tl.math.sqrt(2.0 / pi)
     b = x + 0.044715 * x * x * x
     return 0.5 * x * (1.0 + tanh(a * b))
@@ -25,13 +25,6 @@ def gelu_new(x):
 @triton.jit
 def silu(x):
     return x * tl.sigmoid(x)
-
-# TODO: fixed seed would hurt the performance
-# but how do we modify seed design wise?
-@triton.jit
-def dropout(x, p, seed, offset):
-    random = tl.rand(seed, offset)
-    return tl.where(random > p, x / (1 - p), 0.0)
 
 @triton.jit
 def _fused_linear_kernel_fwd(
@@ -42,7 +35,6 @@ def _fused_linear_kernel_fwd(
     b_ptr=None,
     r_ptr=None,
     apply_silu=False, # gelu 激活和 dropout
-    dropout_prob=0.0,
     seed=1337,
     BLOCK_SIZE_M: tl.constexpr = 128,  # 块大小
     BLOCK_SIZE_N: tl.constexpr = 128, 
@@ -82,8 +74,6 @@ def _fused_linear_kernel_fwd(
     
     if apply_silu:
         z = silu(z)
-    if dropout_prob > 0.0:
-        z = dropout(z, dropout_prob, seed, z_offset)
 
     if r_ptr is not None:
         r = tl.load(r_ptr + z_offset, mask=z_mask)
@@ -98,12 +88,11 @@ def fused_linear(
     bias=None,
     residual=None, # 残差输入项
     add_silu=False,
-    dropout_prob=0.0,
 ):
     # x: (*, K)
     # weight: (K, N)
     # bias: (N,)
-    # f = dropout(gelu(x @ w + b)) + residual
+    # f = silu(x @ w + b) + residual
     
     # 将 x 形状去除最后一个维度，保存为 out_shape_0
     out_shape_0 = x.shape[:-1]
@@ -114,8 +103,8 @@ def fused_linear(
     
     # Allocates output.
     z = torch.empty((M, N), device=x.device, dtype=x.dtype)
-    
-    assert x.shape[1] == weight.shape[0]
+
+    # assert x.shape[1] == weight.shape[0]
     assert x.is_contiguous()
     assert weight.is_contiguous()
 
@@ -138,7 +127,6 @@ def fused_linear(
         z,
         M, N, K,
         apply_silu=add_silu,
-        dropout_prob=dropout_prob,
         b_ptr=bias,
         r_ptr=residual,
         BLOCK_SIZE_M=BLOCK_SIZE_M,

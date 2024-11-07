@@ -44,7 +44,6 @@ def rope_kernel_fw(input_ptr, in_seq_len_stride, in_batch_stride,
 
 @torch.no_grad()
 def rope(
-    ctx,
     t: torch.Tensor,
     freqs: torch.Tensor,
     tensor_format: str = "sbhd",
@@ -56,7 +55,10 @@ def rope(
         raise ValueError(f"Unsupported tensor_format: {tensor_format}.")
 
     seq_len, batch_num, head_num, head_dim = t.shape
-    output = torch.empty_like(t)
+    assert t.device.type == 'cuda', "Input tensor t must be on CUDA device"
+    assert freqs.device.type == 'cuda', "Input tensor freqs must be on CUDA device"
+
+    output = torch.empty_like(t, device='cuda')
 
     BLOCK_SIZE = triton.next_power_of_2(head_dim // 2)
 
@@ -67,49 +69,24 @@ def rope(
     sin = torch.sin(freqs).to(t.dtype)
 
     rope_kernel_fw[grid](t,
-                            t.stride(0),
-                            t.stride(1),
-                            output,
-                            cos,
-                            sin,
-                            cos.stride(0),
-                            sin.stride(0),
-                            seq_len,
-                            head_dim,
-                            BLOCK_SIZE,
-                            batch_num)
-
-    ctx.cos = cos
-    ctx.sin = sin
-    ctx.BLOCK_SIZE = BLOCK_SIZE
-    ctx.tensor_format = tensor_format
+                        t.stride(0),
+                        t.stride(1),
+                        output,
+                        cos,
+                        sin,
+                        cos.stride(0),
+                        sin.stride(0),
+                        seq_len,
+                        head_dim,
+                        BLOCK_SIZE,
+                        batch_num)
 
     if tensor_format == "bshd":
         return output.transpose(0, 1)
-    return output
     
-def precompute_theta_pos_frequencies(head_dim: int, seq_len: int, device: str, theta: float = 10000.0):
-    # As written in the paragraph 3.2.2 of the paper
-    # >> In order to generalize our results in 2D to any xi ∈ Rd where **d is even**, [...]
-    assert head_dim % 2 == 0, "Dimension must be divisible by 2"
-    # Build the theta parameter
-    # According to the formula theta_i = 10000^(-2(i-1)/dim) for i = [1, 2, ... dim/2]
-    # Shape: (Head_Dim / 2)
-    theta_numerator = torch.arange(0, head_dim, 2).float()
-    # Shape: (Head_Dim / 2)
-    theta = 1.0 / (theta ** (theta_numerator / head_dim)).to(device) # (Dim / 2)
-    # Construct the positions (the "m" parameter)
-    # Shape: (Seq_Len)
-    m = torch.arange(seq_len, device=device)
-    # Multiply each theta by each position using the outer product.
-    # Shape: (Seq_Len) outer_product* (Head_Dim / 2) -> (Seq_Len, Head_Dim / 2)
-    freqs = torch.outer(m, theta).float()
-    # We can compute complex numbers in the polar form c = R * exp(m * theta), where R = 1 as follows:
-    # (Seq_Len, Head_Dim / 2) -> (Seq_Len, Head_Dim / 2)
-    freqs_complex = torch.polar(torch.ones_like(freqs), freqs)
-    return freqs_complex
+    return output.to("cuda")
 
-def compute_theta(dim: int, base: float = 10000.0, device: torch.device = torch.device('cpu')) -> torch.Tensor:
+def compute_theta(dim: int, base: float = 10000.0, device: torch.device = torch.device('cuda')) -> torch.Tensor:
     """
     计算旋转位置编码中的 Theta 角度值。
 
@@ -128,10 +105,10 @@ def compute_theta(dim: int, base: float = 10000.0, device: torch.device = torch.
 
     return theta_i
 
-def precompute_freqs_cis(dim: int, seq_len: int, base: float = 10000.0, device: torch.device = torch.device('cpu')):
+def precompute_freqs_cis(dim: int, seq_len: int, base: float = 10000.0, device: torch.device = torch.device('cuda')):
     theta = compute_theta(dim, base, device) # theta 角度值序列，向量, 大小为 dim // 2
     m = torch.arange(seq_len, device=device) # # token 位置值序列，向量，大小为 seq_len
     m_theta = torch.outer(m, theta) # 所有 token 位置的所有 Theta 值范围, 矩阵，尺寸为 [seq_len, dim // 2]
     freqs_cis = torch.polar(torch.ones_like(m_theta), m_theta) # e^{i*m*\theta}，本质上是旋转矩阵
-    
+
     return freqs_cis

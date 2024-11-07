@@ -37,7 +37,9 @@ def _rmsnorm_kernel_fwd(
         x = tl.load(x_row_ptr + col_offsets, mask = mask, other=0.0)
         w = tl.load(w_ptr + col_offsets, mask = mask).to(tl.float32)
         
-        z = x * rsqrt * w
+        normed = x * rsqrt
+        normed = normed.to(w.dtype) # Exact copy from HF
+        z =normed * w
         tl.store(z_row_ptr + col_offsets, z, mask = mask)
         
 @torch.no_grad()
@@ -68,6 +70,29 @@ def rmsnorm(
         weight,
         z,
         K, 
+        eps = eps,
         BLOCK_SIZE=BLOCK_SIZE,    
     )  
     return z.view(out_shape)
+
+def torch_rms_norm(x, weight, eps):
+    return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * weight
+
+def test_rms_norm(M, N, dtype, eps=1e-5, device="cuda"):
+    # create data
+    x_shape = (M, N)
+    w_shape = (x_shape[-1],)
+    weight = torch.rand(w_shape, dtype=dtype, device="cuda")
+    x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device="cuda")
+    # forward pass
+    y_tri = rmsnorm(x, weight, eps)
+    y_ref = torch_rms_norm(x.to(torch.float32), weight.to(torch.float32), eps).to(dtype)
+
+    # compare
+    print("type:", y_tri.dtype, y_ref.dtype)
+    print("max delta:", torch.max(torch.abs(y_tri - y_ref)))
+    assert torch.allclose(y_tri, y_ref, atol=1e-3, rtol=0)
+    return
+
+if __name__ == "__main__":
+    test_rms_norm(100, 256, torch.float16)

@@ -3,7 +3,7 @@ import torch.nn as nn
 from transformers.activations import ACT2FN
 import pytest
 
-from kernels.fused_linear import fused_ffn
+from kernels.fused_linear import fused_linear
 from kernels.rmsnorm import rmsnorm
 from kernels.layernorm import layernorm
 from kernels.softmax import naive_softmax, softmax
@@ -68,7 +68,7 @@ def test_fused_ffn(M, N, K):
     x, w, _, _ = _get_inputs(M, K, N, device)
 
     z_torch = torch_ffn(x_torch, w_torch, b=None, r=None)
-    z = fused_ffn(x, w)
+    z = fused_linear(x, w)
     assert torch.allclose(z, z_torch, atol=1e-2), (z - z_torch).abs().max()
     
     
@@ -155,10 +155,9 @@ def test_flash_attention_v1(B, N, L, H):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     q, k, v = _get_attn_inputs(B, N, L, H, device)
     batch, heads, m_size, dhead = q.shape
-    z_torch = torch_attention(q, k, v)
     atten_out = torch.empty_like(q) 
     sm_scale = 1 / math.sqrt(dhead)
-    # z = attention_forward(q, k, v, atten_out, sm_scale)
+    z_torch = torch_attention(q, k, v)
     z = flash_attention_v1(q, k, v, sm_scale)
     print(f"z_torch: {z_torch[0][0][0][0]}, z: {z[0][0][0][0]}")
     assert torch.allclose(z[0], z_torch[0], atol=1e-3), (z - z_torch).abs().max()

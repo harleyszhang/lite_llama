@@ -2,3 +2,7 @@ __pycache__
 .pytest_cache
 kernels/__pycache__
 benchmark_result/tmp
+tmp/
+my_llama3.2-1B.pth
+config.json
+params.json

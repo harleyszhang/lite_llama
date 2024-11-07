@@ -147,6 +147,9 @@ def flash_attention_v1(
         attention_mask: Attention mask matrix broadcastable to (batch, head_size, m_size, n_size).
     """
     output = torch.empty_like(q)
+    assert q.device.type == 'cuda', "Input tensor q must be on CUDA device"
+    assert k.device.type == 'cuda', "Input tensor keys must be on CUDA device"
+
     assert q.shape[-1] == k.shape[-1] == v.shape[-1]
     assert (
             q.dtype == k.dtype == v.dtype == output.dtype
@@ -154,6 +157,7 @@ def flash_attention_v1(
     
     # sequence length of q, also be rows of Q matrix
     bs, n_heads, m_size, head_dim = q.size()
+
     n_size = k.shape[2]
     sm_scale = 1 / math.sqrt(head_dim)
     # BLOCK_M_SIZE = 128
@@ -172,8 +176,8 @@ def flash_attention_v1(
         m_size,
         n_size,
         head_dim,
-        64,  # BLOCK_M_SIZE
-        64,  # BLOCK_N_SIZE
+        32,  # BLOCK_M_SIZE
+        32,  # BLOCK_N_SIZE
         sm_scale
     )
     return output
