@@ -1,17 +1,12 @@
 from dataclasses import dataclass
-
 import torch
 import torch.nn as nn
-
-from transformers import AutoTokenizer,PretrainedConfig
-from kernels import *
-from dataclasses import dataclass
-from typing import Optional
-import torch.nn.functional as F 
+import torch.nn.functional as F
 import math
-from typing import Optional, Tuple
-import json
-from typing import Any, Dict, Optional
+
+from dataclasses import dataclass
+from typing import Optional, Tuple, Any, Dict, Optional
+from kernels import *
 
 @dataclass
 class LlamaConfig:
@@ -76,7 +71,7 @@ class LlamaConfig:
                 setattr(self, key, value)
 
 def _compute_default_rope_parameters(
-    config: Optional[PretrainedConfig] = None,
+    config: Optional[LlamaConfig] = None,
     device: Optional["torch.device"] = None,
     seq_len: Optional[int] = None,
     **rope_kwargs,
@@ -84,7 +79,7 @@ def _compute_default_rope_parameters(
     """
     Computes the inverse frequencies according to the original RoPE implementation
     Args:
-        config ([`~transformers.PretrainedConfig`]):
+        config ([`~transformers.LlamaConfig`]):
             The model configuration.
         device (`torch.device`):
             The device to use for initialization of the inverse frequencies.
@@ -117,13 +112,13 @@ def _compute_default_rope_parameters(
     return inv_freq, attention_factor
 
 def _compute_llama3_parameters(
-    config: PretrainedConfig, device: "torch.device", seq_len: Optional[int] = None, **rope_kwargs
+    config: LlamaConfig, device: "torch.device", seq_len: Optional[int] = None, **rope_kwargs
 ) -> Tuple["torch.Tensor", float]:
     """
     Computes the inverse frequencies for llama 3.1.
 
     Args:
-        config ([`~transformers.PretrainedConfig`]):
+        config ([`~transformers.LlamaConfig`]):
             The model configuration.
         device (`torch.device`):
             The device to use for initialization of the inverse frequencies.
