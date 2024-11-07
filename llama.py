@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-from tqdm.auto import tqdm
+
 from transformers import AutoTokenizer,PretrainedConfig
 from kernels import *
 from dataclasses import dataclass
@@ -246,38 +246,6 @@ class LlamaRotaryEmbedding(nn.Module):
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
-# def rotate_half(x):
-#     """Rotates half the hidden dims of the input."""
-#     x1 = x[..., : x.shape[-1] // 2]
-#     x2 = x[..., x.shape[-1] // 2 :]
-#     return torch.cat((-x2, x1), dim=-1)
-
-# def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
-#     """Applies Rotary Position Embedding to the query and key tensors.
-
-#     Args:
-#         q (`torch.Tensor`): The query tensor.
-#         k (`torch.Tensor`): The key tensor.
-#         cos (`torch.Tensor`): The cosine part of the rotary embedding.
-#         sin (`torch.Tensor`): The sine part of the rotary embedding.
-#         position_ids (`torch.Tensor`, *optional*):
-#             Deprecated and unused.
-#         unsqueeze_dim (`int`, *optional*, defaults to 1):
-#             The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-#             sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
-#             that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
-#             k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
-#             cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-#             the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
-#     Returns:
-#         `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
-#     """
-#     cos = cos.unsqueeze(unsqueeze_dim)
-#     sin = sin.unsqueeze(unsqueeze_dim)
-#     q_embed = (q * cos) + (rotate_half(q) * sin)
-#     k_embed = (k * cos) + (rotate_half(k) * sin)
-#     return q_embed, k_embed
-
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         """
@@ -323,86 +291,6 @@ class RMSNorm(torch.nn.Module):
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
     
-def compute_theta(dim: int, base: float = 500000.0, device: torch.device = torch.device('cuda')) -> torch.Tensor:
-    """
-    计算旋转位置编码中的 Theta 角度值。
-
-    参数：
-    - d (int): 嵌入向量的维度（必须为偶数）。
-    - base (float): 基础频率参数, 默认为500000.0。
-    - device (torch.device): 计算设备, 默认为CPU。
-
-    返回：
-    - torch.Tensor: 包含Theta值的1D张量, 形状为 [d/2]。
-    """
-    if dim % 2 != 0:
-        print("嵌入维度 dim 必须为偶数")
-    i = torch.arange(1, (dim//2) + 1, dtype=torch.float32, device=device)
-    theta_i = base ** (-2*(i - 1) / dim)
-
-    return theta_i
-
-def precompute_freqs_cis(dim: int, seq_len: int, base: float = 500000.0, device: torch.device = torch.device('cuda')):
-    theta = compute_theta(dim, base, device) # theta 角度值序列，向量, 大小为 dim // 2
-    m = torch.arange(seq_len, device=device) # # token 位置值序列，向量，大小为 seq_len
-    m_theta = torch.outer(m, theta) # 所有 token 位置的所有 Theta 值范围, 矩阵，尺寸为 [seq_len, dim // 2]
-    freqs_cis = torch.polar(torch.ones_like(m_theta), m_theta) # e^{i*m*\theta}，本质上是旋转矩阵
-
-    return freqs_cis
-
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
-    """
-    Reshape frequency tensor for broadcasting it with another tensor.
-
-    This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
-    for the purpose of broadcasting the frequency tensor during element-wise operations.
-
-    Args:
-        freqs_cis (torch.Tensor): Frequency tensor to be reshaped.
-        x (torch.Tensor): Target tensor for broadcasting compatibility.
-
-    Returns:
-        torch.Tensor: Reshaped frequency tensor.
-
-    Raises:
-        AssertionError: If the frequency tensor doesn't match the expected shape.
-        AssertionError: If the target tensor 'x' doesn't have the expected number of dimensions.
-    """
-    ndim = x.ndim
-    assert 0 <= 1 < ndim
-    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-    return freqs_cis.view(*shape)
-
-# def apply_rotary_emb(
-#     xq: torch.Tensor,
-#     xk: torch.Tensor,
-#     freqs_cis: torch.Tensor,
-# ) -> Tuple[torch.Tensor, torch.Tensor]:
-#     """
-#     Apply rotary embeddings to input tensors using the given frequency tensor.
-
-#     This function applies rotary embeddings to the given query 'xq' and key 'xk' tensors using the provided
-#     frequency tensor 'freqs_cis'. The input tensors are reshaped as complex numbers, and the frequency tensor
-#     is reshaped for broadcasting compatibility. The resulting tensors contain rotary embeddings and are
-#     returned as real tensors.
-#     xq and xk shape is [batch_size, seq_len, self.n_kv_heads, self.head_dim]
-
-#     Args:
-#         xq (torch.Tensor): Query(the input querys of self-attnetion) tensor to apply rotary embeddings.
-#         xk (torch.Tensor): Key tensor to apply rotary embeddings.
-#         freqs_cis (torch.Tensor): Precomputed frequency tensor for complex exponentials.
-
-#     Returns:
-#         Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
-#     """
-#     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-#     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-#     freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
-#     xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-#     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-#     return xq_out.type_as(xq), xk_out.type_as(xk)
-
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """同一组的 kv cache 复制多份"""
     batch_size, seq_len, n_kv_heads, head_dim = x.shape
@@ -416,6 +304,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         # (B, Seq_Len, N_KV_Heads * N_Rep, Head_Dim)
         .reshape(batch_size, seq_len, n_kv_heads * n_rep, head_dim)
     )
+
 
 class FusedAttention(nn.Module):
     def __init__(self,  config: LlamaConfig):
@@ -550,9 +439,7 @@ class FusedMLP(nn.Module):
 
     def forward(self, x):
         # return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
-        return self.down_proj(
-            swiglu_forward(self.gate_proj(x), self.up_proj(x))
-        )
+        return self.down_proj(swiglu_forward(self.gate_proj(x), self.up_proj(x)))
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -630,8 +517,10 @@ class Llama(nn.Module):
         batch_size, seq_len = tokens.shape
         # (B, Seq_Len) -> (B, Seq_Len, Dim)
         h = self.embed_tokens(tokens) # torch.isnan(h).any() False
+
         # self.freqs_cis = self.freqs_cis.to(h.device)
         # freqs_cis = self.freqs_cis[start_pos : start_pos + seq_len]
+
         cache_position = torch.arange(start_pos, start_pos + seq_len, device=h.device)
         position_ids = cache_position.unsqueeze(0)
         position_embeddings = self.rotary_emb(h, position_ids)
@@ -665,146 +554,4 @@ class Llama(nn.Module):
         # output = torch.matmul(h, self.lm_head_weight.data.t().contiguous()).float()
 
         return output
-
-from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaForCausalLM
-
-def load_original_llama(model_name_or_path: str, device: str = "cuda"):
-    # config = LlamaConfig.from_pretrained(model_name_or_path)
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-    # tokenizer = AutoTokenizer.from_pretrained(model_name_or_path,config = config)
-    model = LlamaForCausalLM.from_pretrained(
-        model_name_or_path,
-        torch_dtype=torch.float16,
-        device_map="cuda",
-        # config = config
-    )
-    model.to(device)
-    return model, tokenizer
-
-
-def load_custom_llama(model_config: LlamaConfig, pretrained_model: AutoModelForCausalLM, device: str = "cuda"):
-    # 将预训练模型的权重映射到自定义模型
-    hf_sd = pretrained_model.state_dict()
-    # 映射嵌入层  # 映射归一化层
-    mapping = {
-        "model.norm.weight": "norm_weight", 
-        "model.embed_tokens.weight": "embed_tokens.weight",
-        # "model.embed_tokens.weight": "lm_head.weight",
-    }
-
-    # 映射层
-    layers = {
-        'model.layers.{i}.self_attn.q_proj.weight': 'layers.{i}.attention.wq.weight',
-        'model.layers.{i}.self_attn.k_proj.weight': 'layers.{i}.attention.wk.weight',
-        'model.layers.{i}.self_attn.v_proj.weight': 'layers.{i}.attention.wv.weight',
-        'model.layers.{i}.self_attn.o_proj.weight': 'layers.{i}.attention.wo.weight',
-        'model.layers.{i}.mlp.gate_proj.weight': 'layers.{i}.feed_forward.gate_proj.weight',
-        'model.layers.{i}.mlp.up_proj.weight': 'layers.{i}.feed_forward.up_proj.weight',
-        'model.layers.{i}.mlp.down_proj.weight': 'layers.{i}.feed_forward.down_proj.weight',
-        'model.layers.{i}.post_attention_layernorm.weight': 'layers.{i}.ffn_norm_weight',
-        'model.layers.{i}.input_layernorm.weight': 'layers.{i}.attention_norm_weight'
-    }
-
-    #  根据 Transformer 层数量生成映射
-    for i in range(model_config.n_layers):
-        for hf_key, custom_key in layers.items():
-            mapped_key = hf_key.format(i=i) # hf 权重参数字典 key
-            custom_mapped_key = custom_key.format(i=i) # 自定义模型权重参数字典 key
-            mapping[mapped_key] = custom_mapped_key
-
-    # 创建新的状态字典
-    new_sd = {}
-    for hf_key, tensor in tqdm(hf_sd.items(), desc="Mapping weights"):
-        custom_key = mapping.get(hf_key, None)
-        if custom_key is not None:
-            new_sd[custom_key] = tensor # 浅拷贝
-        else:
-            print(f"custom_key: {custom_key}")
-            # 如果某些权重不需要映射，可以选择忽略或处理
-            pass  # 忽略未映射的权重
     
-    new_sd["lm_head.weight"] = hf_sd["model.embed_tokens.weight"]
-
-    # 打印预训练模型的参数名称
-    print("Pretrained model parameters:")
-    for name in hf_sd.keys():
-        print(name)
-
-    # 打印自定义模型的参数名称
-    print("Custom model parameters:")
-    for name in new_sd.keys():
-        print(name)
-
-    torch.save(new_sd, "/gemini/code/lite_llama/my_llama3.2-1B.pth")
-    # torch.set_default_tensor_type(torch.cuda.HalfTensor)
-    torch.set_default_dtype(torch.half)
-    my_model = Llama(model_args).to(device)
-    my_model.load_state_dict(new_sd, strict=True)
-    
-    return my_model
-
-def compare_models(original_model, custom_model, tokenizer, input_text: str, device: str = "cuda"):
-    # 准备输入
-    inputs = tokenizer(input_text, return_tensors="pt").to(device)
-    # 原始模型输出
-    with torch.no_grad():
-        original_outputs = original_model(**inputs, output_hidden_states=True)
-    original_logits = original_outputs.logits
-
-    # 自定义模型输出
-    tokens = inputs['input_ids']
-    with torch.no_grad():
-        custom_outputs = custom_model(tokens, start_pos=0)
-    custom_logits = custom_outputs
-
-    # 比较输出
-    # print(torch.abs(original_model.state_dict()["model.embed_tokens.weight"] - custom_model.state_dict()["lm_head.weight"]))
-    difference = torch.abs(original_logits - custom_logits).mean().item()
-    print(f"Average difference between models: {difference}")
-
-    # 可以设置阈值，判断是否一致
-    if difference < 1e-2:
-        print("Models are consistent.")
-    else:
-        print("Models are not consistent.")
-
-    print(f"custom_model.hidden_states number: {len(custom_model.hidden_states)}, original_outputs.hidden_states number: {len(original_outputs.hidden_states)} ")
-    
-    # 比较所有 layer 的隐藏层状态输出
-    layer_idxs = range(len(custom_model.hidden_states))
-    for index in tqdm(layer_idxs):
-        custom_layer_output = custom_model.hidden_states[index]
-        original_layer_output = original_outputs.hidden_states[index]
-
-        difference = torch.abs(custom_layer_output - original_layer_output).mean().item()
-        print(f"Difference at layer {index}: {difference}")
-
-def load_config_from_json(json_file_path: str) -> LlamaConfig:
-    with open(json_file_path, 'r', encoding='utf-8') as f:
-        config_dict = json.load(f)
-    config = LlamaConfig(config_dict, max_seq_len = 2048)
-    return config
-
-if __name__ == "__main__":
-    # my_model = Llama(model_args).to("cuda")
-    # del my_model
-    # print(model_args)
-
-    # 定义模型参数
-    json_file_path = '/gemini/code/Llama-3.2-1B-Instruct/config.json' # JSON 文件的路径
-    model_args = load_config_from_json(json_file_path) # 加载配置
-    # model_args = LlamaConfig(max_batch_size=2) # 旧版 LlamaConfig 不支持新的 rope 参数
-
-    # 加载原始模型
-    original_model_path = "/gemini/code/Llama-3.2-1B-Instruct"
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    original_model, tokenizer = load_original_llama(original_model_path, device)
-    
-    # 加载自定义模型
-    custom_model = load_custom_llama(model_args, original_model, device)
-
-    # 测试文本
-    test_text = "Once upon a time in a distant land,"
-
-    # 比较模型输出
-    compare_models(original_model, custom_model, tokenizer, test_text, device)

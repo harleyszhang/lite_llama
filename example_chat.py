@@ -1,5 +1,5 @@
 from typing import List, Optional
-from llama_infer import LLaMAInfer, Dialog
+from generate import GenerateText, Dialog
 import torch
 
 def main(
@@ -26,8 +26,8 @@ def main(
     """
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    generator = LLaMAInfer.build(
-        checkpoints_dir='/gemini/code/lite_llama/',
+    generator = GenerateText.build(
+        checkpoints_dir='/gemini/code/Llama-3.2-1B-Instruct/my_weight/',
         tokenizer_path='/gemini/code/Llama-3.2-1B-Instruct/',
         load_model=True,
         max_seq_len=1024,

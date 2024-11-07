@@ -84,13 +84,14 @@ def convert_hf_to_triton(hf_sd, model_args):
         else:
             # 如果某些权重不需要映射，可以选择忽略或处理
             pass  # 忽略未映射的权重
-    torch.save(new_sd, "/gemini/code/lite_llama/my_llama3.2-1B.pth")
+    
+    torch.save(new_sd, "/gemini/code/Llama-3.2-1B-Instruct/my_weight/my_llama3.2-1B.pth")
 
     return new_sd
 
-class LLaMAInfer:
+class GenerateText:
     """
-    LLaMAInfer类用于加载LLaMA模型并执行推理（文本生成）。
+    GenerateText 类用于加载LLaMA模型并执行迭代式生成式推理（文本生成）。
     """
 
     @staticmethod
@@ -165,7 +166,7 @@ class LLaMAInfer:
             model.load_state_dict(state_dict, strict=False)
             print(f"Loaded state dict in {time.time() - prev_time:.2f}s")
 
-        return LLaMAInfer(model, tokenizer, model_args)
+        return GenerateText(model, tokenizer, model_args)
 
     def __init__(self, model: Llama, tokenizer: AutoTokenizer, model_args: LlamaConfig):
         self.model = model
