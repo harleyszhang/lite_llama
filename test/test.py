@@ -1,4 +1,4 @@
-from llama import Llama, ModelArgs
+from lite_llama.lite_llama.llama import Llama, ModelArgs
 from pathlib import Path
 import json
 import torch

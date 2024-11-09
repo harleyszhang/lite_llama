@@ -1,7 +1,8 @@
 from typing import List, Optional
-from generate import GenerateText, Dialog
 import torch
 from torch.profiler import profile, ProfilerActivity
+
+from lite_llama.generate import GenerateText, Dialog
 
 def main(
     temperature: float = 0.6,

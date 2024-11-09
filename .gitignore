@@ -1,4 +1,5 @@
 __pycache__
 .pytest_cache
 kernels/__pycache__
+lite_llama/__pycache__
 images/tmp

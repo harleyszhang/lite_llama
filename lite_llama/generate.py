@@ -8,10 +8,11 @@ from tqdm import tqdm
 
 from transformers import AutoTokenizer
 from typing import List, Literal, Optional, Tuple, TypedDict
-from llama import LlamaConfig, Llama  # 确保这些类已正确定义和导入
-from cuda_graph import CUDAGraphRunner, ModelRunner
 import torch.nn.functional as F 
 from torch.profiler import record_function
+
+from .cuda_graph import CUDAGraphRunner, ModelRunner
+from .llama import LlamaConfig, Llama  # 确保这些类已正确定义和导入
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)

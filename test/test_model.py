@@ -4,7 +4,7 @@ import torch
 import pytest
 from dataclasses import dataclass
 from kernels import fused_linear, rmsnorm
-from llama import ModelArgs, FusedAttention, FusedMLP, LlamaDecoderLayer, Llama
+from lite_llama.lite_llama.llama import ModelArgs, FusedAttention, FusedMLP, LlamaDecoderLayer, Llama
 
 @dataclass
 class TestArgs:

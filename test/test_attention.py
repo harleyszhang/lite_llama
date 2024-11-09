@@ -1,5 +1,5 @@
 
-from llama import *
+from lite_llama.lite_llama.llama import *
 
 class ModelArgs:
     def __init__(self):

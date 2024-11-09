@@ -4,7 +4,7 @@ from tqdm.auto import tqdm
 import json, sys, os
 # 获取 lite_llama 目录的绝对路径并添加到 sys.path 中
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from llama import Llama, LlamaConfig
+from lite_llama.lite_llama.llama import Llama, LlamaConfig
 
 def load_original_llama(model_name_or_path: str, device: str = "cuda"):
     # config = LlamaConfig.from_pretrained(model_name_or_path)
