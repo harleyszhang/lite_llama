@@ -2,13 +2,20 @@ from typing import Optional
 import torch
 import time
 from pathlib import Path
-import json
+import json,logging
 from sentencepiece import SentencePieceProcessor
 from tqdm import tqdm
+
 from transformers import AutoTokenizer
 from typing import List, Literal, Optional, Tuple, TypedDict
 from llama import LlamaConfig, Llama  # 确保这些类已正确定义和导入
+from cuda_graph import CUDAGraphRunner, ModelRunner
 import torch.nn.functional as F 
+from torch.profiler import record_function
+
+# 设置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 Role = Literal["system", "user", "assistant"]
 
@@ -36,7 +43,6 @@ B_SYS, E_SYS = "<<SYS>>\n", "\n<</SYS>>\n\n"
 
 SPECIAL_TAGS = [B_INST, E_INST, "<<SYS>>", "<</SYS>>"]
 UNSAFE_ERROR = "Error: special tags are not allowed as part of the prompt."
-
 
 def convert_hf_to_triton(hf_sd, model_args):
     """
@@ -93,9 +99,17 @@ class GenerateText:
     """
     GenerateText 类用于加载LLaMA模型并执行迭代式生成式推理（文本生成）。
     """
-
     @staticmethod
-    def build(checkpoints_dir: str, tokenizer_path: str, load_model: bool, max_seq_len: int, max_batch_size: int, device: str, triton_weight=True):
+    def build(
+        checkpoints_dir: str, 
+        tokenizer_path: str, 
+        load_model: bool, 
+        max_seq_len: int, 
+        max_batch_size: int, 
+        device: str, 
+        triton_weight=True,
+        compiled_model=True,
+    ):
         """
         构建LLaMAInfer实例, 加载模型和分词器。
 
@@ -108,7 +122,7 @@ class GenerateText:
             device (str): 设备类型（'cuda'或'cpu'）。
 
         返回:
-            LLaMAInfer: 初始化后的LLaMAInfer实例。
+            GenerateText: 初始化后的 GenerateText 实例。
         """
         prev_time = time.time()
         if load_model:
@@ -166,12 +180,36 @@ class GenerateText:
             model.load_state_dict(state_dict, strict=False)
             print(f"Loaded state dict in {time.time() - prev_time:.2f}s")
 
-        return GenerateText(model, tokenizer, model_args)
+        return GenerateText(model, tokenizer, model_args, compiled_model)
 
-    def __init__(self, model: Llama, tokenizer: AutoTokenizer, model_args: LlamaConfig):
+    def __init__(self, model: Llama, tokenizer: AutoTokenizer, model_args: LlamaConfig, compiled_model=True):
         self.model = model
         self.tokenizer = tokenizer
         self.args = model_args
+        self.compiled_model = compiled_model
+        self.model_runner = None
+    
+    def apply_cuda_graph(self, input_ids, prev_pos):
+        """应用 cuda graph 优化
+        参数:
+            - input_ids: 输入 tokens id 列表, shape: (batch_size, seq_len)
+            - prev_pos: 当前处于第几轮迭代循环, 生成第几个 token
+        """
+        if prev_pos == 0:
+            with record_function("prefill"):
+                logits = self.model.forward(input_ids, prev_pos)
+        else:
+            with record_function("decode"):
+                if self.compiled_model == False:
+                    logits = self.model.forward(input_ids, prev_pos)
+                else:
+                    if self.model_runner is None:
+                        self.model_runner = ModelRunner(self.model, vocab_size = self.args.vocab_size, max_batch_size=self.args.max_batch_size)
+                        self.model_runner.capture_decode_graph()
+                    
+                    logits = self.model_runner.decode(input_ids, prev_pos)
+
+        return logits
 
     @torch.inference_mode()
     def generate(
@@ -233,8 +271,18 @@ class GenerateText:
                 ignore_index=pad_id,
             )
 
+        # 创建 CUDA 事件用于测量时间
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
         for cur_pos in range(min_prompt_len, total_len):
-            logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            if prev_pos > 0:
+                # decode 阶段记录开始事件
+                start_event.record()
+
+            input_ids = tokens[:, prev_pos: cur_pos]
+            logits = self.apply_cuda_graph(input_ids, prev_pos) # 真正的调用模型推理的代码
+            # logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
 
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
@@ -262,9 +310,18 @@ class GenerateText:
             if all(eos_reached):
                 break
 
+        # 记录结束事件
+        end_event.record()
+        # 同步 CUDA 流以确保事件被记录
+        torch.cuda.synchronize()
+        # 计算运行时间
+        elapsed_time_ms = start_event.elapsed_time(end_event)
+        logger.info(f"Decode all inference time: {elapsed_time_ms:.4f} ms \n")
+        
         if logprobs:
             token_logprobs = token_logprobs.tolist()
         out_tokens, out_logprobs = [], []
+
         for i, toks in enumerate(tokens.tolist()):
             # cut to max gen len
             start = 0 if echo else len(prompt_tokens[i])
@@ -313,17 +370,8 @@ class GenerateText:
         if max_gen_len is None:
             max_gen_len = self.model.args.max_seq_len - 1
 
-        # 使用 encode 方法获取整数 token ID 列表
-        prompt_tokens = [self.tokenizer.encode(x, add_special_tokens=True) for x in prompts]
-    
-        # 调试输出，确保 prompt_tokens 是整数列表
-        for idx, tokens_list in enumerate(prompt_tokens):
-            print(f"Prompt {idx} tokens: {tokens_list}")
-            print(f"Type of tokens_list: {type(tokens_list)}")
-            if tokens_list:
-                print(f"Type of first token: {type(tokens_list[0])}")
-            else:
-                print("Tokens list is empty.")
+        # 使用 encode 方法获取整数 token ID 列表. prompt_tokens 是整数列表
+        prompt_tokens = [self.tokenizer.encode(x, add_special_tokens=True) for x in prompts]   
 
         generation_tokens, generation_logprobs = self.generate(
             prompt_tokens=prompt_tokens,
@@ -453,7 +501,6 @@ class GenerateText:
             for t, unsafe in zip(generation_tokens, unsafe_requests)
         ]
 
-
 def sample_top_p(probs, p):
     """
     Perform top-p (nucleus) sampling on a probability distribution.
@@ -478,7 +525,6 @@ def sample_top_p(probs, p):
     next_token = torch.multinomial(probs_sort, num_samples=1)
     next_token = torch.gather(probs_idx, -1, next_token)
     return next_token
-
 
 if __name__ == '__main__':
     torch.manual_seed(0)
@@ -508,12 +554,12 @@ if __name__ == '__main__':
         {"role": "user", "content": "Who are you?"},
     ]
 
-    model = LLaMAInfer.build(
-        checkpoints_dir='/gemini/code/pytriton_llama/',
+    model = GenerateText.build(
+        checkpoints_dir='/gemini/code/Llama-3.2-1B-Instruct/my_weight/',
         tokenizer_path='/gemini/code/Llama-3.2-1B-Instruct/',
         load_model=True,
         max_seq_len=1024,
-        max_batch_size=len(prompts),
+        max_batch_size=max_batch_size,
         device=device,
         triton_weight=True
     )

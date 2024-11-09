@@ -1,12 +1,13 @@
 from typing import List, Optional
 from generate import GenerateText, Dialog
 import torch
+from torch.profiler import profile, ProfilerActivity
 
 def main(
     temperature: float = 0.6,
     top_p: float = 0.9,
     max_seq_len: int = 512,
-    max_batch_size: int = 16,
+    max_batch_size: int = 8,
     max_gen_len: Optional[int] = 64,
 ):
     """
@@ -33,7 +34,8 @@ def main(
         max_seq_len=1024,
         max_batch_size=max_batch_size,
         device=device,
-        triton_weight=True
+        triton_weight=True,
+        compiled_model=True
     )
 
     prompts: List[str] = [
@@ -48,12 +50,14 @@ def main(
         # Few shot prompt (providing a few examples before asking model to complete more);
         "Roosevelt was the first president of the United States, he has",
     ]
+    
     results = generator.text_completion(
         prompts,
         max_gen_len=max_gen_len,
         temperature=temperature,
         top_p=top_p,
     )
+    
     for prompt, result in zip(prompts, results):
         print(prompt)
         print(f"> {result['generation']}")
@@ -61,4 +65,6 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
+        main()
+    print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))

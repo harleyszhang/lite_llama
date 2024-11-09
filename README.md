@@ -37,6 +37,14 @@ triton-nightly                 3.0.0.post20240716052845
 
 ![和 transformers 库回答结果对比及精度验证](./images/acc_test.jpg)
 
+## 性能优化
+
+1，针对 decode 阶段使用 cuda graph 优化后，decode 阶段推理总时间为 `8.2402` ms，使用之前为 `17.2241` ms，性能提升 2x 倍，这个结果跟 vllm 应用 cuda graph 后的性能提升倍数几乎一致。
+
+```bash
+INFO: After apply cuda graph, Decode inference time: 8.2402 ms
+INFO: Before apply cuda graph, Decode inference time: 17.2241 ms
+```
 ## Acknowledgement
 
 - [transformers](https://github.com/huggingface/transformers)
