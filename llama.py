@@ -241,7 +241,6 @@ class LlamaRotaryEmbedding(nn.Module):
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
-    
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """同一组的 kv cache 复制多份"""
     batch_size, seq_len, n_kv_heads, head_dim = x.shape
@@ -255,7 +254,6 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         # (B, Seq_Len, N_KV_Heads * N_Rep, Head_Dim)
         .reshape(batch_size, seq_len, n_kv_heads * n_rep, head_dim)
     )
-
 
 class FusedAttention(nn.Module):
     def __init__(self,  config: LlamaConfig):
@@ -309,6 +307,9 @@ class FusedAttention(nn.Module):
         xk = xk.view(batch_size, seq_len, self.n_kv_heads, self.head_dim)
         # (B, 1, H_KV * Head_Dim) -> (B, 1, H_KV, Head_Dim)
         xv = xv.view(batch_size, seq_len, self.n_kv_heads, self.head_dim)
+        
+        cos, sin = position_embeddings
+        xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
 
         # # 计算序列中每个位置的旋转矩阵
         # rotary_emb = LlamaRotaryEmbedding(head_dim, device="cuda")
@@ -328,9 +329,6 @@ class FusedAttention(nn.Module):
         # 对 Q K 的 embedding 向量应用 triton 版rope 位置编码算法
         # xq = rope(xq, freqs_cis)
         # xk = rope(xk, freqs_cis) # 正确
-
-        cos, sin = position_embeddings
-        xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
         # print(f"xk and xv shape is {xq.shape}, {xk.shape}")
         # query_states, key_states = apply_rotary_pos_emb(xq.transpose(1, 2), xk.transpose(1, 2), cos, sin)
 
@@ -360,7 +358,8 @@ class FusedAttention(nn.Module):
         # 8. 应用因果掩码
         # seq_len_q = seq_len
         if mask is not None:
-            scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            scores += mask * -1e9   # (bs, n_local_heads, seqlen, cache_len + seqlen)
+        
         # seq_len_kv = start_pos + seq_len
         # causal_mask = torch.tril(torch.ones((seq_len_q, seq_len_kv), device=x.device, dtype=torch.bool))
         # scores = scores.masked_fill(~causal_mask, float('-inf'))
@@ -481,7 +480,7 @@ class Llama(nn.Module):
             mask = torch.full(
                 (seq_len, seq_len), float("-inf"), device=tokens.device
             )
-            mask = torch.triu(mask, diagonal=1)
+            mask = torch.triu(mask, diagonal=1) # 创建上三角矩阵
 
             # When performing key-value caching, we compute the attention scores
             # only for the new sequence. Thus, the matrix of scores is of size
