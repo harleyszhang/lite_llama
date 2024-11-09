@@ -358,7 +358,7 @@ class FusedAttention(nn.Module):
         # 8. 应用因果掩码
         # seq_len_q = seq_len
         if mask is not None:
-            scores += mask * -1e9   # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            scores += mask   # (bs, n_local_heads, seqlen, cache_len + seqlen)
         
         # seq_len_kv = start_pos + seq_len
         # causal_mask = torch.tril(torch.ones((seq_len_q, seq_len_kv), device=x.device, dtype=torch.bool))
