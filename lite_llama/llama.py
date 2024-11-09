@@ -6,7 +6,7 @@ import math
 
 from dataclasses import dataclass
 from typing import Optional, Tuple, Any, Dict, Optional
-from kernels import *
+from .kernels import *
 
 @dataclass
 class LlamaConfig:

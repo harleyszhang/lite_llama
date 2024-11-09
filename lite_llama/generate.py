@@ -11,7 +11,7 @@ from typing import List, Literal, Optional, Tuple, TypedDict
 import torch.nn.functional as F 
 from torch.profiler import record_function
 
-from .cuda_graph import CUDAGraphRunner, ModelRunner
+from .cuda_graph import ModelRunner
 from .llama import LlamaConfig, Llama  # 确保这些类已正确定义和导入
 
 # 设置日志
@@ -526,45 +526,3 @@ def sample_top_p(probs, p):
     next_token = torch.multinomial(probs_sort, num_samples=1)
     next_token = torch.gather(probs_idx, -1, next_token)
     return next_token
-
-if __name__ == '__main__':
-    torch.manual_seed(0)
-
-    allow_cuda = True
-    device = 'cuda' if torch.cuda.is_available() and allow_cuda else 'cpu'
-
-    prompts = [
-        "Simply put, the theory of relativity states that ",
-        "If Google was an Italian company founded in Milan, it would",
-        # Few shot promt
-        """Translate English to French:
-        
-        sea otter => loutre de mer
-        peppermint => menthe poivrée
-        plush girafe => girafe peluche
-        cheese =>""",
-        # Zero shot prompt
-        """Tell me if the following person is actually Doraemon disguised as human:
-        Name: Umar Jamil
-        Decision: 
-        """
-    ]
-
-    messages = [
-        {"role": "system", "content": "You are a pirate chatbot who always responds in pirate speak!"},
-        {"role": "user", "content": "Who are you?"},
-    ]
-
-    model = GenerateText.build(
-        checkpoints_dir='/gemini/code/Llama-3.2-1B-Instruct/my_weight/',
-        tokenizer_path='/gemini/code/Llama-3.2-1B-Instruct/',
-        load_model=True,
-        max_seq_len=1024,
-        max_batch_size=max_batch_size,
-        device=device,
-        triton_weight=True
-    )
-    prompts = ["Consider you what services he has done", "who are you?"]
-    output_tokens, output_texts = model.text_completion(prompts, max_gen_len=64)
-    output_texts = output_texts[0].replace("<|begin_of_text|>", "")
-    print(output_texts)
