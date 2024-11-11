@@ -71,11 +71,11 @@ INFO: Before apply cuda graph, Decode inference time: 17.2241 ms
 ```bash
 INFO: input tokens shape is  torch.Size([8, 115])
 # 使用 flashattention 前
-INFO:lite_llama.generate:Batch inference time: 3422.5024 ms
-INFO:lite_llama.generate:Tokens per second: 229.07 tokens/s
+INFO:lite_llama.generate:Batch inference time: 3098.5625 ms
+INFO:lite_llama.generate:Tokens per second: 99.40 tokens/s
 # 使用 flashattention1 后
-INFO:lite_llama.generate:Batch inference time: 2955.0149 ms
-INFO:lite_llama.generate:Tokens per second: 265.31 tokens/s
+INFO:lite_llama.generate:Batch inference time: 2681.3823 ms
+INFO:lite_llama.generate:Tokens per second: 114.87 tokens/s
 ```
 
 ## Acknowledgement

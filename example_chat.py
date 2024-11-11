@@ -50,10 +50,10 @@ def main(
         I just """,
         # Few shot prompt (providing a few examples before asking model to complete more);
         "Roosevelt was the first president of the United States, he has",
-        "The quantization-aware training (QAT) with low-rank adaptation (LoRA) models went through only post-training stages, using the same data as the full precision models. To initialize QAT,",
-        "SpinQuant was applied, together with generative post-training quantization (GPTQ). For the SpinQuant rotation matrix fine-tuning,",
-        "You are assistant, Can you explain the theory of relativity in simple terms for someone without a physics background?",
-        "You are assistant, I'm interested in learning about the impact of climate change on marine ecosystems. Could you provide an overview of the current research findings and potential future consequences?"
+        # "The quantization-aware training (QAT) with low-rank adaptation (LoRA) models went through only post-training stages, using the same data as the full precision models. To initialize QAT,",
+        # "SpinQuant was applied, together with generative post-training quantization (GPTQ). For the SpinQuant rotation matrix fine-tuning,",
+        # "You are assistant, Can you explain the theory of relativity in simple terms for someone without a physics background?",
+        # "You are assistant, I'm interested in learning about the impact of climate change on marine ecosystems. Could you provide an overview of the current research findings and potential future consequences?"
     ]
     
     results = generator.text_completion(
