@@ -353,22 +353,19 @@ class FusedAttention(nn.Module):
         # (B, Seq_Len_KV, H_Q, Head_Dim) -> (B, H_Q, Seq_Len_KV, Head_Dim)
         values = values.transpose(1, 2)
 
-        # 标准 self-attention 计算
-        scores = torch.matmul(xq, keys.transpose(2,3))/math.sqrt(self.head_dim)
-        # 8. 应用因果掩码
-        # seq_len_q = seq_len
-        if mask is not None:
-            scores += mask   # (bs, n_local_heads, seqlen, cache_len + seqlen)
-        
+        # # 标准 self-attention 计算
+        # scores = torch.matmul(xq, keys.transpose(2,3))/math.sqrt(self.head_dim)
+        # if mask is not None: # 应用因果掩码
+        #     scores += mask   # (bs, n_local_heads, seqlen, cache_len + seqlen)
+        # scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+        # output = torch.matmul(scores, values)
+
         # seq_len_kv = start_pos + seq_len
         # causal_mask = torch.tril(torch.ones((seq_len_q, seq_len_kv), device=x.device, dtype=torch.bool))
         # scores = scores.masked_fill(~causal_mask, float('-inf'))
 
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        output = torch.matmul(scores, values)
-
-        # flashattention: softmax(qk^t) * v
-        # output = flash_attention_v1(xq, keys, values)
+        # flashattention 计算: softmax(qk^t) * v
+        output = flash_attention_v1(xq, keys, values)
 
         # (B, H_Q, 1, Head_Dim) -> (B, 1, H_Q, Head_Dim) -> (B, 1, Dim)
         output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1))
@@ -477,19 +474,21 @@ class Llama(nn.Module):
 
         mask = None
         if seq_len > 1:
+            # mask = torch.triu(torch.ones((batch_size, self.config.n_heads, seq_len, self.config.hidden_size), dtype=torch.uint8, device="cuda", requires_grad=False))
             mask = torch.full(
                 (seq_len, seq_len), float("-inf"), device=tokens.device
             )
             mask = torch.triu(mask, diagonal=1) # 创建上三角矩阵
 
-            # When performing key-value caching, we compute the attention scores
-            # only for the new sequence. Thus, the matrix of scores is of size
-            # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
-            # j > cache_len + i, since row i corresponds to token cache_len + i.
+            # # When performing key-value caching, we compute the attention scores
+            # # only for the new sequence. Thus, the matrix of scores is of size
+            # # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
+            # # j > cache_len + i, since row i corresponds to token cache_len + i.
             mask = torch.hstack([
                 torch.zeros((seq_len, start_pos), device=tokens.device),
                 mask
             ]).type_as(h)
+            print("mask shape is ", mask.shape)
 
         # Consecutively apply all the encoder layers
         for layer in self.layers:

@@ -25,6 +25,13 @@ def is_hip() -> bool:
     return torch.version.hip is not None
 
 
+def keep(conf):
+    BLOCK_M = conf.kwargs["BLOCK_M"]
+    BLOCK_N = conf.kwargs["BLOCK_N"]
+    if BLOCK_M * BLOCK_N < 128 * 128 and conf.num_warps == 8:
+        return False
+    return True
+
 def ensure_contiguous(fn):
     @functools.wraps(fn)
     def wrapper(ctx, *args, **kwargs):

@@ -3,3 +3,4 @@ __pycache__
 kernels/__pycache__
 lite_llama/__pycache__
 images/tmp
+test/tmp

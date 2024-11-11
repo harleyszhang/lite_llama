@@ -274,14 +274,14 @@ class GenerateText:
 
         # 创建 CUDA 事件用于测量时间
         start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-
+        end_event = torch.cuda.Event(enable_timing=True)                
+        start_event.record()
+        # 初始化 Token 计数器
+        token_count = 0
+        print("input tokens shape is ", tokens.shape)
         for cur_pos in range(min_prompt_len, total_len):
-            if prev_pos > 0:
-                # decode 阶段记录开始事件
-                start_event.record()
-
             input_ids = tokens[:, prev_pos: cur_pos]
+            print(input_ids.shape)
             logits = self.apply_cuda_graph(input_ids, prev_pos) # 真正的调用模型推理的代码
             # logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
 
@@ -308,6 +308,11 @@ class GenerateText:
                 next_token == self.tokenizer.eos_token_id
             )
             prev_pos = cur_pos
+
+            # 累加生成的 tokens 数量（假设 batch_size 为 tokens 的第一个维度）
+            batch_size = tokens.size(0)
+            token_count += batch_size
+
             if all(eos_reached):
                 break
 
@@ -317,8 +322,12 @@ class GenerateText:
         torch.cuda.synchronize()
         # 计算运行时间
         elapsed_time_ms = start_event.elapsed_time(end_event)
-        logger.info(f"Decode all inference time: {elapsed_time_ms:.4f} ms \n")
-        
+        elapsed_time_sec = start_event.elapsed_time(end_event) / 1000.0
+        tokens_per_second = token_count / elapsed_time_sec if elapsed_time_sec > 0 else float('inf')
+
+        logger.info(f"Batch inference time: {elapsed_time_sec * 1000:.4f} ms")
+        logger.info(f"Tokens per second: {tokens_per_second:.2f} tokens/s")
+
         if logprobs:
             token_logprobs = token_logprobs.tolist()
         out_tokens, out_logprobs = [], []

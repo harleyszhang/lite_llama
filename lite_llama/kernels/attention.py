@@ -386,8 +386,8 @@ def _fwd_kernel(
         # We correct the numerator for the current softmax (*beta) -> exp(l_j - l_new) * exp(qk - mj) = exp(l_new) We
         # divide by the normalization. It's strange to do it this way instead of simply computing the softmax for qk,
         # but since all needed operations are already done for updating m and d, it seems faster
-        p_scale = beta / d_new
 
+        p_scale = beta / d_new
         qk_softmax = numerators * p_scale[:, None]
 
         # From here, qk_softmax is correct related to all over previously done block
@@ -397,9 +397,7 @@ def _fwd_kernel(
         # d_i / d_new is for correcting denominator
         # alpha is for correcting numerator
         acc_scale = d_i / d_new * alpha
-
-        # acc scaling
-        acc = acc * acc_scale[:, None]
+        acc = acc * acc_scale[:, None] # acc scaling
 
         # We now apply the last operation, the multiplication by a block of matrix V
         if N_LOAD_MASK_NEEDED:
@@ -407,6 +405,8 @@ def _fwd_kernel(
             v = tl.load(v_ptrs + block_n_start_idx * v_k_stride, mask=v_ptr_mask, other=0.0)
         else:
             v = tl.load(v_ptrs + block_n_start_idx * v_k_stride)
+        
+
         qk_softmax = qk_softmax.to(q_ptr.dtype.element_ty)
         acc += tl.dot(qk_softmax, v)
 
