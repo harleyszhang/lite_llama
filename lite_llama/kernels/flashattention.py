@@ -318,3 +318,26 @@ if __name__ == "__main__":
     test_prefill_stage()
     print("\nRunning Decode Stage Test...")
     test_decode_stage()
+
+"""
+Running Prefill Stage Test...
+Prefill Stage Test Passed: Triton output matches PyTorch standard implementation.
+
+Running Decode Stage Test...
+Decode Stage Step 1 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 2 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 3 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 4 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 5 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 6 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 7 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 8 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 9 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 10 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 11 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 12 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 13 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 14 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 15 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 16 Test Passed: Triton output matches PyTorch standard implementation.
+"""

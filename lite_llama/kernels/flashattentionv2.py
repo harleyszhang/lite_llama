@@ -106,7 +106,7 @@ def flash_attention_v2_kernel(
     causal_mask
     ):
 	"""
-	flashattention 内核实现
+	flashattention2 内核实现
 	"""
 	block_m_idx = tl.program_id(0)
 	head_idx = tl.program_id(1) # 获取当前 CUDA 块在第二个维度（通常是 blockIdx.y）上的索引。head_idx 表示当前块对应的头（head）的索引。
@@ -267,7 +267,7 @@ def test_prefill_stage():
     v = torch.randn(batch_size, num_heads, seq_length, head_dim, device='cuda', dtype=torch.float32)
 
     # 计算 Softmax 缩放因子
-    sm_scale = 1.0 / math.sqrt(head_dim)  # 1 / sqrt(d_k) * 1/log(2)
+    sm_scale = 1.0 / math.sqrt(head_dim)  # 1 / sqrt(d_k)
 
     # 调用 Triton 内核
     out = flash_attention_v2(q, k, v)
@@ -342,3 +342,26 @@ if __name__ == "__main__":
     test_prefill_stage()
     print("\nRunning Decode Stage Test...")
     test_decode_stage()
+
+"""
+Running Prefill Stage Test...
+Prefill Stage Test Passed: Triton output matches PyTorch standard implementation.
+
+Running Decode Stage Test...
+Decode Stage Step 1 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 2 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 3 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 4 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 5 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 6 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 7 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 8 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 9 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 10 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 11 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 12 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 13 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 14 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 15 Test Passed: Triton output matches PyTorch standard implementation.
+Decode Stage Step 16 Test Passed: Triton output matches PyTorch standard implementation.
+"""
