@@ -4,11 +4,11 @@ The llama model inference lite framework by tirton.
 
 ## 特性
 
-- 支持最新的 llama3.2 推理
-- 支持 GQA、cuda graph 优化
-- 自定义内核的高效 triton 实现： `flashattention`、`rmsnorm` 等
-- 支持算子融合，如：逐元素相乘 `*` 和 `silu` 的融合
-- 部分自定义算子如： `rmsnorm`、`rope`、`逐元素相乘` 等采用高效 `triton` 内核实现
+- 支持最新的 llama3.2 推理。
+- 支持 GQA、cuda graph 优化。
+- 支持 `flashattention1` 和 `flashattention2`。
+- 支持算子融合，如：逐元素相乘 `*` 和 `silu` 的融合。
+- 部分自定义算子如：`rmsnorm`、`rope`、`逐元素相乘` 等采用高效 `triton` 内核实现
 
 ## GPU Information
 
@@ -71,11 +71,18 @@ INFO: Before apply cuda graph, Decode inference time: 17.2241 ms
 ```bash
 INFO: input tokens shape is  torch.Size([8, 115])
 # 使用 flashattention 前
-INFO:lite_llama.generate:Batch inference time: 3098.5625 ms
-INFO:lite_llama.generate:Tokens per second: 99.40 tokens/s
+INFO:lite_llama.generate:Batch inference time: 3152.0476 ms
+INFO:lite_llama.generate:Tokens per second: 97.71 tokens/s
 # 使用 flashattention1 后
 INFO:lite_llama.generate:Batch inference time: 2681.3823 ms
 INFO:lite_llama.generate:Tokens per second: 114.87 tokens/s
+```
+
+3，继续优化, 将 `flashattention` 升级到 `flashattention2`, 减少一定计算量。
+
+```bash
+INFO:lite_llama.generate:Batch inference time: 2103.0737 ms
+INFO:lite_llama.generate:Tokens per second: 146.45 tokens/s
 ```
 
 ## Acknowledgement

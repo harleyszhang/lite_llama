@@ -218,8 +218,7 @@ gbps(max_ms) 和 gbps(min_ms)：这些值通常用于表示性能的波动范围
 
 ################################benchamrk flashattention################################
 try:
-    from kernels.flashattention import flash_attention_v1
-    from kernels.fused_flashattention import attention
+    from ..lite_llama.kernels.flashattention import flash_attention_v1
     HAS_FLASH = True
 except BaseException:
     HAS_FLASH = False

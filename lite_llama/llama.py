@@ -353,19 +353,19 @@ class FusedAttention(nn.Module):
         # (B, Seq_Len_KV, H_Q, Head_Dim) -> (B, H_Q, Seq_Len_KV, Head_Dim)
         values = values.transpose(1, 2)
 
-        # 标准 self-attention 计算
-        scores = torch.matmul(xq, keys.transpose(2,3))/math.sqrt(self.head_dim)
-        if mask is not None: # 应用因果掩码
-            scores += mask   # (bs, n_local_heads, seqlen, cache_len + seqlen)
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        output = torch.matmul(scores, values)
+        # # 标准 self-attention 计算
+        # scores = torch.matmul(xq, keys.transpose(2,3))/math.sqrt(self.head_dim)
+        # if mask is not None: # 应用因果掩码
+        #     scores += mask   # (bs, n_local_heads, seqlen, cache_len + seqlen)
+        # scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+        # output = torch.matmul(scores, values)
 
         # seq_len_kv = start_pos + seq_len
         # causal_mask = torch.tril(torch.ones((seq_len_q, seq_len_kv), device=x.device, dtype=torch.bool))
         # scores = scores.masked_fill(~causal_mask, float('-inf'))
 
         # flashattention 计算: softmax(qk^t) * v
-        # output = flash_attention_v1(xq, keys, values)
+        output = flash_attention_v2(xq, keys, values)
 
         # (B, H_Q, 1, Head_Dim) -> (B, 1, H_Q, Head_Dim) -> (B, 1, Dim)
         output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1))
