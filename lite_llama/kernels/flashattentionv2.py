@@ -57,10 +57,6 @@ def _attn_fwd_inner(
 
 		# compute O = PV
 		v = tl.load(v_ptrs + block_n_start_idx * v_seq_stride, mask=k_mask, other=0.0)
-		# if fp8_v:
-		# 	p = p.to(tl.float8e5)
-		# else:
-		# 	p = p.to(tl.float16)
 		p = p.to(v.dtype)
 		# acc += tl.dot(p, v)
 		acc = tl.dot(p, v, acc)
@@ -115,8 +111,8 @@ def flash_attention_v2_kernel(
 	cur_head_idx = head_idx % n_heads # 通过取模操作，计算出当前头在其所属批次中的具体索引。
 
 	m_range_offs = tl.arange(0, BLOCK_M_SIZE) # seq_dim 维度偏移
-	n_range_offs = tl.arange(0, BLOCK_N_SIZE) # head_dim 维度偏移
-	dhead_range_offs = tl.arange(0, HEAD_DIM)
+	n_range_offs = tl.arange(0, BLOCK_N_SIZE) # bs*n_heads 维度偏移
+	dhead_range_offs = tl.arange(0, HEAD_DIM) # head_dim 维度偏移
 
 	offs_m = block_m_idx * BLOCK_M_SIZE + m_range_offs # 计算当前块在 M(seq_dim) 维度上的实际偏移量。
 
