@@ -77,7 +77,7 @@ def _flash_decoding_stage1_kernel(
     acc = tl.zeros([BLOCK_DMODEL], dtype=tl.float32)  # [BLOCK_DMODEL]
 
     # 迭代处理每个块
-    for start_n in range(num_blocks):
+    for start_n in range(0, num_blocks, 1):
         offs_n_new = start_n * BLOCK_N + offs_n  # [BLOCK_N]
         # 生成 K 的掩码
         k_mask = offs_n_new < cur_batch_partition_end_index  # [BLOCK_N]
@@ -88,7 +88,7 @@ def _flash_decoding_stage1_kernel(
 
         # 计算 qk^T
         qk = tl.sum(q * k, axis=1)  # [BLOCK_N]
-        qk = qk * sm_scale
+        qk *= sm_scale
         qk = tl.where(k_mask, qk, float("-inf"))  # [BLOCK_N]
 
         # 更新最大值项和 qk 项
@@ -102,7 +102,7 @@ def _flash_decoding_stage1_kernel(
         d_i = d_i * alpha + tl.sum(p)  # 标量
 
         # 更新 attention 输出累加器
-        acc = acc * alpha + tl.sum(p[:, None] * v, axis=0)  # [BLOCK_DMODEL]
+        acc = alpha * acc + tl.sum(p[:, None] * v, axis=0)  # [BLOCK_DMODEL]
         # acc = acc * alpha + tl.dot(p, v)  # [BLOCK_DMODEL]
 
         # 更新归一化器
@@ -188,55 +188,55 @@ def _flash_decoding_stage2_kernel(
 	BLOCK_DMODEL: tl.constexpr,
 	BLOCK_SEQ: tl.constexpr, # type: ignore
 ):
-	"""Reduction (online softmax)
-	"""
-	batch_idx = tl.program_id(0)
-	head_idx = tl.program_id(1)
-	
-	# 初始化偏移 
-	offs_d = tl.arange(0, BLOCK_DMODEL)
+    """Reduction (online softmax)
+    """
+    batch_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
 
-	offs_part_v = batch_idx * mido_batch_stride \
-				+ head_idx * mido_heads_stride \
-				+ offs_d * mido_dim_stride
+    # 初始化偏移 
+    offs_d = tl.arange(0, BLOCK_DMODEL)
 
-	offs_part_max = batch_idx * mido_les_batch_stride \
-				+ head_idx * mido_les_heads_stride
-	
-	part_v_ptrs = Mid_O + offs_part_v
-	part_max_ptrs = Mid_O_LogExpSum + offs_part_max
+    offs_part_v = batch_idx * mido_batch_stride \
+                + head_idx * mido_heads_stride \
+                + offs_d * mido_dim_stride
 
-	# Reduce kv 分块相关变量值. num_partitions 是 kv 分块数量
-	d_i = tl.zeros([BLOCK_DMODEL], dtype=tl.float32)
-	m_i = -float("inf")
-	acc = tl.zeros([BLOCK_DMODEL], dtype=tl.float32)
-	num_partitions = (actual_seq_len + BLOCK_SEQ - 1) // BLOCK_SEQ
+    offs_part_max = batch_idx * mido_les_batch_stride \
+                + head_idx * mido_les_heads_stride
 
-	for block_seq_n in range(0, num_partitions, 1):
-		part_v = tl.load(part_v_ptrs)
-		part_max = tl.load(part_max_ptrs)
+    part_v_ptrs = Mid_O + offs_part_v
+    part_max_ptrs = Mid_O_LogExpSum + offs_part_max
 
-		# -- 更新局部最大值 -- #
-		m_ij = tl.maximum(part_max, m_i)
-	
-		# -- 计算 alpha = exp(m{j-1} - m{j}) 值 -- #
-		alpha = tl.exp(m_i - m_ij)
+    # Reduce kv 分块相关变量值. num_partitions 是 kv 分块数量
+    d_i = 0.0
+    m_i = -float("inf")
+    acc = tl.zeros([BLOCK_DMODEL], dtype=tl.float32)
+    num_partitions = (actual_seq_len + BLOCK_SEQ - 1) // BLOCK_SEQ
 
-		# -- 更新归一化项和 attention 输出累加器 -- #
-		acc *= alpha
-		p = tl.exp(part_max - m_ij)
-		acc += p * part_v
+    for block_seq_n in range(0, num_partitions, 1): # TODO 有 bug 需要修复
+        part_v = tl.load(part_v_ptrs)
+        part_max = tl.load(part_max_ptrs)
 
-		d_i = d_i * alpha + p
-		
-		# 更新 max 值和指针偏移
-		m_i = m_ij
-		part_v_ptrs += mido_partitions_stride
-		part_max_ptrs += mido_les_partitions_stride
+        # -- 更新局部最大值 -- #
+        m_ij = tl.maximum(part_max, m_i)
 
-	# -- 更新 attention 输出累加器 -- #
-	offs_out = batch_idx * o_bs_stride + head_idx * o_heads_stride + offs_d * o_dim_stride
-	tl.store(Ouput + offs_out, acc / d_i)
+        # -- 计算 alpha = exp(m{j-1} - m{j}) 值 -- #
+        alpha = tl.exp(m_i - m_ij)
+
+        # -- 更新归一化项和 attention 输出累加器 -- #
+        p = tl.exp(part_max - m_ij)
+        acc = alpha * acc + p * part_v
+
+        # alpha * d_i: 缩放 d_i, p * weight: 当前元素的指数值 * 权重
+        d_i = alpha * d_i + p
+
+        # 更新 max 值和指针偏移
+        m_i = m_ij
+        part_v_ptrs += mido_partitions_stride
+        part_max_ptrs += mido_les_partitions_stride
+
+    # -- 更新 attention 输出累加器 -- #
+    offs_out = batch_idx * o_bs_stride + head_idx * o_heads_stride + offs_d * o_dim_stride
+    tl.store(Ouput + offs_out, acc / d_i)
 
 @torch.no_grad()
 def flash_decode_stage2(
@@ -258,7 +258,7 @@ def flash_decode_stage2(
 		actual_seq_len,   # TODO 支持 PagedAttention 和连续批处理
 		BLOCK_DMODEL = head_dim,
 		BLOCK_SEQ = PARTITION_SIZE, # type: ignore	
-		num_warps = 4,
+		num_warps = 2,
 		num_stages = 2,
 	)
 
@@ -271,7 +271,7 @@ def flash_decoding(
 	# q.view(-1, num_heads, head_dim)
 	assert q.shape[-1] == k.shape[-1] == v.shape[-1]
 	batchs, num_heads, head_dim = q.shape # decode 阶段 q 的 seq_len = 1, 
-	actual_seq_len = k.shape[0] // batchs
+	# actual_seq_len = k.shape[0] // batchs
 	
 	kv_nums, _, _ = k.shape
 	# middle results
@@ -285,13 +285,14 @@ def flash_decoding(
 	mid_o_logexpsum = torch.empty((batchs, num_heads, max_num_partitions), dtype=torch.float32, device=q.device)
 
 	# decode stage 1: attention in partitions
-	print(f"k stride is ", *k.stride())
+	# print(f"k stride is ", *k.stride())
 	flash_decode_stage1(q, k, v, actual_seq_len, mid_o, mid_o_logexpsum, PARTITION_SIZE)
 
 	# decode stage 2: reduction among partitions
 	atten_output = torch.empty_like(q)
-	print(f"atten_output shape is ", atten_output.shape)
-	print(f"atten_output stride is ", *atten_output.stride())
+	print("atten_output dtype is ", atten_output.dtype)
+	# print(f"atten_output shape is ", atten_output.shape)
+	# print(f"atten_output stride is ", *atten_output.stride())
 
 	flash_decode_stage2(mid_o, mid_o_logexpsum, atten_output, actual_seq_len, PARTITION_SIZE)
 
@@ -327,13 +328,13 @@ def standard_attention(Q, K, V, sm_scale, mask=None):
 
 def test_decode_stage():
 	# 设置测试参数
-	batch_size = 2
-	num_heads = 64
+	batch_size = 4
+	num_heads = 32
 	# 使用 padattention，所以 batch 中的每个 seq 长度相同
 	kv_cache_seq_length = 1024
 	generated_seq_length = 16
 	head_dim = 64
-	dtype = torch.float16
+	dtype = torch.float16  # 改为 float32
 
 	# 生成固定的初始输入张量
 	torch.manual_seed(0)
@@ -352,7 +353,6 @@ def test_decode_stage():
 	print(f"triton_new_token_q shape is ", triton_new_token_q.shape)
 
 	# 模拟生成过程中逐步增加序列长度
-
 	for step in range(1, generated_seq_length + 1):
 		# 扩展 Q, K, V 和 Out
 		# q_extended = torch.cat([q_initial, new_token_q], dim=2)
@@ -378,7 +378,8 @@ def test_decode_stage():
 
 		# 比较 Triton 内核输出与标准实现的输出
 		if torch.allclose(triton_new_token_q, torch_new_token_q_format, atol=1e-1):
-			print(f"Decode Stage Step {step} Test Passed: Triton output matches PyTorch standard implementation.")
+			max_difference = (triton_new_token_q - torch_new_token_q_format).abs().max()
+			print(f"Decode Stage Step {step} Difference {max_difference} Test Passed: Triton output matches PyTorch standard implementation.")
 		else:
 			max_diff = (triton_new_token_q - torch_new_token_q_format).abs().max()
 			print(f"Decode Stage Step {step} Test Failed: Maximum difference {max_diff}")

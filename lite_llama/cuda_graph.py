@@ -70,6 +70,7 @@ class ModelRunner:
         # graph 输入参数 x 和 start_pos 必须和模型要求的输入参数一样
         batch_size = x.shape[0]
         if batch_size in self.graph_runners:
+            # print("INFO: CUDA graph captured for this batch size, apply cuda graph to decode inference.")
             model_executable = self.graph_runners[batch_size]
         else:
             print("Warning: CUDA graph not captured for this batch size, falling back to original model.")

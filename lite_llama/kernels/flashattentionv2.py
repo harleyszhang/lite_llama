@@ -181,6 +181,7 @@ def flash_attention_v2(
         output: Attention ouput tensor, shape is consistent with q. 
         attention_mask: Attention mask matrix broadcastable to (batch, head_size, m_size, n_size).
     """
+    # (B, Seq_Len_Q, Num_Heads_Q, Head_Dim) -> (B, H_Q, Seq_Len_Q, Head_Dim)
     output = torch.empty_like(q)
     assert q.device.type == 'cuda', "Input tensor q must be on CUDA device"
     assert k.device.type == 'cuda', "Input tensor keys must be on CUDA device"
@@ -326,7 +327,8 @@ def test_decode_stage():
 
         # 比较 Triton 内核输出与标准实现的输出
         if torch.allclose(triton_new_token_q, torch_new_token_q, atol=1e-1):
-            print(f"Decode Stage Step {step} Test Passed: Triton output matches PyTorch standard implementation.")
+            max_difference = (triton_new_token_q - torch_new_token_q).abs().max()
+            print(f"Decode Stage Step {step} Difference {max_difference}. Test Passed: Triton output matches PyTorch standard implementation.")
         else:
             max_diff = (triton_new_token_q - torch_new_token_q).abs().max()
             print(f"Decode Stage Step {step} Test Failed: Maximum difference {max_diff}")

@@ -178,7 +178,7 @@ class GenerateText:
             if 'rope.freqs' in checkpoint:
                 del checkpoint['rope.freqs']  # 删除检查点中未匹配的键（例如rope.freqs）
             # 使用转换后的 state_dict 加载模型
-            model.load_state_dict(state_dict, strict=False)
+            model.load_state_dict(state_dict, strict=True)
             print(f"Loaded state dict in {time.time() - prev_time:.2f}s")
 
         return GenerateText(model, tokenizer, model_args, compiled_model)
@@ -190,28 +190,15 @@ class GenerateText:
         self.compiled_model = compiled_model
         self.model_runner = None
     
-    def apply_cuda_graph(self, input_ids, prev_pos):
+    def apply_cuda_graph(self,):
         """应用 cuda graph 优化
         参数:
             - input_ids: 输入 tokens id 列表, shape: (batch_size, seq_len)
             - prev_pos: 当前处于第几轮迭代循环, 生成第几个 token
         """
-        if prev_pos == 0:
-            with record_function("prefill"):
-                logits = self.model.forward(input_ids, prev_pos)
-        else:
-            with record_function("decode"):
-                if self.compiled_model == False:
-                    logits = self.model.forward(input_ids, prev_pos)
-                else:
-                    if self.model_runner is None:
-                        self.model_runner = ModelRunner(self.model, vocab_size = self.args.vocab_size, max_batch_size=self.args.max_batch_size)
-                        self.model_runner.capture_decode_graph()
-                    
-                    logits = self.model_runner.decode(input_ids, prev_pos)
-
-        return logits
-
+        self.model_runner = ModelRunner(self.model, vocab_size = self.args.vocab_size, max_batch_size=self.args.max_batch_size)
+        self.model_runner.capture_decode_graph()
+        
     @torch.inference_mode()
     def generate(
         self,
@@ -251,8 +238,10 @@ class GenerateText:
         total_len = min(args.max_seq_len, max_gen_len + max_prompt_len)
 
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+        # tokens shape is torch.Size([4, 85], 这个 shape 也是输入给模型的尺寸
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
 
+        # len(prompt_tokens) = 4, prompt_tokens: list
         for k, t in enumerate(prompt_tokens):
             tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
         if logprobs:
@@ -279,11 +268,18 @@ class GenerateText:
         # 初始化 Token 计数器
         token_count = 0
         print("input tokens shape is ", tokens.shape)
+        if self.compiled_model:
+            self.apply_cuda_graph() # 真正的调用模型推理的代码
+
         for cur_pos in range(min_prompt_len, total_len):
+            # decode 阶段 input_ids shape is [4, 1]
             input_ids = tokens[:, prev_pos: cur_pos]
-            print(input_ids.shape)
-            logits = self.apply_cuda_graph(input_ids, prev_pos) # 真正的调用模型推理的代码
-            # logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+
+            # print(input_ids.shape)
+            if prev_pos == 0 or not self.compiled_model:
+                logits = self.model.forward(input_ids, prev_pos)
+            else:
+                logits = self.model_runner.decode(input_ids, prev_pos)
 
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
@@ -291,7 +287,8 @@ class GenerateText:
             else:
                 next_token = torch.argmax(logits[:, -1], dim=-1)
 
-            next_token = next_token.reshape(-1)
+            next_token = next_token.reshape(-1) # shape is batch_size
+            
             # only replace token if prompt has already been generated
             next_token = torch.where(
                 input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
@@ -346,6 +343,7 @@ class GenerateText:
                 probs = probs[:eos_idx] if logprobs else None
             out_tokens.append(toks)
             out_logprobs.append(probs)
+
         return (out_tokens, out_logprobs if logprobs else None)
 
     def text_completion(

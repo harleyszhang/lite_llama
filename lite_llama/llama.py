@@ -290,6 +290,7 @@ class FusedAttention(nn.Module):
         mask: Optional[torch.Tensor] = None,
     ):
         x = x.to(torch.float16)
+        token_atten_input_shape = x.shape 
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
 
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
@@ -346,13 +347,7 @@ class FusedAttention(nn.Module):
         # (B, Seq_Len_KV, H_KV, Head_Dim) --> (B, Seq_Len_KV, H_Q, Head_Dim)
         values = repeat_kv(values, self.n_rep) # shape is torch.Size([4, 82, 32, 64])
 
-        # 4. sel-attention (flash_attention)； # (B, 1, H_Q, Head_Dim) -> (B, H_Q, 1, Head_Dim)
-        xq = xq.transpose(1, 2)
-        # (B, Seq_Len_KV, H_Q, Head_Dim) -> (B, H_Q, Seq_Len_KV, Head_Dim)
-        keys = keys.transpose(1, 2)
-        # (B, Seq_Len_KV, H_Q, Head_Dim) -> (B, H_Q, Seq_Len_KV, Head_Dim)
-        values = values.transpose(1, 2)
-
+        # 4. sel-attention
         # # 标准 self-attention 计算
         # scores = torch.matmul(xq, keys.transpose(2,3))/math.sqrt(self.head_dim)
         # if mask is not None: # 应用因果掩码
@@ -365,10 +360,26 @@ class FusedAttention(nn.Module):
         # scores = scores.masked_fill(~causal_mask, float('-inf'))
 
         # flashattention 计算: softmax(qk^t) * v
-        output = flash_attention_v2(xq, keys, values)
+        if seq_len:
+            xq = xq.transpose(1, 2)
+            keys = keys.transpose(1, 2)
+            values = values.transpose(1, 2)
+            output = flash_attention_v2(xq, keys, values)
+            # (B, H_Q, Seq_Len_Q, Head_Dim) -> (B, Seq_Len_Q, Num_Heads_Q, Head_Dim) -> (B, Seq_Len_Q, Hidden_Size)
+            output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1))
+        else:
+            # xq_shape = xq.shape # (B, 1, H_Q, Head_Dim)
+            batch_size, kv_actual_seq_len, num_heads, head_dim = keys.shape[0], keys.shape[1], keys.shape[2], keys.shape[3]
+            
+            # print("keys and values shape is ", keys.shape, values.shape)
+            xq = xq.transpose(1, 2).contiguous().view(-1, num_heads, head_dim)
+            keys = keys.transpose(1, 2).contiguous().view(-1, num_heads, head_dim)
+            values = values.transpose(1, 2).contiguous().view(-1, num_heads, head_dim)
+            # print("after transpose and reshape keys and values shape is ", keys.shape, values.shape)
 
-        # (B, H_Q, 1, Head_Dim) -> (B, 1, H_Q, Head_Dim) -> (B, 1, Dim)
-        output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1))
+            output = flash_decoding(xq, keys, values, kv_actual_seq_len) # ouput shape is [batchs, num_heads, head_dim]
+            output = output.view(batch_size, 1, num_heads * head_dim )
+        
         output = self.wo(output)
         # output = torch.matmul(output, self.o_proj_weight.data.t()) # (B, 1, Dim) -> (B, 1, Dim)
         return output
@@ -439,6 +450,7 @@ class Llama(nn.Module):
         self.config = config
         self.vocab_size = config.vocab_size
         self.n_layers = config.n_layers
+        self.hidden_states = []
 
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.embed_tokens = nn.Embedding(self.vocab_size, config.hidden_size, dtype=torch.float16)
@@ -452,8 +464,6 @@ class Llama(nn.Module):
         self.layers = nn.ModuleList(
             [LlamaDecoderLayer(config) for layer_id in range(config.n_layers)]
         )
-        self.hidden_states = []
-
         # self.freqs_cis = precompute_freqs_cis(
         #     # Note that self.params.max_seq_len is multiplied by 2 because the token limit for the Llama 2 generation of models is 4096. 
         #     # Adding this multiplier instead of using 4096 directly allows for dynamism of token lengths while training or fine-tuning.
@@ -461,6 +471,7 @@ class Llama(nn.Module):
         # )
 
     def forward(self, tokens: torch.Tensor, start_pos: int):
+        self.hidden_states = []
         batch_size, seq_len = tokens.shape
         # (B, Seq_Len) -> (B, Seq_Len, Dim)
         h = self.embed_tokens(tokens) # torch.isnan(h).any() False
@@ -480,15 +491,15 @@ class Llama(nn.Module):
             )
             mask = torch.triu(mask, diagonal=1) # 创建上三角矩阵
 
-            # # When performing key-value caching, we compute the attention scores
-            # # only for the new sequence. Thus, the matrix of scores is of size
-            # # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
-            # # j > cache_len + i, since row i corresponds to token cache_len + i.
+            # When performing key-value caching, we compute the attention scores
+            # only for the new sequence. Thus, the matrix of scores is of size
+            # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
+            # j > cache_len + i, since row i corresponds to token cache_len + i.
             mask = torch.hstack([
                 torch.zeros((seq_len, start_pos), device=tokens.device),
                 mask
             ]).type_as(h)
-            print("mask shape is ", mask.shape)
+            # print("mask shape is ", mask.shape)
 
         # Consecutively apply all the encoder layers
         for layer in self.layers:
