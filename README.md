@@ -85,11 +85,11 @@ INFO:lite_llama.generate:Batch inference time: 2103.0737 ms
 INFO:lite_llama.generate:Tokens per second: 146.45 tokens/s
 ```
 
-4, 再次优化，decode 阶段的推理使用 `flashdecoding`，提升 decode 阶段的并行度，充分发挥 GPU 算力。
+4, 再次优化，decode 阶段的推理使用 `flashdecoding`，提升 decode 阶段的 attention 计算并行度，充分发挥 GPU 算力。
 
 ```bash
-INFO:lite_llama.generate:Decode stage Batch inference time: 1984.5532 ms
-INFO:lite_llama.generate:Decode stage tokens per second : 155.20 tokens/s
+INFO:lite_llama.generate:Decode stage Batch inference time: 1641.4178 ms
+INFO:lite_llama.generate:Decode stage tokens per second : 187.64 tokens/s
 ```
 
 ## Acknowledgement

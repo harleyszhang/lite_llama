@@ -1,5 +1,5 @@
 
-from lite_llama.lite_llama.llama import *
+from lite_llama.lite_llama.models.llama import *
 
 class ModelArgs:
     def __init__(self):

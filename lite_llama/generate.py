@@ -11,8 +11,8 @@ from typing import List, Literal, Optional, Tuple, TypedDict
 import torch.nn.functional as F 
 from torch.profiler import record_function
 
-from .cuda_graph import ModelRunner
-from .llama import LlamaConfig, Llama  # 确保这些类已正确定义和导入
+from .models.cuda_graph import ModelRunner
+from .models.llama import LlamaConfig, Llama  # 确保这些类已正确定义和导入
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
@@ -261,16 +261,18 @@ class GenerateText:
                 ignore_index=pad_id,
             )
 
-        # 创建 CUDA 事件用于测量时间
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)                
-        start_event.record()
+
         # 初始化 Token 计数器
-        token_count = 0
         print("input tokens shape is ", tokens.shape)
+
         if self.compiled_model:
             self.apply_cuda_graph() # 真正的调用模型推理的代码
 
+        # 创建 CUDA 事件用于测量时间
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        token_count = 0
         for cur_pos in range(min_prompt_len, total_len):
             # decode 阶段 input_ids shape is [4, 1]
             input_ids = tokens[:, prev_pos: cur_pos]
@@ -322,8 +324,8 @@ class GenerateText:
         elapsed_time_sec = start_event.elapsed_time(end_event) / 1000.0
         tokens_per_second = token_count / elapsed_time_sec if elapsed_time_sec > 0 else float('inf')
 
-        logger.info(f"Batch inference time: {elapsed_time_sec * 1000:.4f} ms")
-        logger.info(f"Tokens per second: {tokens_per_second:.2f} tokens/s")
+        logger.info(f"Decode stage Batch inference time: {elapsed_time_sec * 1000:.4f} ms")
+        logger.info(f"Decode stage tokens per second : {tokens_per_second:.2f} tokens/s")
 
         if logprobs:
             token_logprobs = token_logprobs.tolist()

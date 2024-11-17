@@ -31,7 +31,7 @@ def sample_top_p(probs, p):
 
 # 获取 lite_llama 目录的绝对路径并添加到 sys.path 中
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from lite_llama.llama import Llama, LlamaConfig
+from lite_llama.models.llama import Llama, LlamaConfig
 
 def load_config_from_json(json_file_path: str, device: str="cuda") -> LlamaConfig:
     with open(json_file_path, "r") as f:
@@ -265,8 +265,8 @@ if __name__ == "__main__":
     # 加载原始模型
     original_model, tokenizer = load_original_llama(original_model_path, device)
     # 加载自定义模型
-    custom_model = load_and_convert_to_custom_llama(model_args, original_model, device)
-    # custom_model = load_custom_llam(my_model_path, model_args, device)
+    # custom_model = load_and_convert_to_custom_llama(model_args, original_model, device)
+    custom_model = load_custom_llam(my_model_path, model_args, device)
 
     # 测试文本
     test_text = "Once upon a time in a distant land,"

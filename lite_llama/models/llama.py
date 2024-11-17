@@ -4,71 +4,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-from dataclasses import dataclass
-from typing import Optional, Tuple, Any, Dict, Optional
-from .kernels import *
-
-@dataclass
-class LlamaConfig:
-    architectures: Optional[list] = None
-    attention_bias: bool = False
-    attention_dropout: float = 0.0
-    bos_token_id: Optional[int] = None
-    eos_token_id: Optional[int] = None
-    head_dim: Optional[int] = None
-    hidden_act: str = "silu"
-    # 模型隐藏层大小
-    dim: Optional[int] = None
-    initializer_range: float = 0.02
-    hidden_size: Optional[int] = 2048
-    intermediate_size: Optional[int] = 8192
-    max_position_embeddings: Optional[int] = None
-    mlp_bias: bool = False
-    model_type: str = "llama"
-    # 注意力头数，也就是 q heads 头数
-    n_heads: Optional[int] = None
-    # 解码层数
-    n_layers: Optional[int] = None
-    # 使用了 GQA 技术的 kv heads 头数
-    n_kv_heads: Optional[int] = None
-    pretraining_tp: int = 1
-    rms_norm_eps: float = 1e-5
-    rope_scaling: Optional[Dict[str, Any]] = None
-    rope_theta: float = 10000.0
-    tie_word_embeddings: bool = True
-    torch_dtype: str = "float32"
-    transformers_version: Optional[str] = None
-    use_cache: bool = True
-    vocab_size: Optional[int] = None
-    max_batch_size: int = 4
-    max_seq_len: int = 2048
-    device: str = "cuda"
-
-    def __init__(self, config_dict: Optional[Dict[str, Any]] = None, **kwargs):
-        # 首先，设置默认属性值
-        for field_name, field_def in self.__dataclass_fields__.items():
-            setattr(self, field_name, field_def.default)
-
-        # 如果提供了 config_dict，从中更新属性
-        if config_dict is not None:
-            for key, value in config_dict.items():
-                # 处理名称映射
-                if key == 'num_attention_heads':
-                    self.n_heads = value
-                elif key == 'num_hidden_layers':
-                    self.n_layers = value
-                elif key == 'num_key_value_heads':
-                    self.n_kv_heads = value
-                else:
-                    setattr(self, key, value)
-
-        # 处理额外的关键字参数
-        for key, value in kwargs.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
-            else:
-                # 如果属性不存在，可以选择存储在 extra_args 中，或者直接添加
-                setattr(self, key, value)
+from typing import Optional, Tuple
+from lite_llama.kernels import *
+from lite_llama.models.config import LlamaConfig
 
 def _compute_default_rope_parameters(
     config: Optional[LlamaConfig] = None,
@@ -102,7 +40,7 @@ def _compute_default_rope_parameters(
     elif config is not None:
         base = config.rope_theta
         partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
-        head_dim = getattr(config, "head_dim", config.hidden_size // config.n_heads)
+        head_dim = getattr(config, "head_dim", config.hidden_size // config.num_heads)
         dim = int(head_dim * partial_rotary_factor)
 
     attention_factor = 1.0  # Unused in this type of RoPE
@@ -243,16 +181,16 @@ class LlamaRotaryEmbedding(nn.Module):
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """同一组的 kv cache 复制多份"""
-    batch_size, seq_len, n_kv_heads, head_dim = x.shape
+    batch_size, seq_len, num_kv_heads, head_dim = x.shape
     if n_rep == 1:
         return x
     return (
-        # (B, Seq_Len, N_KV_Heads, 1, Head_Dim)
+        # (B, Seq_Len, num_kv_heads, 1, Head_Dim)
         x[:, :, :, None, :]
-        # (B, Seq_Len, N_KV_Heads, N_Rep, Head_Dim)
-        .expand(batch_size, seq_len, n_kv_heads, n_rep, head_dim)
-        # (B, Seq_Len, N_KV_Heads * N_Rep, Head_Dim)
-        .reshape(batch_size, seq_len, n_kv_heads * n_rep, head_dim)
+        # (B, Seq_Len, num_kv_heads, N_Rep, Head_Dim)
+        .expand(batch_size, seq_len, num_kv_heads, n_rep, head_dim)
+        # (B, Seq_Len, num_kv_heads * N_Rep, Head_Dim)
+        .reshape(batch_size, seq_len, num_kv_heads * n_rep, head_dim)
     )
 
 class FusedAttention(nn.Module):
@@ -261,27 +199,27 @@ class FusedAttention(nn.Module):
         self.config= config
 
         # K V 头数相同，但和 Q 可能不同
-        self.n_kv_heads = config.n_heads if config.n_kv_heads is None else config.n_kv_heads
-        self.n_heads_q = config.n_heads
-        self.n_rep = self.n_heads_q // self.n_kv_heads # kv 重复次数
+        self.num_kv_heads = config.num_heads if config.num_kv_heads is None else config.num_kv_heads
+        self.num_heads_q = config.num_heads
+        self.n_rep = self.num_heads_q // self.num_kv_heads # kv 重复次数
 
         # 每个头的维度大小, head_dim 和 hidden_size 不一样
-        self.head_dim = config.hidden_size // config.n_heads
-        self.hidden_size = config.n_heads * self.head_dim
+        self.head_dim = config.hidden_size // config.num_heads
+        self.hidden_size = config.num_heads * self.head_dim
 
-        self.wq = nn.Linear(config.hidden_size, config.n_heads * self.head_dim, bias=False, dtype=torch.float16)
-        self.wk = nn.Linear(config.hidden_size, self.n_kv_heads * self.head_dim, bias=False, dtype=torch.float16)
-        self.wv = nn.Linear(config.hidden_size, self.n_kv_heads * self.head_dim, bias=False, dtype=torch.float16)
-        self.wo = nn.Linear(config.n_heads * self.head_dim, config.hidden_size, bias=False, dtype=torch.float16)
+        self.wq = nn.Linear(config.hidden_size, config.num_heads * self.head_dim, bias=False, dtype=torch.float16)
+        self.wk = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=False, dtype=torch.float16)
+        self.wv = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=False, dtype=torch.float16)
+        self.wo = nn.Linear(config.num_heads * self.head_dim, config.hidden_size, bias=False, dtype=torch.float16)
 
-        # self.q_proj_weight = nn.Parameter(torch.rand(config.n_heads * self.head_dim,  config.hidden_size))
-        # self.k_proj_weight = nn.Parameter(torch.rand(self.n_kv_heads * self.head_dim, config.hidden_size))
-        # self.v_proj_weight = nn.Parameter(torch.rand(self.n_kv_heads * self.head_dim, config.hidden_size))
-        # self.o_proj_weight = nn.Parameter(torch.rand(config.n_heads * self.head_dim, config.hidden_size))
+        # self.q_proj_weight = nn.Parameter(torch.rand(config.num_heads * self.head_dim,  config.hidden_size))
+        # self.k_proj_weight = nn.Parameter(torch.rand(self.num_kv_heads * self.head_dim, config.hidden_size))
+        # self.v_proj_weight = nn.Parameter(torch.rand(self.num_kv_heads * self.head_dim, config.hidden_size))
+        # self.o_proj_weight = nn.Parameter(torch.rand(config.num_heads * self.head_dim, config.hidden_size))
 
         # 提前按最大可分配空间分配好 kv cache 张量
-        self.cache_k = torch.zeros((config.max_batch_size, config.max_seq_len, self.n_kv_heads, self.head_dim)).cuda()
-        self.cache_v = torch.zeros((config.max_batch_size, config.max_seq_len, self.n_kv_heads, self.head_dim)).cuda()
+        self.cache_k = torch.zeros((config.max_batch_size, config.max_seq_len, self.num_kv_heads, self.head_dim)).cuda()
+        self.cache_v = torch.zeros((config.max_batch_size, config.max_seq_len, self.num_kv_heads, self.head_dim)).cuda()
 
     def forward(self, 
         x: torch.Tensor,
@@ -303,11 +241,11 @@ class FusedAttention(nn.Module):
         xk = self.wk(x)
         xv = self.wv(x)
         # (B, 1, H_Q * Head_Dim) -> (B, 1, H_Q, Head_Dim), 
-        xq = xq.view(batch_size, seq_len, self.n_heads_q, self.head_dim)
+        xq = xq.view(batch_size, seq_len, self.num_heads_q, self.head_dim)
         # (B, 1, H_KV * Head_Dim) -> (B, 1, H_KV, Head_Dim)
-        xk = xk.view(batch_size, seq_len, self.n_kv_heads, self.head_dim)
+        xk = xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         # (B, 1, H_KV * Head_Dim) -> (B, 1, H_KV, Head_Dim)
-        xv = xv.view(batch_size, seq_len, self.n_kv_heads, self.head_dim)
+        xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         
         cos, sin = position_embeddings
         xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
@@ -360,7 +298,7 @@ class FusedAttention(nn.Module):
         # scores = scores.masked_fill(~causal_mask, float('-inf'))
 
         # flashattention 计算: softmax(qk^t) * v
-        if seq_len:
+        if seq_len > 1:
             xq = xq.transpose(1, 2)
             keys = keys.transpose(1, 2)
             values = values.transpose(1, 2)
@@ -368,14 +306,11 @@ class FusedAttention(nn.Module):
             # (B, H_Q, Seq_Len_Q, Head_Dim) -> (B, Seq_Len_Q, Num_Heads_Q, Head_Dim) -> (B, Seq_Len_Q, Hidden_Size)
             output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1))
         else:
-            # xq_shape = xq.shape # (B, 1, H_Q, Head_Dim)
             batch_size, kv_actual_seq_len, num_heads, head_dim = keys.shape[0], keys.shape[1], keys.shape[2], keys.shape[3]
-            
-            # print("keys and values shape is ", keys.shape, values.shape)
-            xq = xq.transpose(1, 2).contiguous().view(-1, num_heads, head_dim)
-            keys = keys.transpose(1, 2).contiguous().view(-1, num_heads, head_dim)
-            values = values.transpose(1, 2).contiguous().view(-1, num_heads, head_dim)
-            # print("after transpose and reshape keys and values shape is ", keys.shape, values.shape)
+            new_bs = batch_size * kv_actual_seq_len
+            xq = xq.view(-1, num_heads, head_dim)
+            keys = keys.view(new_bs, num_heads, head_dim)
+            values = values.view(new_bs, num_heads, head_dim)
 
             output = flash_decoding(xq, keys, values, kv_actual_seq_len) # ouput shape is [batchs, num_heads, head_dim]
             output = output.view(batch_size, 1, num_heads * head_dim )
@@ -405,9 +340,9 @@ class LlamaDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig):
         super().__init__()
         self.config= config
-        self.n_heads = config.n_heads
+        self.num_heads = config.num_heads
         self.hidden_size = config.hidden_size
-        self.head_dim = config.hidden_size // config.n_heads
+        self.head_dim = config.hidden_size // config.num_heads
 
         self.attention_norm_weight = nn.Parameter(torch.ones(self.hidden_size,), requires_grad=False)
         self.ffn_norm_weight = nn.Parameter(torch.ones(self.hidden_size,), requires_grad=False)
@@ -449,7 +384,7 @@ class Llama(nn.Module):
 
         self.config = config
         self.vocab_size = config.vocab_size
-        self.n_layers = config.n_layers
+        self.num_layers = config.num_layers
         self.hidden_states = []
 
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
@@ -462,12 +397,12 @@ class Llama(nn.Module):
         # self.lm_head_weight = nn.Parameter(torch.rand(self.vocab_size, config.hidden_size))
 
         self.layers = nn.ModuleList(
-            [LlamaDecoderLayer(config) for layer_id in range(config.n_layers)]
+            [LlamaDecoderLayer(config) for layer_id in range(config.num_layers)]
         )
         # self.freqs_cis = precompute_freqs_cis(
         #     # Note that self.params.max_seq_len is multiplied by 2 because the token limit for the Llama 2 generation of models is 4096. 
         #     # Adding this multiplier instead of using 4096 directly allows for dynamism of token lengths while training or fine-tuning.
-        #     self.config.hidden_size // self.config.n_heads, self.config.max_seq_len * 2
+        #     self.config.hidden_size // self.config.num_heads, self.config.max_seq_len * 2
         # )
 
     def forward(self, tokens: torch.Tensor, start_pos: int):
@@ -485,7 +420,7 @@ class Llama(nn.Module):
 
         mask = None
         if seq_len > 1:
-            # mask = torch.triu(torch.ones((batch_size, self.config.n_heads, seq_len, self.config.hidden_size), dtype=torch.uint8, device="cuda", requires_grad=False))
+            # mask = torch.triu(torch.ones((batch_size, self.config.num_heads, seq_len, self.config.hidden_size), dtype=torch.uint8, device="cuda", requires_grad=False))
             mask = torch.full(
                 (seq_len, seq_len), float("-inf"), device=tokens.device
             )

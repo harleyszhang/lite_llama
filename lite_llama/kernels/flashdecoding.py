@@ -133,38 +133,52 @@ def _flash_decoding_stage1_kernel(
 		# 	tl.device_print(f"updated d_i", d_i)
 		# 	tl.device_print(f"updated acc", acc)
         
-	need_store = tl.where(num_blocks == 0, 0, 1)
-	for _ in range(0, need_store, 1):
-		# 计算存储的偏移量
-		off_mid_o = (
-			batch_pid * mido_batch_stride
-			+ head_pid * mido_heads_stride
-			+ seq_block_pid * mido_partitions_stride
-			+ offs_d * mido_dim_stride
-		)
+	# need_store = tl.where(num_blocks == 0, 0, 1)
+	# for _ in range(0, need_store, 1):
+	# 	# 计算存储的偏移量
+	# 	off_mid_o = (
+	# 		batch_pid * mido_batch_stride
+	# 		+ head_pid * mido_heads_stride
+	# 		+ seq_block_pid * mido_partitions_stride
+	# 		+ offs_d * mido_dim_stride
+	# 	)
 
-		off_mid_o_les = (
-			batch_pid * mido_les_batch_stride
-			+ head_pid * mido_les_heads_stride
-			+ seq_block_pid * mido_les_partitions_stride
-		)
-		tl.store(Mid_O + off_mid_o, acc / d_i)
-		tl.store(Mid_O_LogExpSum + off_mid_o_les, m_i + tl.log(d_i))
+	# 	off_mid_o_les = (
+	# 		batch_pid * mido_les_batch_stride
+	# 		+ head_pid * mido_les_heads_stride
+	# 		+ seq_block_pid * mido_les_partitions_stride
+	# 	)
+	# 	tl.store(Mid_O + off_mid_o, acc / d_i)
+	# 	tl.store(Mid_O_LogExpSum + off_mid_o_les, m_i + tl.log(d_i))
         
 	# 计算是否需要存储
-	# need_store = num_blocks > 0  # 标量布尔值
-	# need_store = tl.where(num_block == 0, 0, 1)
-	# # 计算最终的 attention 输出和 log-sum-exp
-	# part_atten_out = acc / d_i  # [BLOCK_DMODEL]
-	# logexpsum = m_i + tl.log(d_i)  # 标量
+	need_store = num_blocks > 0  # 标量布尔值
 
-	# # 条件存储
-	# part_atten_out = tl.where(need_store, part_atten_out, 0.0)  # [BLOCK_DMODEL]
-	# logexpsum = tl.where(need_store, logexpsum, -1.0e8)  # 标量
+	# 计算存储的偏移量
+	off_mid_o = (
+		batch_pid * mido_batch_stride
+		+ head_pid * mido_heads_stride
+		+ seq_block_pid * mido_partitions_stride
+		+ offs_d * mido_dim_stride
+	)
 
-	# # 存储结果
-	# tl.store(Mid_O + off_mid_o, part_atten_out, mask=need_store)
-	# tl.store(Mid_O_LogExpSum + off_mid_o_les, logexpsum, mask=need_store)
+	off_mid_o_les = (
+		batch_pid * mido_les_batch_stride
+		+ head_pid * mido_les_heads_stride
+		+ seq_block_pid * mido_les_partitions_stride
+	)
+
+	# 计算最终的 attention 输出和 log-sum-exp
+	part_atten_out = acc / d_i  # [BLOCK_DMODEL]
+	logexpsum = m_i + tl.log(d_i)  # 标量
+
+	# 条件存储
+	part_atten_out = tl.where(need_store, part_atten_out, 0.0)  # [BLOCK_DMODEL]
+	logexpsum = tl.where(need_store, logexpsum, float("-inf"))  # 标量
+
+	# 存储结果
+	tl.store(Mid_O + off_mid_o, part_atten_out, mask=need_store)
+	tl.store(Mid_O_LogExpSum + off_mid_o_les, logexpsum, mask=need_store)
 
 
 @torch.no_grad()
@@ -174,13 +188,15 @@ def flash_decode_stage1(
     mid_o, mid_o_logexpsum, # Mid_O: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE), head_dim], Mid_O_LogExpSum: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE)]
     PARTITION_SIZE,
 ):
-	BLOCK_N_SIZE = 32
+	BLOCK_N_SIZE = 16
 
 	# BLOCK_DMODEL = q.shape[-1]
 	assert PARTITION_SIZE % BLOCK_N_SIZE == 0, "PARTITION_SIZE 必须是 BLOCK_N_SIZE 的倍数"
 
 	batchs, num_heads, head_dim = q.shape
 	sm_scale = 1.0 / (head_dim ** 0.5)
+	
+	# grid 配置的并行度比 flashattention1-2 多了 kv cache seq 维度
 	grid = (batchs, num_heads, triton.cdiv(actual_seq_len + PARTITION_SIZE - 1, PARTITION_SIZE))
 
 	_flash_decoding_stage1_kernel[grid](
@@ -303,7 +319,7 @@ def flash_decoding(
 	
 	kv_nums, _, _ = k.shape
 	# middle results
-	PARTITION_SIZE = 128
+	PARTITION_SIZE = 32
 	# 最大可用分区数量计算
 	max_num_partitions = (actual_seq_len + PARTITION_SIZE -1) // PARTITION_SIZE
 
