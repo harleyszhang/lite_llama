@@ -5,8 +5,8 @@ import torch.nn.functional as F
 import math
 
 from typing import Optional, Tuple
-from lite_llama.kernels import *
-from lite_llama.models.config import LlamaConfig
+from ..kernels import *
+from .model_config import LlamaConfig
 
 def _compute_default_rope_parameters(
     config: Optional[LlamaConfig] = None,
@@ -194,7 +194,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 class FusedAttention(nn.Module):
-    def __init__(self,  config: LlamaConfig):
+    def __init__(self,  config: LlamaConfig, cache_k=None, cache_v=None):
         super().__init__()
         self.config= config
 
@@ -218,11 +218,13 @@ class FusedAttention(nn.Module):
         # self.o_proj_weight = nn.Parameter(torch.rand(config.num_heads * self.head_dim, config.hidden_size))
 
         # 提前按最大可分配空间分配好 kv cache 张量
-        self.cache_k = torch.zeros((config.max_batch_size, config.max_seq_len, self.num_kv_heads, self.head_dim)).cuda()
-        self.cache_v = torch.zeros((config.max_batch_size, config.max_seq_len, self.num_kv_heads, self.head_dim)).cuda()
+        # self.cache_k = torch.zeros((config.max_batch_size, config.max_seq_len, self.num_kv_heads, self.head_dim)).cuda()
+        # self.cache_v = torch.zeros((config.max_batch_size, config.max_seq_len, self.num_kv_heads, self.head_dim)).cuda()
 
     def forward(self, 
         x: torch.Tensor,
+        cache_k: torch.Tensor, 
+        cache_v: torch.Tensor, 
         start_pos: int,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         mask: Optional[torch.Tensor] = None,
@@ -272,13 +274,16 @@ class FusedAttention(nn.Module):
         # query_states, key_states = apply_rotary_pos_emb(xq.transpose(1, 2), xk.transpose(1, 2), cos, sin)
 
         # 2. 获取 kv 缓冲向量并更新 kv 向量
-        self.cache_k[:batch_size, start_pos : start_pos + seq_len] = xk
-        self.cache_v[:batch_size, start_pos : start_pos + seq_len] = xv
+        cache_k.view(batch_size, -1, self.num_kv_heads, self.head_dim)
+        cache_v.view(batch_size, -1, self.num_kv_heads, self.head_dim)
+        
+        cache_k[:batch_size, start_pos : start_pos + seq_len] = xk
+        cache_v[:batch_size, start_pos : start_pos + seq_len] = xv
 
         # (B, Seq_Len_KV, H_KV, Head_Dim)
-        keys = self.cache_k[:batch_size, : start_pos + seq_len]
+        keys = cache_k[:batch_size, : start_pos + seq_len]
         # (B, Seq_Len_KV, H_KV, Head_Dim)
-        values = self.cache_v[:batch_size, : start_pos + seq_len]  # shape is torch.Size([4, 41, 8, 64])
+        values = cache_v[:batch_size, : start_pos + seq_len]  # shape is torch.Size([4, 41, 8, 64])
 
         # 3. GQA # (B, Seq_Len_KV, H_KV, Head_Dim) --> (B, Seq_Len_KV, H_Q, Head_Dim)
         keys = repeat_kv(keys, self.n_rep)
@@ -334,7 +339,6 @@ class FusedMLP(nn.Module):
         # return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
         return self.down_proj(swiglu_forward(self.gate_proj(x), self.up_proj(x)))
 
-
 class LlamaDecoderLayer(nn.Module):
 
     def __init__(self, config: LlamaConfig):
@@ -354,9 +358,11 @@ class LlamaDecoderLayer(nn.Module):
         self.feed_forward = FusedMLP(config)
 
     def forward(self, x: torch.Tensor, 
+                k_cache: torch.Tensor, 
+                v_cache: torch.Tensor,
                 start_pos: int, 
                 position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-                mask: Optional[torch.Tensor] = None
+                mask: Optional[torch.Tensor] = None,
             ):
         # Normalization BEFORE the attention block
         # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
@@ -365,7 +371,7 @@ class LlamaDecoderLayer(nn.Module):
 
         # attention 部分计算结果正确, 张量尺寸符合要求
         h = x + self.attention.forward(
-           hidden_states, start_pos, position_embeddings, mask
+           hidden_states, k_cache, v_cache, start_pos, position_embeddings, mask
         )
         # Normalization BEFORE the feed forward block
         # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
@@ -374,7 +380,6 @@ class LlamaDecoderLayer(nn.Module):
 
         out = h + self.feed_forward.forward(hidden_states)
         return out
-
 
 class Llama(nn.Module):
     def __init__(self, config: LlamaConfig):
@@ -405,7 +410,7 @@ class Llama(nn.Module):
         #     self.config.hidden_size // self.config.num_heads, self.config.max_seq_len * 2
         # )
 
-    def forward(self, tokens: torch.Tensor, start_pos: int):
+    def forward(self, tokens: torch.Tensor, start_pos: int, atten_info):
         self.hidden_states = []
         batch_size, seq_len = tokens.shape
         # (B, Seq_Len) -> (B, Seq_Len, Dim)
@@ -437,9 +442,18 @@ class Llama(nn.Module):
             # print("mask shape is ", mask.shape)
 
         # Consecutively apply all the encoder layers
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
+            # 获取指定层的 kv_buffer
+            layer_kv_buffer = atten_info.kv_buffer[i]
+            select_index = atten_info.atten_info
+            num_kv_heads = atten_info.num_kv_heads
+
+            # 获取指定 token 的键和值, 键和值在第二个维度上分别占据前后各一半
+            k_cache = layer_kv_buffer[select_index, :num_kv_heads, :]
+            v_cache = layer_kv_buffer[select_index, num_kv_heads:, :]
+
             self.hidden_states.append(h)
-            h = layer(h, start_pos, position_embeddings, mask) # h.shape [4, 41, 2048]
+            h = layer(h, k_cache, v_cache, start_pos, position_embeddings, mask) # h.shape [4, 41, 2048]
             
         # h = self.norm(h)
         h = rmsnorm(h, self.norm_weight.data, eps=self.config.rms_norm_eps)

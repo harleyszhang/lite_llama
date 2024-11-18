@@ -1,5 +1,6 @@
-
-from lite_llama.lite_llama.models.llama import *
+import torch, os,sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
+from lite_llama.models.llama import *
 
 class ModelArgs:
     def __init__(self):

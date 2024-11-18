@@ -92,12 +92,12 @@ class ModelExecutor:
     def build(
         checkpoints_dir: str, 
         tokenizer_path: str, 
+        max_batch_size: int,
+        max_seq_len: int,
         load_model: bool, 
-        max_seq_len: int, 
-        max_batch_size: int, 
-        device: str, 
         triton_weight=True,
         compiled_model=True,
+        device: str = "cuda", 
     ):
         """
         构建LLaMAInfer实例, 加载模型和分词器。
@@ -169,7 +169,7 @@ class ModelExecutor:
             model.load_state_dict(state_dict, strict=True)
             print(f"Loaded state dict in {time.time() - prev_time:.2f}s")
 
-        return ModelExecutor(model, tokenizer, model_args, compiled_model)
+        return ModelExecutor(model, compiled_model)
 
     def __init__(self, model: Llama, compiled_model=True, device="cuda"):
         self.model = model
@@ -220,43 +220,6 @@ class ModelExecutor:
         )
 
         return kv_mem_manager
-    
-    @torch.no_grad()
-    def copy_kv_index_to_req_cpu(req_to_token_indexs, b_req_idx, seq_len, memindex):
-        """
-        在 CPU 上根据请求索引和序列长度，将 KV 索引从 memindex 复制到 req_to_token_indexs。
-        
-        参数：
-            req_to_token_indexs (torch.Tensor): 输出张量，用于存储 KV 索引。形状为 (num_requests, max_seq_len)。
-            b_req_idx (torch.Tensor): 批次中每个请求的 ID，形状为 (num_tokens,)。
-            seq_len (torch.Tensor): 每个请求的序列长度，形状为 (num_tokens,)。
-            memindex (torch.Tensor): 每个令牌的 KV 索引，形状为 (num_tokens,)。
-        """
-        # 获取令牌数量
-        seq_len = seq_len.shape[0]
-        
-        # 确保所有输入张量在第一个维度上的大小相同
-        assert seq_len.shape[0] == memindex.shape[0] and b_req_idx.shape[0] == seq_len.shape[0], \
-            "所有输入张量在第一个维度上的大小必须相同。"
-        
-        # 遍历每个令牌
-        for cur_index in range(seq_len):
-            # 获取当前请求的 ID
-            cur_req_idx = b_req_idx[cur_index].item()
-            
-            # 获取当前令牌的 KV 索引
-            cur_token_index = memindex[cur_index].item()
-            
-            # 获取当前请求的序列长度
-            cur_seq_len = seq_len[cur_index].item()
-            
-            # 计算目标位置的偏移量，即 req_to_token_indexs[cur_req_idx][cur_seq_len - 1]
-            dest_offset = cur_req_idx, cur_seq_len - 1
-            
-            # 将当前令牌索引存储到目标位置
-            req_to_token_indexs[dest_offset] = cur_token_index
-        
-        return
 
     def apply_cuda_graph(self,):
         """应用 cuda graph 优化

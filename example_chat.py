@@ -28,15 +28,15 @@ def main(
     """
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    generator = GenerateText.build(
+    generator = GenerateText(
         checkpoints_dir='/gemini/code/Llama-3.2-1B-Instruct/my_weight/',
         tokenizer_path='/gemini/code/Llama-3.2-1B-Instruct/',
-        load_model=True,
+        max_batch_size=32,
         max_seq_len=1024,
-        max_batch_size=max_batch_size,
-        device=device,
-        triton_weight=True,
+        load_model=True,
         compiled_model=True
+        triton_weight=True,
+        device="cuda",
     )
 
     prompts: List[str] = [
