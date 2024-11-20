@@ -60,9 +60,9 @@ def main(
     
     results = generator.text_completion(
         prompts,
-        max_gen_len=max_gen_len,
         temperature=temperature,
         top_p=top_p,
+        max_gen_len=max_gen_len,
     )
     
     for prompt, result in zip(prompts, results):

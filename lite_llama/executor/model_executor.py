@@ -107,7 +107,7 @@ class ModelExecutor:
         model_config = ModelExecutor._load_model_config(checkpoints_dir, max_batch_size, max_seq_len, device="cuda")
         model = ModelExecutor._load_model_weight(model_config, checkpoints_dir, load_model, triton_weight, device=device) # 加载权重后的模型
 
-        return ModelExecutor(tokenizer, model_config, model, compiled_model)
+        return ModelExecutor(tokenizer, model_config, model, True)
 
     @staticmethod
     def _load_model_weight( model_args: LlamaConfig, checkpoints_dir, load_model = True, triton_weight=True, device="cuda"):
@@ -232,7 +232,7 @@ class ModelExecutor:
         )
         self.model_runner.capture_decode_graph()
 
-    def forward(self, input_ids, prev_pos, max_gen_len):
+    def forward(self, input_ids, prev_pos):
         batch_size, seq_len = input_ids.shape # 静态批处理, batch 中每个请求的 seq_len 都相等
         # print(f"input_ids shape is {input_ids.shape}")
         if seq_len > 1:
@@ -247,7 +247,7 @@ class ModelExecutor:
 
             # select_index = select_index.view(batch_size, seq_len) # select_index shape [batch_size, seq_len]
             self.atten_info.select_index = select_index
-            print(f"prefill decode stage select_index shape: {select_index.shape}")
+            print(f"prefill stage select_index shape: {select_index.shape}")
         else:
             is_prefill = False
             prev_index = self.atten_info.select_index
@@ -256,10 +256,9 @@ class ModelExecutor:
                 decode_index = alloc_mem[0]
             else:
                 decode_index, _, _  = self.kv_mem_manager.alloc_kvcache(batch_size)
-            
-            # decode_index = decode_index.view(batch_size, seq_len)
             self.atten_info.decode_index = decode_index
-
+            # decode_index = decode_index.view(batch_size, seq_len)
+            
             # if prev_index is not None:
             #     self.atten_info.select_index = torch.cat([prev_index, decode_index], dim=1)
 

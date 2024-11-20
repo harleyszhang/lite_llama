@@ -151,7 +151,7 @@ class GenerateText:
             # decode 阶段 input_ids shape is [4, 1]
             input_ids = tokens[:, prev_pos: cur_pos]
 
-            logits = self.model_executor.forward(input_ids, prev_pos, max_gen_len)
+            logits = self.model_executor.forward(input_ids, prev_pos)
             
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
