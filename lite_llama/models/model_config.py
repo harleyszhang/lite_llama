@@ -11,7 +11,7 @@ class LlamaConfig:
     head_dim: Optional[int] = None
     hidden_act: str = "silu"
     
-    dim: Optional[int] = None
+    # dim: Optional[int] = None
     initializer_range: float = 0.02
     
     # 模型隐藏层大小
@@ -48,9 +48,9 @@ class LlamaConfig:
         if config_dict is not None:
             for key, value in config_dict.items():
                 # 处理名称映射
-                if key == 'num_attentionum_heads':
+                if key == 'num_attention_heads':
                     self.num_heads = value
-                elif key == 'num_hiddenum_layers':
+                elif key == 'num_hidden_layers':
                     self.num_layers = value
                 elif key == 'num_key_value_heads':
                     self.num_kv_heads = value

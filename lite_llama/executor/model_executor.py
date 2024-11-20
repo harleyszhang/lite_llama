@@ -1,5 +1,4 @@
-import torch, json, time
-from dataclasses import dataclass
+import torch, json, time,logging
 from pathlib import Path
 from transformers import AutoTokenizer
 from tqdm import tqdm
@@ -9,6 +8,16 @@ from .mem_manager import ComputeMaxAvailableBlocks, KVCacheMemoryManager
 from ..models.model_config import LlamaConfig
 from ..models.llama import Llama
 from .cuda_graph import ModelRunner
+from .executor_struct import AttentionInfo, ModelRunnerConfig
+
+logger = logging.getLogger(__name__)
+
+def indexs_convert(indexs: torch.tensor, batch_size: int):
+    """
+    prefill 阶段分配的kv cache 索引和 decode 阶段分配的索引合并在一起需要做变换
+    TODO: 支持连续批处理开发时用上.
+    """
+    pass
 
 def convert_hf_to_triton(hf_sd, model_args):
     """
@@ -43,51 +52,31 @@ def convert_hf_to_triton(hf_sd, model_args):
     # 根据 Transformer 层数量生成映射
     for i in range(model_args.n_layers):
         for hf_key, custom_key in layers.items():
-            mapped_key = hf_key.format(i=i) # hf 权重参数字典 key
-            custom_mapped_key = custom_key.format(i=i) # 自定义模型权重参数字典 key
-            mapping[mapped_key] = custom_mapped_key
+            # 左边是 hf 权重参数字典 key, 右边是自定义模型权重参数字典 key
+            mapping[hf_key.format(i=i)] = custom_key.format(i=i)
 
     # 创建新的状态字典
     new_sd = {}
     for hf_key, tensor in tqdm(hf_sd.items(), desc="Mapping weights"):
-        custom_key = mapping.get(hf_key, None)
-        if custom_key is not None:
+        if hf_key in mapping:
             new_sd[custom_key] = tensor
         else:
-            # 如果某些权重不需要映射，可以选择忽略或处理
-            pass  # 忽略未映射的权重
+            print(f"Warning: Unmapped key {hf_key}")
     
     torch.save(new_sd, "/gemini/code/Llama-3.2-1B-Instruct/my_weight/my_llama3.2-1B.pth")
 
     return new_sd
 
-@dataclass
-class ModelRunnerConfig:
-    block_size = 1
-    checkpoints_dir = "/gemini/code/Llama-3.2-1B-Instruct"
-    max_batch_size = 32
-    gpu_memory_utilization=0.9
-
-class AttentionInfo:
-    def __init__(self):
-        self.batch_size = None
-        self.seq_len = None
-        self.max_gen_len = 128
-
-        self.select_index = None
-        self.start_index = None
-        self.end_index = None
-
-        self.num_kv_heads = None
-        self.kv_buffer = None
-        self.is_prefill = None
-        self.max_num_tokens = None
 
 class ModelExecutor:
-    model = Llama
-    model_runner_config = ModelRunnerConfig
+    # 定义类属性
+    tokenizer = None
+    model_config = None
+    model = None
+    # model_runner_config = ModelRunnerConfig
     atten_info = AttentionInfo
 
+    # 通过静态方法 build 将类属性当作默认配置使用
     @staticmethod
     def build(
         checkpoints_dir: str, 
@@ -100,7 +89,7 @@ class ModelExecutor:
         device: str = "cuda", 
     ):
         """
-        构建LLaMAInfer实例, 加载模型和分词器。
+        构建 ModelExecutor 实例, 加载模型、分词器和初始化推理信息结构体 atten_info。
 
         参数:
             checkpoints_dir (str): 模型检查点目录路径。
@@ -111,9 +100,19 @@ class ModelExecutor:
             device (str): 设备类型（'cuda'或'cpu'）。
 
         返回:
-            GenerateText: 初始化后的 GenerateText 实例。
+            ModelExecutor: 初始化后的 ModelExecutor 实例。
         """
+        # 加载分词器
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        model_config = ModelExecutor._load_model_config(checkpoints_dir, max_batch_size, max_seq_len, device="cuda")
+        model = ModelExecutor._load_model_weight(model_config, checkpoints_dir, load_model, triton_weight, device=device) # 加载权重后的模型
+
+        return ModelExecutor(tokenizer, model_config, model, compiled_model)
+
+    @staticmethod
+    def _load_model_weight( model_args: LlamaConfig, checkpoints_dir, load_model = True, triton_weight=True, device="cuda"):
         prev_time = time.time()
+        
         if load_model:
             checkpoints = sorted(Path(checkpoints_dir).glob("*.pth"))
             assert len(checkpoints) > 0, f"no checkpoint files found in {checkpoints_dir}"
@@ -125,22 +124,6 @@ class ModelExecutor:
             prev_time = time.time()
         else:
             checkpoint = None
-
-        # 读取模型参数
-        params_path = Path(checkpoints_dir) / "config.json"
-        assert params_path.exists(), f"params.json not found in {checkpoints_dir}"
-        with open(params_path, "r") as f:
-            params = json.load(f)
-
-        model_args: LlamaConfig = LlamaConfig(
-            params,
-            max_seq_len=max_seq_len,
-            max_batch_size=max_batch_size,
-            device=device,
-        )
-
-        # 加载分词器
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
         # 设置默认张量类型
         if device == "cuda":
@@ -169,12 +152,31 @@ class ModelExecutor:
             model.load_state_dict(state_dict, strict=True)
             print(f"Loaded state dict in {time.time() - prev_time:.2f}s")
 
-        return ModelExecutor(model, compiled_model)
+        return model
+    
+    @staticmethod
+    def _load_model_config(checkpoints_dir, max_batch_size, max_seq_len, device="cuda"):
+        checkpoints_dir = checkpoints_dir
+        # 读取模型参数
+        params_path = Path(checkpoints_dir) / "config.json"
+        assert params_path.exists(), f"params.json not found in {checkpoints_dir}"
+        with open(params_path, "r") as f:
+            params = json.load(f)
 
-    def __init__(self, model: Llama, compiled_model=True, device="cuda"):
+        model_config: LlamaConfig = LlamaConfig(
+            params, 
+            max_batch_size = max_batch_size,
+            max_seq_len = max_seq_len,
+            device=device
+        )
+
+        return model_config
+
+    def __init__(self, tokenizer:AutoTokenizer, model_config: LlamaConfig, model: Llama, compiled_model=True, device="cuda"):
+        self.tokenizer = tokenizer
+        self.model_config = model_config
         self.model = model
 
-        self.model_config = self._load_model_config()
         self.max_gpu_num_blocks, self.max_num_tokens = self._get_max_tokens(self.model_config)
         self.kv_mem_manager = self._init_mem_manager(
             self.model_config, self.max_gpu_num_blocks, self.max_num_tokens, block_size=1, 
@@ -183,21 +185,16 @@ class ModelExecutor:
 
         self.gpu_kv_buffer = self.kv_mem_manager.gpu_kv_buffer
         self.model_runner = None
-
+        self.compiled_model = compiled_model
+        
         if compiled_model:
-            self.apply_cuda_graph() # 真正的调用模型推理的代码
-
-    def _load_model_config(self, device="cuda"):
-        checkpoints_dir = self.model_runner_config.checkpoints_dir
-        # 读取模型参数
-        params_path = Path(checkpoints_dir) / "config.json"
-        assert params_path.exists(), f"params.json not found in {checkpoints_dir}"
-        with open(params_path, "r") as f:
-            params = json.load(f)
-
-        model_config: LlamaConfig = LlamaConfig(params, device=device,)
-
-        return model_config
+            self.apply_cuda_graph(self.max_gpu_num_blocks, self.kv_mem_manager) # 真正的调用模型推理的代码
+        
+        self.kv_mem_manager = self._init_mem_manager(
+            self.model_config, self.max_gpu_num_blocks, self.max_num_tokens, block_size=1, 
+            dtype=torch.float16,  device="cuda"
+        )
+        self.gpu_kv_buffer = self.kv_mem_manager.gpu_kv_buffer
 
     def _get_max_tokens(self, model_config, gpu_memory_utilization=0.9, block_size=1):
         avaliable_blocks = ComputeMaxAvailableBlocks(model_config, gpu_memory_utilization, block_size)
@@ -221,41 +218,56 @@ class ModelExecutor:
 
         return kv_mem_manager
 
-    def apply_cuda_graph(self,):
+    def apply_cuda_graph(self, max_gpu_num_blocks, kv_mem_manager):
         """应用 cuda graph 优化
         参数:
             - input_ids: 输入 tokens id 列表, shape: (batch_size, seq_len)
             - prev_pos: 当前处于第几轮迭代循环, 生成第几个 token
         """
-        self.model_runner = ModelRunner(self.model, vocab_size = self.args.vocab_size, max_batch_size=self.args.max_batch_size)
+        self.model_runner = ModelRunner(
+            self.model, 
+            self.model_config, 
+            max_gpu_num_blocks, 
+            kv_mem_manager
+        )
         self.model_runner.capture_decode_graph()
 
     def forward(self, input_ids, prev_pos, max_gen_len):
         batch_size, seq_len = input_ids.shape # 静态批处理, batch 中每个请求的 seq_len 都相等
-        
+        # print(f"input_ids shape is {input_ids.shape}")
         if seq_len > 1:
             is_prefill = True
-            # 一次性分配最大所需 kv cache
-            need_size = batch_size * seq_len
-            select_index, start_index, end_index  = self.kv_mem_manager.alloc_contiguous_kvcache(need_size)  
+            # 一次性分配最大所需 kv cache. seq0: [token0, token1, token2, token3,], seq1: [token0, token1, token2, token3,]
+            need_size = batch_size * (seq_len)
+            alloc_mem = self.kv_mem_manager.alloc_contiguous_kvcache(need_size)
+            if alloc_mem is not None:
+                select_index = alloc_mem[0]
+            else:
+                select_index, _, _  = self.kv_mem_manager.alloc_kvcache(need_size)
+
+            # select_index = select_index.view(batch_size, seq_len) # select_index shape [batch_size, seq_len]
+            self.atten_info.select_index = select_index
+            print(f"prefill decode stage select_index shape: {select_index.shape}")
         else:
             is_prefill = False
-            # need_size = batch_size
+            prev_index = self.atten_info.select_index
+            alloc_mem = self.kv_mem_manager.alloc_contiguous_kvcache(batch_size)
+            if alloc_mem is not None:
+                decode_index = alloc_mem[0]
+            else:
+                decode_index, _, _  = self.kv_mem_manager.alloc_kvcache(batch_size)
+            
+            # decode_index = decode_index.view(batch_size, seq_len)
+            self.atten_info.decode_index = decode_index
 
-        self.atten_info.batch_size = batch_size
-        self.atten_info.seq_len = seq_len
-        self.atten_info.max_gen_len = max_gen_len
+            # if prev_index is not None:
+            #     self.atten_info.select_index = torch.cat([prev_index, decode_index], dim=1)
 
-        self.atten_info.select_index = select_index
-        self.atten_info.start_index = start_index
-        self.atten_info.end_index = end_index
-
-        self.atten_info.num_kv_heads = self.model_config.num_kv_heads
+            # print(f"after view decode_index shape is {select_index.shape}")
+            # print(f"after concat decode_index is {self.atten_info.decode_index}")
 
         self.atten_info.kv_buffer = self.gpu_kv_buffer
-        self.atten_info.max_num_tokens = self.max_num_tokens
 
-        # print(input_ids.shape)
         if prev_pos == 0 or not self.compiled_model:
             logits = self.model.forward(input_ids, prev_pos, self.atten_info)
         else:

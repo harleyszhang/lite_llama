@@ -30,7 +30,7 @@ class ComputeMaxAvailableBlocks:
     def compute_cache_block_size_bytes(self,):
         """Get the size of the KV cache block size in bytes.
         """
-        if self.head_dim is None:
+        if self.model_config.head_dim is None:
             head_size = self.model_config.hidden_size // self.model_config.num_heads
         else:
             head_size = self.model_config.head_dim
@@ -46,13 +46,13 @@ class ComputeMaxAvailableBlocks:
         return transformer_kv_cache_blocks_bytes
 
     def compute_num_available_blocks(self, model_path=None, dummy_input = None, model_byes=None):
-        free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
-        # 获取峰值内存分配
-        peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+        free_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"] # 获取峰值内存分配
+        
         # 清理未使用的缓存，计算非Torch分配的内存
         torch.cuda.empty_cache()
         torch_allocated_bytes = torch.cuda.memory_stats()["allocated_bytes.all.current"]
-        total_allocated_bytes = torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]
+        total_allocated_bytes = total_gpu_memory - free_memory
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
 
         # 如果有非Torch分配的内存，增加到峰值内存中
@@ -64,7 +64,9 @@ class ComputeMaxAvailableBlocks:
             total_gpu_memory * self.gpu_memory_utilization -
             peak_memory
         )
-
+        # if available_kv_cache_memory <= 0:
+        # available_kv_cache_memory = free_memory
+        
         cache_block_size = self.compute_cache_block_size_bytes() # 单位字节
 
         if cache_block_size == 0:
@@ -73,17 +75,15 @@ class ComputeMaxAvailableBlocks:
             max_gpu_num_blocks = int(available_kv_cache_memory // cache_block_size)
         
         logger.info(
-            "Memory profiling result: total_gpu_memory=%.2f GB"
-            " peak_torch_memory = %.2f GB non_torch_memory=%.2f GiB",
-            " kv_cache_size = %.2fGiB"
-            " available_kv_cache_memory=%.2f GiB max_gpu_num_blocks=%d",
-            total_gpu_memory / (1024**3),
-            (peak_memory - non_torch_allocations) / (1024**3),
-            non_torch_allocations / (1024**3),
-            available_kv_cache_memory / (1024**3),
-            max_gpu_num_blocks,
+            f"cache_block_size = {cache_block_size / (1024 ** 2)} MB \n"
+            f"Memory profiling result: total_gpu_memory={total_gpu_memory / (1024**3):.2f} GB, \n"
+            f"peak_torch_memory={(peak_memory - non_torch_allocations) / (1024**3):.2f} GB, \n"
+            f"non_torch_memory={non_torch_allocations / (1024**3):.2f} GB, \n"
+            f"kv_cache_size={available_kv_cache_memory / (1024**3):.2f} GB, \n"
+            f"available_kv_cache_memory={available_kv_cache_memory / (1024**3):.2f} GB, \n"
+            f"max_gpu_num_blocks={max_gpu_num_blocks}\n"
         )
-
+    
         return max_gpu_num_blocks
     
 
@@ -105,8 +105,8 @@ class KVCacheMemoryManager:
 
         # Initialize the gpu_kv_buffer
         self._allocate_kv_cache(
+            gpu_num_blocks,
             head_dim, num_kv_heads, num_layers, 
-            gpu_num_blocks,  
             dtype, device)
 
     def _allocate_kv_cache(self, 
@@ -122,9 +122,10 @@ class KVCacheMemoryManager:
         self.gpu_kv_buffer = [
             torch.empty((max_num_tokens, 2 * num_kv_heads, head_dim), dtype=dtype, device=device) for _ in range(num_layers)
         ]
+        print(f"gpu_kv_buffer per layer shape: {self.gpu_kv_buffer[0].shape}")
     
     @torch.no_grad()
-    def alloc_kv_cache(self, need_size):
+    def alloc_kvcache(self, need_size):
         if need_size > self.can_use_mem_size:
             logger.warn(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
             return None
@@ -143,18 +144,21 @@ class KVCacheMemoryManager:
         
         # batch 大小是动态变化的
         can_use_pos_index = torch.nonzero(self.kv_mem_use_state == 0).view(-1)
-        
-        # 可用块索引中排除了最后 need_size - 1 个索引，因为这些索引作为起始点时，没有足够的块来满足连续的 need_size 个块的需求。
-        start_indexs = can_use_pos_index[:-need_size + 1]
-        # 对应的排除前面的 need_size - 1 个索引，如果以这些索引作为终点时，不满足需求
-        end_indexs = can_use_pos_index[need_size - 1]
+        # print(f"can_use_pos_index: {can_use_pos_index}, wait tobe allocate size: {need_size}")
+
+        # 可用块索引中排除了最后 need_size 个索引，因为这些索引作为起始点时，没有足够的块来满足连续的 need_size 个块的需求。
+        start_indexs = can_use_pos_index[:-need_size]
+        # 对应的排除前面的 need_size 个索引，如果以这些索引作为终点时，不满足需求
+        end_indexs = can_use_pos_index[need_size:]
         # 计算每对 start 和 end 之间的差值
+
         diff = end_indexs - start_indexs
         
-        contiguous_blocks = (diff == need_size - 1)
+        contiguous_blocks = (diff == need_size)
         # 找到那些差值等于 need_size - 1 的位置，意味着 start 和 end 之间有连续的 need_size 个块
-        contiguous_blocks = (diff == (need_size - 1)).nonzero(as_tuple=True)[0]
-        
+        contiguous_blocks = (diff == (need_size)).nonzero(as_tuple=True)[0]
+        # print("contiguous_blocks: ", contiguous_blocks)
+
         if contiguous_blocks.numel() > 0: # numel 返回张量种元素数量
             start_index = start_indexs[contiguous_blocks[0]].item() # item 方法将张量转换成 Python 数值
             end_index = start_index + need_size

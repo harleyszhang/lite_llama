@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch.profiler import record_function
 from transformers import AutoTokenizer
 
-from .model_executor.model_executor import ModelExecutor
+from .executor.model_executor import ModelExecutor
 from .models.llama import Llama  # 确保这些类已正确定义和导入
 from .models.model_config import LlamaConfig
 
@@ -52,7 +52,7 @@ class GenerateText:
     def __init__(self, 
         checkpoints_dir = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/',
         tokenizer_path = '/gemini/code/Llama-3.2-1B-Instruct/',
-        max_batch_size = 32,
+        max_batch_size = 8,
         max_seq_len = 1024,
         load_model = True,
         triton_weight = True,
@@ -72,6 +72,8 @@ class GenerateText:
             compiled_model = compiled_model,
             device = device
         )
+        self.tokenizer = self.model_executor.tokenizer
+        self.model_config = self.model_executor.model_config
         
     @torch.inference_mode()
     def generate(
@@ -102,14 +104,14 @@ class GenerateText:
             If logprobs is True, token log probabilities are computed for each generated token.
 
         """
-        args = self.args
+        model_config = self.model_config
         bsz = len(prompt_tokens)
-        assert bsz <= args.max_batch_size, (bsz, args.max_batch_size)
+        assert bsz <= model_config.max_batch_size, (bsz, model_config.max_batch_size)
 
         min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
-        assert max_prompt_len <= args.max_seq_len
-        total_len = min(args.max_seq_len, max_gen_len + max_prompt_len)
+        assert max_prompt_len <= model_config.max_seq_len
+        total_len = min(model_config.max_seq_len, max_gen_len + max_prompt_len)
 
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
         # tokens shape is torch.Size([4, 85], 这个 shape 也是输入给模型的尺寸
@@ -136,18 +138,20 @@ class GenerateText:
             )
 
         # 初始化 Token 计数器
-        print("input tokens shape is ", tokens.shape)
+        # print("input tokens shape is ", tokens.shape)
 
         # 创建 CUDA 事件用于测量时间
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
         token_count = 0
+        print(f"min_prompt_len {min_prompt_len} and total_len {total_len}")
+
         for cur_pos in range(min_prompt_len, total_len):
             # decode 阶段 input_ids shape is [4, 1]
             input_ids = tokens[:, prev_pos: cur_pos]
 
-            self.model_executor.forward(input_ids, prev_pos, max_gen_len)
+            logits = self.model_executor.forward(input_ids, prev_pos, max_gen_len)
             
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
@@ -178,8 +182,8 @@ class GenerateText:
             batch_size = tokens.size(0)
             token_count += batch_size
 
-            if all(eos_reached):
-                break
+            # if all(eos_reached):
+            #     break
 
         # 记录结束事件
         end_event.record()
@@ -244,7 +248,7 @@ class GenerateText:
 
         """
         if max_gen_len is None:
-            max_gen_len = self.model.args.max_seq_len - 1
+            max_gen_len = self.model_config.max_seq_len - 1
 
         # 使用 encode 方法获取整数 token ID 列表. prompt_tokens 是整数列表
         prompt_tokens = [self.tokenizer.encode(x, add_special_tokens=True) for x in prompts]   
@@ -301,7 +305,7 @@ class GenerateText:
 
         """
         if max_gen_len is None:
-            max_gen_len = self.model.args.max_seq_len - 1
+            max_gen_len = self.model_config.max_seq_len - 1
         prompt_tokens = []
         unsafe_requests = []
         for dialog in dialogs:

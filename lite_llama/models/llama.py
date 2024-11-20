@@ -221,10 +221,59 @@ class FusedAttention(nn.Module):
         # self.cache_k = torch.zeros((config.max_batch_size, config.max_seq_len, self.num_kv_heads, self.head_dim)).cuda()
         # self.cache_v = torch.zeros((config.max_batch_size, config.max_seq_len, self.num_kv_heads, self.head_dim)).cuda()
 
-    def forward(self, 
+    def context_forward(
+        self,
         x: torch.Tensor,
-        cache_k: torch.Tensor, 
-        cache_v: torch.Tensor, 
+        atten_info,
+        layer_index:int,
+        start_pos: int,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        mask: Optional[torch.Tensor] = None,
+    ):         
+        x = x.to(torch.float16)
+        batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
+
+        # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
+
+        xq = self.wq(x)
+        xk = self.wk(x)
+        xv = self.wv(x)
+
+        xq = xq.view(batch_size, seq_len, self.num_heads_q, self.head_dim)
+        xk = xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        
+        cos, sin = position_embeddings
+        xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
+
+        # 2. 获取 kv 缓冲向量并更新 kv 向量
+        select_index = atten_info.select_index
+        num_kv_heads = self.num_kv_heads
+        layer_kv_buffer = atten_info.kv_buffer[layer_index]
+        
+        layer_kv_buffer[select_index, :num_kv_heads, :] = xk.view(batch_size * seq_len, num_kv_heads, -1)
+        layer_kv_buffer[select_index, num_kv_heads:, :] = xv.view(batch_size * seq_len, num_kv_heads, -1)
+        print(f"prefill stage layer_kv_buffer shape is {layer_kv_buffer.shape}")
+
+        keys = repeat_kv(xk, self.n_rep)
+        values = repeat_kv(xv, self.n_rep) # shape is torch.Size([4, 82, 32, 64])
+
+        # 3. sel-attention. flashattention 计算: softmax(qk^t) * v
+        xq = xq.transpose(1, 2)
+        keys = keys.transpose(1, 2)
+        values = values.transpose(1, 2)
+        output = flash_attention_v2(xq, keys, values)
+        # (B, H_Q, Seq_Len_Q, Head_Dim) -> (B, Seq_Len_Q, Num_Heads_Q, Head_Dim) -> (B, Seq_Len_Q, Hidden_Size)
+        output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1))
+        
+        # 4. attention 输出做线性变换
+        output = self.wo(output)
+        return output
+
+    def token_forward(self, 
+        x: torch.Tensor,
+        atten_info,
+        layer_index:int,
         start_pos: int,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         mask: Optional[torch.Tensor] = None,
@@ -242,6 +291,7 @@ class FusedAttention(nn.Module):
         xq = self.wq(x)
         xk = self.wk(x)
         xv = self.wv(x)
+
         # (B, 1, H_Q * Head_Dim) -> (B, 1, H_Q, Head_Dim), 
         xq = xq.view(batch_size, seq_len, self.num_heads_q, self.head_dim)
         # (B, 1, H_KV * Head_Dim) -> (B, 1, H_KV, Head_Dim)
@@ -274,21 +324,72 @@ class FusedAttention(nn.Module):
         # query_states, key_states = apply_rotary_pos_emb(xq.transpose(1, 2), xk.transpose(1, 2), cos, sin)
 
         # 2. 获取 kv 缓冲向量并更新 kv 向量
-        cache_k.view(batch_size, -1, self.num_kv_heads, self.head_dim)
-        cache_v.view(batch_size, -1, self.num_kv_heads, self.head_dim)
+        select_index = atten_info.select_index
         
-        cache_k[:batch_size, start_pos : start_pos + seq_len] = xk
-        cache_v[:batch_size, start_pos : start_pos + seq_len] = xv
+        num_kv_heads = self.num_kv_heads
+        layer_kv_buffer = atten_info.kv_buffer[layer_index]
 
-        # (B, Seq_Len_KV, H_KV, Head_Dim)
-        keys = cache_k[:batch_size, : start_pos + seq_len]
-        # (B, Seq_Len_KV, H_KV, Head_Dim)
-        values = cache_v[:batch_size, : start_pos + seq_len]  # shape is torch.Size([4, 41, 8, 64])
+        if atten_info.select_index is not None:
+            past_k_cache = layer_kv_buffer[select_index, :num_kv_heads, :]
+            past_v_cache = layer_kv_buffer[select_index, num_kv_heads:, :]
+            # 获取指定上一轮 token 的键和值, 键和值在第二个维度上分别占据前后各一半
+
+            past_k_cache_reshape = past_k_cache.view(batch_size, seq_len, num_kv_heads, -1)
+            past_v_cache_reshape = past_v_cache.view(batch_size, seq_len, num_kv_heads, -1)
+            
+            xk = torch.cat([past_k_cache_reshape, xk], dim=1)
+            xv = torch.cat([past_v_cache_reshape, xv], dim=1)
+            print("Have execute prefill stage!")
+            atten_info.select_index = torch.cat([atten_info.select_index.view(batch_size, seq_len), atten_info.decode_index.view(batch_size, seq_len)], dim=1).view(-1)
+            layer_kv_buffer[atten_info.select_index, :num_kv_heads, :] = xk.view(batch_size * seq_len, num_kv_heads, self.head_dim)
+            layer_kv_buffer[atten_info.select_index, num_kv_heads:, :] = xv.view(batch_size * seq_len, num_kv_heads, self.head_dim)
+        else:
+            # print("atten_info.select_index and num_kv_heads is ", atten_info.select_index, num_kv_heads)
+            # print("layer_kv_buffer shape ", layer_kv_buffer.shape)
+            # print(f"atten_info.kv_buffer[layer_index][atten_info.select_index, :num_kv_heads, :]", layer_kv_buffer[atten_info.select_index, :num_kv_heads, :].shape)
+            # print(f"xk shape {xk.shape}, xv shape {xv.shape}")
+            # print("xk.view(batch_size * seq_len, num_kv_heads, self.head_dim)", xk.view(batch_size * seq_len, num_kv_heads, self.head_dim).shape)
+            layer_kv_buffer[atten_info.decode_index, :num_kv_heads, :] = xk.view(batch_size * seq_len, num_kv_heads, self.head_dim)
+            layer_kv_buffer[atten_info.decode_index, num_kv_heads:, :] = xv.view(batch_size * seq_len, num_kv_heads, self.head_dim)
+            # atten_info.select_index = atten_info.decode_index
+        
+        # layr_k_cache = layer_kv_buffer[select_index, :num_kv_heads, :]  # shape: [batch_size * seq_len, num_kv_heads, head_dim]
+        # layer_v_cache = layer_kv_buffer[select_index, num_kv_heads:, :]  # shape: [batch_size * seq_len, num_kv_heads, head_dim]
+         
+        # k_cache = k_cache_flat.view(batch_size, seq_len, num_kv_heads, -1)  # shape: [batch_size, seq_len, num_kv_heads, head_dim]
+        # v_cache = v_cache_flat.view(batch_size, seq_len, num_kv_heads, -1)  # shape: [batch_size, seq_len, num_kv_heads, head_dim]
+        
+        # # 更新 kv cache 
+        # layr_k_cache[:batch_size, start_pos : start_pos + seq_len] = xk
+        # layer_v_cache[:batch_size, start_pos : start_pos + seq_len] = xv
+
+        # # 将 select_index 展平为一维
+        # select_index_flat = select_index.view(-1)  # shape: [batch_size * seq_len]
+        # print(f"After flat select_index shape is {select_index_flat.shape}")
+        # print("select_index_flat ", select_index_flat)
+        # # 获取指定层的 kv_buffer
+        # layer_kv_buffer = atten_info.kv_buffer[i]
+        # # 获取指定 token 的键和值, 键和值在第二个维度上分别占据前后各一半
+        # k_cache_flat = layer_kv_buffer[select_index_flat, :num_kv_heads, :]  # shape: [batch_size * seq_len, num_kv_heads, head_dim]
+        # v_cache_flat = layer_kv_buffer[select_index_flat, num_kv_heads:, :]  # shape: [batch_size * seq_len, num_kv_heads, head_dim]
+        # print(f"k_cache_flat shape {k_cache_flat.shape}")
+        # # 重新调整形状为 [batch_size, seq_len, num_kv_heads, head_dim]
+        # k_cache = k_cache_flat.view(batch_size, seq_len, num_kv_heads, -1)  # shape: [batch_size, seq_len, num_kv_heads, head_dim]
+        # v_cache = v_cache_flat.view(batch_size, seq_len, num_kv_heads, -1)  # shape: [batch_size, seq_len, num_kv_heads, head_dim]
+
+        # print(f"decode stage cache_k shape is {cache_k.shape}, start_pos, seq_len {start_pos}, {seq_len}")
+        # cache_k[:batch_size, start_pos : start_pos + seq_len] = xk
+        # cache_v[:batch_size, start_pos : start_pos + seq_len] = xv
+
+        # # (B, Seq_Len_KV, H_KV, Head_Dim)
+        # keys = cache_k[:batch_size, : start_pos + seq_len]
+        # # (B, Seq_Len_KV, H_KV, Head_Dim)
+        # values = cache_v[:batch_size, : start_pos + seq_len]  # shape is torch.Size([4, 41, 8, 64])
 
         # 3. GQA # (B, Seq_Len_KV, H_KV, Head_Dim) --> (B, Seq_Len_KV, H_Q, Head_Dim)
-        keys = repeat_kv(keys, self.n_rep)
+        keys = repeat_kv(xk, self.n_rep)
         # (B, Seq_Len_KV, H_KV, Head_Dim) --> (B, Seq_Len_KV, H_Q, Head_Dim)
-        values = repeat_kv(values, self.n_rep) # shape is torch.Size([4, 82, 32, 64])
+        values = repeat_kv(xv, self.n_rep) # shape is torch.Size([4, 82, 32, 64])
 
         # 4. sel-attention
         # # 标准 self-attention 计算
@@ -302,24 +403,17 @@ class FusedAttention(nn.Module):
         # causal_mask = torch.tril(torch.ones((seq_len_q, seq_len_kv), device=x.device, dtype=torch.bool))
         # scores = scores.masked_fill(~causal_mask, float('-inf'))
 
-        # flashattention 计算: softmax(qk^t) * v
-        if seq_len > 1:
-            xq = xq.transpose(1, 2)
-            keys = keys.transpose(1, 2)
-            values = values.transpose(1, 2)
-            output = flash_attention_v2(xq, keys, values)
-            # (B, H_Q, Seq_Len_Q, Head_Dim) -> (B, Seq_Len_Q, Num_Heads_Q, Head_Dim) -> (B, Seq_Len_Q, Hidden_Size)
-            output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1))
-        else:
-            batch_size, kv_actual_seq_len, num_heads, head_dim = keys.shape[0], keys.shape[1], keys.shape[2], keys.shape[3]
-            new_bs = batch_size * kv_actual_seq_len
-            xq = xq.view(-1, num_heads, head_dim)
-            keys = keys.view(new_bs, num_heads, head_dim)
-            values = values.view(new_bs, num_heads, head_dim)
+        # 4. flashattention 计算: softmax(qk^t) * v
+        batch_size, kv_actual_seq_len, num_heads, head_dim = keys.shape[0], keys.shape[1], keys.shape[2], keys.shape[3]
+        new_bs = batch_size * kv_actual_seq_len
 
-            output = flash_decoding(xq, keys, values, kv_actual_seq_len) # ouput shape is [batchs, num_heads, head_dim]
-            output = output.view(batch_size, 1, num_heads * head_dim )
-        
+        xq = xq.view(-1, num_heads, head_dim)
+        keys = keys.view(new_bs, num_heads, head_dim)
+        values = values.view(new_bs, num_heads, head_dim)
+
+        output = flash_decoding(xq, keys, values, kv_actual_seq_len) # ouput shape is [batchs, num_heads, head_dim]
+        output = output.view(batch_size, 1, num_heads * head_dim )
+    
         output = self.wo(output)
         # output = torch.matmul(output, self.o_proj_weight.data.t()) # (B, 1, Dim) -> (B, 1, Dim)
         return output
@@ -357,24 +451,31 @@ class LlamaDecoderLayer(nn.Module):
         self.attention = FusedAttention(config)
         self.feed_forward = FusedMLP(config)
 
-    def forward(self, x: torch.Tensor, 
-                k_cache: torch.Tensor, 
-                v_cache: torch.Tensor,
-                start_pos: int, 
-                position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-                mask: Optional[torch.Tensor] = None,
-            ):
-        # Normalization BEFORE the attention block
-        # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
-        # hidden_states = self.attention_norm(x)
+    def forward(self, 
+        x: torch.Tensor, 
+        atten_info,
+        layer_index: int,
+        start_pos: int, 
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        mask: Optional[torch.Tensor] = None,
+    ):
+        # Normalization BEFORE the attention block. # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
+        batch_size, seq_len, _ = x.shape
+        # print(f"decoder layer input x shape is {x.shape}")
+
         hidden_states = rmsnorm(x, self.attention_norm_weight.data, eps=self.config.rms_norm_eps)
 
         # attention 部分计算结果正确, 张量尺寸符合要求
-        h = x + self.attention.forward(
-           hidden_states, k_cache, v_cache, start_pos, position_embeddings, mask
-        )
-        # Normalization BEFORE the feed forward block
-        # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
+        if seq_len > 1:
+            h = x + self.attention.context_forward(
+                hidden_states, atten_info, layer_index, start_pos, position_embeddings, mask
+            )
+        else:
+            h = x + self.attention.token_forward(
+                hidden_states, atten_info, layer_index, start_pos, position_embeddings, mask
+            )
+        
+        # Normalization BEFORE the feed forward block. # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
         # hidden_states = self.ffn_norm(h)
         hidden_states = rmsnorm(h, self.ffn_norm_weight.data, eps=self.config.rms_norm_eps)
 
@@ -411,6 +512,7 @@ class Llama(nn.Module):
         # )
 
     def forward(self, tokens: torch.Tensor, start_pos: int, atten_info):
+        print(f"llama model input shape is {tokens.shape}")
         self.hidden_states = []
         batch_size, seq_len = tokens.shape
         # (B, Seq_Len) -> (B, Seq_Len, Dim)
@@ -442,18 +544,9 @@ class Llama(nn.Module):
             # print("mask shape is ", mask.shape)
 
         # Consecutively apply all the encoder layers
-        for i, layer in enumerate(self.layers):
-            # 获取指定层的 kv_buffer
-            layer_kv_buffer = atten_info.kv_buffer[i]
-            select_index = atten_info.atten_info
-            num_kv_heads = atten_info.num_kv_heads
-
-            # 获取指定 token 的键和值, 键和值在第二个维度上分别占据前后各一半
-            k_cache = layer_kv_buffer[select_index, :num_kv_heads, :]
-            v_cache = layer_kv_buffer[select_index, num_kv_heads:, :]
-
+        for i, layer in enumerate(self.layers):            
             self.hidden_states.append(h)
-            h = layer(h, k_cache, v_cache, start_pos, position_embeddings, mask) # h.shape [4, 41, 2048]
+            h = layer(h, atten_info, i, start_pos, position_embeddings, mask)  # h.shape [batch_size, seq_len, hidden_dim]
             
         # h = self.norm(h)
         h = rmsnorm(h, self.norm_weight.data, eps=self.config.rms_norm_eps)

@@ -27,16 +27,18 @@ def main(
             set to the model's max sequence length. Defaults to None.
     """
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    checkpoints_dir = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/'
+    tokenizer_path = '/gemini/code/Llama-3.2-1B-Instruct/'
 
     generator = GenerateText(
-        checkpoints_dir='/gemini/code/Llama-3.2-1B-Instruct/my_weight/',
-        tokenizer_path='/gemini/code/Llama-3.2-1B-Instruct/',
-        max_batch_size=32,
-        max_seq_len=1024,
-        load_model=True,
-        compiled_model=True
-        triton_weight=True,
-        device="cuda",
+        checkpoints_dir = checkpoints_dir,
+        tokenizer_path = tokenizer_path,
+        max_batch_size = max_batch_size,
+        max_seq_len = max_seq_len,
+        load_model = True,
+        compiled_model = True,
+        triton_weight = True,
+        device = device,
     )
 
     prompts: List[str] = [
@@ -70,6 +72,6 @@ def main(
 
 
 if __name__ == "__main__":
-    # with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
     main()
+    # with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
     # print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
