@@ -276,6 +276,10 @@ class FusedAttention(nn.Module):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         mask: Optional[torch.Tensor] = None,
     ):
+        # atten_info.select_index = torch.unique(atten_info.select_index, return_inverse=True)
+        # 条件过滤：只选择有效索引
+        # atten_info.select_index  = atten_info.select_index[atten_info.select_index  > 0]  # 只保留小于 x 长度的索引
+        # print("atten_info.select_index is ", atten_info.select_index)
         x = x.to(torch.float16)
         token_atten_input_shape = x.shape 
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
@@ -303,27 +307,29 @@ class FusedAttention(nn.Module):
         # 2. 获取 kv 缓冲向量并更新 kv 向量
         select_index = atten_info.select_index
         num_kv_heads = self.num_kv_heads
+        # count_nonzero = torch.count_nonzero(select_index)
+        # select_index = torch.unique(atten_info.select_index, sorted=False)
+        # if count_nonzero > 0:
         
-        # layer_kv_buffer = atten_info.kv_buffer[layer_index]
-        if atten_info.select_index is not None:
-            past_k_cache = atten_info.kv_buffer[layer_index][select_index, :num_kv_heads, :]
-            past_v_cache = atten_info.kv_buffer[layer_index][select_index, num_kv_heads:, :]
-            # 获取指定上一轮 token 的键和值, 键和值在第二个维度上分别占据前后各一半
-            past_k_cache_reshape = past_k_cache.view(batch_size, -1, num_kv_heads, self.head_dim)
-            past_v_cache_reshape = past_v_cache.view(batch_size, -1, num_kv_heads, self.head_dim)
-            # print(f"past_v_cache_reshape shape {past_v_cache_reshape.shape} xk shape {xk.shape}")
-            xk = torch.cat([past_k_cache_reshape, xk], dim=1)
-            xv = torch.cat([past_v_cache_reshape, xv], dim=1)
-            # print(f"atten_info.select_index.view(batch_size, seq_len) shape is {atten_info.select_index.view(batch_size, -1).shape}")
-            # print(f"atten_info.select_index shape {atten_info.select_index.shape}")
-            select_index = torch.cat([atten_info.select_index.view(batch_size, -1),
-                                            atten_info.decode_index.view(batch_size, -1)], dim=1).view(-1)
-            
-            atten_info.kv_buffer[layer_index][select_index, :num_kv_heads, :] = xk.view(-1, num_kv_heads, self.head_dim)
-            atten_info.kv_buffer[layer_index][select_index, num_kv_heads:, :] = xv.view(-1, num_kv_heads, self.head_dim)
-        else:
-            atten_info.kv_buffer[layer_index][atten_info.decode_index, :num_kv_heads, :] = xk.view(batch_size * seq_len, num_kv_heads, self.head_dim)
-            atten_info.kv_buffer[layer_index][atten_info.decode_index, num_kv_heads:, :] = xv.view(batch_size * seq_len, num_kv_heads, self.head_dim)
+        past_k_cache = atten_info.kv_buffer[layer_index][select_index, :num_kv_heads, :]
+        past_v_cache = atten_info.kv_buffer[layer_index][select_index, num_kv_heads:, :]
+        
+        # 获取指定上一轮 token 的键和值, 键和值在第二个维度上分别占据前后各一半
+        past_k_cache_reshape = past_k_cache.view(batch_size, -1, num_kv_heads, self.head_dim)
+        past_v_cache_reshape = past_v_cache.view(batch_size, -1, num_kv_heads, self.head_dim)
+        
+        xk = torch.cat([past_k_cache_reshape, xk], dim=1)
+        xv = torch.cat([past_v_cache_reshape, xv], dim=1)
+        # print(f"atten_info.select_index.view(batch_size, seq_len) shape is {atten_info.select_index.view(batch_size, -1).shape}")
+        select_index = torch.cat([atten_info.select_index.view(batch_size, -1),
+                                atten_info.decode_index.view(batch_size, -1)], dim=1).view(-1)
+        
+        atten_info.kv_buffer[layer_index][select_index, :num_kv_heads, :] = xk.view(-1, num_kv_heads, self.head_dim)
+        atten_info.kv_buffer[layer_index][select_index, num_kv_heads:, :] = xv.view(-1, num_kv_heads, self.head_dim)
+    # else:
+        #     # print("atten_info.select_index shape ", atten_info.select_index.shape)
+        #     atten_info.kv_buffer[layer_index][atten_info.decode_index, :num_kv_heads, :] = xk.view(batch_size * seq_len, num_kv_heads, self.head_dim)
+        #     atten_info.kv_buffer[layer_index][atten_info.decode_index, num_kv_heads:, :] = xv.view(batch_size * seq_len, num_kv_heads, self.head_dim)
 
         # 3. GQA # (B, Seq_Len_KV, H_KV, Head_Dim) --> (B, Seq_Len_KV, H_Q, Head_Dim)
         keys = repeat_kv(xk, self.n_rep)
@@ -388,8 +394,6 @@ class LlamaDecoderLayer(nn.Module):
     ):
         # Normalization BEFORE the attention block. # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
         batch_size, seq_len, _ = x.shape
-        # print(f"decoder layer input x shape is {x.shape}")
-
         hidden_states = rmsnorm(x, self.attention_norm_weight.data, eps=self.config.rms_norm_eps)
 
         # attention 部分计算结果正确, 张量尺寸符合要求
@@ -438,16 +442,15 @@ class Llama(nn.Module):
         #     self.config.hidden_size // self.config.num_heads, self.config.max_seq_len * 2
         # )
 
-    def forward(self, tokens: torch.Tensor, start_pos: int, atten_info):
-        # print(f"llama model input shape is {tokens.shape}")
+    def forward(self, tokens: torch.Tensor, start_pos, atten_info):
+        
+        # start_pos = start_pos.item()
         self.hidden_states = []
         batch_size, seq_len = tokens.shape
-        # (B, Seq_Len) -> (B, Seq_Len, Dim)
         h = self.embed_tokens(tokens) # torch.isnan(h).any() False
 
         # self.freqs_cis = self.freqs_cis.to(h.device)
         # freqs_cis = self.freqs_cis[start_pos : start_pos + seq_len]
-
         cache_position = torch.arange(start_pos, start_pos + seq_len, device=h.device)
         position_ids = cache_position.unsqueeze(0)
         position_embeddings = self.rotary_emb(h, position_ids)
@@ -468,22 +471,16 @@ class Llama(nn.Module):
                 torch.zeros((seq_len, start_pos), device=tokens.device),
                 mask
             ]).type_as(h)
-            # print("mask shape is ", mask.shape)
 
         # Consecutively apply all the encoder layers
         for i, layer in enumerate(self.layers):            
             self.hidden_states.append(h)
             h = layer(h, atten_info, i, start_pos, position_embeddings, mask)  # h.shape [batch_size, seq_len, hidden_dim]
-        
-        if seq_len == 1 and atten_info.select_index is not None:
-            atten_info.select_index = torch.cat([atten_info.select_index.view(batch_size, -1),
-                                                atten_info.decode_index.view(batch_size, -1)], dim=1).view(-1)
-        # h = self.norm(h)
-        h = rmsnorm(h, self.norm_weight.data, eps=self.config.rms_norm_eps)
 
+        h = rmsnorm(h, self.norm_weight.data, eps=self.config.rms_norm_eps)
         self.hidden_states.append(h)
         output = self.lm_head(h)
-        # output = torch.matmul(h, self.lm_head_weight.data.t().contiguous()).float()
 
+        print(f"prefill or decode stage select_index shape: {atten_info.select_index.shape}")
         return output
  

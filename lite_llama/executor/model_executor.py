@@ -177,24 +177,20 @@ class ModelExecutor:
         self.model_config = model_config
         self.model = model
 
-        self.max_gpu_num_blocks, self.max_num_tokens = self._get_max_tokens(self.model_config)
-        self.kv_mem_manager = self._init_mem_manager(
-            self.model_config, self.max_gpu_num_blocks, self.max_num_tokens, block_size=1, 
-            dtype=torch.float16,  device="cuda"
-        )
-
-        self.gpu_kv_buffer = self.kv_mem_manager.gpu_kv_buffer
         self.model_runner = None
         self.compiled_model = compiled_model
         
         if compiled_model:
-            self.apply_cuda_graph(self.max_gpu_num_blocks, self.kv_mem_manager) # 真正的调用模型推理的代码
+            self.max_gpu_num_blocks, self.kv_mem_manager = self.apply_cuda_graph() # 真正的调用模型推理的代码
         
-        self.kv_mem_manager = self._init_mem_manager(
-            self.model_config, self.max_gpu_num_blocks, self.max_num_tokens, block_size=1, 
-            dtype=torch.float16,  device="cuda"
-        )
+        # self.max_gpu_num_blocks, self.max_num_tokens = self._get_max_tokens(self.model_config)
+        # self.kv_mem_manager = self._init_mem_manager(
+        #     self.model_config, self.max_gpu_num_blocks, self.max_num_tokens, block_size=1, 
+        #     dtype=torch.float16,  device="cuda"
+        # )
         self.gpu_kv_buffer = self.kv_mem_manager.gpu_kv_buffer
+        self.atten_info = AttentionInfo
+        self.atten_info.kv_buffer = self.kv_mem_manager.gpu_kv_buffer
 
     def _get_max_tokens(self, model_config, gpu_memory_utilization=0.9, block_size=1):
         avaliable_blocks = ComputeMaxAvailableBlocks(model_config, gpu_memory_utilization, block_size)
@@ -218,12 +214,18 @@ class ModelExecutor:
 
         return kv_mem_manager
 
-    def apply_cuda_graph(self, max_gpu_num_blocks, kv_mem_manager):
+    def apply_cuda_graph(self, ):
         """应用 cuda graph 优化
         参数:
             - input_ids: 输入 tokens id 列表, shape: (batch_size, seq_len)
             - prev_pos: 当前处于第几轮迭代循环, 生成第几个 token
         """
+        max_gpu_num_blocks, max_num_tokens = self._get_max_tokens(self.model_config)
+        
+        kv_mem_manager = self._init_mem_manager(
+            self.model_config, max_gpu_num_blocks, max_num_tokens, block_size=1, 
+            dtype=torch.float16,  device="cuda"
+        )
         self.model_runner = ModelRunner(
             self.model, 
             self.model_config, 
@@ -231,6 +233,8 @@ class ModelExecutor:
             kv_mem_manager
         )
         self.model_runner.capture_decode_graph()
+
+        return  max_gpu_num_blocks, kv_mem_manager
 
     def forward(self, input_ids, prev_pos):
         batch_size, seq_len = input_ids.shape # 静态批处理, batch 中每个请求的 seq_len 都相等
@@ -245,8 +249,9 @@ class ModelExecutor:
             else:
                 select_index, _, _  = self.kv_mem_manager.alloc_kvcache(need_size)
 
-            # select_index = select_index.view(batch_size, seq_len) # select_index shape [batch_size, seq_len]
+                    # 对 select_index 进行填充，使其形状与捕获时一致
             self.atten_info.select_index = select_index
+
             print(f"prefill stage select_index shape: {select_index.shape}")
         else:
             is_prefill = False
@@ -257,19 +262,19 @@ class ModelExecutor:
             else:
                 decode_index, _, _  = self.kv_mem_manager.alloc_kvcache(batch_size)
             self.atten_info.decode_index = decode_index
-            # decode_index = decode_index.view(batch_size, seq_len)
-            
-            # if prev_index is not None:
-            #     self.atten_info.select_index = torch.cat([prev_index, decode_index], dim=1)
-
-            # print(f"after view decode_index shape is {select_index.shape}")
-            # print(f"after concat decode_index is {self.atten_info.decode_index}")
-
-        self.atten_info.kv_buffer = self.gpu_kv_buffer
 
         if prev_pos == 0 or not self.compiled_model:
             logits = self.model.forward(input_ids, prev_pos, self.atten_info)
         else:
-            logits = self.model_runner.decode(input_ids, prev_pos, self.atten_info)
+            # left_select_index = self.atten_info.select_index
+            self.atten_info.select_index = torch.zeros((512), dtype=torch.long, device='cuda')
+            # self.atten_info.select_index[:, :left_select_index.shape] = left_select_index  # 将实际的 select_index 复制到填充后的张量中
+            logits = self.model_runner.decode(input_ids, prev_pos, self.atten_info) # 执行了
+        
+        # if seq_len == 1 and self.atten_info.select_index.numel() > 0:
+        #     select_index = torch.cat([left_select_index,
+        #                              self.atten_info.decode_index.view(batch_size, -1)], dim=1).view(-1)
+        #     self.atten_info.select_index = torch.zeros((512), dtype=torch.long, device='cuda')
+        #     self.atten_info.select_index[:, :select_index.shape] = select_index  # 将实际的 select_index 复制到填充后的张量中
 
         return logits
