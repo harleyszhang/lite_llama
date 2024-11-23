@@ -182,8 +182,8 @@ class GenerateText:
             batch_size = tokens.size(0)
             token_count += batch_size
 
-            # if all(eos_reached):
-            #     break
+            if all(eos_reached):
+                break
 
         # 记录结束事件
         end_event.record()

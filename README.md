@@ -92,6 +92,13 @@ INFO:lite_llama.generate:Decode stage Batch inference time: 1641.4178 ms
 INFO:lite_llama.generate:Decode stage tokens per second : 187.64 tokens/s
 ```
 
+5, 继续再次优化，支持 kv cache 高效的动态管理（类似 tokenattention），解决了 kv cache 显存浪费和分配低效的问题。
+
+```bash
+INFO:lite_llama.generate:Decode stage Batch inference time: 1413.9111 ms
+INFO:lite_llama.generate:Decode stage tokens per second : 217.84 tokens/s
+```
+
 ## Acknowledgement
 
 - [transformers](https://github.com/huggingface/transformers)

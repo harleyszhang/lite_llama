@@ -178,7 +178,7 @@ class ModelExecutor:
         self.model = model
 
         self.model_runner = None
-        self.compiled_model = compiled_model
+        self.compiled_model = False
         
         if compiled_model:
             self.max_gpu_num_blocks, self.kv_mem_manager = self.apply_cuda_graph() # 真正的调用模型推理的代码
@@ -254,8 +254,6 @@ class ModelExecutor:
 
             print(f"prefill stage select_index shape: {select_index.shape}")
         else:
-            is_prefill = False
-            prev_index = self.atten_info.select_index
             alloc_mem = self.kv_mem_manager.alloc_contiguous_kvcache(batch_size)
             if alloc_mem is not None:
                 decode_index = alloc_mem[0]
@@ -266,15 +264,11 @@ class ModelExecutor:
         if prev_pos == 0 or not self.compiled_model:
             logits = self.model.forward(input_ids, prev_pos, self.atten_info)
         else:
-            # left_select_index = self.atten_info.select_index
-            self.atten_info.select_index = torch.zeros((512), dtype=torch.long, device='cuda')
-            # self.atten_info.select_index[:, :left_select_index.shape] = left_select_index  # 将实际的 select_index 复制到填充后的张量中
             logits = self.model_runner.decode(input_ids, prev_pos, self.atten_info) # 执行了
         
-        # if seq_len == 1 and self.atten_info.select_index.numel() > 0:
-        #     select_index = torch.cat([left_select_index,
-        #                              self.atten_info.decode_index.view(batch_size, -1)], dim=1).view(-1)
-        #     self.atten_info.select_index = torch.zeros((512), dtype=torch.long, device='cuda')
-        #     self.atten_info.select_index[:, :select_index.shape] = select_index  # 将实际的 select_index 复制到填充后的张量中
-
+        if seq_len == 1 and self.atten_info.select_index.numel() > 0:
+            select_index = torch.cat([self.atten_info.select_index.view(batch_size, -1),
+                                     self.atten_info.decode_index.view(batch_size, -1)], dim=1).view(-1)
+            self.atten_info.select_index = select_index
+        
         return logits

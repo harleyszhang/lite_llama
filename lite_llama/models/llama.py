@@ -228,7 +228,6 @@ class FusedAttention(nn.Module):
         layer_index:int,
         start_pos: int,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        mask: Optional[torch.Tensor] = None,
     ):         
         x = x.to(torch.float16)
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
@@ -274,7 +273,6 @@ class FusedAttention(nn.Module):
         layer_index:int,
         start_pos: int,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        mask: Optional[torch.Tensor] = None,
     ):
         # atten_info.select_index = torch.unique(atten_info.select_index, return_inverse=True)
         # 条件过滤：只选择有效索引
@@ -390,7 +388,6 @@ class LlamaDecoderLayer(nn.Module):
         layer_index: int,
         start_pos: int, 
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        mask: Optional[torch.Tensor] = None,
     ):
         # Normalization BEFORE the attention block. # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
         batch_size, seq_len, _ = x.shape
@@ -399,15 +396,14 @@ class LlamaDecoderLayer(nn.Module):
         # attention 部分计算结果正确, 张量尺寸符合要求
         if seq_len > 1:
             h = x + self.attention.context_forward(
-                hidden_states, atten_info, layer_index, start_pos, position_embeddings, mask
+                hidden_states, atten_info, layer_index, start_pos, position_embeddings
             )
         else:
             h = x + self.attention.token_forward(
-                hidden_states, atten_info, layer_index, start_pos, position_embeddings, mask
+                hidden_states, atten_info, layer_index, start_pos, position_embeddings
             )
         
         # Normalization BEFORE the feed forward block. # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
-        # hidden_states = self.ffn_norm(h)
         hidden_states = rmsnorm(h, self.ffn_norm_weight.data, eps=self.config.rms_norm_eps)
 
         out = h + self.feed_forward.forward(hidden_states)
@@ -436,51 +432,23 @@ class Llama(nn.Module):
         self.layers = nn.ModuleList(
             [LlamaDecoderLayer(config) for layer_id in range(config.num_layers)]
         )
-        # self.freqs_cis = precompute_freqs_cis(
-        #     # Note that self.params.max_seq_len is multiplied by 2 because the token limit for the Llama 2 generation of models is 4096. 
-        #     # Adding this multiplier instead of using 4096 directly allows for dynamism of token lengths while training or fine-tuning.
-        #     self.config.hidden_size // self.config.num_heads, self.config.max_seq_len * 2
-        # )
 
     def forward(self, tokens: torch.Tensor, start_pos, atten_info):
-        
-        # start_pos = start_pos.item()
         self.hidden_states = []
-        batch_size, seq_len = tokens.shape
-        h = self.embed_tokens(tokens) # torch.isnan(h).any() False
+        _, seq_len = tokens.shape
+        h = self.embed_tokens(tokens)
 
-        # self.freqs_cis = self.freqs_cis.to(h.device)
-        # freqs_cis = self.freqs_cis[start_pos : start_pos + seq_len]
         cache_position = torch.arange(start_pos, start_pos + seq_len, device=h.device)
         position_ids = cache_position.unsqueeze(0)
         position_embeddings = self.rotary_emb(h, position_ids)
-
-        mask = None
-        if seq_len > 1:
-            # mask = torch.triu(torch.ones((batch_size, self.config.num_heads, seq_len, self.config.hidden_size), dtype=torch.uint8, device="cuda", requires_grad=False))
-            mask = torch.full(
-                (seq_len, seq_len), float("-inf"), device=tokens.device
-            )
-            mask = torch.triu(mask, diagonal=1) # 创建上三角矩阵
-
-            # When performing key-value caching, we compute the attention scores
-            # only for the new sequence. Thus, the matrix of scores is of size
-            # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
-            # j > cache_len + i, since row i corresponds to token cache_len + i.
-            mask = torch.hstack([
-                torch.zeros((seq_len, start_pos), device=tokens.device),
-                mask
-            ]).type_as(h)
-
         # Consecutively apply all the encoder layers
         for i, layer in enumerate(self.layers):            
             self.hidden_states.append(h)
-            h = layer(h, atten_info, i, start_pos, position_embeddings, mask)  # h.shape [batch_size, seq_len, hidden_dim]
+            h = layer(h, atten_info, i, start_pos, position_embeddings)  # h.shape [batch_size, seq_len, hidden_dim]
 
         h = rmsnorm(h, self.norm_weight.data, eps=self.config.rms_norm_eps)
         self.hidden_states.append(h)
         output = self.lm_head(h)
 
-        print(f"prefill or decode stage select_index shape: {atten_info.select_index.shape}")
         return output
  

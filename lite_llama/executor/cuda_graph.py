@@ -103,9 +103,7 @@ class ModelRunner:
             dtype=dtype,
             device=device
         )
-        
-        # print(f"atten_info.select_index shape {atten_info.select_index.shape}")
-     
+             
         for layer_index in range(self.model_config.num_layers):
             atten_info.kv_buffer[layer_index][decode_index, :self.model_config.num_kv_heads, :] = intermediate_tensors
             atten_info.kv_buffer[layer_index][decode_index, self.model_config.num_kv_heads:, :] = intermediate_tensors
@@ -134,8 +132,7 @@ class ModelRunner:
             self.graph_runners[batch_size] = graph_runner
 
     def decode(self, x: torch.Tensor, start_pos, atten_info: AttentionInfo):
-        # TODO: 灵活适应不同模型
-        # graph 输入参数 x 和 start_pos 必须和模型要求的输入参数一样
+        # TODO: 灵活适应不同模型. graph 输入参数 x 和 start_pos 必须和模型要求的输入参数一样
         batch_size = x.shape[0]
         if batch_size in self.graph_runners:
             # print("INFO: CUDA graph captured for this batch size, apply cuda graph to decode inference.")
@@ -146,4 +143,3 @@ class ModelRunner:
         
         logits = model_executable(x, start_pos, atten_info)
         return logits
-
