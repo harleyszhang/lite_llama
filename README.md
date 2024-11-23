@@ -4,9 +4,10 @@ The llama model inference lite framework by tirton.
 
 ## 特性
 
-- 支持最新的 llama3.2 推理。
+- 支持最新的 llama3.2 模型推理。
 - 支持 GQA、cuda graph 优化。
-- 支持 `flashattention1` 和 `flashattention2`。
+- 支持 `flashattention1`、`flashattention2`、 `flashdecoding`。
+- 支持 kv cache 的高效动态管理（类似 `tokenattnetion`）。
 - 支持算子融合，如：逐元素相乘 `*` 和 `silu` 的融合。
 - 部分自定义算子如：`rmsnorm`、`rope`、`逐元素相乘` 等采用高效 `triton` 内核实现
 
@@ -57,7 +58,7 @@ prompts: List[str] = [
 ]
 ```
 
-1，针对 decode 阶段使用 cuda graph 优化后，decode 阶段推理总时间为 `8.2402` ms，使用之前为 `17.2241` ms，性能提升 2x 倍，这个结果跟 vllm 应用 cuda graph 后的性能提升倍数几乎一致。
+1，针对 decode 阶段使用 cuda graph 优化后，单次 decode 阶段时间为 `8.2402` ms，使用之前为 `17.2241` ms，性能提升 2x 倍，这个结果跟 vllm 应用 cuda graph 后的性能提升倍数几乎一致。
 
 ```bash
 INFO: After apply cuda graph, Decode inference time: 8.2402 ms
