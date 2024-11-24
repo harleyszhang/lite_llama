@@ -36,7 +36,6 @@ class GenerateText:
             max_batch_size =  max_batch_size,
             max_seq_len = max_seq_len,
             triton_weight = triton_weight,
-            compiled_model = compiled_model,
             device = device
         )
         self.tokenizer = self.model_executor.tokenizer
