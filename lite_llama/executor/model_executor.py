@@ -238,9 +238,7 @@ class ModelExecutor:
 
     def forward(self, input_ids, prev_pos):
         batch_size, seq_len = input_ids.shape # 静态批处理, batch 中每个请求的 seq_len 都相等
-        # print(f"input_ids shape is {input_ids.shape}")
         if seq_len > 1:
-            is_prefill = True
             # 一次性分配最大所需 kv cache. seq0: [token0, token1, token2, token3,], seq1: [token0, token1, token2, token3,]
             need_size = batch_size * (seq_len)
             alloc_mem = self.kv_mem_manager.alloc_contiguous_kvcache(need_size)
@@ -248,11 +246,7 @@ class ModelExecutor:
                 select_index = alloc_mem[0]
             else:
                 select_index, _, _  = self.kv_mem_manager.alloc_kvcache(need_size)
-
-                    # 对 select_index 进行填充，使其形状与捕获时一致
             self.atten_info.select_index = select_index
-
-            print(f"prefill stage select_index shape: {select_index.shape}")
         else:
             alloc_mem = self.kv_mem_manager.alloc_contiguous_kvcache(batch_size)
             if alloc_mem is not None:
