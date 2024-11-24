@@ -45,7 +45,7 @@ triton-nightly                 3.0.0.post20240716052845
 
 ## 如何使用
 
-推荐 cuda 版本 12.0 及以上。下载 llama3.2-1B-Instruct 模型放到指定目录。
+推荐 cuda 版本 12.0 及以上。下载 [llama3.2-1B-Instruct 模型](https://pan.quark.cn/s/6eef1f2921e0)并放到指定 `cli.py` 文件的指定 `checkpoints_dir` 目录。
 
 ```bash
 conda create --name lite_llama python >= 3.10

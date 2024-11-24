@@ -1,7 +1,5 @@
 from typing import List, Optional
 import torch
-from torch.profiler import profile, ProfilerActivity
-
 from lite_llama.generate import GenerateText
 
 checkpoints_dir = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/' # 改成自己的存放模型路径
@@ -129,8 +127,8 @@ def cli_generate(
 		print(f"> {result['generation']}")
 		print("\n==================================\n")
 
-def main():
-    cli_generate_stream()
+def main(stream_flag = True):
+    cli_generate_stream() if stream_flag else cli_generate()
 
 if __name__ == "__main__":
     main()

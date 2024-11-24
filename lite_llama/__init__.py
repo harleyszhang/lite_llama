@@ -1,1 +1,2 @@
 from lite_llama.generate import GenerateText
+from lite_llama.generate_stream import GenerateText

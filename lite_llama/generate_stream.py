@@ -17,8 +17,8 @@ class GenerateText:
     GenerateText 类用于加载LLaMA模型并执行迭代式生成式推理 (文本生成)。
     """
     def __init__(self, 
-        checkpoints_dir = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/',
-        tokenizer_path = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/',
+        checkpoints_dir: str,
+        tokenizer_path: str,
         max_batch_size = 32,
         max_seq_len = 1024,
         load_model = True,
@@ -162,6 +162,7 @@ class GenerateText:
 def sample_top_p(probs, p):
     """
     执行 Top-p (Nucleus) 采样, 从概率分布中采样下一个词。
+    
     参数：
         probs (torch.Tensor): 概率分布张量，形状为 `[batch_size, vocab_size]`。
         p (float): 累积概率阈值，取值范围在 0 到 1 之间。

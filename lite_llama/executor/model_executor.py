@@ -1,4 +1,4 @@
-import torch, json, time,logging
+import torch, json, time,logging, os, shutil, glob
 from pathlib import Path
 from transformers import AutoTokenizer
 from tqdm import tqdm
@@ -19,11 +19,25 @@ def indexs_convert(indexs: torch.tensor, batch_size: int):
     """
     pass
 
-def convert_hf_to_triton(hf_sd, model_args):
+def build_new_weight_dir(checkpoints_dir:str, new_sd):
+    # 保存 lite_llama 模型权重并构建新的权重目录
+    current_dir = os.path.dirname(os.path.abspath(__file__)) # 获取当前文件所在的目录
+    my_weight_dir = os.path.join(current_dir, "../../my_weight/") # 项目所在根目录
+    os.makedirs(my_weight_dir, exist_ok=True) # 创建文件夹（如果不存在）
+    torch.save(new_sd, os.path.join(my_weight_dir, "my_llama3.2-1B.pth"))
+
+    # 获取所有 JSON 文件
+    json_files = glob.glob(os.path.join(checkpoints_dir, "*.json"))
+    for file_path in json_files:
+        shutil.copy(file_path, my_weight_dir) # 复制 hf 权重目录的所有 json 文件到新的目录
+        print(f"已复制: {file_path} -> {my_weight_dir}")
+
+def convert_llama_hf_to_triton(checkpoints_dir, hf_sd, model_args):
     """
     将 Hugging Face 模型的权重字典转换为自定义模型的权重字典。
 
     参数:
+        checkpoints_dir: Hugging Face 模型的目录
         hf_sd (dict): Hugging Face 模型的状态字典。
         model_args (LlamaConfig): 自定义模型的配置参数。
 
@@ -63,10 +77,9 @@ def convert_hf_to_triton(hf_sd, model_args):
         else:
             print(f"Warning: Unmapped key {hf_key}")
     
-    torch.save(new_sd, "/gemini/code/Llama-3.2-1B-Instruct/my_weight/my_llama3.2-1B.pth")
-
+    build_new_weight_dir(checkpoints_dir, new_sd)
+    
     return new_sd
-
 
 class ModelExecutor:
     # 定义类属性
@@ -83,9 +96,8 @@ class ModelExecutor:
         tokenizer_path: str, 
         max_batch_size: int,
         max_seq_len: int,
-        load_model: bool, 
-        triton_weight=True,
-        compiled_model=True,
+        load_model: bool = True, 
+        triton_weight: bool = True,
         device: str = "cuda", 
     ):
         """
@@ -119,11 +131,11 @@ class ModelExecutor:
             ckpt_path = checkpoints[0]
             print(f'Loading checkpoint "{ckpt_path}"')
 
-            checkpoint = torch.load(ckpt_path, map_location="cuda")
-            print(f"Loaded checkpoint in {time.time() - prev_time:.2f}s")
+            hf_sd = torch.load(ckpt_path, map_location="cuda")
+            print(f"Loaded weight checkpoints files in {time.time() - prev_time:.2f}s")
             prev_time = time.time()
         else:
-            checkpoint = None
+            hf_sd = None
 
         # 设置默认张量类型
         if device == "cuda":
@@ -133,21 +145,22 @@ class ModelExecutor:
 
         if load_model:
             if triton_weight:
-                state_dict = checkpoint
+                state_dict = hf_sd
                 print("Load Triton weight directly!")
             else:
-                state_dict = convert_hf_to_triton(checkpoint, model_args) # 转换权重名称
+                state_dict = convert_llama_hf_to_triton(checkpoints_dir, hf_sd, model_args) # 转换权重名称
         else:
             state_dict = None
 
         torch.set_default_tensor_type(torch.cuda.HalfTensor)
+        
         # 初始化自定义的 Llama 模型
         model = Llama(model_args).to(device)
 
         if load_model:
             # The only unmatched key in the checkpoint is rope.freqs. Remove it
-            if 'rope.freqs' in checkpoint:
-                del checkpoint['rope.freqs']  # 删除检查点中未匹配的键（例如rope.freqs）
+            if 'rope.freqs' in hf_sd:
+                del hf_sd['rope.freqs']  # 删除检查点中未匹配的键（例如rope.freqs）
             # 使用转换后的 state_dict 加载模型
             model.load_state_dict(state_dict, strict=True)
             print(f"Loaded state dict in {time.time() - prev_time:.2f}s")
@@ -186,8 +199,8 @@ class ModelExecutor:
         # self.max_gpu_num_blocks, self.max_num_tokens = self._get_max_tokens(self.model_config)
         # self.kv_mem_manager = self._init_mem_manager(
         #     self.model_config, self.max_gpu_num_blocks, self.max_num_tokens, block_size=1, 
-        #     dtype=torch.float16,  device="cuda"
-        # )
+        #     dtype=torch.float16,  device="cuda")
+        
         self.gpu_kv_buffer = self.kv_mem_manager.gpu_kv_buffer
         self.atten_info = AttentionInfo
         self.atten_info.kv_buffer = self.kv_mem_manager.gpu_kv_buffer
@@ -258,7 +271,7 @@ class ModelExecutor:
         if prev_pos == 0 or not self.compiled_model:
             logits = self.model.forward(input_ids, prev_pos, self.atten_info)
         else:
-            logits = self.model_runner.decode(input_ids, prev_pos, self.atten_info) # 执行了
+            logits = self.model_runner.decode(input_ids, prev_pos, self.atten_info) # TODO: cuda graph 可能执行失败, 待解决
         
         if seq_len == 1 and self.atten_info.select_index.numel() > 0:
             select_index = torch.cat([self.atten_info.select_index.view(batch_size, -1),

@@ -10,17 +10,20 @@ def main(
     max_seq_len: int = 2048,
     max_batch_size: int = 1,  # 每次处理一个 Prompt
     max_gen_len: Optional[int] = 128,
+    load_model: bool = True,
+    compiled_model: bool = True,
+    triton_weight: bool = True
 ):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     generator = GenerateText(
         checkpoints_dir=checkpoints_dir,
         tokenizer_path=checkpoints_dir,
-        max_batch_size=max_batch_size,
-        max_seq_len=max_seq_len,
-        load_model=True,
-        compiled_model=True,
-        triton_weight=True,
+        max_batch_size = max_batch_size,
+        max_seq_len = max_seq_len,
+        load_model = load_model,
+        compiled_model = compiled_model,
+        triton_weight = triton_weight,
         device=device,
     )
 
