@@ -43,6 +43,23 @@ triton-nightly                 3.0.0.post20240716052845
 
 ![流式输出](./images/generate.gif)
 
+## 如何使用
+
+推荐 cuda 版本 12.0 及以上。下载 llama3.2-1B-Instruct 模型放到指定目录。
+
+```bash
+conda create --name lite_llama python >= 3.10
+conda activate lite_llama
+git clone https://github.com/harleyszhang/lite_llama.git
+cd lite_llama/
+pip install -r requirement.txt
+python cli.py # 已经下载好模型并放在指定目录的基础上运行
+```
+
+程序运行成功后，终端显示界面如下所示，在终端中输入你的问题即可。
+
+![cli](./images/generate_stream.png)
+
 ## 性能优化
 
 输入提示词：
