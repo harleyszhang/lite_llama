@@ -4,7 +4,6 @@ import triton.language as tl
 
 from .utils import calculate_settings, ensure_contiguous
 
-
 @triton.jit
 def silu(x):
     return x * tl.sigmoid(x)

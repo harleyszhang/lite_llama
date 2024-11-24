@@ -329,7 +329,6 @@ def flash_decoding(
 	mid_o_logexpsum = torch.empty((batchs, num_heads, max_num_partitions), dtype=torch.float32, device=q.device)
 
 	# decode stage 1: attention in partitions
-	
 	flash_decode_stage1(q, k, v, actual_seq_len, mid_o, mid_o_logexpsum, PARTITION_SIZE)
     
 	# decode stage 2: reduction among partitions

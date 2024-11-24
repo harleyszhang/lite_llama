@@ -5,7 +5,6 @@ import triton
 import triton.language as tl
 from typing import Tuple, Union
 
-
 @triton.jit
 def rope_kernel_fw(input_ptr, in_seq_len_stride, in_batch_stride,
                    output_ptr, cos_ptr, sin_ptr, cos_stride, sin_stride,

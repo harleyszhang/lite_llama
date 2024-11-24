@@ -127,7 +127,7 @@ class GenerateText:
         eos_reached = torch.tensor([False] * bsz, device = device) # 记录是否到达结束 token
 
         if logprobs:
-            token_logprobs = torch.zeros_like(tokens, dtype=torch.float)
+            token_logprobs, _ = torch.zeros_like(tokens, dtype=torch.float)
 
         prev_pos = 0 # 初始化上一次生成的位置
 
@@ -149,7 +149,7 @@ class GenerateText:
         token_count = 0 # 累计生成 token 数
         for cur_pos in range(min_prompt_len, total_len):
             input_ids = tokens[:, prev_pos: cur_pos] # 当前输入 token ids, decode 阶段 input_ids shape is [4, 1]
-            logits = self.model_executor.forward(input_ids, prev_pos) # 模型执行器的前向推理
+            logits, select_index = self.model_executor.forward(input_ids, prev_pos) # 模型执行器的前向推理
             
             # 根据 temperature 和 top_p 进行采样
             if temperature > 0:
@@ -207,125 +207,10 @@ class GenerateText:
 		# 处理生成的 tokens 和对应的对数概率，提取最终的输出序列。
         out_tokens, out_logprobs = self.process_output_tokens(tokens, prompt_tokens, max_gen_len, 
 									logprobs, echo, self.tokenizer.eos_token_id, token_logprobs)
+        # 减少 kv cache 内存管理器的引用计数
+        self.model_executor.kv_mem_manager.decrease_refs(select_index)
         return out_tokens, out_logprobs
     
-    @torch.inference_mode()
-    def generate_stream(
-        self,
-        prompt_tokens: List[List[int]],
-        max_gen_len: int,
-        temperature: float = 0.6,
-        top_p: float = 0.9,
-        logprobs: bool = False,
-        echo: bool = False,
-    ) -> Generator[Tuple[List[str], Optional[List[float]]], None, None]:
-        """
-        基于提供的 prompt_tokens, 使用语言生成模型逐个生成 token, 并在生成时立即输出。
-
-        参数：
-            prompt_tokens (List[List[int]]): 已经进行分词的 prompt, 每个 prompt 是一个整数列表。
-            max_gen_len (int): 生成的最大长度。
-            temperature (float, optional): 控制采样随机性的温度值。默认为 0.6。
-            top_p (float, optional): 用于 nucleus sampling 的概率阈值。默认为 0.9。
-            logprobs (bool, optional): 是否计算生成 token 的对数概率。默认为 False。
-            echo (bool, optional): 是否在输出中包含 prompt_tokens。默认为 False。
-            
-        generator 输出：
-            Tuple[List[str], Optional[List[float]]]: 包含生成的文本和对应的对数概率(如果 logprobs 为 True)。
-        说明：
-            该方法在生成循环中，每生成一个新 token, 就立即输出对应的文本和概率(如果需要）。
-        """
-        model_config = self.model_config
-        bsz = len(prompt_tokens)
-        assert bsz <= model_config.max_batch_size, (bsz, model_config.max_batch_size)
-
-        min_prompt_len = min(len(t) for t in prompt_tokens)
-        max_prompt_len = max(len(t) for t in prompt_tokens)
-        assert max_prompt_len <= model_config.max_seq_len
-        total_len = min(model_config.max_seq_len, max_gen_len + max_prompt_len)
-        
-        pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
-        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
-        input_text_mask = tokens != pad_id
-        eos_reached = torch.tensor([False] * bsz, device="cuda")
-
-        for k, t in enumerate(prompt_tokens):
-            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
-
-        prev_pos = 0
-        last_yielded_pos = [len(prompt_tokens[i]) if not echo else 0 for i in range(bsz)] # 初始化每个样本已输出的位置
-
-        if min_prompt_len == total_len: # 如果 prompt 已经达到最大长度，无需生成
-            logits = self.model.forward(tokens, prev_pos)
-
-        for cur_pos in range(min_prompt_len, total_len):
-            input_ids = tokens[:, prev_pos: cur_pos]
-            logits = self.model_executor.forward(input_ids, prev_pos)
-
-            if temperature > 0:
-                probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
-                next_token = sample_top_p(probs, top_p)
-            else:
-                next_token = torch.argmax(logits[:, -1], dim=-1)
-
-            next_token = next_token.reshape(-1)  # shape is (batch_size,)
-
-            # 仅在需要生成的情况下替换 token
-            next_token = torch.where(input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token)
-            tokens[:, cur_pos] = next_token
-
-            eos_reached |= (~input_text_mask[:, cur_pos]) & (next_token == self.tokenizer.eos_token_id)
-            prev_pos = cur_pos
-            
-            # 为整个批次收集输出
-            batch_outputs = []
-            for i in range(bsz):
-                start = last_yielded_pos[i]
-                end = cur_pos + 1
-                if start < end:
-                    token = tokens[i, start:end].tolist()
-                    text = self.tokenizer.decode(token)
-                    batch_outputs.append(text)
-                    last_yielded_pos[i] = end
-                else:
-                    batch_outputs.append('') # 如果没有新生成的内容，添加空字符串
-
-            # 将整个批次的输出一次性 yield
-            yield batch_outputs
-
-            if eos_reached.all():
-                break
-
-    def text_completion_stream(
-        self,
-        prompts: List[str],
-        temperature: float = 0.6,
-        top_p: float = 0.9,
-        max_gen_len: Optional[int] = None,
-        logprobs: bool = False,
-        echo: bool = False,
-    ) -> Generator[List[CompletionPrediction], None, None]:
-        if max_gen_len is None:
-            max_gen_len = self.model_config.max_seq_len - 1
-
-        prompt_tokens = [self.tokenizer.encode(x, add_special_tokens=True) for x in prompts]
-
-        stream = self.generate_stream(
-            prompt_tokens=prompt_tokens,
-            max_gen_len=max_gen_len,
-            temperature=temperature,
-            top_p=top_p,
-            logprobs=logprobs,
-            echo=echo,
-        )
-
-        # 初始化每个样本的生成结果
-        completions = [{'generation': '', 'tokens': []} for _ in prompts]
-        for batch_outputs in stream:
-            for i, text in enumerate(batch_outputs):
-                completions[i]['generation'] += text
-            yield completions.copy()
-
     def text_completion(
         self,
         prompts: List[str],

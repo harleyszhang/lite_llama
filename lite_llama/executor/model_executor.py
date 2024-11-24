@@ -278,4 +278,4 @@ class ModelExecutor:
                                      self.atten_info.decode_index.view(batch_size, -1)], dim=1).view(-1)
             self.atten_info.select_index = select_index
         
-        return logits
+        return logits, self.atten_info.select_index

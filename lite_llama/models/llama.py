@@ -80,8 +80,7 @@ def _compute_llama3_parameters(
     high_freq_wavelen = old_context_len / high_freq_factor
 
     wavelen = 2 * math.pi / inv_freq
-    # wavelen < high_freq_wavelen: do nothing
-    # wavelen > low_freq_wavelen: divide by factor
+    # wavelen < high_freq_wavelen: do nothing; wavelen > low_freq_wavelen: divide by factor
     inv_freq_llama = torch.where(wavelen > low_freq_wavelen, inv_freq / factor, inv_freq)
     # otherwise: interpolate between the two, using a smooth factor
     smooth_factor = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
@@ -451,4 +450,3 @@ class Llama(nn.Module):
         output = self.lm_head(h)
 
         return output
- 

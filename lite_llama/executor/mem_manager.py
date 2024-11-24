@@ -157,7 +157,6 @@ class KVCacheMemoryManager:
         contiguous_blocks = (diff == need_size)
         # 找到那些差值等于 need_size - 1 的位置，意味着 start 和 end 之间有连续的 need_size 个块
         contiguous_blocks = (diff == (need_size)).nonzero(as_tuple=True)[0]
-        # print("contiguous_blocks: ", contiguous_blocks)
 
         if contiguous_blocks.numel() > 0: # numel 返回张量种元素数量
             start_index = start_indexs[contiguous_blocks[0]].item() # item 方法将张量转换成 Python 数值

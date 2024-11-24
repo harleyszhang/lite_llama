@@ -48,7 +48,6 @@ class GenerateText:
         max_gen_len: int,
         temperature: float = 0.6,
         top_p: float = 0.9,
-        logprobs: bool = False,
         echo: bool = False,
     ) -> Generator[Tuple[List[str], Optional[List[float]]], None, None]:
         """
@@ -88,11 +87,11 @@ class GenerateText:
         last_yielded_pos = [len(prompt_tokens[i]) if not echo else 0 for i in range(bsz)] # 初始化每个样本已输出的位置
 
         if min_prompt_len == total_len: # 如果 prompt 已经达到最大长度，无需生成
-            logits = self.model.forward(tokens, prev_pos)
+            logits, _ = self.model.forward(tokens, prev_pos)
 
         for cur_pos in range(min_prompt_len, total_len):
             input_ids = tokens[:, prev_pos: cur_pos]
-            logits = self.model_executor.forward(input_ids, prev_pos)
+            logits, select_index = self.model_executor.forward(input_ids, prev_pos)
 
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
@@ -127,6 +126,9 @@ class GenerateText:
 
             if eos_reached.all():
                 break
+        
+        # 减少 kv cache 内存管理器的引用计数
+        self.model_executor.kv_mem_manager.decrease_refs(select_index)
 
     def text_completion_stream(
         self,
@@ -134,7 +136,6 @@ class GenerateText:
         temperature: float = 0.6,
         top_p: float = 0.9,
         max_gen_len: Optional[int] = None,
-        logprobs: bool = False,
         echo: bool = False,
     ) -> Generator[List[CompletionPrediction], None, None]:
         if max_gen_len is None:
@@ -147,7 +148,6 @@ class GenerateText:
             max_gen_len=max_gen_len,
             temperature=temperature,
             top_p=top_p,
-            logprobs=logprobs,
             echo=echo,
         )
 

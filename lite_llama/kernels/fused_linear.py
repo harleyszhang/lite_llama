@@ -89,11 +89,12 @@ def fused_linear(
     residual=None, # 残差输入项
     add_silu=False,
 ):
-    # x: (*, K)
-    # weight: (K, N)
-    # bias: (N,)
-    # f = silu(x @ w + b) + residual
-    
+    """
+    x: (*, K)
+    weight: (K, N)
+    bias: (N,)
+    f = silu(x @ w + b) + residual
+    """
     # 将 x 形状去除最后一个维度，保存为 out_shape_0
     out_shape_0 = x.shape[:-1]
     # 将 x 的所有维度压缩为二维张量, [B, L, K] -> [M, K], K 是隐藏层的维度。

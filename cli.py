@@ -9,7 +9,7 @@ def main(
     top_p: float = 0.9,
     max_seq_len: int = 2048,
     max_batch_size: int = 1,  # 每次处理一个 Prompt
-    max_gen_len: Optional[int] = 128,
+    max_gen_len: Optional[int] = 512,
     load_model: bool = True,
     compiled_model: bool = True,
     triton_weight: bool = True
@@ -44,8 +44,8 @@ def main(
             max_gen_len=max_gen_len,
         )
 
-        # 初始化生成结果
-        completion = ''
+        completion = '' # 初始化生成结果
+        # NOTE: 创建了一个 generator 后，可以通过 for 循环来迭代它
         for batch_completions in stream:
             new_text = batch_completions[0]['generation'][len(completion):]
             completion = batch_completions[0]['generation']
