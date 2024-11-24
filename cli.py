@@ -1,21 +1,21 @@
 import torch
-from typing import List, Optional
-from lite_llama.generate import GenerateText # 导入 GenerateText 类
+from typing import Optional
+from lite_llama.generate_stream import GenerateText # 导入 GenerateText 类
+
+checkpoints_dir = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/' # 改成自己的存放模型路径
 
 def main(
     temperature: float = 0.6,
     top_p: float = 0.9,
-    max_seq_len: int = 512,
+    max_seq_len: int = 2048,
     max_batch_size: int = 1,  # 每次处理一个 Prompt
-    max_gen_len: Optional[int] = 64,
+    max_gen_len: Optional[int] = 128,
 ):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    checkpoints_dir = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/'
-    tokenizer_path = '/gemini/code/Llama-3.2-1B-Instruct/'
-
+    
     generator = GenerateText(
         checkpoints_dir=checkpoints_dir,
-        tokenizer_path=tokenizer_path,
+        tokenizer_path=checkpoints_dir,
         max_batch_size=max_batch_size,
         max_seq_len=max_seq_len,
         load_model=True,
@@ -25,8 +25,8 @@ def main(
     )
 
     while True:
-        # 提示用户输入
-        prompt = input("请输入您的提示（输入 'exit' 退出）：\n")
+        prompt = input("请输入您的提示（输入 'exit' 退出）：\n") # 提示用户输入
+        # NOTE: strip() 是字符串方法，用于移除字符串开头和结尾的指定字符（默认为空格或换行符）。
         if prompt.strip().lower() == 'exit':
             print("程序已退出。")
             break

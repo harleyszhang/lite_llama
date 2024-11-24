@@ -45,12 +45,12 @@ UNSAFE_ERROR = "Error: special tags are not allowed as part of the prompt."
 
 class GenerateText:
     """
-    GenerateText 类用于加载LLaMA模型并执行迭代式生成式推理（文本生成）。
+    GenerateText 类用于加载LLaMA模型并执行迭代式生成式推理 (文本生成)。
     """
 
     def __init__(self, 
         checkpoints_dir = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/',
-        tokenizer_path = '/gemini/code/Llama-3.2-1B-Instruct/',
+        tokenizer_path = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/',
         max_batch_size = 8,
         max_seq_len = 1024,
         load_model = True,

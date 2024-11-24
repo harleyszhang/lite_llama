@@ -4,6 +4,8 @@ from torch.profiler import profile, ProfilerActivity
 
 from lite_llama.generate import GenerateText
 
+checkpoints_dir = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/' # 改成自己的存放模型路径
+
 def cli_generate_stream(
     temperature: float = 0.6,
     top_p: float = 0.9,
@@ -23,12 +25,10 @@ def cli_generate_stream(
 
     """
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    checkpoints_dir = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/'
-    tokenizer_path = '/gemini/code/Llama-3.2-1B-Instruct/'
 
     generator = GenerateText(
         checkpoints_dir=checkpoints_dir,
-        tokenizer_path=tokenizer_path,
+        tokenizer_path=checkpoints_dir,
         max_batch_size = max_batch_size,  # 修改为单个提示处理
         max_seq_len=max_seq_len,
         load_model=True,
@@ -92,12 +92,10 @@ def cli_generate(
             set to the model's max sequence length. Defaults to None.
     """
 	device = 'cuda' if torch.cuda.is_available() else 'cpu'
-	checkpoints_dir = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/'
-	tokenizer_path = '/gemini/code/Llama-3.2-1B-Instruct/'
-
+	
 	generator = GenerateText(
 		checkpoints_dir = checkpoints_dir,
-		tokenizer_path = tokenizer_path,
+		tokenizer_path = checkpoints_dir,
 		max_batch_size = max_batch_size,
 		max_seq_len = max_seq_len,
 		load_model = True,
