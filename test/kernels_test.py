@@ -1,20 +1,17 @@
 import torch,math
 import torch.nn as nn
 from transformers.activations import ACT2FN
-import pytest
+import pytest, sys, os
 
-from kernels.fused_linear import fused_linear
-from kernels.rmsnorm import rmsnorm
-from kernels.layernorm import layernorm
-from kernels.softmax import naive_softmax, softmax
-from kernels.flashattention import flash_attention_v1
-from kernels.rope import rope
-
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
+from lite_llama.kernels.fused_linear import fused_linear
+from lite_llama.kernels.rmsnorm import rmsnorm
+from lite_llama.kernels.layernorm import layernorm
+from lite_llama.kernels.softmax import naive_softmax, softmax
+from lite_llama.kernels.flashattention import flash_attention_v1
+from lite_llama.kernels.rope import rope
 from typing import Callable, Dict, Tuple, Union
-# from transformer_engine.pytorch.attention import (
-#     RotaryPositionEmbedding,
-#     apply_rotary_pos_emb,
-# )
+from torch_rope import RotaryPositionEmbedding, apply_rotary_pos_emb
 
 class RMSNorm(nn.Module):
     """nlp 领域"""
@@ -121,31 +118,22 @@ def test_softmax(M, K):
     output = softmax(x).to(device)
     assert torch.allclose(output, output_torch, atol=1e-5)
 
-def torch_attention(q, k, v):
+def torch_attention(q, k, v, attention_mask=None, is_causal=False):
     assert q.shape == k.shape == v.shape
-    
-    # q, k, v = map(lambda x: x.view(B * N, L, H), (q, k, v))
-    # z = (q @ k.transpose(2, 3)) / math.sqrt(H)
-    # attn_mask = torch.tril(torch.ones((L, L), dtype=torch.bool)).to(z.device)
-    
-    # z = torch.where(attn_mask, z, float("-inf"))
-    # z = z.softmax(-1) @ v
-    # return z.view(B, N, L, H)
-
-
-    # if attention_mask is not None:
-    #     p += attention_mask
-    # if is_causal:
-    #     m_size = q.size(2)
-    #     n_size = k.size(2)
-    #     M = torch.tril(torch.ones((m_size, n_size), device="cuda"))
-    #     p = torch.where(M == 0, float("-inf"), p)
     B, N, L, H = q.shape
     sm_scale = 1 / math.sqrt(H)
     p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
     p = torch.nn.functional.softmax(p, dim=-1)
 
     ref_out = torch.matmul(p.to(v.dtype), v)
+    if attention_mask is not None:
+        p += attention_mask
+    if is_causal:
+        m_size = q.size(2)
+        n_size = k.size(2)
+        M = torch.tril(torch.ones((m_size, n_size), device="cuda"))
+        p = torch.where(M == 0, float("-inf"), p)
+
     return ref_out
 
 @pytest.mark.parametrize("B,N", [(4, 8), (8, 16), (24, 32), (64, 20)])
@@ -179,89 +167,63 @@ def _non_overlapping_grad(output: torch.Tensor) -> torch.Tensor:
     t = torch.ones_like(output)
     return torch.sum(output * t)
 
-
-# @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
-# @pytest.mark.parametrize("seq_length", [1024, 2048])
-# @pytest.mark.parametrize("hidden_size", [64, 128])
-# @pytest.mark.parametrize("rotary_percent", [1.0])
-# @pytest.mark.parametrize("margin", [0, 10])
-# @pytest.mark.parametrize("transpose", [None])
-# @pytest.mark.parametrize("tensor_format", ["sbhd", "bshd"])
-# @pytest.mark.parametrize("loss_func", [_overlapping_grad, _non_overlapping_grad])
-# def test_triton_rope(
-#     dtype: torch.dtype,
-#     seq_length: int,
-#     hidden_size: int,
-#     rotary_percent: float,
-#     margin: int,
-#     transpose: Union[Tuple, None],
-#     tensor_format: str,
-#     loss_func: Callable,
-# ) -> None:
-#     device = torch.device("cuda:0")
-#     batch_size, head_num = 2, 64
-#     t = torch.rand(
-#         (seq_length - margin, batch_size, head_num, hidden_size),
-#         dtype=dtype,
-#         device=device,
-#     )
-#     if tensor_format == "bshd":
-#         t = t.transpose(0, 1).contiguous()
-
-#     if transpose:
-#         t = t.transpose(*transpose).contiguous().transpose(*transpose)
-
-#     t.requires_grad = True
-
-#     rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent)
-#     emb = rotary_pos_emb(seq_length)
-
-#     # triton
-#     output_triton = rope(
-#         t, emb, tensor_format=tensor_format
-#     )
-
-#     loss_triton = loss_func(output_triton)
-#     loss_triton.backward()
-#     grad_triton = t.grad.detach().clone()
-#     t.grad = None
-
-#     # te
-#     output_te = apply_rotary_pos_emb(
-#         t, emb, tensor_format=tensor_format, fused=True,
-#     )
-
-#     loss_te = loss_func(output_te)
-#     loss_te.backward()
-#     grad_te = t.grad.detach().clone()
-#     t.grad = None
-
-#     torch.testing.assert_close(output_te, output_triton, **get_tol(dtype))
-#     torch.testing.assert_close(grad_te, grad_triton, **get_tol(dtype))
-#     assert output_te.is_contiguous()
-
-from kernels.token_embedding import token_embedding
-
-@pytest.mark.parametrize("vocab_size", [2, 32])
-@pytest.mark.parametrize("batch_size", [8])
-@pytest.mark.parametrize("hidden_size", [32, 128, 256])
-@pytest.mark.parametrize("seqlen, block_size", [(10, 20), (20, 20)])
-def test_fused_embeddings(batch_size, seqlen, vocab_size, block_size, hidden_size):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # 随机初始化词嵌入矩阵
-    wte = torch.randn(vocab_size, hidden_size, device='cuda', dtype=torch.float32)
-
-    x = torch.randint(
-        0, vocab_size, size=(batch_size, seqlen), dtype=torch.long, device=device
+####################################### triton 版rope 算法单元测试 #################################
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("seq_length", [1024, 2048])
+@pytest.mark.parametrize("hidden_size", [64, 128])
+@pytest.mark.parametrize("rotary_percent", [1.0])
+@pytest.mark.parametrize("margin", [0, 10])
+@pytest.mark.parametrize("transpose", [None])
+@pytest.mark.parametrize("tensor_format", ["sbhd", "bshd"])
+@pytest.mark.parametrize("loss_func", [_overlapping_grad, _non_overlapping_grad])
+def test_triton_rope(
+    dtype: torch.dtype,
+    seq_length: int,
+    hidden_size: int,
+    rotary_percent: float,
+    margin: int,
+    transpose: Union[Tuple, None],
+    tensor_format: str,
+    loss_func: Callable,
+) -> None:
+    device = torch.device("cuda:0")
+    batch_size, head_num = 2, 64
+    t = torch.rand(
+        (seq_length - margin, batch_size, head_num, hidden_size),
+        dtype=dtype,
+        device=device,
     )
-    z = token_embedding(x, wte)
+    if tensor_format == "bshd":
+        t = t.transpose(0, 1).contiguous()
 
-    # 使用 PyTorch 的 nn.Embedding
-    wte_matrix = wte.view(vocab_size, hidden_size)
-    embedding = nn.Embedding(vocab_size, hidden_size).to('cuda')
-    with torch.no_grad():
-        embedding.weight.copy_(wte_matrix)
-    z_torch = embedding(x)
+    if transpose:
+        t = t.transpose(*transpose).contiguous().transpose(*transpose)
 
-    assert torch.allclose(z, z_torch, atol=1e-5), (z - z_torch).abs().max()
+    t.requires_grad = True
+
+    rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent)
+    emb = rotary_pos_emb(seq_length)
+
+    # triton
+    output_triton = rope(
+        t, emb, tensor_format=tensor_format
+    )
+
+    loss_triton = loss_func(output_triton)
+    loss_triton.backward()
+    grad_triton = t.grad.detach().clone()
+    t.grad = None
+
+    # te
+    output_te = apply_rotary_pos_emb(
+        t, emb, tensor_format=tensor_format, fused=True,
+    )
+
+    loss_te = loss_func(output_te)
+    loss_te.backward()
+    grad_te = t.grad.detach().clone()
+    t.grad = None
+
+    torch.testing.assert_close(output_te, output_triton, **get_tol(dtype))
+    torch.testing.assert_close(grad_te, grad_triton, **get_tol(dtype))
+    assert output_te.is_contiguous()

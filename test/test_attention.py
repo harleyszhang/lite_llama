@@ -1,6 +1,7 @@
 import torch, os,sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from lite_llama.models.llama import *
+from torch_rope import apply_rotary_emb
 
 class ModelArgs:
     def __init__(self):

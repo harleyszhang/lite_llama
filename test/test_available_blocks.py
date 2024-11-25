@@ -5,7 +5,7 @@ import logging, json,os,sys
 
 # 获取 lite_llama 目录的绝对路径并添加到 sys.path 中
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from lite_llama.models.llama import Llama, LlamaConfig
+from lite_llama.models.model_config import LlamaConfig
 
 logger = logging.getLogger(__name__)
 

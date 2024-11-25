@@ -1,3 +1,5 @@
+# 代码可直接运行，用于测试标准 "MHA 层" 的结果
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -65,12 +67,12 @@ def test_multihead_attention(vocab_size = 1000, batch_size = 1, seq_length = 4, 
     output = mha_layer(h, mask) # MHA 前向传播
     assert output.shape == (batch_size, seq_length, embed_dim), "输出形状不正确"
     
-    # # 检查因果遮罩是否有效, 通过设置输入为单位矩阵，观察输出是否遵循因果遮罩
-    # x_identity = torch.eye(seq_length, embed_dim).unsqueeze(0).repeat(batch_size,1,1)  # (batch, seq, embed)
-    # output_identity = mha_layer(x_identity, mask)
+    # 检查因果遮罩是否有效, 通过设置输入为单位矩阵，观察输出是否遵循因果遮罩
+    x_identity = torch.eye(seq_length, embed_dim).unsqueeze(0).repeat(batch_size,1,1)  # (batch, seq, embed)
+    output_identity = mha_layer(x_identity, mask)
     
-    # # 由于输入是单位矩阵，输出应该保持某种结构，可以进行简单的检查
-    # assert not torch.isnan(output_identity).any(), "输出包含NaN值"
+    # 由于输入是单位矩阵，输出应该保持某种结构，可以进行简单的检查
+    assert not torch.isnan(output_identity).any(), "输出包含NaN值"
     
     print("多头注意力输出示例：")
     print(output)

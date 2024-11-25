@@ -2,6 +2,7 @@ from lite_llama.lite_llama.models.llama import Llama, ModelArgs
 from pathlib import Path
 import json
 import torch
+
 from transformers import (
     AutoModelForCausalLM,
     LlamaForCausalLM,
@@ -15,23 +16,24 @@ with open(Path(checkpoints_dir) / "params.json", "r") as f:
 
 print("model params ", params)
 
-# # 打印自定义 llama 模型结构
-# ModelArgs = ModelArgs(
-#             max_seq_len=2048,
-#             max_batch_size=2,
-#             device="cuda",
-#             **params)
+# 打印自定义 llama 模型结构
+ModelArgs = ModelArgs(
+            max_seq_len=2048,
+            max_batch_size=2,
+            device="cuda",
+            **params)
 
-# model = Llama(ModelArgs)
-# model.eval()
-# print(model)
+model = Llama(ModelArgs)
+model.eval()
+print(model)
 
-# print("my Llama all parameters:", model.state_dict().keys())
+print("my Llama all parameters:", model.state_dict().keys())
 
-# # named_parameters() 方法可以返回模型中所有参数的名称和参数（即权重和偏置）。
-# print("my llama archetectue and shape")
-# for name, param in model.named_parameters():
-#     print(name, param.shape)
+# named_parameters() 方法可以返回模型中所有参数的名称和参数（即权重和偏置）。
+print("my llama archetectue and shape")
+for name, param in model.named_parameters():
+    print(name, param.shape)
+
 """
 Llama(
   (tok_embeddings): Embedding(128256, 2048)
@@ -50,28 +52,28 @@ state_dict = torch.load('/gemini/code/Llama-3.2-1B-Instruct/original/consolidate
 for name, param in state_dict.items():
     print(name, param.shape)
 
-# # 打印所有模块的名称和模块
-# # for name, module in model.named_modules():
-# #     print(name, module)
+# 打印所有模块的名称和模块
+# for name, module in model.named_modules():
+#     print(name, module)
 
-# # 打印 transformers 库 AutoModelForCausalLM 模型结构
-# from transformers import AutoModelForCausalLM, AutoTokenizer,AutoModel,LlamaForCausalLM,AutoConfig
+# 打印 transformers 库 AutoModelForCausalLM 模型结构
+from transformers import AutoModelForCausalLM, AutoTokenizer,AutoModel,LlamaForCausalLM,AutoConfig
 
-# model_checkpoint = "/gemini/code/Llama-3.2-1B-Instruct"
-# model = LlamaForCausalLM.from_pretrained(
-#     model_checkpoint,
-#     torch_dtype=torch.bfloat16,
-#     device_map="auto",
-# )
+model_checkpoint = "/gemini/code/Llama-3.2-1B-Instruct"
+model = LlamaForCausalLM.from_pretrained(
+    model_checkpoint,
+    torch_dtype=torch.bfloat16,
+    device_map="auto",
+)
 
-# print(model)
-# print("LlamaForCausalLM all parameters:", model.state_dict().keys())
-# # named_parameters() 方法可以返回模型中所有参数的名称和参数（即权重和偏置）。
-# for name, param in model.named_parameters():
-#     print(name, param.shape)
+print(model)
+print("LlamaForCausalLM all parameters:", model.state_dict().keys())
+# named_parameters() 方法可以返回模型中所有参数的名称和参数（即权重和偏置）。
+for name, param in model.named_parameters():
+    print(name, param.shape)
 
-# tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
-# generator = pipeline("text-generation", model=model, tokenizer=tokenizer)
+tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
+generator = pipeline("text-generation", model=model, tokenizer=tokenizer)
 
 """
 LlamaForCausalLM(

@@ -174,11 +174,12 @@ class KVCacheMemoryManager:
 
         # 获取未使用的内存块索引
         can_use_pos_index = torch.nonzero(self.kv_mem_use_state == 0).view(-1)
-
         N = can_use_pos_index.numel()
         if N >= need_size:
-            # 正确地计算 start_indexs 和 end_indexs
+            # 正确地计算 start_indexs 和 end_indexs. 
+            # NOTE: 起始索引不能大于 N - need_size, 又因为 [: index] 切片操作是不包含 index 的, 所以需要将 N - need_size 加 1
             start_indexs = can_use_pos_index[:N - need_size + 1]
+            # NOTE: can_use_pos_index[3:], 将获取索引为 3 到 9 的元素。
             end_indexs = can_use_pos_index[need_size - 1:]
             diff = end_indexs - start_indexs
 
