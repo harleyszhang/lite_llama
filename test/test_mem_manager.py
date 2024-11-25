@@ -73,13 +73,13 @@ class TestKVCacheMemoryManager(unittest.TestCase):
         # 可用内存大小应为0
         self.assertEqual(self.manager.can_use_mem_size, 0)
 
-    def test_add_refs(self):
+    def test_add_ref(self):
         # 分配 2 个块
         need_size = 2
         select_index = self.manager.alloc_kv_cache(need_size)
         self.assertIsNotNone(select_index)
         # 再次添加引用
-        self.manager.add_refs(select_index)
+        self.manager.add_ref(select_index)
         # 检查引用计数是否为2
         used_state = self.manager.kv_mem_use_state[select_index]
         self.assertTrue(torch.all(used_state == 2))
