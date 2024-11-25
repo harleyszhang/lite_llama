@@ -48,7 +48,7 @@ class MultiHeadAttention(nn.Module):
         return out
 
 def generate_causal_mask(seq_length):
-    """生成一个因果遮罩，上三角为0，下三角为1"""
+    """生成一个因果遮罩, 上三角为0, 下三角为1"""
     mask = torch.tril(torch.ones((seq_length, seq_length))).unsqueeze(0).unsqueeze(0)  # (1, 1, seq, seq)
     return mask  # 1表示可见，0表示遮蔽
 

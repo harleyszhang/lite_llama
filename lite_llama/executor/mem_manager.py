@@ -118,7 +118,7 @@ class ComputeMaxAvailableBlocks:
     
 
 class KVCacheMemoryManager:
-    def __init__(self, head_dim, num_kv_heads, num_layers, gpu_num_blocks, max_num_tokens, block_size=1, dtype=torch.float16, device="cuda"):
+    def __init__(self, head_dim, num_kv_heads, num_layers, gpu_num_blocks, block_size=1, dtype=torch.float16, device="cuda"):
         self.head_dim = head_dim
         self.num_kv_heads = num_kv_heads
         self.num_layers = num_layers
@@ -127,19 +127,19 @@ class KVCacheMemoryManager:
         self.max_num_tokens = gpu_num_blocks * block_size
         self.dtype = dtype
         self.device = device
+        self.can_use_mem_size = gpu_num_blocks # 可用的 kv cache tokens 数量
 
         # 定义 kv 内存位置索引和内存使用状态变量
         self.kv_mem_pos_indexs = torch.arange(0, self.max_num_tokens, dtype=torch.long, device="cuda")
         self.kv_mem_use_state = torch.zeros(self.max_num_tokens, dtype = torch.int32, device="cuda")
-        self.can_use_mem_size = gpu_num_blocks # 可用的 kv cache tokens 数量
 
         # Initialize the gpu_kv_buffer
-        self._allocate_kv_cache(
+        self.init_kv_buffers(
             gpu_num_blocks,
             head_dim, num_kv_heads, num_layers, 
             dtype, device)
 
-    def _allocate_kv_cache(self, 
+    def init_kv_buffers(self, 
         max_num_tokens,
         head_dim, num_kv_heads, num_layers,
         dtype,
@@ -157,7 +157,7 @@ class KVCacheMemoryManager:
     @torch.no_grad()
     def alloc_kvcache(self, need_size):
         if need_size > self.can_use_mem_size:
-            logger.warn(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
+            logger.warning(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
             return None
         
         can_use_pos_index = torch.nonzero(self.kv_mem_use_state == 0).view(-1)
@@ -168,11 +168,12 @@ class KVCacheMemoryManager:
     
     @torch.no_grad()
     def alloc_contiguous_kvcache(self, need_size):
-        if self.can_use_mem_size < need_size:
-            logger.info(f"warn no enough contiguous cache need_size {need_size} left_size {self.can_use_mem_size}")
+        if need_size > self.can_use_mem_size:
+            logger.warning(f"warn no enough contiguous cache need_size {need_size} left_size {self.can_use_mem_size}")
             return None
         
-        # batch 大小是动态变化的
+        # batch 大小是动态变化的. 
+        # NOTE: 找到未使用的内存块索引, torch.nonzero returns a tensor containing the indices of all non-zero elements of :attr:`input`.
         can_use_pos_index = torch.nonzero(self.kv_mem_use_state == 0).view(-1)
         # print(f"can_use_pos_index: {can_use_pos_index}, wait tobe allocate size: {need_size}")
 
@@ -197,6 +198,7 @@ class KVCacheMemoryManager:
 
         return None
     
+    # 增加引用计数
     @torch.no_grad()
     def add_ref(self, token_index: torch.Tensor):
         state = self.kv_mem_use_state[token_index]
@@ -207,6 +209,7 @@ class KVCacheMemoryManager:
         self.kv_mem_use_state[token_index] += 1
         return
     
+    # 减少引用计数
     @torch.no_grad()
     def release_ref(self, token_index: torch.Tensor):
         # 使用 unique 方法获取 token_index 中唯一的 token 索引，并返回每个唯一索引在原始张量中出现的次数。
@@ -223,6 +226,7 @@ class KVCacheMemoryManager:
     def _free_buffers(self):
         self.gpu_kv_buffer = None
     
+    # 释放所有内存
     @torch.no_grad()
     def free_all(self,):
         self.can_use_mem_size = len(self.kv_mem_use_state)
