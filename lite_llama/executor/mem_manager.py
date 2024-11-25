@@ -171,30 +171,26 @@ class KVCacheMemoryManager:
         if need_size > self.can_use_mem_size:
             logger.warning(f"warn no enough contiguous cache need_size {need_size} left_size {self.can_use_mem_size}")
             return None
-        
-        # batch 大小是动态变化的. 
-        # NOTE: 找到未使用的内存块索引, torch.nonzero returns a tensor containing the indices of all non-zero elements of :attr:`input`.
+
+        # 获取未使用的内存块索引
         can_use_pos_index = torch.nonzero(self.kv_mem_use_state == 0).view(-1)
-        # print(f"can_use_pos_index: {can_use_pos_index}, wait tobe allocate size: {need_size}")
 
-        # 可用块索引中排除了最后 need_size 个索引，因为这些索引作为起始点时，没有足够的块来满足连续的 need_size 个块的需求。
-        start_indexs = can_use_pos_index[:-need_size]
-        # 对应的排除前面的 need_size 个索引，如果以这些索引作为终点时，不满足需求
-        end_indexs = can_use_pos_index[need_size:]
-        # 计算每对 start 和 end 之间的差值
+        N = can_use_pos_index.numel()
+        if N >= need_size:
+            # 正确地计算 start_indexs 和 end_indexs
+            start_indexs = can_use_pos_index[:N - need_size + 1]
+            end_indexs = can_use_pos_index[need_size - 1:]
+            diff = end_indexs - start_indexs
 
-        diff = end_indexs - start_indexs
-        
-        contiguous_blocks = (diff == need_size)
-        # 找到那些差值等于 need_size - 1 的位置，意味着 start 和 end 之间有连续的 need_size 个块
-        contiguous_blocks = (diff == (need_size)).nonzero(as_tuple=True)[0]
+            # 寻找连续的块，差值应为 need_size - 1
+            contiguous_blocks = (diff == need_size - 1).nonzero(as_tuple=True)[0]
 
-        if contiguous_blocks.numel() > 0: # numel 返回张量种元素数量
-            start_index = start_indexs[contiguous_blocks[0]].item() # item 方法将张量转换成 Python 数值
-            end_index = start_index + need_size
-            select_index = self.kv_mem_pos_indexs[start_index:end_index]
-            self.add_ref(select_index)
-            return select_index, start_index, end_index
+            if contiguous_blocks.numel() > 0:
+                start_index = start_indexs[contiguous_blocks[0]].item()
+                end_index = start_index + need_size
+                select_index = self.kv_mem_pos_indexs[start_index:end_index]
+                self.add_ref(select_index)
+                return select_index, start_index, end_index
 
         return None
     
