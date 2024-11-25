@@ -92,6 +92,7 @@ def flash_attention_v2_kernel(
     out_seq_stride,
     out_dim_stride,
 
+    num_kv_groups, # group of kv heads
     n_heads,      # number of heads
     m_size,       # sequence length of q
     n_size,       # sequence length of k, also be rows of K matrix
@@ -101,57 +102,59 @@ def flash_attention_v2_kernel(
     qk_scale,
     causal_mask
     ):
-	"""
-	flashattention2 内核实现
-	"""
-	block_m_idx = tl.program_id(0)
-	head_idx = tl.program_id(1) # 获取当前 CUDA 块在第二个维度（通常是 blockIdx.y）上的索引。head_idx 表示当前块对应的头（head）的索引。
+    """
+    flashattention2 内核实现
+    """
+    block_m_idx = tl.program_id(0)
+    head_idx = tl.program_id(1) # 获取当前 CUDA 块在第二个维度（通常是 blockIdx.y）上的索引。head_idx 表示当前块对应的头（head）的索引。
 
-	cur_batch_idx = head_idx // n_heads # 通过整数除法，将 head_idx 转换为当前批次（batch）的索引。
-	cur_head_idx = head_idx % n_heads # 通过取模操作，计算出当前头在其所属批次中的具体索引。
+    cur_batch_idx = head_idx // n_heads # 通过整数除法，将 head_idx 转换为当前批次（batch）的索引。
+    cur_head_idx = head_idx % n_heads # 通过取模操作，计算出当前头在其所属批次中的具体索引。
 
-	m_range_offs = tl.arange(0, BLOCK_M_SIZE) # seq_dim 维度偏移
-	n_range_offs = tl.arange(0, BLOCK_N_SIZE) # bs*n_heads 维度偏移
-	dhead_range_offs = tl.arange(0, HEAD_DIM) # head_dim 维度偏移
+    cur_kv_head_idx = cur_head_idx // num_kv_groups # 支持 GQA 模型直接获取 kv heads index, 也兼容非 GQA 模型
 
-	offs_m = block_m_idx * BLOCK_M_SIZE + m_range_offs # 计算当前块在 M(seq_dim) 维度上的实际偏移量。
+    m_range_offs = tl.arange(0, BLOCK_M_SIZE) # seq_dim 维度偏移
+    n_range_offs = tl.arange(0, BLOCK_N_SIZE) # bs*n_heads 维度偏移
+    dhead_range_offs = tl.arange(0, HEAD_DIM) # head_dim 维度偏移
 
-	# 二维偏移, Compute offsets for the first block on matrix Q K V Output
-	offs_q = ( 
-		cur_batch_idx * q_batch_stride 
-		+ cur_head_idx * q_heads_stride
-		+ (offs_m[:, None] * q_seq_stride + dhead_range_offs[None,:] * q_dim_stride))
+    offs_m = block_m_idx * BLOCK_M_SIZE + m_range_offs # 计算当前块在 M(seq_dim) 维度上的实际偏移量。
 
-	offs_k = (
-		cur_batch_idx * k_batch_stride 
-		+ cur_head_idx * k_heads_stride
-		+ (n_range_offs[:,None] * k_seq_stride + dhead_range_offs[None,:] * k_dim_stride))
+    # 二维偏移, Compute offsets for the first block on matrix Q K V Output
+    offs_q = ( 
+        cur_batch_idx * q_batch_stride 
+        + cur_head_idx * q_heads_stride
+        + (offs_m[:, None] * q_seq_stride + dhead_range_offs[None,:] * q_dim_stride))
 
-	offs_v = ( 
-		cur_batch_idx * v_batch_stride 
-		+ cur_head_idx * v_heads_stride
-		+ (n_range_offs[:,None] * v_seq_stride + dhead_range_offs[None,:] * v_dim_stride))
+    offs_k = (
+        cur_batch_idx * k_batch_stride 
+        + cur_kv_head_idx * k_heads_stride
+        + (n_range_offs[:,None] * k_seq_stride + dhead_range_offs[None,:] * k_dim_stride))
 
-	offs_o = ( 
-		cur_batch_idx * out_batch_stride 
-		+ cur_head_idx * out_heads_stride
-		+ (offs_m[:,None] * out_seq_stride + dhead_range_offs[None,:] * out_dim_stride))
+    offs_v = ( 
+        cur_batch_idx * v_batch_stride 
+        + cur_kv_head_idx * v_heads_stride
+        + (n_range_offs[:,None] * v_seq_stride + dhead_range_offs[None,:] * v_dim_stride))
 
-	q_ptrs = q_ptr + offs_q
-	k_ptrs = k_ptr + offs_k
-	v_ptrs = v_ptr + offs_v
-	out_ptrs = o_ptr + offs_o
+    offs_o = ( 
+        cur_batch_idx * out_batch_stride 
+        + cur_head_idx * out_heads_stride
+        + (offs_m[:,None] * out_seq_stride + dhead_range_offs[None,:] * out_dim_stride))
 
-	q_mask = offs_m[:, None] < m_size
-	q = tl.load(q_ptrs, mask=q_mask, other=0.0)
+    q_ptrs = q_ptr + offs_q
+    k_ptrs = k_ptr + offs_k
+    v_ptrs = v_ptr + offs_v
+    out_ptrs = o_ptr + offs_o
 
-	# 初始化用于计算 softmax 归一化项的 m 和 d, 意义见 online-softmax, 这里
-	m_i = tl.zeros([BLOCK_M_SIZE,], dtype=tl.float32) - float("inf")
-	d_i = tl.zeros([BLOCK_M_SIZE,], dtype=tl.float32)
-	acc = tl.zeros([BLOCK_M_SIZE, HEAD_DIM], dtype=tl.float32)
+    q_mask = offs_m[:, None] < m_size
+    q = tl.load(q_ptrs, mask=q_mask, other=0.0)
 
-	# acc 是 attention 输出累加器, d_i 是 softmax 的归一化项（分母）, m_i 是最大值（分子）
-	acc, d_i = _attn_fwd_inner(acc, m_i, d_i, q,
+    # 初始化用于计算 softmax 归一化项的 m 和 d, 意义见 online-softmax, 这里
+    m_i = tl.zeros([BLOCK_M_SIZE,], dtype=tl.float32) - float("inf")
+    d_i = tl.zeros([BLOCK_M_SIZE,], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M_SIZE, HEAD_DIM], dtype=tl.float32)
+
+    # acc 是 attention 输出累加器, d_i 是 softmax 的归一化项（分母）, m_i 是最大值（分子）
+    acc, d_i = _attn_fwd_inner(acc, m_i, d_i, q,
                                 k_ptrs, v_ptrs,
                                 k_seq_stride, v_seq_stride,
                                 offs_m,
@@ -160,11 +163,11 @@ def flash_attention_v2_kernel(
                                 causal_mask,
                                 BLOCK_M_SIZE, BLOCK_N_SIZE,
                                 v_ptr.dtype.element_ty == tl.float8e5
-								)
+                                )
 
-	acc = acc / d_i[:, None]
-	out_mask = offs_m[:, None] < m_size
-	tl.store(out_ptrs, acc, mask=out_mask)
+    acc = acc / d_i[:, None]
+    out_mask = offs_m[:, None] < m_size
+    tl.store(out_ptrs, acc, mask=out_mask)
 
 @torch.no_grad()
 @custom_fwd(cast_inputs=torch.float16)
@@ -181,6 +184,7 @@ def flash_attention_v2(
         output: Attention ouput tensor, shape is consistent with q. 
         attention_mask: Attention mask matrix broadcastable to (batch, head_size, m_size, n_size).
     """
+    num_kv_groups = q.shape[1] // k.shape[1] # num_q_heads // num_k_heads
     # (B, Seq_Len_Q, Num_Heads_Q, Head_Dim) -> (B, H_Q, Seq_Len_Q, Head_Dim)
     output = torch.empty_like(q)
     assert q.device.type == 'cuda', "Input tensor q must be on CUDA device"
@@ -211,6 +215,7 @@ def flash_attention_v2(
         *k.stride(),  # (batch, heads, n_size, head_dim)
         *v.stride(),  # (batch, heads, n_size, head_dim)
         *output.stride(),  # (batch, heads, m_size, n_size)
+        num_kv_groups,
         n_heads,
         m_size,
         n_size,

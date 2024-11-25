@@ -11,6 +11,7 @@ def _flash_decoding_stage1_kernel(
     Q, K, V, sm_scale,
 
     actual_seq_len,  # 实际序列长度
+	num_kv_groups, # group of kv heads
     Mid_O, Mid_O_LogExpSum,
 
     q_bs_stride, q_heads_stride, q_dim_stride,  # Q 的 strides
@@ -28,6 +29,8 @@ def _flash_decoding_stage1_kernel(
 	# 获取当前程序的 block 在各个维度上的索引
 	batch_pid = tl.program_id(0)
 	head_pid = tl.program_id(1)
+	kv_head_pid = head_pid // num_kv_groups
+
 	seq_block_pid = tl.program_id(2)
 
 	# 计算当前批次的起始位置
@@ -54,13 +57,13 @@ def _flash_decoding_stage1_kernel(
 	# 计算 K 和 V 的偏移量
 	k_offs = (
 		(cur_batch_start_loc + offs_n[:, None]) * k_bs_stride
-		+ head_pid * k_heads_stride
+		+ kv_head_pid * k_heads_stride
 		+ offs_d[None, :] * k_dim_stride
 	)
 
 	v_offs = (
 		(cur_batch_start_loc + offs_n[:, None]) * v_bs_stride
-		+ head_pid * v_heads_stride
+		+ kv_head_pid * v_heads_stride
 		+ offs_d[None, :] * v_dim_stride
 	)
     
@@ -77,7 +80,7 @@ def _flash_decoding_stage1_kernel(
 	m_i = -float("inf")  # 标量
 	acc = tl.zeros([BLOCK_DMODEL], dtype=tl.float32)  # [BLOCK_DMODEL]
 	
-	# if (batch_pid == 1) & (head_pid == 1) & (seq_block_pid == 1):
+	# if (batch_pid == 1) & (kv_head_pid == 1) & (seq_block_pid == 1):
 	# 	tl.device_print(f"cur_batch_partition_start_index", cur_batch_partition_start_index)
 	# 	tl.device_print(f"cur_batch_partition_end_index", cur_batch_partition_end_index)
 	# 	tl.device_print(f"offs_n", offs_n)
@@ -198,10 +201,12 @@ def flash_decode_stage1(
 	
 	# grid 配置的并行度比 flashattention1-2 多了 kv cache seq 维度
 	grid = (batchs, num_heads, triton.cdiv(actual_seq_len + PARTITION_SIZE - 1, PARTITION_SIZE))
+	num_kv_groups = q.shape[1] // k.shape[1] # num_q_heads // num_k_heads
 
 	_flash_decoding_stage1_kernel[grid](
 		q, k, v, sm_scale,
 		actual_seq_len,  # 使用实际序列长度
+		num_kv_groups,   # kv 组数量
 		mid_o, mid_o_logexpsum,
 		*q.stride(),
 		*k.stride(),

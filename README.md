@@ -121,6 +121,8 @@ INFO:lite_llama.generate:Decode stage Batch inference time: 1413.9111 ms
 INFO:lite_llama.generate:Decode stage tokens per second : 217.84 tokens/s
 ```
 
+6, 一个简单的优化, 使用 `GQA_KV_heads_index` 替代 `repeat_kv` 函数。
+
 ## Acknowledgement
 
 - [transformers](https://github.com/huggingface/transformers)

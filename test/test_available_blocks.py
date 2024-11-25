@@ -54,7 +54,6 @@ def determine_num_available_blocks(model_config, gpu_memory_utilization = 0.9) -
     # Get the peak memory allocation recorded by torch
     peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
     
-    
     # 清理未使用的缓存，计算非Torch分配的内存
     torch.cuda.empty_cache()
     torch_allocated_bytes = torch.cuda.memory_stats()["allocated_bytes.all.current"]

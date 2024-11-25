@@ -36,6 +36,7 @@ def flash_attention_v1_kernel(
     out_seq_stride,
     out_dim_stride,
 
+    num_kv_groups, # group of kv heads
     n_heads,      # number of heads
     m_size,
     n_size,       # sequence length of k, also be rows of K matrix
@@ -54,6 +55,8 @@ def flash_attention_v1_kernel(
     cur_batch_idx = head_idx // n_heads
     cur_head_idx = head_idx % n_heads
 
+    cur_kv_head_idx = cur_head_idx // num_kv_groups
+
     m_range_offs = tl.arange(0, BLOCK_M_SIZE)
     n_range_offs = tl.arange(0, BLOCK_N_SIZE) # head_dim 维度偏移
     dhead_range_offs = tl.arange(0, BLOCK_DHEAD_SIZE)
@@ -68,12 +71,12 @@ def flash_attention_v1_kernel(
 
     k_offs = (
         cur_batch_idx * k_batch_stride 
-        + cur_head_idx * k_heads_stride
+        + cur_kv_head_idx * k_heads_stride
         + (n_range_offs[:,None] * k_seq_stride + dhead_range_offs[None,:] * k_dim_stride))
     
     v_offs = ( 
         cur_batch_idx * v_batch_stride 
-        + cur_head_idx * v_heads_stride
+        + cur_kv_head_idx * v_heads_stride
         + (n_range_offs[:,None] * v_seq_stride + dhead_range_offs[None,:] * v_dim_stride))
 
     o_offs = ( 
@@ -157,6 +160,7 @@ def flash_attention_v1(
         output: Attention ouput tensor, shape is consistent with q. 
         attention_mask: Attention mask matrix broadcastable to (batch, head_size, m_size, n_size).
     """
+    num_kv_groups = q.shape[1] // k.shape[1] # num_q_heads // num_k_heads
     output = torch.empty_like(q)
     assert q.device.type == 'cuda', "Input tensor q must be on CUDA device"
     assert k.device.type == 'cuda', "Input tensor keys must be on CUDA device"
@@ -190,6 +194,7 @@ def flash_attention_v1(
         m_size,
         n_size,
         head_dim,
+        num_kv_groups,
         32,  # BLOCK_M_SIZE
         32,  # BLOCK_N_SIZE
         sm_scale,

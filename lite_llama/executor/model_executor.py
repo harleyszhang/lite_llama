@@ -217,9 +217,7 @@ class ModelExecutor:
             head_dim = self.model_config.head_dim,
             num_kv_heads = self.model_config.num_kv_heads,
             num_layers = self.model_config.num_layers,
-
             gpu_num_blocks = gpu_num_blocks,
-            max_num_tokens = max_num_tokens,
             block_size = block_size,
             dtype = dtype,
             device=device
@@ -236,7 +234,7 @@ class ModelExecutor:
         max_gpu_num_blocks, max_num_tokens = self._get_max_tokens(self.model_config)
         
         kv_mem_manager = self._init_mem_manager(
-            self.model_config, max_gpu_num_blocks, max_num_tokens, block_size=1, 
+            self.model_config, max_gpu_num_blocks, block_size=1, 
             dtype=torch.float16,  device="cuda"
         )
         self.model_runner = ModelRunner(
