@@ -208,7 +208,8 @@ class GenerateText:
         out_tokens, out_logprobs = self.process_output_tokens(tokens, prompt_tokens, max_gen_len, 
 									logprobs, echo, self.tokenizer.eos_token_id, token_logprobs)
         # 减少 kv cache 内存管理器的引用计数
-        self.model_executor.kv_mem_manager.decrease_refs(select_index)
+        self.model_executor.kv_mem_manager.release_ref(select_index)
+        
         return out_tokens, out_logprobs
     
     def text_completion(

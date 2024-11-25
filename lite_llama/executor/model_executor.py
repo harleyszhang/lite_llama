@@ -193,13 +193,13 @@ class ModelExecutor:
         self.model_runner = None
         self.compiled_model = False
         
-        if compiled_model:
-            self.max_gpu_num_blocks, self.kv_mem_manager = self.apply_cuda_graph() # 真正的调用模型推理的代码
-        
-        # self.max_gpu_num_blocks, self.max_num_tokens = self._get_max_tokens(self.model_config)
-        # self.kv_mem_manager = self._init_mem_manager(
-        #     self.model_config, self.max_gpu_num_blocks, self.max_num_tokens, block_size=1, 
-        #     dtype=torch.float16,  device="cuda")
+        if self.compiled_model:
+            self.max_gpu_num_blocks, self.kv_mem_manager = self.apply_cuda_graph() # 调用 cuda graph 优化
+        else:
+            self.max_gpu_num_blocks, self.max_num_tokens = self._get_max_tokens(self.model_config)
+            self.kv_mem_manager = self._init_mem_manager(
+                self.model_config, self.max_gpu_num_blocks, self.max_num_tokens, block_size=1, 
+                dtype=torch.float16,  device="cuda")
         
         self.gpu_kv_buffer = self.kv_mem_manager.gpu_kv_buffer
         self.atten_info = AttentionInfo

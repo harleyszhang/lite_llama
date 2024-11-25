@@ -128,7 +128,7 @@ class GenerateText:
                 break
         
         # 减少 kv cache 内存管理器的引用计数
-        self.model_executor.kv_mem_manager.decrease_refs(select_index)
+        self.model_executor.kv_mem_manager.release_ref(select_index)
 
     def text_completion_stream(
         self,
