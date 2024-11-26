@@ -256,7 +256,6 @@ if __name__ == "__main__":
             max_batch_size = 64,
             max_seq_len = 2048,
             triton_weight = True,
-            compiled_model = False,
             device = device
         )
     # 测试文本
