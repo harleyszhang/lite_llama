@@ -113,7 +113,9 @@ def load_and_convert_to_custom_qwen2(model_config: Qwen2Config, pretrained_model
     for name in new_sd.keys():
         print(name)
 
-    torch.save(new_sd, "/gemini/code/Qwen2.5-1.5B-Instruct/my_weight/my_qwen2.5-1.5B.pth")
+    # 保存转换好的自定义权重
+    torch.save(new_sd, "/gemini/code/Qwen2.5-3B-Instruct/my_qwen2.5-3B.pth")
+
     # torch.set_default_tensor_type(torch.cuda.HalfTensor)
     torch.set_default_dtype(torch.half)
     my_model = Qwen2Model(model_config).to(device)
@@ -230,8 +232,8 @@ def compare_models(original_model, custom_model, tokenizer, input_text: str, dev
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # 定义模型配置参数
-    original_model_path = "/gemini/code/Qwen2.5-1.5B-Instruct"
-    my_model_path = "/gemini/code/Llama-3.2-1B-Instruct/my_weight"
+    original_model_path = "/gemini/pretrain/Qwen2.5-3B"
+    my_model_path = "/gemini/code/Qwen2.5-3B-Instruct/"
     json_file_path = os.path.join(original_model_path, 'config.json') # JSON 文件的路径
     model_config = load_config_from_json(json_file_path, device) # 加载配置
 

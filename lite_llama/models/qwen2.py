@@ -196,7 +196,7 @@ class FusedMLP(nn.Module):
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False, dtype=torch.float16)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False, dtype=torch.float16)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False, dtype=torch.float16) # torch.float32 cpu
-        print("self.down_proj dtype and device is ", self.down_proj.weight.dtype, self.down_proj.weight.device)
+        # print("self.down_proj dtype and device is ", self.down_proj.weight.dtype, self.down_proj.weight.device)
 
     def forward(self, x):
         print("FusedMLP input shape is ", x.shape)

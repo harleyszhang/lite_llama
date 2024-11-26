@@ -139,3 +139,4 @@ class Qwen2Config:
             else:
                 # 如果属性不存在，可以选择存储在 extra_args 中，或者直接添加
                 setattr(self, key, value)
+        self.head_dim = self.hidden_size // self.num_heads
