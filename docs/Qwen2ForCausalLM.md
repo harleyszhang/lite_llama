@@ -1,6 +1,8 @@
 ## hf qwen2 模型结构信息
 
 ### 模型结构
+
+```bash
 Qwen2ForCausalLM(
   (model): Qwen2Model(
     (embed_tokens): Embedding(151936, 1536)
@@ -28,9 +30,11 @@ Qwen2ForCausalLM(
   )
   (lm_head): Linear(in_features=1536, out_features=151936, bias=False)
 )
+```
 
 ### 模型参数及形状
 
+```
 model.embed_tokens.weight torch.Size([151936, 1536])
 model.layers.0.self_attn.q_proj.weight torch.Size([1536, 1536])
 model.layers.0.self_attn.q_proj.bias torch.Size([1536])
@@ -369,3 +373,4 @@ model.layers.27.mlp.down_proj.weight torch.Size([1536, 8960])
 model.layers.27.input_layernorm.weight torch.Size([1536])
 model.layers.27.post_attention_layernorm.weight torch.Size([1536])
 model.norm.weight torch.Size([1536])
+```
