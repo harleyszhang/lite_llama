@@ -103,13 +103,13 @@ class Qwen2Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5 # 计算 attention 分数缩放的系数
 
-        self.q_proj_weight = nn.Parameter(torch.rand(hidden_size, hidden_size))
-        self.q_proj_bias = nn.Parameter(torch.rand(hidden_size))
+        self.q_proj_weight = nn.Parameter(torch.rand(hidden_size, hidden_size, dtype=torch.float16))
+        self.q_proj_bias = nn.Parameter(torch.rand(hidden_size, dtype=torch.float16))
 
-        self.k_proj_weight = nn.Parameter(torch.rand(num_kv_heads * self.head_dim, hidden_size))
-        self.v_proj_weight = nn.Parameter(torch.rand(num_kv_heads * self.head_dim, hidden_size))
-        self.k_proj_bias = nn.Parameter(torch.rand(num_kv_heads * self.head_dim))
-        self.v_proj_bias = nn.Parameter(torch.rand(num_kv_heads * self.head_dim))
+        self.k_proj_weight = nn.Parameter(torch.rand(num_kv_heads * self.head_dim, hidden_size, dtype=torch.float16))
+        self.v_proj_weight = nn.Parameter(torch.rand(num_kv_heads * self.head_dim, hidden_size, dtype=torch.float16))
+        self.k_proj_bias = nn.Parameter(torch.rand(num_kv_heads * self.head_dim, dtype=torch.float16))
+        self.v_proj_bias = nn.Parameter(torch.rand(num_kv_heads * self.head_dim, dtype=torch.float16))
 
         self.attn = Attention(num_heads, num_kv_heads)
 
@@ -193,9 +193,9 @@ class FusedMLP(nn.Module):
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
 
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False) # torch.float32 cpu
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False, dtype=torch.float16)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False, dtype=torch.float16)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False, dtype=torch.float16) # torch.float32 cpu
         print("self.down_proj dtype and device is ", self.down_proj.weight.dtype, self.down_proj.weight.device)
 
     def forward(self, x):

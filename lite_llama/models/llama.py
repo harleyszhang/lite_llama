@@ -7,7 +7,7 @@ import math
 from typing import Optional, Tuple
 from ..kernels import *
 from .model_config import LlamaConfig
-from .LlamaRotaryEmbedding import LlamaRotaryEmbedding
+from .RotaryEmbedding import LlamaRotaryEmbedding
 
 class FusedAttention(nn.Module):
     def __init__(self,  config: LlamaConfig, cache_k=None, cache_v=None):

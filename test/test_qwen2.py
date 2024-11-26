@@ -1,24 +1,16 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen2ForCausalLM
 import torch
 from tqdm.auto import tqdm
 import json, sys, os
 from pathlib import Path
 
+# 获取 lite_llama 目录的绝对路径并添加到 sys.path 中
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from lite_llama.models.qwen2 import Qwen2Model, Qwen2Config
+
 def sample_top_p(probs, p):
     """
     Perform top-p (nucleus) sampling on a probability distribution.
-
-    Args:
-        probs (torch.Tensor): Probability distribution tensor.
-        p (float): Probability threshold for top-p sampling.
-
-    Returns:
-        torch.Tensor: Sampled token indices.
-
-    Note:
-        Top-p sampling selects the smallest set of tokens whose cumulative probability mass
-        exceeds the threshold p. The distribution is renormalized based on the selected tokens.
-
     """
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
     probs_sum = torch.cumsum(probs_sort, dim=-1)
@@ -29,18 +21,14 @@ def sample_top_p(probs, p):
     next_token = torch.gather(probs_idx, -1, next_token)
     return next_token
 
-# 获取 lite_llama 目录的绝对路径并添加到 sys.path 中
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from lite_llama.models.llama import Llama, LlamaConfig
-
-def load_config_from_json(json_file_path: str, device: str="cuda") -> LlamaConfig:
+def load_config_from_json(json_file_path: str, device: str="cuda") -> Qwen2Config:
     with open(json_file_path, "r") as f:
         config_dict = json.load(f)
-    config = LlamaConfig(config_dict, max_seq_len = 2048, device=device)
+    
+    config = Qwen2Config(config_dict, max_seq_len = 2048, device=device)
     return config
 
 def load_original_llama(model_name_or_path: str, device: str = "cuda"):
-    # config = LlamaConfig.from_pretrained(model_name_or_path)
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
@@ -50,7 +38,7 @@ def load_original_llama(model_name_or_path: str, device: str = "cuda"):
     model.to(device)
     return model, tokenizer
 
-def load_custom_llam(model_name_or_path: str, model_args: LlamaConfig, device: str = "cuda"):
+def load_custom_llam(model_name_or_path: str, model_config: Qwen2Config, device: str = "cuda"):
     checkpoints = sorted(Path(model_name_or_path).glob("*.pth"))
     assert len(checkpoints) > 0, f"no checkpoint files found in {model_name_or_path}"
     ckpt_path = checkpoints[0]
@@ -59,12 +47,12 @@ def load_custom_llam(model_name_or_path: str, model_args: LlamaConfig, device: s
     # 根据设备选择合适的 dtype
     torch.set_default_dtype(torch.half)
 
-    model = Llama(model_args).to(device)
+    model = Qwen2Model(model_config).to(device)
     model.load_state_dict(state_dict, strict=True)
 
     return model
-    
-def load_and_convert_to_custom_llama(model_config: LlamaConfig, pretrained_model: AutoModelForCausalLM, device: str = "cuda"):
+
+def load_and_convert_to_custom_qwen2(model_config: Qwen2Config, pretrained_model: AutoModelForCausalLM, device: str = "cuda"):
     # 将预训练模型的权重映射到自定义模型
     hf_sd = pretrained_model.state_dict()
     # 映射嵌入层  # 映射归一化层
@@ -76,15 +64,23 @@ def load_and_convert_to_custom_llama(model_config: LlamaConfig, pretrained_model
 
     # 映射层
     layers = {
-        'model.layers.{i}.self_attn.q_proj.weight': 'layers.{i}.attention.wq.weight',
-        'model.layers.{i}.self_attn.k_proj.weight': 'layers.{i}.attention.wk.weight',
-        'model.layers.{i}.self_attn.v_proj.weight': 'layers.{i}.attention.wv.weight',
-        'model.layers.{i}.self_attn.o_proj.weight': 'layers.{i}.attention.wo.weight',
-        'model.layers.{i}.mlp.gate_proj.weight': 'layers.{i}.feed_forward.gate_proj.weight',
-        'model.layers.{i}.mlp.up_proj.weight': 'layers.{i}.feed_forward.up_proj.weight',
-        'model.layers.{i}.mlp.down_proj.weight': 'layers.{i}.feed_forward.down_proj.weight',
-        'model.layers.{i}.post_attention_layernorm.weight': 'layers.{i}.ffn_norm_weight',
-        'model.layers.{i}.input_layernorm.weight': 'layers.{i}.attention_norm_weight'
+        'model.layers.{i}.self_attn.q_proj.weight': 'layers.{i}.self_attn.q_proj_weight',
+        'model.layers.{i}.self_attn.q_proj.bias': 'layers.{i}.self_attn.q_proj_bias',
+
+        'model.layers.{i}.self_attn.k_proj.weight': 'layers.{i}.self_attn.k_proj_weight',
+        'model.layers.{i}.self_attn.k_proj.bias': 'layers.{i}.self_attn.k_proj_bias',
+
+        'model.layers.{i}.self_attn.v_proj.weight': 'layers.{i}.self_attn.v_proj_weight',
+        'model.layers.{i}.self_attn.v_proj.bias': 'layers.{i}.self_attn.v_proj_bias',
+
+        'model.layers.{i}.self_attn.o_proj.weight': 'layers.{i}.self_attn.o_proj_weight',
+
+        'model.layers.{i}.mlp.gate_proj.weight': 'layers.{i}.mlp.gate_proj.weight',
+        'model.layers.{i}.mlp.up_proj.weight': 'layers.{i}.mlp.up_proj.weight',
+        'model.layers.{i}.mlp.down_proj.weight': 'layers.{i}.mlp.down_proj.weight',
+
+        'model.layers.{i}.input_layernorm.weight': 'layers.{i}.input_layernorm_weight',
+        'model.layers.{i}.post_attention_layernorm.weight': 'layers.{i}.post_attention_layernorm_weight',
     }
 
     #  根据 Transformer 层数量生成映射
@@ -105,7 +101,7 @@ def load_and_convert_to_custom_llama(model_config: LlamaConfig, pretrained_model
             # 如果某些权重不需要映射，可以选择忽略或处理
             pass  # 忽略未映射的权重
     
-    new_sd["lm_head.weight"] = hf_sd["model.embed_tokens.weight"]
+    new_sd["lm_head_weight"] = hf_sd["model.embed_tokens.weight"]
 
     # 打印预训练模型的参数名称
     print("Pretrained model parameters:")
@@ -117,10 +113,10 @@ def load_and_convert_to_custom_llama(model_config: LlamaConfig, pretrained_model
     for name in new_sd.keys():
         print(name)
 
-    torch.save(new_sd, "/gemini/code/Llama-3.2-1B-Instruct/my_weight/my_llama3.2-1B.pth")
+    torch.save(new_sd, "/gemini/code/Qwen2.5-1.5B-Instruct/my_weight/my_qwen2.5-1.5B.pth")
     # torch.set_default_tensor_type(torch.cuda.HalfTensor)
     torch.set_default_dtype(torch.half)
-    my_model = Llama(model_args).to(device)
+    my_model = Qwen2Model(model_config).to(device)
     my_model.load_state_dict(new_sd, strict=True)
     
     return my_model
@@ -185,25 +181,6 @@ def decode_stage_compare(original_model, custom_model, tokenizer, input_text: st
         logits_diff = torch.abs(original_logits - custom_outputs_logits).mean().item()
         print(f"=========== Step {step+1}: Logits difference is: {logits_diff} ================")
 
-        # if logits_diff >= 1e-2:
-        #     print(f"Step {step+1} failed: Logits difference {logits_diff} exceeds threshold.")
-        #     break
-        # else:
-        #     print(f"Step {step+1} passed.")
-
-        # 比较下一个 token
-        # token_diff = torch.abs(original_next_token - custom_next_token).float().mean().item()
-        # print(f"Step {step+1}: Token difference: {token_diff}")
-        # if token_diff > 0:
-        #     print(f"Step {step+1} failed: Tokens differ.")
-        #     break
-        # else:
-        #     print(f"Step {step+1} passed.")
-
-        # # 生成下一个 token, 模型内部已经集成了过去的 kv cache 
-        # original_generated = torch.cat([original_generated, original_next_token], dim=-1)
-        # custom_generated = torch.cat([custom_generated, custom_next_token], dim=-1)
-
         # 更新 attention mask if necessary
         if attention_mask is not None:
             attention_mask = torch.cat([attention_mask, torch.ones((attention_mask.shape[0], 1), device=device, dtype=attention_mask.dtype)], dim=-1)
@@ -225,8 +202,7 @@ def compare_models(original_model, custom_model, tokenizer, input_text: str, dev
         custom_outputs = custom_model(tokens, start_pos=0)
     custom_logits = custom_outputs
 
-    # 比较输出
-    # print(torch.abs(original_model.state_dict()["model.embed_tokens.weight"] - custom_model.state_dict()["lm_head.weight"]))
+    # 比较 logits 输出
     difference = torch.abs(original_logits - custom_logits).mean().item()
     print(f"Average difference between models: {difference}")
 
@@ -252,20 +228,23 @@ def compare_models(original_model, custom_model, tokenizer, input_text: str, dev
     decode_stage_compare(original_model, custom_model, tokenizer, input_text, device)
 
 if __name__ == "__main__":
-    
-    original_model_path = "/gemini/code/Llama-3.2-1B-Instruct"
-    my_model_path = "/gemini/code/Llama-3.2-1B-Instruct/my_weight"
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    
     # 定义模型配置参数
-    json_file_path = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/config.json' # JSON 文件的路径
-    model_args = load_config_from_json(json_file_path, device) # 加载配置
+    original_model_path = "/gemini/code/Qwen2.5-1.5B-Instruct"
+    my_model_path = "/gemini/code/Llama-3.2-1B-Instruct/my_weight"
+    json_file_path = os.path.join(original_model_path, 'config.json') # JSON 文件的路径
+    model_config = load_config_from_json(json_file_path, device) # 加载配置
 
     # 加载原始模型
     original_model, tokenizer = load_original_llama(original_model_path, device)
+    custom_model = Qwen2Model(model_config)
+    
+    for name, param in custom_model.named_parameters():
+        print(name, param.shape)
+
     # 加载自定义模型
-    custom_model = load_and_convert_to_custom_llama(model_args, original_model, device)
-    # custom_model = load_custom_llam(my_model_path, model_args, device)
+    custom_model = load_and_convert_to_custom_qwen2(model_config, original_model, device)
+    # custom_model = load_custom_llam(my_model_path, model_config, device)
 
     # 测试文本
     test_text = "Once upon a time in a distant land,"

@@ -14,7 +14,7 @@ class ComputeMaxAvailableBlocks:
     and  calculate the maximum possible number of GPU blocks that can be allocated with the remaining free memory.
     if not execute dummy forward run, it should be run after cuda graph!
     """
-    def __init__(self, model_config: LlamaConfig, gpu_memory_utilization=0.9, block_size=1):
+    def __init__(self, model_config, gpu_memory_utilization=0.9, block_size=1):
         self.model_config = model_config
         self.gpu_memory_utilization = gpu_memory_utilization
         self.block_size = block_size # 一个 block 表示多少个 tokens

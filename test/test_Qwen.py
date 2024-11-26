@@ -1,14 +1,17 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen2ForCausalLM
 
-model_name = "/gemini/code/Llama-3.2-1B-Instruct"
+model_name = "/gemini/code/Qwen2.5-1.5B-Instruct"
 
-model = AutoModelForCausalLM.from_pretrained(
+model = Qwen2ForCausalLM.from_pretrained(
     model_name,
     torch_dtype="auto",
     device_map="auto"
 )
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 print(model)
+print("my llama archetectue and shape")
+for name, param in model.named_parameters():
+    print(name, param.shape)
 
 prompt = "秦始皇活了多少岁？."
 messages = [
@@ -32,3 +35,33 @@ generated_ids = [
 
 response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
 print(response)
+
+"""
+Qwen2ForCausalLM(
+  (model): Qwen2Model(
+    (embed_tokens): Embedding(151936, 1536)
+    (layers): ModuleList(
+      (0-27): 28 x Qwen2DecoderLayer(
+        (self_attn): Qwen2SdpaAttention(
+          (q_proj): Linear(in_features=1536, out_features=1536, bias=True)
+          (k_proj): Linear(in_features=1536, out_features=256, bias=True)
+          (v_proj): Linear(in_features=1536, out_features=256, bias=True)
+          (o_proj): Linear(in_features=1536, out_features=1536, bias=False)
+          (rotary_emb): Qwen2RotaryEmbedding()
+        )
+        (mlp): Qwen2MLP(
+          (gate_proj): Linear(in_features=1536, out_features=8960, bias=False)
+          (up_proj): Linear(in_features=1536, out_features=8960, bias=False)
+          (down_proj): Linear(in_features=8960, out_features=1536, bias=False)
+          (act_fn): SiLU()
+        )
+        (input_layernorm): Qwen2RMSNorm((1536,), eps=1e-06)
+        (post_attention_layernorm): Qwen2RMSNorm((1536,), eps=1e-06)
+      )
+    )
+    (norm): Qwen2RMSNorm((1536,), eps=1e-06)
+    (rotary_emb): Qwen2RotaryEmbedding()
+  )
+  (lm_head): Linear(in_features=1536, out_features=151936, bias=False)
+)
+"""

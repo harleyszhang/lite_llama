@@ -5,8 +5,10 @@ from tqdm import tqdm
 
 from .mem_manager import ComputeMaxAvailableBlocks, KVCacheMemoryManager
 
-from ..models.model_config import LlamaConfig
+from ..models.model_config import LlamaConfig, Qwen2Config
 from ..models.llama import Llama
+from ..models.qwen2 import Qwen2Model
+
 from .cuda_graph import ModelRunner
 from .executor_struct import AttentionInfo, ModelRunnerConfig
 
@@ -116,13 +118,13 @@ class ModelExecutor:
         """
         # 加载分词器
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-        model_config = ModelExecutor._load_model_config(checkpoints_dir, max_batch_size, max_seq_len, device="cuda")
+        model_config = ModelExecutor._load_model_config(checkpoints_dir, max_batch_size, max_seq_len, device=device)
         model = ModelExecutor._load_model_weight(model_config, checkpoints_dir, load_model, triton_weight, device=device) # 加载权重后的模型
 
         return ModelExecutor(tokenizer, model_config, model, True)
 
     @staticmethod
-    def _load_model_weight( model_args: LlamaConfig, checkpoints_dir, load_model = True, triton_weight=True, device="cuda"):
+    def _load_model_weight(model_args, checkpoints_dir, load_model = True, triton_weight=True, device="cuda"):
         prev_time = time.time()
         
         if load_model:
@@ -152,10 +154,18 @@ class ModelExecutor:
         else:
             state_dict = None
 
+        # for name, param in state_dict.items():
+        #     print(f"参数名称: {name}, 形状: {param.shape}")
+
         torch.set_default_tensor_type(torch.cuda.HalfTensor)
         
         # 初始化自定义的 Llama 模型
-        model = Llama(model_args).to(device)
+        if model_args.model_type == "llama":
+            model = Llama(model_args).to(device)
+        elif model_args.model_type == "qwen2":
+            model = Qwen2Model(model_args).to(device) # 将模型移动到设备并转换为半精度
+        else:
+            print("Error, unsupported model!")
 
         if load_model:
             # The only unmatched key in the checkpoint is rope.freqs. Remove it
@@ -176,16 +186,24 @@ class ModelExecutor:
         with open(params_path, "r") as f:
             params = json.load(f)
 
-        model_config: LlamaConfig = LlamaConfig(
-            params, 
-            max_batch_size = max_batch_size,
-            max_seq_len = max_seq_len,
-            device=device
-        )
+        if params["model_type"]== "llama":
+            model_config: LlamaConfig = LlamaConfig(
+                params, 
+                max_batch_size = max_batch_size,
+                max_seq_len = max_seq_len,
+                device=device
+            )
+        elif params["model_type"] == "qwen2":
+            model_config: Qwen2Config = Qwen2Config(
+                params, 
+                max_batch_size = max_batch_size,
+                max_seq_len = max_seq_len,
+                device=device
+            )
 
         return model_config
 
-    def __init__(self, tokenizer:AutoTokenizer, model_config: LlamaConfig, model: Llama, compiled_model=True, device="cuda"):
+    def __init__(self, tokenizer:AutoTokenizer, model_config, model, compiled_model=True, device="cuda"):
         self.tokenizer = tokenizer
         self.model_config = model_config
         self.model = model
