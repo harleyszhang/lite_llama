@@ -25,7 +25,7 @@ class Attention(nn.Module):
         layer_index:int,
     ):         
         xq = xq.to(torch.float16)
-        batch_size, seq_len, hidden_size = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
+        batch_size, seq_len, num_heads, head_dim = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
         
         # 1. 获取 prefill 阶段的 select_index, 并更新 kv cache 张量
         select_index = atten_info.select_index
@@ -125,7 +125,7 @@ class Qwen2Attention(nn.Module):
         xq = torch.addmm(
             self.q_proj_bias.t(),
             x.view(-1, self.hidden_size),  # input 必须转换为 2D 张量
-            self.q_proj_weight,
+            self.q_proj_weight.t(),
             beta = 1.0,
             alpha = 1.0,
         )
@@ -133,7 +133,7 @@ class Qwen2Attention(nn.Module):
         xk = torch.addmm(
             self.k_proj_bias.t(),
             x.view(-1, self.hidden_size),  # input 必须转换为 2D 张量
-            self.k_proj_weight,
+            self.k_proj_weight.t(),
             beta = 1.0,
             alpha = 1.0,
         )
@@ -141,7 +141,7 @@ class Qwen2Attention(nn.Module):
         xv = torch.addmm(
             self.v_proj_bias.t(),
             x.view(-1, self.hidden_size),  # input 必须转换为 2D 张量
-            self.v_proj_weight,
+            self.v_proj_weight.t(),
             beta = 1.0,
             alpha = 1.0,
         )
@@ -183,7 +183,8 @@ class Qwen2Attention(nn.Module):
             )
 
         # 进行张量矩阵乘法, 需要对原始的 o_proj_weight 权重进行转置
-        output = torch.mm(attn_output, self.o_proj_weight.t())
+        # attn_output shape is [batch_size, seq_len, hidden_size]
+        output = torch.matmul(attn_output, self.o_proj_weight.t())
         return output
     
 class FusedMLP(nn.Module):
@@ -199,7 +200,7 @@ class FusedMLP(nn.Module):
         # print("self.down_proj dtype and device is ", self.down_proj.weight.dtype, self.down_proj.weight.device)
 
     def forward(self, x):
-        print("FusedMLP input shape is ", x.shape)
+        # print("FusedMLP input shape is ", x.shape)
         return self.down_proj(swiglu_forward(self.gate_proj(x), self.up_proj(x)))
         
 class Qwen2DecoderLayer(nn.Module):
@@ -255,7 +256,7 @@ class Qwen2Model(nn.Module):
         self.norm_weight = nn.Parameter(torch.ones(config.hidden_size))
 
         # 使用 nn.Linear 层替代 lm_head_weight
-        if config.tie_word_embeddings:
+        if False:
             # self.lm_head = self.embed_tokens
             self.lm_head_weight = self.embed_tokens.weight
         else:
