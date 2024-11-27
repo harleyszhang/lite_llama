@@ -1,6 +1,6 @@
 # lite_llama
 
-The llama model inference lite framework by tirton.
+The llama model inference lite framework by triton.
 
 ## 特性
 
