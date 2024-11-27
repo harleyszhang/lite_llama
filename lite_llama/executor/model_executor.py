@@ -11,6 +11,7 @@ from ..models.qwen2 import Qwen2Model
 
 from .cuda_graph import ModelRunner
 from .executor_struct import AttentionInfo, ModelRunnerConfig
+from .weight_convert import convert_llama_hf_to_litellama
 
 logger = logging.getLogger(__name__)
 
@@ -20,68 +21,6 @@ def indexs_convert(indexs: torch.tensor, batch_size: int):
     TODO: 支持连续批处理开发时用上.
     """
     pass
-
-def build_new_weight_dir(checkpoints_dir:str, new_sd):
-    # 保存 lite_llama 模型权重并构建新的权重目录
-    current_dir = os.path.dirname(os.path.abspath(__file__)) # 获取当前文件所在的目录
-    my_weight_dir = os.path.join(current_dir, "../../my_weight/") # 项目所在根目录
-    os.makedirs(my_weight_dir, exist_ok=True) # 创建文件夹（如果不存在）
-    torch.save(new_sd, os.path.join(my_weight_dir, "my_llama3.2-1B.pth"))
-
-    # 获取所有 JSON 文件
-    json_files = glob.glob(os.path.join(checkpoints_dir, "*.json"))
-    for file_path in json_files:
-        shutil.copy(file_path, my_weight_dir) # 复制 hf 权重目录的所有 json 文件到新的目录
-        print(f"已复制: {file_path} -> {my_weight_dir}")
-
-def convert_llama_hf_to_triton(checkpoints_dir, hf_sd, model_args):
-    """
-    将 Hugging Face 模型的权重字典转换为自定义模型的权重字典。
-
-    参数:
-        checkpoints_dir: Hugging Face 模型的目录
-        hf_sd (dict): Hugging Face 模型的状态字典。
-        model_args (LlamaConfig): 自定义模型的配置参数。
-
-    返回:
-        dict: 转换后的状态字典。
-    """
-    mapping = {
-        "tok_embeddings.weight": "embed_tokens.weight",
-        "norm.weight": "norm_weight", 
-        "output.weight": "lm_head.weight",
-    }
-
-    layers = {
-        # key 是原始权重值, value 是自定义模型结构权重参数
-        "layers.{i}.attention.wq.weight": "layers.{i}.attention.wq.weight",
-        "layers.{i}.attention.wk.weight": "layers.{i}.attention.wk.weight",
-        "layers.{i}.attention.wv.weight": "layers.{i}.attention.wv.weight",
-        "layers.{i}.attention.wo.weight": "layers.{i}.attention.wo.weight",
-        "layers.{i}.feed_forward.w1.weight": "layers.{i}.feed_forward.gate_proj.weight",
-        "layers.{i}.feed_forward.w3.weight": "layers.{i}.feed_forward.up_proj.weight",
-        "layers.{i}.feed_forward.w2.weight": "layers.{i}.feed_forward.down_proj.weight",
-        "layers.{i}.attention_norm.weight": "layers.{i}.attention_norm.weight",
-        "layers.{i}.ffn_norm.weight": "layers.{i}.ffn_norm.weight",
-    }
-
-    # 根据 Transformer 层数量生成映射
-    for i in range(model_args.n_layers):
-        for hf_key, custom_key in layers.items():
-            # 左边是 hf 权重参数字典 key, 右边是自定义模型权重参数字典 key
-            mapping[hf_key.format(i=i)] = custom_key.format(i=i)
-
-    # 创建新的状态字典
-    new_sd = {}
-    for hf_key, tensor in tqdm(hf_sd.items(), desc="Mapping weights"):
-        if hf_key in mapping:
-            new_sd[custom_key] = tensor
-        else:
-            print(f"Warning: Unmapped key {hf_key}")
-    
-    build_new_weight_dir(checkpoints_dir, new_sd)
-    
-    return new_sd
 
 class ModelExecutor:
     # 定义类属性
@@ -150,7 +89,7 @@ class ModelExecutor:
                 state_dict = hf_sd
                 print("Load Triton weight directly!")
             else:
-                state_dict = convert_llama_hf_to_triton(checkpoints_dir, hf_sd, model_args) # 转换权重名称
+                state_dict = convert_llama_hf_to_litellama(checkpoints_dir, hf_sd, model_args) # 转换权重名称
         else:
             state_dict = None
 
