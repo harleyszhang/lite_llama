@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from lite_llama.models.qwen2 import Qwen2Model, Qwen2Config
 from lite_llama.executor.model_executor import ModelExecutor
+from lite_llama.executor.weight_convert import convert_qwen2_hf_to_litellama
 
 def sample_top_p(probs, p):
     """
@@ -268,7 +269,7 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # Define model config path
     original_model_path = "/gemini/pretrain/Qwen2.5-3B"
-    my_model_path = "/gemini/code/Qwen2.5-3B/"
+    my_model_path = "/gemini/code/llm_weights/Qwen2.5-3B/"
     json_file_path = os.path.join(original_model_path, 'config.json') # JSON 文件的路径
 
     # Load config
@@ -278,6 +279,8 @@ if __name__ == "__main__":
     original_model, tokenizer, hf_sd = load_original_model(original_model_path, device)
 
     # Initialize ModelExecutor with correct paths
+    # hf_sd = original_model.state_dict()
+    # custom_model, _ = convert_qwen2_hf_to_litellama(checkpoints_dir, hf_sd, model_config, device=device)
     qwen2_test = Qwen2ModelInferTest(
         checkpoints_dir = my_model_path,
         tokenizer_path = original_model_path,  # Assuming tokenizer is at original_model_path
