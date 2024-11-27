@@ -45,7 +45,7 @@ llama3.2-1.5B-Instruct 模型流式输出结果测试：
 
 `Qwen2.5-3B` 模型（社区版本）流式输出结果测试：
 
-![流式输出](./images/qwen2.5-3b-output.gif)
+![流式输出](./images/output.gif)
 
 ## 如何使用
 
