@@ -4,7 +4,7 @@ The llama model inference lite framework by tirton.
 
 ## 特性
 
-- 支持最新的 llama3.2 模型推理，支持 top-p 采样, 支持流式输出。
+- 支持最新的 llama3、Qwen2.5 模型推理，支持 top-p 采样, 支持流式输出。
 - 支持 GQA、cuda graph 优化。
 - 支持 `flashattention1`、`flashattention2`、 `flashdecoding`。
 - 支持 kv cache 的高效动态管理（类似 `tokenattnetion`）。
@@ -39,9 +39,13 @@ triton-nightly                 3.0.0.post20240716052845
 
 ![和 transformers 库回答结果对比及精度验证](./images/acc_test.jpg)
 
-流式输出结果测试：
+llama3.2-1.5B-Instruct 模型流式输出结果测试：
 
 ![流式输出](./images/generate.gif)
+
+`Qwen2.5-3B` 模型（社区版本）流式输出结果测试：
+
+![流式输出](./images/qwen2.5-3b-output.gif)
 
 ## 如何使用
 
