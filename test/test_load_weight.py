@@ -123,7 +123,7 @@ def compare_model_weights(hf_sd, new_sd, model_config, rtol=1e-5, atol=1e-8):
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # 定义模型配置参数
+    # 定义 Qwen2.5-3B 模型权重路径和配置参数
     original_model_path = "/gemini/pretrain/Qwen2.5-3B"
     my_model_path = "/gemini/code/Qwen2.5-3B-Instruct/"
     json_file_path = os.path.join(original_model_path, 'config.json') # JSON 文件的路径

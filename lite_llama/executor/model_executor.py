@@ -154,9 +154,6 @@ class ModelExecutor:
         else:
             state_dict = None
 
-        # for name, param in state_dict.items():
-        #     print(f"参数名称: {name}, 形状: {param.shape}")
-
         torch.set_default_tensor_type(torch.cuda.HalfTensor)
         
         # 初始化自定义的 Llama 模型

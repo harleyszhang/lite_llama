@@ -97,7 +97,7 @@ class Qwen2Config:
     # 使用了 GQA 技术的 kv heads 头数
     num_kv_heads: Optional[int] = 2
 
-    rms_norm_eps: float = 1e-5
+    rms_norm_eps: float = 1e-6
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: float = 1000000.0
 

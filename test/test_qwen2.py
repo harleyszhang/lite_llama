@@ -127,114 +127,155 @@ def load_and_convert_to_custom_qwen2(model_config: Qwen2Config, pretrained_model
     
     return my_model, new_sd
 
-def decode_stage_compare(original_model, model_executor, tokenizer, input_text: str, device: str = "cuda"):
-    """
-    在解码阶段逐步比较原始模型和自定义模型的输出。
+class Qwen2ModelInferTest():
+    def __init__(
+        self, 
+        checkpoints_dir: str,
+        tokenizer_path: str,
+        max_batch_size = 32,
+        max_seq_len = 2048,
+        load_model: bool = True,
+        triton_weight: bool = True,
+        device: str = "cuda",
+    ):
+        self.model_executor = ModelExecutor.build(
+            checkpoints_dir = checkpoints_dir,
+            tokenizer_path = checkpoints_dir,
+            load_model = load_model,
+            max_batch_size = max_batch_size,
+            max_seq_len = max_seq_len,
+            triton_weight = triton_weight,
+            device = device,
+        )
 
-    Args:
-        original_model (Any): 原始模型。
-        custom_model (Any): 自定义模型。
-        tokenizer (Any): tokenizer。
-        input_text (str): 输入文本。
-        device (str, optional): 设备类型，默认是 "cuda"。
-    """
-    # 准备输入
-    inputs = tokenizer(input_text, return_tensors="pt").to(device)
-    input_ids = inputs['input_ids']
-    attention_mask = inputs.get('attention_mask', None)
+    def decode_stage_compare(
+        self, 
+        original_model, 
+        model_executor, 
+        tokenizer, 
+        prefill_output_token: str, 
+        device: str = "cuda"
+    ):
+        """
+        在解码阶段逐步比较原始模型和自定义模型的输出。
 
-    # 设置生成参数
-    max_new_tokens = 10
-    original_model.eval()
-    custom_model.eval()
+        Args:
+            original_model (Any): 原始模型。
+            custom_model (Any): 自定义模型。
+            tokenizer (Any): tokenizer。
+            input_text (str): 输入文本。
+            device (str, optional): 设备类型，默认是 "cuda"。
+        """
+        # 准备输入
+        inputs = tokenizer(prefill_output_token, return_tensors="pt").to(device)
+        input_ids = inputs['input_ids']
+        attention_mask = inputs.get('attention_mask', None)
 
-    # 初始化生成的 tokens
-    original_generated = input_ids
-    custom_generated = input_ids
+        # 设置生成参数
+        max_new_tokens = 10
+        original_model.eval()
+        custom_model.eval()
 
-    for step in tqdm(range(max_new_tokens), desc="Decoding steps"):
-        # 原始模型生成下一个 token
+        for step in tqdm(range(max_new_tokens), desc="Decoding steps"):
+            # 原始模型生成下一个 token
+            with torch.no_grad():
+                original_outputs = original_model(input_ids, 
+                                                attention_mask=attention_mask, 
+                                                output_hidden_states=True,
+                                                return_dict = True,
+                                                use_cache = True)
+                original_logits = original_outputs.logits[:, -1, :]  # 获取最后一个时间步的 logits
+                original_next_token = torch.argmax(original_logits, dim=-1, keepdim=True)
+
+            # 自定义模型生成下一个 token
+            with torch.no_grad():
+                custom_outputs_logits, select_index = model_executor.forward(input_ids, prev_pos = input_ids.shape[1] - 1) # 模型执行器的前向推理
+                probs = torch.softmax(original_logits[:, -1] / 0.6, dim=-1) # temperature = 0.6
+                custom_next_token = sample_top_p(probs, p = 0.9)
+
+            # 比较所有 layer 的隐藏层状态输出
+            # print("original_outputs.hidden_states length is", len(original_outputs.hidden_states)) # 17
+            # print("model_executor.model.hidden_states length is", len(model_executor.model.hidden_states)) # 17
+
+            layer_idxs = range(len(model_executor.model.hidden_states))
+
+            print(f"============== Step {step+1}: Layer Compares: ====================")
+            for index in tqdm(layer_idxs):
+                custom_layer_output = model_executor.model.hidden_states[index]
+                original_layer_output = original_outputs.hidden_states[index]
+
+                difference = torch.abs(custom_layer_output - original_layer_output).mean().item()
+                print(f"Difference at layer {index}: {difference}")
+
+            # # 比较 logits
+            logits_diff = torch.abs(original_logits - custom_outputs_logits).mean().item()
+            print(f"=========== Step {step+1}: Logits difference is: {logits_diff} ================")
+
+            # 更新 attention mask if necessary
+            if attention_mask is not None:
+                attention_mask = torch.cat([attention_mask, torch.ones((attention_mask.shape[0], 1), device=device, dtype=attention_mask.dtype)], dim=-1)
+
+        print("Decode stage comparison completed.")
+
+    def prefill_stage_compare(
+        self,
+        original_model, model_executor, tokenizer, 
+        input_text: str, device: str = "cuda"
+    ):
+        """填充阶段比较, 也会比较所有 layer 的隐藏层状态输出"""
+        print("\n############################ [Starting Prefill stage comparison] #################################")
+        # 准备输入
+        inputs = tokenizer(input_text, return_tensors="pt").to(device)
+        # 原始模型输出
         with torch.no_grad():
-            original_outputs = original_model(original_generated, 
-                                              attention_mask=attention_mask, 
-                                              output_hidden_states=True,
-                                              return_dict = True,
-                                              use_cache = True)
-            original_logits = original_outputs.logits[:, -1, :]  # 获取最后一个时间步的 logits
-            original_next_token = torch.argmax(original_logits, dim=-1, keepdim=True)
+            original_outputs = original_model(**inputs, output_hidden_states=True)
+        original_logits = original_outputs.logits
 
-        # 自定义模型生成下一个 token
+        # 自定义模型输出
+        tokens = inputs['input_ids']
         with torch.no_grad():
-            custom_outputs_logits, select_index = model_executor.forward(input_ids, prev_pos = original_generated.shape[1] - 1) # 模型执行器的前向推理
-            # custom_outputs_logits = custom_model(custom_generated, start_pos=original_generated.shape[1]-1,)
-            probs = torch.softmax(original_logits[:, -1] / 0.6, dim=-1) # temperature = 0.6
-            custom_next_token = sample_top_p(probs, p = 0.9)
+            custom_outputs, _ = model_executor.forward(tokens, prev_pos = 0)
+        custom_logits = custom_outputs
 
-        # 比较所有 layer 的隐藏层状态输出
-        # print("original_outputs.hidden_states length is", len(original_outputs.hidden_states)) # 17
-        # print("model_executor.model.hidden_states length is", len(model_executor.model.hidden_states)) # 17
+        # 比较 logits 输出
+        difference = torch.abs(original_logits - custom_logits).mean().item()
+        print(f"Prefill stage model output logits average difference between models: {difference}")
 
+        # 可以设置阈值，判断是否一致
+        if difference < 1e-1:
+            print("Models are consistent.")
+        else:
+            print("Models are not consistent.")
+
+        print(f"model_executor.model.hidden_states number: {len(model_executor.model.hidden_states)}, original_outputs.hidden_states number: {len(original_outputs.hidden_states)} ")
+        
         layer_idxs = range(len(model_executor.model.hidden_states))
-
-        print(f"============== Step {step+1}: Layer Compares: ====================")
-        for index in tqdm(layer_idxs):
+        for index in tqdm(layer_idxs): # 会比较所有 layer 的隐藏层状态输出
             custom_layer_output = model_executor.model.hidden_states[index]
             original_layer_output = original_outputs.hidden_states[index]
 
             difference = torch.abs(custom_layer_output - original_layer_output).mean().item()
             print(f"Difference at layer {index}: {difference}")
 
-        # # 比较 logits
-        logits_diff = torch.abs(original_logits - custom_outputs_logits).mean().item()
-        print(f"=========== Step {step+1}: Logits difference is: {logits_diff} ================")
+        # 获取最后一个 token 的 logits
+        next_token_logits = original_logits[:, -1, :]
 
-        # 更新 attention mask if necessary
-        if attention_mask is not None:
-            attention_mask = torch.cat([attention_mask, torch.ones((attention_mask.shape[0], 1), device=device, dtype=attention_mask.dtype)], dim=-1)
+        # 应用 softmax 转换为概率
+        probs = torch.softmax(next_token_logits, dim=-1)
 
-    print("Decode stage comparison completed.")
+        # 使用 nucleus sampling 或直接 argmax
+        next_token_id = torch.argmax(probs, dim=-1)
 
-def compare_models(original_model, model_executor, tokenizer, input_text: str, device: str = "cuda"):
-    # custom_model = model_executor
-    print("\n############################ [Starting Prefill stage comparison] #################################")
-    # 准备输入
-    inputs = tokenizer(input_text, return_tensors="pt").to(device)
-    # 原始模型输出
+        # 解码生成的 token
+        generated_text = tokenizer.decode(next_token_id)
+        print("生成的 token:", generated_text)
 
-    with torch.no_grad():
-        original_outputs = original_model(**inputs, output_hidden_states=True)
-    original_logits = original_outputs.logits
+        return generated_text
 
-    # 自定义模型输出
-    tokens = inputs['input_ids']
-    with torch.no_grad():
-        custom_outputs, select_index = model_executor.forward(tokens, prev_pos = 0)
-    custom_logits = custom_outputs
-
-    # 比较 logits 输出
-    difference = torch.abs(original_logits - custom_logits).mean().item()
-    print(f"Average difference between models: {difference}")
-
-    # 可以设置阈值，判断是否一致
-    if difference < 1e-2:
-        print("Models are consistent.")
-    else:
-        print("Models are not consistent.")
-
-    print(f"model_executor.model.hidden_states number: {len(model_executor.model.hidden_states)}, original_outputs.hidden_states number: {len(original_outputs.hidden_states)} ")
-    
-    # 比较所有 layer 的隐藏层状态输出
-    layer_idxs = range(len(model_executor.model.hidden_states))
-    for index in tqdm(layer_idxs):
-        custom_layer_output = model_executor.model.hidden_states[index]
-        original_layer_output = original_outputs.hidden_states[index]
-
-        difference = torch.abs(custom_layer_output - original_layer_output).mean().item()
-        print(f"Difference at layer {index}: {difference}")
-
-    # 解码阶段比较
-    print("\n############################ [Starting Decode stage comparison] #################################")
-    decode_stage_compare(original_model, model_executor, tokenizer, input_text, device)
+    def compare_models(self, original_model, tokenizer, input_text: str, device: str = "cuda"):
+        prefill_output_token = self.prefill_stage_compare(original_model, self.model_executor, tokenizer, input_text, device)
+        
+        self.decode_stage_compare(original_model, self.model_executor, tokenizer, prefill_output_token, device)
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -247,24 +288,17 @@ if __name__ == "__main__":
     # 加载原始模型
     original_model, tokenizer, hf_sd = load_original_llama(original_model_path, device)
     custom_model = Qwen2Model(model_config)
-    
-    for name, param in custom_model.named_parameters():
-        print(name, param.shape)
 
     # 加载自定义模型
     # custom_model, _ = load_and_convert_to_custom_qwen2(model_config, original_model, device)
-    
-    model_executor = ModelExecutor.build(
-            checkpoints_dir = my_model_path,
-            tokenizer_path = my_model_path,
-            load_model = True,
-            max_batch_size = 64,
-            max_seq_len = 2048,
-            triton_weight = True,
-            device = device
-        )
+    Qwen2ModelInferTest(my_model_path,my_model_path,
+        max_batch_size = 64,
+        max_seq_len = 2048,
+        load_model = True,
+        triton_weight = True,
+        device = "cuda",
+    ):
     # 测试文本
     test_text = "Once upon a time in a distant land,"
-
     # 比较模型输出
     compare_models(original_model, model_executor, tokenizer, test_text, device)
