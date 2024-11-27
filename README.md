@@ -129,8 +129,11 @@ INFO:lite_llama.generate:Decode stage tokens per second : 217.84 tokens/s
 
 ## Acknowledgement
 
+- [meta-llama/llama-models](https://github.com/meta-llama/llama-models/tree/main)
 - [transformers](https://github.com/huggingface/transformers)
 - [Liger-Kernel](https://github.com/linkedin/Liger-Kernel/tree/main)
 - [kernl](https://github.com/ELS-RD/kernl/tree/main)
 - [unsloth](https://github.com/unslothai/unsloth/tree/main)
 - [openai-triton](https://triton-lang.org/main/getting-started/tutorials/)
+- [lightllm](https://github.com/ModelTC/lightllm)
+- [vllm](https://github.com/vllm-project/vllm)
