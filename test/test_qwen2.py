@@ -1,4 +1,4 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen2ForCausalLM
 import torch
 from tqdm.auto import tqdm
 import json, sys, os
@@ -53,7 +53,7 @@ def load_config_from_json(json_file_path: str, device: str="cuda") -> Qwen2Confi
 
 def load_original_model(model_name_or_path: str, device: str = "cuda"):
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-    model = AutoModelForCausalLM.from_pretrained(
+    model = Qwen2ForCausalLM.from_pretrained(
         model_name_or_path,
         torch_dtype=torch.float16 if device == "cuda" else torch.float32,
         device_map="auto" if device == "cuda" else None,
@@ -128,15 +128,6 @@ class Qwen2ModelInferTest():
             print(f"Logits shape mismatch: original {original_logits.shape}, custom {custom_logits.shape}")
             return None
 
-        difference = torch.abs(original_logits - custom_logits).mean().item()
-        print(f"Prefill stage model output logits average difference between models: {difference}")
-
-        # Set threshold
-        if difference < 1e-1:
-            print("Models are consistent.")
-        else:
-            print("Models are not consistent.")
-
         # Compare hidden states
         original_hidden_states = original_outputs.hidden_states  # Tuple of [B, S, D]
         custom_hidden_states = model_executor.model.hidden_states  # Assuming list of [B, S, D]
@@ -158,11 +149,13 @@ class Qwen2ModelInferTest():
             difference = torch.abs(custom_layer_output - original_layer_output).mean().item()
             print(f"Difference at layer {index}: {difference}")
 
-        # Sampling next token
-        # Get logits for last token
-        original_next_token_logits = original_logits[:, -1, :]  # [B, V]
-        probs = torch.softmax(original_next_token_logits, dim=-1)  # [B, V]
+        # Compare logits        
+        logits_diff = torch.abs(original_logits - custom_logits).mean().item()
+        print(f"Prefill stage model Logits difference: {logits_diff}")
 
+        # Sampling next token
+        original_next_token_logits = original_logits[:, -1, :]  # [B, V] Get logits for last token
+        probs = torch.softmax(original_next_token_logits, dim=-1)  # [B, V]
         # Sample next token
         next_token_id = torch.argmax(probs, dim=-1)  # [B]
 
@@ -196,26 +189,41 @@ class Qwen2ModelInferTest():
         # 初始化生成的 tokens
         original_generated = input_ids
         custom_next_token = input_ids
-
+        original_next_token = input_ids
+        
+        # 初始化 past_key_values 为 None
+        past_key_values = None
         for step in tqdm(range(max_new_tokens), desc="Decoding steps"):
             # 1. Original model generates next token
             with torch.no_grad():
-                original_outputs = original_model(original_generated, 
-                                                  attention_mask=attention_mask, 
+                original_outputs = original_model(original_next_token, 
+                                                  past_key_values=past_key_values,
                                                   output_hidden_states=True, 
                                                   return_dict=True, 
                                                   use_cache=True
                                                 )
                 original_logits = original_outputs.logits[:, -1, :]  # [B, V]
-                original_next_token = torch.argmax(original_logits, dim=-1, keepdim=True)  # [B, 1]
+
+                temperature = 0.6 # Apply temperature # custom_outputs_logits: [B, V]
+                probs = torch.softmax(original_logits / temperature, dim=-1)  # [B, V]
+                original_next_token = sample_top_p(probs, p=0.9)  # Sample next token [B, 1]
+                # original_next_token = torch.argmax(original_logits, dim=-1, keepdim=True)  # [B, 1]
 
             # 2. Custom model generates next token
             with torch.no_grad():
                 custom_outputs_logits, _ = model_executor.forward(custom_next_token, 
                                                                   prev_pos = original_generated.shape[1] - 1
                                                                 )
+                # 确保 custom_outputs_logits 是 [B, V]
+                if custom_outputs_logits.dim() == 3:
+                    custom_logits = custom_outputs_logits[:, -1, :]  # [B, V]
+                elif custom_outputs_logits.dim() == 2:
+                    custom_logits = custom_outputs_logits  # [B, V]
+                else:
+                    raise ValueError(f"Unexpected custom_outputs_logits dimensions: {custom_outputs_logits.dim()}")
+                
                 temperature = 0.6 # Apply temperature # custom_outputs_logits: [B, V]
-                probs = torch.softmax(custom_outputs_logits / temperature, dim=-1)  # [B, V]
+                probs = torch.softmax(custom_logits / temperature, dim=-1)  # [B, V]
                 custom_next_token = sample_top_p(probs, p=0.9)  # Sample next token [B, 1]
 
             # Compare hidden states
@@ -244,7 +252,7 @@ class Qwen2ModelInferTest():
 
             # 生成下一个 token, 模型内部已经集成了过去的 kv cache 
             original_generated = torch.cat([original_generated, original_next_token], dim=-1)
-            custom_generated = torch.cat([custom_generated, custom_next_token], dim=-1)
+            past_key_values = original_outputs.past_key_values # 更新 past_key_values
             
             # Update attention_mask if necessary
             if attention_mask is not None:
