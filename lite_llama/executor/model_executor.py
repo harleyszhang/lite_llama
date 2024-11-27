@@ -89,7 +89,12 @@ class ModelExecutor:
                 state_dict = hf_sd
                 print("Load Triton weight directly!")
             else:
-                state_dict = convert_llama_hf_to_litellama(checkpoints_dir, hf_sd, model_args) # 转换权重名称
+                if model_args.model_type == "llama":
+                    state_dict = convert_llama_hf_to_litellama(checkpoints_dir, hf_sd, model_args) # 转换权重名称
+                elif model_args.model_type == "qwen2":
+                    state_dict = convert_llama_hf_to_litellama(checkpoints_dir, hf_sd, model_args) # 转换权重名称
+                else:
+                    print("Error, unsupported model!")
         else:
             state_dict = None
 
