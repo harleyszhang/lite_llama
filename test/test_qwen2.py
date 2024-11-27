@@ -1,4 +1,4 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen2ForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen2ForCausalLM, LlamaForCausalLM
 import torch
 from tqdm.auto import tqdm
 import json, sys, os
@@ -37,7 +37,9 @@ def load_original_llama(model_name_or_path: str, device: str = "cuda"):
         device_map="cuda",
     )
     model.to(device)
-    return model, tokenizer
+    hf_sd = model.state_dict()
+
+    return model, tokenizer, hf_sd
 
 def load_custom_llam(model_name_or_path: str, model_config: Qwen2Config, device: str = "cuda"):
     checkpoints = sorted(Path(model_name_or_path).glob("*.pth"))
@@ -50,8 +52,9 @@ def load_custom_llam(model_name_or_path: str, model_config: Qwen2Config, device:
 
     model = Qwen2Model(model_config).to(device)
     model.load_state_dict(state_dict, strict=True)
+    new_sd = model.state_dict()
 
-    return model
+    return model, new_sd
 
 def load_and_convert_to_custom_qwen2(model_config: Qwen2Config, pretrained_model: AutoModelForCausalLM, device: str = "cuda"):
     # 将预训练模型的权重映射到自定义模型
@@ -60,7 +63,7 @@ def load_and_convert_to_custom_qwen2(model_config: Qwen2Config, pretrained_model
     mapping = {
         "model.norm.weight": "norm_weight", 
         "model.embed_tokens.weight": "embed_tokens.weight",
-        # "model.embed_tokens.weight": "lm_head.weight",
+        "lm_head.weight": "lm_head_weight",
     }
 
     # 映射层
@@ -98,7 +101,7 @@ def load_and_convert_to_custom_qwen2(model_config: Qwen2Config, pretrained_model
         if custom_key is not None:
             new_sd[custom_key] = tensor # 浅拷贝
         else:
-            print(f"custom_key: {custom_key}")
+            print(f"custom_key: {custom_key}, hf_key: {hf_key}")
             # 如果某些权重不需要映射，可以选择忽略或处理
             pass  # 忽略未映射的权重
     
@@ -106,13 +109,13 @@ def load_and_convert_to_custom_qwen2(model_config: Qwen2Config, pretrained_model
 
     # 打印预训练模型的参数名称
     print("Pretrained model parameters:")
-    for name in hf_sd.keys():
-        print(name)
+    for name, parameters in hf_sd.items():
+        print(name, parameters.shape)
 
     # 打印自定义模型的参数名称
     print("Custom model parameters:")
-    for name in new_sd.keys():
-        print(name)
+    for name, parameters in new_sd.items():
+        print(name, parameters.shape)
 
     # 保存转换好的自定义权重
     torch.save(new_sd, "/gemini/code/Qwen2.5-3B-Instruct/my_qwen2.5-3B.pth")
@@ -122,7 +125,7 @@ def load_and_convert_to_custom_qwen2(model_config: Qwen2Config, pretrained_model
     my_model = Qwen2Model(model_config).to(device)
     my_model.load_state_dict(new_sd, strict=True)
     
-    return my_model
+    return my_model, new_sd
 
 def decode_stage_compare(original_model, model_executor, tokenizer, input_text: str, device: str = "cuda"):
     """
@@ -162,14 +165,14 @@ def decode_stage_compare(original_model, model_executor, tokenizer, input_text: 
 
         # 自定义模型生成下一个 token
         with torch.no_grad():
-            custom_outputs_logits, select_index = model_executor.forward(input_ids, start_pos=original_generated.shape[1] - 1) # 模型执行器的前向推理
+            custom_outputs_logits, select_index = model_executor.forward(input_ids, prev_pos = original_generated.shape[1] - 1) # 模型执行器的前向推理
             # custom_outputs_logits = custom_model(custom_generated, start_pos=original_generated.shape[1]-1,)
             probs = torch.softmax(original_logits[:, -1] / 0.6, dim=-1) # temperature = 0.6
             custom_next_token = sample_top_p(probs, p = 0.9)
 
         # 比较所有 layer 的隐藏层状态输出
         # print("original_outputs.hidden_states length is", len(original_outputs.hidden_states)) # 17
-        # print("model_executor.model.hidden_states length is", len(model_executor.model.hidden_states))         # 17
+        # print("model_executor.model.hidden_states length is", len(model_executor.model.hidden_states)) # 17
 
         layer_idxs = range(len(model_executor.model.hidden_states))
 
@@ -197,6 +200,7 @@ def compare_models(original_model, model_executor, tokenizer, input_text: str, d
     # 准备输入
     inputs = tokenizer(input_text, return_tensors="pt").to(device)
     # 原始模型输出
+
     with torch.no_grad():
         original_outputs = original_model(**inputs, output_hidden_states=True)
     original_logits = original_outputs.logits
@@ -204,7 +208,7 @@ def compare_models(original_model, model_executor, tokenizer, input_text: str, d
     # 自定义模型输出
     tokens = inputs['input_ids']
     with torch.no_grad():
-        custom_outputs = model_executor(tokens, start_pos=0)
+        custom_outputs, select_index = model_executor.forward(tokens, prev_pos = 0)
     custom_logits = custom_outputs
 
     # 比较 logits 输出
@@ -241,14 +245,15 @@ if __name__ == "__main__":
     model_config = load_config_from_json(json_file_path, device) # 加载配置
 
     # 加载原始模型
-    original_model, tokenizer = load_original_llama(original_model_path, device)
+    original_model, tokenizer, hf_sd = load_original_llama(original_model_path, device)
     custom_model = Qwen2Model(model_config)
     
     for name, param in custom_model.named_parameters():
         print(name, param.shape)
 
     # 加载自定义模型
-    # custom_model = load_and_convert_to_custom_qwen2(model_config, original_model, device)
+    # custom_model, _ = load_and_convert_to_custom_qwen2(model_config, original_model, device)
+    
     model_executor = ModelExecutor.build(
             checkpoints_dir = my_model_path,
             tokenizer_path = my_model_path,

@@ -3,6 +3,20 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from lite_llama.models.llama import *
 from torch_rope import apply_rotary_emb
 
+def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """同一组的 kv cache 复制多份"""
+    batch_size, seq_len, num_kv_heads, head_dim = x.shape
+    if n_rep == 1:
+        return x
+    return (
+        # (B, Seq_Len, num_kv_heads, 1, Head_Dim)
+        x[:, :, :, None, :]
+        # (B, Seq_Len, num_kv_heads, N_Rep, Head_Dim)
+        .expand(batch_size, seq_len, num_kv_heads, n_rep, head_dim)
+        # (B, Seq_Len, num_kv_heads * N_Rep, Head_Dim)
+        .reshape(batch_size, seq_len, num_kv_heads * n_rep, head_dim)
+    )
+
 class ModelArgs:
     def __init__(self):
         self.dim = 64  # 模型维度

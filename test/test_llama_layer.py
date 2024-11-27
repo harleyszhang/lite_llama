@@ -1,10 +1,11 @@
 # test_model.py
 
 import torch
-import pytest
+import pytest, os, sys
 from dataclasses import dataclass
-from kernels import fused_linear, rmsnorm
-from lite_llama.lite_llama.models.llama import ModelArgs, FusedAttention, FusedMLP, LlamaDecoderLayer, Llama
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
+from lite_llama.kernels import fused_linear, rmsnorm
+from lite_llama.models.llama import ModelArgs, FusedAttention, FusedMLP, LlamaDecoderLayer, Llama
 
 @dataclass
 class TestArgs:
