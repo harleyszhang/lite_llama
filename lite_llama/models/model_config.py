@@ -140,3 +140,62 @@ class Qwen2Config:
                 # 如果属性不存在，可以选择存储在 extra_args 中，或者直接添加
                 setattr(self, key, value)
         self.head_dim = self.hidden_size // self.num_heads
+
+@dataclass
+class CLIPVisionConfig():
+    """
+    This is the configuration class to store the configuration of a [`CLIPVisionModel`]. It is used to instantiate a
+    CLIP vision encoder according to the specified arguments, defining the model architecture. Instantiating a
+    configuration with the defaults will yield a similar configuration to that of the vision encoder of the CLIP
+    [openai/clip-vit-base-patch32](https://huggingface.co/openai/clip-vit-base-patch32) architecture.
+    """
+    hidden_size: int = 768,
+    intermediate_size: int = 3072,
+    projection_dim: int = 512,
+    num_layers: int = 12, # encoder_layer 层数
+    num_heads: int = 12,  # attention 模块的头数目
+    num_channels: int = 3,
+    image_size: int = 224,
+    patch_size: int = 32,
+    hidden_act: int = "quick_gelu",
+    layer_norm_eps: int = 1e-5,
+    attention_dropout: int = 0.0,
+    initializer_range: int = 0.02,
+    initializer_factor: int = 1.0,
+
+    model_type: str = "clip_vision_model"
+
+    def __init__(self, config_dict: Optional[Dict[str, Any]] = None, **kwargs):
+        self.sliding_window = self.sliding_window if self.use_sliding_window else None
+
+        # 首先，设置默认属性值
+        for field_name, field_def in self.__dataclass_fields__.items():
+            setattr(self, field_name, field_def.default)
+
+        # 如果提供了 config_dict，从中更新属性, clip 模型的配置文件包含 text 和 vision 配置
+        if config_dict is not None:
+            # get the vision config dict if we are loading from CLIPConfig
+            if config_dict.get("model_type") == "clip":
+                config_dict = config_dict["vision_config"]
+            else:
+                print("Error! clip model config file not include vision config!")
+
+            for key, value in config_dict.items():
+                # 处理名称映射
+                if key == 'num_attention_heads':
+                    self.num_heads = value
+                elif key == 'num_hidden_layers':
+                    self.num_layers = value
+                elif key == 'num_key_value_heads':
+                    self.num_kv_heads = value
+                else:
+                    setattr(self, key, value)
+
+        # 处理额外的关键字参数
+        for key, value in kwargs.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+            else:
+                # 如果属性不存在，可以选择存储在 extra_args 中，或者直接添加
+                setattr(self, key, value)
+        self.head_dim = self.hidden_size // self.num_heads
