@@ -187,8 +187,7 @@ class Qwen2Attention(nn.Module):
                 atten_info, layer_index
             )
 
-        # 进行张量矩阵乘法, 需要对原始的 o_proj_weight 权重进行转置
-        # attn_output shape is [batch_size, seq_len, hidden_size]
+        # 进行张量矩阵乘法, 需要对原始的 o_proj_weight 权重进行转置, attn_output shape is [batch_size, seq_len, hidden_size]
         output = torch.matmul(attn_output, self.o_proj_weight.t())
         return output
     
@@ -275,7 +274,7 @@ class Qwen2Model(nn.Module):
         self.lm_head_weight = nn.Parameter(torch.rand(self.vocab_size, self.hidden_size, dtype=torch.float16))
         
         self.layers = nn.ModuleList(
-            [Qwen2DecoderLayer(config) for layer_id in range(config.num_layers)]
+            [Qwen2DecoderLayer(config) for _ in range(config.num_layers)]
         )
 
     def forward(self, tokens: torch.Tensor, start_pos, atten_info):

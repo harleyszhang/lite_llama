@@ -201,14 +201,23 @@ class Llama(nn.Module):
             [LlamaDecoderLayer(config) for _ in range(config.num_layers)]
         )
 
-    def forward(self, tokens: torch.Tensor, start_pos, atten_info):
+    def forward(
+        self, input_ids: torch.Tensor, start_pos, atten_info, 
+        positions: torch.Tensor = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ):
         self.hidden_states = []
-        _, seq_len = tokens.shape
-        h = self.embed_tokens(tokens)
+        _, seq_len = input_ids.shape
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            hidden_states = self.get_input_embeddings(input_ids)
+        
+        # h = self.embed_tokens(input_ids)
 
         cache_position = torch.arange(start_pos, start_pos + seq_len, device=h.device)
         position_ids = cache_position.unsqueeze(0)
-        position_embeddings = self.rotary_emb(h, position_ids)
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
         
         for i, layer in enumerate(self.layers): # Consecutively apply all the encoder layers
             self.hidden_states.append(h)
@@ -219,3 +228,6 @@ class Llama(nn.Module):
         output = self.lm_head(h)
 
         return output
+    
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
