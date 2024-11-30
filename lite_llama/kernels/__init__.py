@@ -1,6 +1,7 @@
 from .rmsnorm import rmsnorm
 from .layernorm import layernorm
 from .activations import (gelu, relu, leaky_relu, tanh)
+from .activation_layers import ACT2FN
 from .flashattention import flash_attention_v1
 from .flashattentionv2 import flash_attention_v2
 from .flashdecoding import flash_decoding
