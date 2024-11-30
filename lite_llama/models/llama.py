@@ -203,7 +203,7 @@ class Llama(nn.Module):
 
     def forward(
         self, input_ids: torch.Tensor, start_pos, atten_info, 
-        positions: torch.Tensor = None,
+        position_ids: torch.Tensor = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ):
         self.hidden_states = []

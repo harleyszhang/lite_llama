@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from typing import Any, Optional, Tuple, Union
 
-from .activations import ACT2FN
+from ..kernels.activation_layers import ACT2FN
 from .model_config import CLIPVisionConfig
 from ..kernels import *
 

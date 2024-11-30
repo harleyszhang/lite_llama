@@ -56,6 +56,8 @@ class LlamaConfig:
                     self.num_layers = value
                 elif key == 'num_key_value_heads':
                     self.num_kv_heads = value
+                elif key == 'mm_hidden_size':
+                    self.hidden_size = value
                 else:
                     setattr(self, key, value)
 
@@ -129,6 +131,8 @@ class Qwen2Config:
                     self.num_layers = value
                 elif key == 'num_key_value_heads':
                     self.num_kv_heads = value
+                elif key == 'max_length':
+                    self.max_seq_len = value
                 else:
                     setattr(self, key, value)
 
