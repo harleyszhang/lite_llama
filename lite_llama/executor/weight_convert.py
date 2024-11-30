@@ -89,9 +89,9 @@ def convert_qwen2_hf_to_litellama(
 
     return new_sd
 
-def convert_llama_hf_to_litellama(checkpoints_dir, hf_sd, model_config):
+def convert_llama_torch_to_litellama(checkpoints_dir, hf_sd, model_config):
     """
-    将 Hugging Face 模型的权重字典转换为自定义模型的权重字典。
+    将 pytorch bin 格式的模型的权重字典转换为自定义模型的权重字典。
 
     参数:
         checkpoints_dir: Hugging Face 模型的目录
@@ -116,8 +116,59 @@ def convert_llama_hf_to_litellama(checkpoints_dir, hf_sd, model_config):
         "layers.{i}.feed_forward.w1.weight": "layers.{i}.feed_forward.gate_proj.weight",
         "layers.{i}.feed_forward.w3.weight": "layers.{i}.feed_forward.up_proj.weight",
         "layers.{i}.feed_forward.w2.weight": "layers.{i}.feed_forward.down_proj.weight",
-        "layers.{i}.attention_norm.weight": "layers.{i}.attention_norm.weight",
-        "layers.{i}.ffn_norm.weight": "layers.{i}.ffn_norm.weight",
+
+        "layers.{i}.attention_norm.weight": "layers.{i}.attention_norm_weight",
+        "layers.{i}.ffn_norm.weight": "layers.{i}.ffn_norm_weight",
+    }
+
+    # 根据 Transformer 层数量生成映射
+    for i in range(model_config.n_layers):
+        for hf_key, custom_key in layers.items():
+            # 左边是 hf 权重参数字典 key, 右边是自定义模型权重参数字典 key
+            mapping[hf_key.format(i=i)] = custom_key.format(i=i)
+
+    # 创建新的状态字典
+    new_sd = {}
+    for hf_key, tensor in tqdm(hf_sd.items(), desc="Mapping weights"):
+        if hf_key in mapping:
+            new_sd[custom_key] = tensor
+        else:
+            print(f"Warning: Unmapped key {hf_key}")
+    
+    build_new_weight_dir(checkpoints_dir, new_sd)
+    return new_sd
+
+def convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, model_config):
+    """
+    将 Hugging Face 模型的权重字典转换为自定义模型的权重字典。
+
+    参数:
+        checkpoints_dir: Hugging Face 模型的目录
+        hf_sd (dict): Hugging Face 模型的状态字典。
+        model_config (LlamaConfig): 自定义模型的配置参数。
+
+    返回:
+        dict: 转换后的状态字典。
+    """
+    mapping = {
+        "language_model.model.embed_tokens.weight": "language_model.embed_tokens.weight",
+        "language_model.model.norm.weight": "language_model.norm_weight", 
+        "language_model.model.lm_head.weight": "language_model.lm_head.weight",
+    }
+
+    layers = {
+        # key 是原始权重值, value 是自定义模型结构权重参数
+        "language_model.model.layers.{i}.attention.wq.weight": "language_model.layers.{i}.attention.wq.weight",
+        "language_model.model.layers.{i}.attention.wk.weight": "language_model.layers.{i}.attention.wk.weight",
+        "language_model.model.layers.{i}.attention.wv.weight": "language_model.layers.{i}.attention.wv.weight",
+        "language_model.model.layers.{i}.attention.wo.weight": "language_model.layers.{i}.attention.wo.weight",
+
+        "language_model.model.layers.{i}.feed_forward.gate_proj.weight": "language_model.layers.{i}.feed_forward.gate_proj.weight",
+        "language_model.model.layers.{i}.feed_forward.up_proj.weight": "language_model.layers.{i}.feed_forward.up_proj.weight",
+        "language_model.model.layers.{i}.feed_forward.down_proj.weight": "language_model.layers.{i}.feed_forward.down_proj.weight",
+
+        "language_model.model.layers.{i}.input_layernorm.weight": "language_model.layers.{i}.attention_norm_weight",
+        "language_model.model.layers.{i}.post_attention_layernorm.weight": "language_model.layers.{i}.ffn_norm_weight",
     }
 
     # 根据 Transformer 层数量生成映射

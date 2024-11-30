@@ -203,3 +203,155 @@ class CLIPVisionConfig():
                 # 如果属性不存在，可以选择存储在 extra_args 中，或者直接添加
                 setattr(self, key, value)
         self.head_dim = self.hidden_size // self.num_heads
+
+from dataclasses import dataclass, field
+from typing import List, Optional, Dict, Any
+import json
+
+@dataclass
+class TextConfig:
+    _name_or_path: str
+    architectures: List[str]
+    max_position_embeddings: int
+    model_type: str
+    rms_norm_eps: float
+    torch_dtype: str
+    vocab_size: int
+
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> 'TextConfig':
+        return TextConfig(
+            _name_or_path=data.get("_name_or_path"),
+            architectures=data.get("architectures", []),
+            max_position_embeddings=data.get("max_position_embeddings", 512),
+            model_type=data.get("model_type", "llama"),
+            rms_norm_eps=data.get("rms_norm_eps", 1e-5),
+            torch_dtype=data.get("torch_dtype", "float32"),
+            vocab_size=data.get("vocab_size", 30522)
+        )
+
+@dataclass
+class VisionConfig:
+    hidden_size: int
+    image_size: int
+    intermediate_size: int
+    model_type: str
+    num_attention_heads: int
+    num_hidden_layers: int
+    patch_size: int
+    projection_dim: int
+    vocab_size: int
+
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> 'VisionConfig':
+        return VisionConfig(
+            hidden_size=data.get("hidden_size", 768),
+            image_size=data.get("image_size", 224),
+            intermediate_size=data.get("intermediate_size", 3072),
+            model_type=data.get("model_type", "clip_vision_model"),
+            num_attention_heads=data.get("num_attention_heads", 12),
+            num_hidden_layers=data.get("num_hidden_layers", 12),
+            patch_size=data.get("patch_size", 16),
+            projection_dim=data.get("projection_dim", 768),
+            vocab_size=data.get("vocab_size", 1000)
+        )
+
+@dataclass
+class LlavaConfig:
+    architectures: List[str]
+    ignore_index: int
+    image_token_index: int
+    model_type: str
+    pad_token_id: int
+    projector_hidden_act: str
+    text_config: TextConfig
+    tie_word_embeddings: bool
+    torch_dtype: str
+    transformers_version: str
+    vision_config: VisionConfig
+    vision_feature_layer: int
+    vision_feature_select_strategy: str
+    vocab_size: int
+
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> 'LlavaConfig':
+        text_cfg = TextConfig.from_dict(data.get("text_config", {}))
+        vision_cfg = VisionConfig.from_dict(data.get("vision_config", {}))
+        return LlavaConfig(
+            architectures=data.get("architectures", []),
+            ignore_index=data.get("ignore_index", -100),
+            image_token_index=data.get("image_token_index", 32000),
+            model_type=data.get("model_type", "llava"),
+            pad_token_id=data.get("pad_token_id", 32001),
+            projector_hidden_act=data.get("projector_hidden_act", "gelu"),
+            text_config=text_cfg,
+            tie_word_embeddings=data.get("tie_word_embeddings", False),
+            torch_dtype=data.get("torch_dtype", "float16"),
+            transformers_version=data.get("transformers_version", "4.36.0.dev0"),
+            vision_config=vision_cfg,
+            vision_feature_layer=data.get("vision_feature_layer", -2),
+            vision_feature_select_strategy=data.get("vision_feature_select_strategy", "default"),
+            vocab_size=data.get("vocab_size", 32064)
+        )
+
+    @classmethod
+    def from_json(cls, json_path: str) -> 'LlavaConfig':
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+        return cls.from_dict(data)
+    
+
+def test_llava_config():
+    # 示例配置 JSON 字符串
+    config_json = """
+    {
+      "architectures": [
+        "LlavaForConditionalGeneration"
+      ],
+      "ignore_index": -100,
+      "image_token_index": 32000,
+      "model_type": "llava",
+      "pad_token_id": 32001,
+      "projector_hidden_act": "gelu",
+      "text_config": {
+        "_name_or_path": "lmsys/vicuna-7b-v1.5",
+        "architectures": [
+          "LlamaForCausalLM"
+        ],
+        "max_position_embeddings": 4096,
+        "model_type": "llama",
+        "rms_norm_eps": 1e-05,
+        "torch_dtype": "float16",
+        "vocab_size": 32064
+      },
+      "tie_word_embeddings": false,
+      "torch_dtype": "float16",
+      "transformers_version": "4.36.0.dev0",
+      "vision_config": {
+        "hidden_size": 1024,
+        "image_size": 336,
+        "intermediate_size": 4096,
+        "model_type": "clip_vision_model",
+        "num_attention_heads": 16,
+        "num_hidden_layers": 24,
+        "patch_size": 14,
+        "projection_dim": 768,
+        "vocab_size": 32000
+      },
+      "vision_feature_layer": -2,
+      "vision_feature_select_strategy": "default",
+      "vocab_size": 32064
+    }
+    """
+
+    # 将 JSON 字符串解析为字典
+    config_dict = json.loads(config_json)
+
+    # 从字典创建 LlavaConfig 实例
+    llava_config = LlavaConfig.from_dict(config_dict)
+
+    # 打印配置以验证
+    print(llava_config)
+
+if __name__ == "__main__":
+    main()

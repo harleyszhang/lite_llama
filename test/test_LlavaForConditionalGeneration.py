@@ -1,13 +1,10 @@
 from PIL import Image
-import requests
+import requests,torch
 from transformers import AutoProcessor, LlavaForConditionalGeneration, LlavaConfig, \
                         LlavaNextConfig, LlavaNextForConditionalGeneration
-import torch
-
-from transformers import AutoProcessor, LlavaNextConfig, LlavaNextForConditionalGeneration
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 
-model_path = "/gemini/code/llava-hf/llama3-llava-next-8b-hf"
+model_path = "/gemini/code/liuhaotian/llava-v1.5-7b"
 
 # 使用 init_empty_weights 初始化空模型
 # with init_empty_weights():
@@ -17,7 +14,7 @@ model_path = "/gemini/code/llava-hf/llama3-llava-next-8b-hf"
 # # 使用 load_checkpoint_and_dispatch 分配权重
 # model = load_checkpoint_and_dispatch(model, model_path, device_map="auto")
 
-model = LlavaNextForConditionalGeneration.from_pretrained(
+model = LlavaForConditionalGeneration.from_pretrained(
     model_path, 
     torch_dtype=torch.float16, 
     low_cpu_mem_usage=True,
@@ -30,10 +27,17 @@ image = Image.open(requests.get(url, stream=True).raw)
 
 inputs = processor(images=image, text=prompt, return_tensors="pt")
 
+# 显式移动每个张量到 CUDA
+inputs = {k: v.to("cuda") for k, v in inputs.items()}
+
 # Generate
 generate_ids = model.generate(**inputs, max_new_tokens=30)
 print(processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0])
-
+"""
+USER: 
+What's the content of the image?
+ASSISTANT: The image shows a street scene with a red stop sign on the left side. In the background, there is a traditional Chinese-style archway with red
+"""
 print("模型结构", model)
 # 打印模型的简单摘要
 print(f"模型总参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")

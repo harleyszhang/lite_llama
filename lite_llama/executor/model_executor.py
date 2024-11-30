@@ -5,13 +5,14 @@ from tqdm import tqdm
 
 from .mem_manager import ComputeMaxAvailableBlocks, KVCacheMemoryManager
 
-from ..models.model_config import LlamaConfig, Qwen2Config
+from ..models.model_config import LlamaConfig, Qwen2Config, LlavaConfig
 from ..models.llama import Llama
 from ..models.qwen2 import Qwen2Model
+from ..models.llava import LlavaLlama
 
 from .cuda_graph import ModelRunner
 from .executor_struct import AttentionInfo, ModelRunnerConfig
-from .weight_convert import convert_llama_hf_to_litellama
+from .weight_convert import convert_llama_torch_to_litellama, convert_llavallama_hf_to_litellama, convert_qwen2_hf_to_litellama
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +91,11 @@ class ModelExecutor:
                 print("Load Triton weight directly!")
             else:
                 if model_args.model_type == "llama":
-                    state_dict = convert_llama_hf_to_litellama(checkpoints_dir, hf_sd, model_args) # 转换权重名称
+                    state_dict = convert_llama_torch_to_litellama(checkpoints_dir, hf_sd, model_args) # 转换权重名称
                 elif model_args.model_type == "qwen2":
-                    state_dict = convert_llama_hf_to_litellama(checkpoints_dir, hf_sd, model_args) # 转换权重名称
+                    state_dict = convert_qwen2_hf_to_litellama(checkpoints_dir, hf_sd, model_args) # 转换权重名称
+                elif model_args.model_type == "llava":
+                    state_dict = convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, model_args) # 转换权重名称
                 else:
                     print("Error, unsupported model!")
         else:
@@ -105,6 +108,8 @@ class ModelExecutor:
             model = Llama(model_args).to(device)
         elif model_args.model_type == "qwen2":
             model = Qwen2Model(model_args).to(device) # 将模型移动到设备并转换为半精度
+        elif model_args.model_type == "llava":
+            model = LlavaLlama(model_args).to(device) # 将模型移动到设备并转换为半精度
         else:
             print("Error, unsupported model!")
 
@@ -141,7 +146,13 @@ class ModelExecutor:
                 max_seq_len = max_seq_len,
                 device=device
             )
-
+        elif params["model_type"] == "llava":
+            model_config: LlavaConfig = LlavaConfig(
+                params, 
+                max_batch_size = max_batch_size,
+                max_seq_len = max_seq_len,
+                device=device
+            )
         return model_config
 
     def __init__(self, tokenizer:AutoTokenizer, model_config, model, compiled_model=True, device="cuda"):
