@@ -202,7 +202,6 @@ class FusedMLP(nn.Module):
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False, dtype=torch.float16)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False, dtype=torch.float16)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False, dtype=torch.float16) # torch.float32 cpu
-        # print("self.down_proj dtype and device is ", self.down_proj.weight.dtype, self.down_proj.weight.device)
 
     def forward(self, x):
         # print("FusedMLP input shape is ", x.shape)
@@ -273,12 +272,7 @@ class Qwen2Model(nn.Module):
         self.norm_weight = nn.Parameter(torch.ones(config.hidden_size, dtype=torch.float16))
 
         # 使用 nn.Linear 层替代 lm_head_weight
-        if False:
-            # self.lm_head = self.embed_tokens
-            self.lm_head_weight = self.embed_tokens.weight
-        else:
-            # self.lm_head = nn.Linear(config.hidden_size, self.vocab_size, bias=False)
-            self.lm_head_weight = nn.Parameter(torch.rand(self.vocab_size, self.hidden_size, dtype=torch.float16))
+        self.lm_head_weight = nn.Parameter(torch.rand(self.vocab_size, self.hidden_size, dtype=torch.float16))
         
         self.layers = nn.ModuleList(
             [Qwen2DecoderLayer(config) for layer_id in range(config.num_layers)]
@@ -305,73 +299,3 @@ class Qwen2Model(nn.Module):
         # output = self.lm_head(h)
 
         return output
-
-class CLIPVisionTransformer(nn.Module):
-
-    def __init__(
-        self,
-        config: CLIPVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        *,
-        num_hidden_layers_override: Optional[int] = None,
-        require_post_norm: Optional[bool] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-
-        self.config = config
-        embed_dim = config.hidden_size
-
-        self.embeddings = CLIPVisionEmbeddings(config)
-
-        # NOTE: This typo of "layrnorm" is not fixed on purpose to match
-        # the original transformers code and name of the model weights.
-        self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
-
-        self.encoder = CLIPEncoder(
-            config=config,
-            quant_config=quant_config,
-            num_hidden_layers_override=num_hidden_layers_override,
-            prefix=f"{prefix}.encoder",
-        )
-
-        num_hidden_layers = config.num_hidden_layers
-        if len(self.encoder.layers) > config.num_hidden_layers:
-            raise ValueError(
-                f"The original encoder only has {num_hidden_layers} "
-                f"layers, but you requested {len(self.encoder.layers)} layers."
-            )
-
-        # If possible, skip post_layernorm to conserve memory
-        if require_post_norm is None:
-            require_post_norm = len(self.encoder.layers) == num_hidden_layers
-
-        if require_post_norm:
-            self.post_layernorm = nn.LayerNorm(embed_dim,
-                                               eps=config.layer_norm_eps)
-        else:
-            self.post_layernorm = None
-
-    def forward(
-        self,
-        pixel_values: torch.Tensor,
-        feature_sample_layers: Optional[list[int]] = None,
-    ) -> torch.Tensor:
-
-        hidden_states = self.embeddings(pixel_values)
-        hidden_states = self.pre_layrnorm(hidden_states)
-
-        return_all_hidden_states = feature_sample_layers is not None
-
-        # Produces either the last layer output or all of the hidden states,
-        # depending on if we have feature_sample_layers or not
-        encoder_outputs = self.encoder(
-            inputs_embeds=hidden_states,
-            return_all_hidden_states=return_all_hidden_states)
-
-        # Handle post-norm (if applicable) and stacks feature layers if needed
-        encoder_outputs = resolve_visual_encoder_outputs(
-            encoder_outputs, feature_sample_layers, self.post_layernorm,
-            self.config.num_hidden_layers)
-
-        return encoder_outputs
