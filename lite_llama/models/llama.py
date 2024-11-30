@@ -1,8 +1,5 @@
-from dataclasses import dataclass
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import math
 
 from typing import Optional, Tuple
 from ..kernels import *
@@ -28,17 +25,11 @@ class FusedAttention(nn.Module):
         self.wv = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=False, dtype=torch.float16)
         self.wo = nn.Linear(config.num_heads * self.head_dim, config.hidden_size, bias=False, dtype=torch.float16)
 
-        # self.q_proj_weight = nn.Parameter(torch.rand(config.num_heads * self.head_dim,  config.hidden_size))
-        # self.k_proj_weight = nn.Parameter(torch.rand(self.num_kv_heads * self.head_dim, config.hidden_size))
-        # self.v_proj_weight = nn.Parameter(torch.rand(self.num_kv_heads * self.head_dim, config.hidden_size))
-        # self.o_proj_weight = nn.Parameter(torch.rand(config.num_heads * self.head_dim, config.hidden_size))
-
     def context_forward(
         self,
         x: torch.Tensor,
         atten_info,
         layer_index:int,
-        start_pos: int,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):         
         x = x.to(torch.float16)
@@ -79,19 +70,12 @@ class FusedAttention(nn.Module):
         x: torch.Tensor,
         atten_info,
         layer_index:int,
-        start_pos: int,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
         x = x.to(torch.float16)
-        token_atten_input_shape = x.shape 
-        batch_size, seq_len, hidden_size = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
+        batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
 
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
-        # decode stage: (B, 1, Dim) -> (B, 1, H_Q * Head_Dim). H_Q:  Q 头数, H_K: K 头数   
-        # xq = torch.matmul(x, self.q_proj_weight.data.t())
-        # xk = torch.matmul(x, self.k_proj_weight.data.t())
-        # xv = torch.matmul(x, self.v_proj_weight.data.t())
-
         xq = self.wq(x)
         xk = self.wk(x)
         xv = self.wv(x)
@@ -119,7 +103,7 @@ class FusedAttention(nn.Module):
         
         xk = torch.cat([past_k_cache_reshape, xk], dim=1)
         xv = torch.cat([past_v_cache_reshape, xv], dim=1)
-        # print(f"atten_info.select_index.view(batch_size, seq_len) shape is {atten_info.select_index.view(batch_size, -1).shape}")
+        
         select_index = torch.cat([atten_info.select_index.view(batch_size, -1),
                                 atten_info.decode_index.view(batch_size, -1)], dim=1).view(-1)
         
@@ -138,7 +122,6 @@ class FusedAttention(nn.Module):
         output = output.view(batch_size, 1, self.num_heads_q * head_dim)
     
         output = self.wo(output)
-        # output = torch.matmul(output, self.o_proj_weight.data.t()) # (B, 1, Dim) -> (B, 1, Dim)
         return output
 
 class FusedMLP(nn.Module):
@@ -153,7 +136,6 @@ class FusedMLP(nn.Module):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False, dtype=torch.float16)
 
     def forward(self, x):
-        # return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
         return self.down_proj(swiglu_forward(self.gate_proj(x), self.up_proj(x)))
 
 class LlamaDecoderLayer(nn.Module):
@@ -167,9 +149,6 @@ class LlamaDecoderLayer(nn.Module):
 
         self.attention_norm_weight = nn.Parameter(torch.ones(self.hidden_size,), requires_grad=False)
         self.ffn_norm_weight = nn.Parameter(torch.ones(self.hidden_size,), requires_grad=False)
-
-        # self.attention_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        # self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         
         self.attention = FusedAttention(config)
         self.feed_forward = FusedMLP(config)
@@ -178,21 +157,20 @@ class LlamaDecoderLayer(nn.Module):
         x: torch.Tensor, 
         atten_info,
         layer_index: int,
-        start_pos: int, 
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
         # Normalization BEFORE the attention block. # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
-        batch_size, seq_len, _ = x.shape
+        _, seq_len, _ = x.shape
         hidden_states = rmsnorm(x, self.attention_norm_weight.data, eps=self.config.rms_norm_eps)
 
         # attention 部分计算结果正确, 张量尺寸符合要求
         if seq_len > 1:
             h = x + self.attention.context_forward(
-                hidden_states, atten_info, layer_index, start_pos, position_embeddings
+                hidden_states, atten_info, layer_index, position_embeddings
             )
         else:
             h = x + self.attention.token_forward(
-                hidden_states, atten_info, layer_index, start_pos, position_embeddings
+                hidden_states, atten_info, layer_index, position_embeddings
             )
         
         # Normalization BEFORE the feed forward block. # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
@@ -215,14 +193,12 @@ class Llama(nn.Module):
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.embed_tokens = nn.Embedding(self.vocab_size, config.hidden_size, dtype=torch.float16)
         self.norm_weight = nn.Parameter(torch.ones(config.hidden_size,), requires_grad=False)
-        # self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         # 使用 nn.Linear 层替代 lm_head_weight
         self.lm_head = nn.Linear(config.hidden_size, self.vocab_size, bias=False, dtype=torch.float16)
-        # self.lm_head_weight = nn.Parameter(torch.rand(self.vocab_size, config.hidden_size))
 
         self.layers = nn.ModuleList(
-            [LlamaDecoderLayer(config) for layer_id in range(config.num_layers)]
+            [LlamaDecoderLayer(config) for _ in range(config.num_layers)]
         )
 
     def forward(self, tokens: torch.Tensor, start_pos, atten_info):
@@ -233,10 +209,10 @@ class Llama(nn.Module):
         cache_position = torch.arange(start_pos, start_pos + seq_len, device=h.device)
         position_ids = cache_position.unsqueeze(0)
         position_embeddings = self.rotary_emb(h, position_ids)
-        # Consecutively apply all the encoder layers
-        for i, layer in enumerate(self.layers):            
+        
+        for i, layer in enumerate(self.layers): # Consecutively apply all the encoder layers
             self.hidden_states.append(h)
-            h = layer(h, atten_info, i, start_pos, position_embeddings)  # h.shape [batch_size, seq_len, hidden_dim]
+            h = layer(h, atten_info, i, position_embeddings)  # h.shape [batch_size, seq_len, hidden_dim]
 
         h = rmsnorm(h, self.norm_weight.data, eps=self.config.rms_norm_eps)
         self.hidden_states.append(h)
