@@ -155,7 +155,7 @@ def convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, llm_config):
     mapping = {
         "language_model.model.embed_tokens.weight": "language_model.embed_tokens.weight",
         "language_model.model.norm.weight": "language_model.norm_weight", 
-        "language_model.model.lm_head.weight": "language_model.lm_head.weight",
+        "language_model.lm_head.weight": "language_model.lm_head.weight",
     }
 
     layers = {
@@ -188,6 +188,7 @@ def convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, llm_config):
             new_sd[hf_key] = tensor
             print(f"Warning: Unmapped key {hf_key}")
     
+    print("new_sd items", new_sd.items())
     build_new_weight_dir(checkpoints_dir, new_sd)
     return new_sd
 
