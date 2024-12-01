@@ -182,7 +182,8 @@ def convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, llm_config):
     # 创建新的状态字典
     new_sd = {}
     for hf_key, tensor in tqdm(hf_sd.items(), desc="Mapping weights"):
-        if hf_key in mapping:
+        custom_key = mapping.get(hf_key, None)
+        if custom_key is not None:
             new_sd[custom_key] = tensor
         else:
             new_sd[hf_key] = tensor
