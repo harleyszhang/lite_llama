@@ -22,12 +22,11 @@ import torch.nn.functional as F
 from safetensors import safe_open
 
 from transformers import AutoConfig,AutoModel, AutoModelForCausalLM, LlavaConfig, \
-                         LlamaConfig, LlamaModel, LlamaForCausalLM
-
-from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.generation.utils import GenerateOutput
+                         LlamaModel, LlamaForCausalLM
 
 from .llama import Llama
+from .model_config import LlamaConfig
+
 from .utils import merge_input_ids_with_image_features
 from ..utils.llava_image_procss import process_images
 from ..utils.config_convert import convert_transformers_to_custom_config
@@ -60,7 +59,11 @@ class LlavaLlama(nn.Module):
         self.device = torch.device("cuda")
         self.llava_config = llava_config
         text_config = self.llava_config.text_config # TODO: 将 text_config 转换成 LlamaConfig 类型
-        self.llama_config = convert_transformers_to_custom_config(text_config)
+        # self.llama_config = convert_transformers_to_custom_config(text_config)
+        self.llama_config = LlamaConfig.from_dict(text_config.to_dict())
+
+        # print("self.text_config", text_config.to_dict())
+        # print("self.llama_config", self.llama_config)
 
         # 视觉处理模块（vision_tower）初始化
         self.vision_tower = AutoModel.from_config(llava_config.vision_config)

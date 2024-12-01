@@ -14,11 +14,16 @@ class ComputeMaxAvailableBlocks:
     and  calculate the maximum possible number of GPU blocks that can be allocated with the remaining free memory.
     if not execute dummy forward run, it should be run after cuda graph!
     """
-    def __init__(self, model_config, gpu_memory_utilization=0.9, block_size=1):
-        self.model_config = model_config
+    def __init__(self, hidden_size, num_heads, num_kv_heads, head_dim = None, gpu_memory_utilization=0.9, block_size=1):
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        
+        self.head_dim = head_dim
+
         self.gpu_memory_utilization = gpu_memory_utilization
         self.block_size = block_size # 一个 block 表示多少个 tokens
-        self.dtype = self.model_config.torch_dtype
+        self.dtype = self.torch_dtype
         
         if self.dtype in ["float16", "bfloat16", "fp16", "bfp16"]:
             self.dtype_size = 2
@@ -30,13 +35,13 @@ class ComputeMaxAvailableBlocks:
     def compute_cache_block_size_bytes(self):
         """Get the size of the KV cache block size in bytes.
         """
-        if self.model_config.head_dim is None:
-            head_size = self.model_config.hidden_size // self.model_config.num_heads
+        if self.head_dim is None:
+            head_size = self.hidden_size // self.num_heads
         else:
-            head_size = self.model_config.head_dim
+            head_size = self.head_dim
         
-        num_layers = self.model_config.num_layers
-        num_kv_heads = self.model_config.num_kv_heads
+        num_layers = self.num_layers
+        num_kv_heads = self.num_kv_heads
         # num_heads * head_size = hidden_size
         kv_cache_token_bytes_per_layer = (num_kv_heads * head_size) * 2 * self.dtype_size
         transformer_kv_cache_token_bytes = kv_cache_token_bytes_per_layer * num_layers
@@ -122,9 +127,10 @@ class KVCacheMemoryManager:
         self.head_dim = head_dim
         self.num_kv_heads = num_kv_heads
         self.num_layers = num_layers
-        self.gpu_num_blocks = gpu_num_blocks
+        self.gpu_num_blocks = gpu_num_blocks # 手动设定的给kv cache 内存管理分配的可用 blocks 数目:gpu_num_blocks
         self.block_size = block_size
         self.max_num_tokens = gpu_num_blocks * block_size
+
         self.dtype = dtype
         self.device = device
         self.can_use_mem_size = gpu_num_blocks # 可用的 kv cache tokens 数量

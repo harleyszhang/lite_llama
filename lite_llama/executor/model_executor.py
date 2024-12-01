@@ -64,7 +64,7 @@ class ModelExecutor:
         return ModelExecutor(tokenizer, model_config, model, True)
 
     @staticmethod
-    def _load_model_weight(model_args, checkpoints_dir, load_model = True, triton_weight=True, device="cuda"):
+    def _load_model_weight(model_config, checkpoints_dir, load_model = True, triton_weight=True, device="cuda"):
         prev_time = time.time()
         
         if load_model:
@@ -90,12 +90,12 @@ class ModelExecutor:
                 state_dict = hf_sd
                 print("Load Triton weight directly!")
             else:
-                if model_args.model_type == "llama":
-                    state_dict = convert_llama_torch_to_litellama(checkpoints_dir, hf_sd, model_args) # 转换权重名称
-                elif model_args.model_type == "qwen2":
-                    state_dict = convert_qwen2_hf_to_litellama(checkpoints_dir, hf_sd, model_args) # 转换权重名称
-                elif model_args.model_type == "llava":
-                    state_dict = convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, model_args) # 转换权重名称
+                if model_config.model_type == "llama":
+                    state_dict = convert_llama_torch_to_litellama(checkpoints_dir, hf_sd, model_config) # 转换权重名称
+                elif model_config.model_type == "qwen2":
+                    state_dict = convert_qwen2_hf_to_litellama(checkpoints_dir, hf_sd, model_config) # 转换权重名称
+                elif model_config.model_type == "llava":
+                    state_dict = convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, model_config) # 转换权重名称
                 else:
                     print("Error, unsupported model!")
         else:
@@ -104,12 +104,12 @@ class ModelExecutor:
         torch.set_default_tensor_type(torch.cuda.HalfTensor)
         
         # 初始化自定义的 Llama 模型
-        if model_args.model_type == "llama":
-            model = Llama(model_args).to(device)
-        elif model_args.model_type == "qwen2":
-            model = Qwen2Model(model_args).to(device) # 将模型移动到设备并转换为半精度
-        elif model_args.model_type == "llava":
-            model = LlavaLlama(model_args).to(device) # 将模型移动到设备并转换为半精度
+        if model_config.model_type == "llama":
+            model = Llama(model_config).to(device)
+        elif model_config.model_type == "qwen2":
+            model = Qwen2Model(model_config).to(device) # 将模型移动到设备并转换为半精度
+        elif model_config.model_type == "llava":
+            model = LlavaLlama(model_config).to(device) # 将模型移动到设备并转换为半精度
         else:
             print("Error, unsupported model!")
 
@@ -157,7 +157,12 @@ class ModelExecutor:
 
     def __init__(self, tokenizer:AutoTokenizer, model_config, model, compiled_model=True, device="cuda"):
         self.tokenizer = tokenizer
-        self.model_config = model_config
+        
+        if self.model_config is LlavaConfig:
+            self.llm_config = model_config.text_config
+        else:
+            self.llm_config = model_config
+
         self.model = model
 
         self.model_runner = None
@@ -166,27 +171,33 @@ class ModelExecutor:
         if self.compiled_model:
             self.max_gpu_num_blocks, self.kv_mem_manager = self.apply_cuda_graph() # 调用 cuda graph 优化
         else:
-            self.max_gpu_num_blocks, self.max_num_tokens = self._get_max_tokens(self.model_config)
+            self.max_gpu_num_blocks, self.max_num_tokens = self._get_max_tokens(gpu_memory_utilization=0.9, block_size=1)
             self.kv_mem_manager = self._init_mem_manager(
-                self.model_config, self.max_gpu_num_blocks, self.max_num_tokens, block_size=1, 
+                self.max_gpu_num_blocks, self.max_num_tokens, block_size=1, 
                 dtype=torch.float16,  device="cuda")
         
         self.gpu_kv_buffer = self.kv_mem_manager.gpu_kv_buffer
         self.atten_info = AttentionInfo
         self.atten_info.kv_buffer = self.kv_mem_manager.gpu_kv_buffer
 
-    def _get_max_tokens(self, model_config, gpu_memory_utilization=0.9, block_size=1):
-        avaliable_blocks = ComputeMaxAvailableBlocks(model_config, gpu_memory_utilization, block_size)
+    def _get_max_tokens(self, gpu_memory_utilization=0.9, block_size=1):
+        avaliable_blocks = ComputeMaxAvailableBlocks(
+            hidden_size = self.llm_config.hidden_size, 
+            num_heads = self.llm_config.num_heads, 
+            num_kv_heads = self.llm_config.num_kv_heads, 
+            gpu_memory_utilization = gpu_memory_utilization, 
+            block_size = block_size,
+        )
         max_gpu_num_blocks = avaliable_blocks.compute_num_available_blocks()
         max_gpu_num_tokens = max_gpu_num_blocks * block_size
 
         return max_gpu_num_blocks, max_gpu_num_tokens
     
-    def _init_mem_manager(self, model_config, gpu_num_blocks, max_num_tokens, block_size=1, dtype=torch.float16,  device="cuda"):
+    def _init_mem_manager(self, gpu_num_blocks, block_size=1, dtype=torch.float16,  device="cuda"):
         kv_mem_manager = KVCacheMemoryManager(
-            head_dim = self.model_config.head_dim,
-            num_kv_heads = self.model_config.num_kv_heads,
-            num_layers = self.model_config.num_layers,
+            head_dim = self.llm_config.head_dim,
+            num_kv_heads = self.llm_config.num_kv_heads,
+            num_layers = self.llm_config.num_layers,
             gpu_num_blocks = gpu_num_blocks,
             block_size = block_size,
             dtype = dtype,
@@ -201,15 +212,16 @@ class ModelExecutor:
             - input_ids: 输入 tokens id 列表, shape: (batch_size, seq_len)
             - prev_pos: 当前处于第几轮迭代循环, 生成第几个 token
         """
-        max_gpu_num_blocks, max_num_tokens = self._get_max_tokens(self.model_config)
+        # TODO: 修复支持多模态模型配置问题的错误
+        max_gpu_num_blocks, _ = self._get_max_tokens(gpu_memory_utilization=0.9, block_size=1)
         
         kv_mem_manager = self._init_mem_manager(
-            self.model_config, max_gpu_num_blocks, block_size=1, 
+            max_gpu_num_blocks, block_size=1, 
             dtype=torch.float16,  device="cuda"
         )
         self.model_runner = ModelRunner(
             self.model, 
-            self.model_config, 
+            self.llm_config, 
             max_gpu_num_blocks, 
             kv_mem_manager
         )

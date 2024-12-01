@@ -5,10 +5,11 @@ from ..models.qwen2 import Qwen2Config
 
 def build_new_weight_dir(checkpoints_dir:str, new_sd):
     # 保存 lite_llama 模型权重并构建新的权重目录
+    model_id = os.path.basename(os.path.normpath(checkpoints_dir))
     current_dir = os.path.dirname(os.path.abspath(__file__)) # 获取当前文件所在的目录
-    my_weight_dir = os.path.join(current_dir, "../../my_weight/") # 项目所在根目录
+    my_weight_dir = os.path.join(current_dir, "../../my_weight/" + model_id) # 项目所在根目录
     os.makedirs(my_weight_dir, exist_ok=True) # 创建文件夹（如果不存在）
-    torch.save(new_sd, os.path.join(my_weight_dir, "my_llama3.2-1B.pth"))
+    torch.save(new_sd, os.path.join(my_weight_dir, model_id + ".pth"))
 
     # 获取所有 JSON 文件
     json_files = glob.glob(os.path.join(checkpoints_dir, "*.json"))
@@ -109,10 +110,11 @@ def convert_llama_torch_to_litellama(checkpoints_dir, hf_sd, model_config):
 
     layers = {
         # key 是原始权重值, value 是自定义模型结构权重参数
-        "layers.{i}.attention.wq.weight": "layers.{i}.attention.wq.weight",
-        "layers.{i}.attention.wk.weight": "layers.{i}.attention.wk.weight",
-        "layers.{i}.attention.wv.weight": "layers.{i}.attention.wv.weight",
-        "layers.{i}.attention.wo.weight": "layers.{i}.attention.wo.weight",
+        "layers.{i}.attention.wq.weight": "layers.{i}.attention.q_proj.weight",
+        "layers.{i}.attention.wk.weight": "layers.{i}.attention.k_proj.weight",
+        "layers.{i}.attention.wv.weight": "layers.{i}.attention.v_proj.weight",
+        "layers.{i}.attention.wo.weight": "layers.{i}.attention.o_proj.weight",
+
         "layers.{i}.feed_forward.w1.weight": "layers.{i}.feed_forward.gate_proj.weight",
         "layers.{i}.feed_forward.w3.weight": "layers.{i}.feed_forward.up_proj.weight",
         "layers.{i}.feed_forward.w2.weight": "layers.{i}.feed_forward.down_proj.weight",
@@ -122,7 +124,7 @@ def convert_llama_torch_to_litellama(checkpoints_dir, hf_sd, model_config):
     }
 
     # 根据 Transformer 层数量生成映射
-    for i in range(model_config.n_layers):
+    for i in range(model_config.num_layers):
         for hf_key, custom_key in layers.items():
             # 左边是 hf 权重参数字典 key, 右边是自定义模型权重参数字典 key
             mapping[hf_key.format(i=i)] = custom_key.format(i=i)
@@ -138,7 +140,7 @@ def convert_llama_torch_to_litellama(checkpoints_dir, hf_sd, model_config):
     build_new_weight_dir(checkpoints_dir, new_sd)
     return new_sd
 
-def convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, model_config):
+def convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, llm_config):
     """
     将 Hugging Face 模型的权重字典转换为自定义模型的权重字典。
 
@@ -158,21 +160,21 @@ def convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, model_config):
 
     layers = {
         # key 是原始权重值, value 是自定义模型结构权重参数
-        "language_model.model.layers.{i}.attention.wq.weight": "language_model.layers.{i}.attention.wq.weight",
-        "language_model.model.layers.{i}.attention.wk.weight": "language_model.layers.{i}.attention.wk.weight",
-        "language_model.model.layers.{i}.attention.wv.weight": "language_model.layers.{i}.attention.wv.weight",
-        "language_model.model.layers.{i}.attention.wo.weight": "language_model.layers.{i}.attention.wo.weight",
+        "language_model.model.layers.{i}.self_attn.q_proj.weight": "language_model.layers.{i}.attention.q_proj.weight",
+        "language_model.model.layers.{i}.self_attn.k_proj.weight": "language_model.layers.{i}.attention.k_proj.weight",
+        "language_model.model.layers.{i}.self_attn.v_proj.weight": "language_model.layers.{i}.attention.v_proj.weight",
+        "language_model.model.layers.{i}.self_attn.o_proj.weight": "language_model.layers.{i}.attention.o_proj.weight",
 
-        "language_model.model.layers.{i}.feed_forward.gate_proj.weight": "language_model.layers.{i}.feed_forward.gate_proj.weight",
-        "language_model.model.layers.{i}.feed_forward.up_proj.weight": "language_model.layers.{i}.feed_forward.up_proj.weight",
-        "language_model.model.layers.{i}.feed_forward.down_proj.weight": "language_model.layers.{i}.feed_forward.down_proj.weight",
+        "language_model.model.layers.{i}.mlp.gate_proj.weight": "language_model.layers.{i}.mlp.gate_proj.weight",
+        "language_model.model.layers.{i}.mlp.up_proj.weight": "language_model.layers.{i}.mlp.up_proj.weight",
+        "language_model.model.layers.{i}.mlp.down_proj.weight": "language_model.layers.{i}.mlp.down_proj.weight",
 
         "language_model.model.layers.{i}.input_layernorm.weight": "language_model.layers.{i}.attention_norm_weight",
         "language_model.model.layers.{i}.post_attention_layernorm.weight": "language_model.layers.{i}.ffn_norm_weight",
     }
 
     # 根据 Transformer 层数量生成映射
-    for i in range(model_config.n_layers):
+    for i in range(llm_config.num_layers):
         for hf_key, custom_key in layers.items():
             # 左边是 hf 权重参数字典 key, 右边是自定义模型权重参数字典 key
             mapping[hf_key.format(i=i)] = custom_key.format(i=i)
@@ -183,7 +185,9 @@ def convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, model_config):
         if hf_key in mapping:
             new_sd[custom_key] = tensor
         else:
+            new_sd[hf_key] = tensor
             print(f"Warning: Unmapped key {hf_key}")
     
     build_new_weight_dir(checkpoints_dir, new_sd)
     return new_sd
+

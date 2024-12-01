@@ -11,6 +11,23 @@ def convert_transformers_to_custom_config(
 ) -> LlamaConfig:
     # 将 transformers 配置转换为字典
     config_dict = transformers_config.to_dict()
+    print("transformers.LlamaConfig dict: ", config_dict)
+    
+    return LlamaConfig(
+            _name_or_path=config_dict.get("_name_or_path"),
+            architectures=config_dict.get("architectures", ["LlamaForCausalLM"]),
+            max_position_embeddings=config_dict.get("max_position_embeddings", 4096),
+            model_type=config_dict.get("model_type", "llama"),
+            rms_norm_eps=config_dict.get("rms_norm_eps", 1e-5),
+            torch_dtype=config_dict.get("torch_dtype", "float16"),
+            vocab_size=config_dict.get("vocab_size", 32064),
+            
+            hidden_size = config_dict.get("hidden_size", 4096),
+            intermediate_size = config_dict.get("intermediate_size", 11008),
+            num_hidden_layers = config_dict.get("num_hidden_layers", 32),
+            num_attention_heads = config_dict.get("num_attention_heads", 32),
+            num_key_value_heads = config_dict.get("num_key_value_heads", None),
+        )
 
     # 创建自定义配置实例
     custom_config = LlamaConfig(config_dict=config_dict)

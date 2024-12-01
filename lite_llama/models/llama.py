@@ -20,10 +20,10 @@ class FusedAttention(nn.Module):
         self.head_dim = config.hidden_size // config.num_heads
         self.hidden_size = config.num_heads * self.head_dim
 
-        self.wq = nn.Linear(config.hidden_size, config.num_heads * self.head_dim, bias=False, dtype=torch.float16)
-        self.wk = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=False, dtype=torch.float16)
-        self.wv = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=False, dtype=torch.float16)
-        self.wo = nn.Linear(config.num_heads * self.head_dim, config.hidden_size, bias=False, dtype=torch.float16)
+        self.q_proj = nn.Linear(config.hidden_size, config.num_heads * self.head_dim, bias=False, dtype=torch.float16)
+        self.k_proj = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=False, dtype=torch.float16)
+        self.v_proj = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=False, dtype=torch.float16)
+        self.o_proj = nn.Linear(config.num_heads * self.head_dim, config.hidden_size, bias=False, dtype=torch.float16)
 
     def context_forward(
         self,
@@ -36,9 +36,9 @@ class FusedAttention(nn.Module):
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
 
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
-        xq = self.wq(x)
-        xk = self.wk(x)
-        xv = self.wv(x)
+        xq = self.q_proj(x)
+        xk = self.k_proj(x)
+        xv = self.v_proj(x)
 
         xq = xq.view(batch_size, seq_len, self.num_heads_q, self.head_dim)
         xk = xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
@@ -63,7 +63,7 @@ class FusedAttention(nn.Module):
         output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1))
         
         # 4. attention 输出做线性变换
-        output = self.wo(output)
+        output = self.o_proj(output)
         return output
 
     def token_forward(self, 
@@ -151,7 +151,7 @@ class LlamaDecoderLayer(nn.Module):
         self.ffn_norm_weight = nn.Parameter(torch.ones(self.hidden_size,), requires_grad=False)
         
         self.attention = FusedAttention(config)
-        self.feed_forward = FusedMLP(config)
+        self.mlp = FusedMLP(config)
 
     def forward(self, 
         x: torch.Tensor, 
@@ -176,7 +176,7 @@ class LlamaDecoderLayer(nn.Module):
         # Normalization BEFORE the feed forward block. # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
         hidden_states = rmsnorm(h, self.ffn_norm_weight.data, eps=self.config.rms_norm_eps)
 
-        out = h + self.feed_forward.forward(hidden_states)
+        out = h + self.mlp.forward(hidden_states)
         return out
 
 class Llama(nn.Module):
