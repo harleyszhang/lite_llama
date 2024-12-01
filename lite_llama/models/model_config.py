@@ -1,9 +1,11 @@
-from dataclasses import dataclass
-from typing import Optional, Tuple, Any, Dict, Optional
+from dataclasses import dataclass,field, fields
+from typing import Any, Dict, List, Optional, Tuple, Union
+import os, json
+
 
 @dataclass
 class LlamaConfig:
-    architectures: Optional[list] = None
+    architectures: List[str] = field(default_factory=lambda: ["LlamaForCausalLM"])
     attention_bias: bool = False
     attention_dropout: float = 0.0
     bos_token_id: Optional[int] = None
@@ -11,20 +13,15 @@ class LlamaConfig:
     head_dim: Optional[int] = None
     hidden_act: str = "silu"
     
-    # dim: Optional[int] = None
     initializer_range: float = 0.02
     
-    # 模型隐藏层大小
-    hidden_size: Optional[int] = 2048
-    intermediate_size: Optional[int] = 8192
+    hidden_size: int = 2048  # 默认值调整为2048，保持一致性
+    intermediate_size: int = 8192
     max_position_embeddings: Optional[int] = None
     mlp_bias: bool = False
     model_type: str = "llama"
-    # 注意力头数，也就是 q heads 头数
-    num_heads: Optional[int] = None
-    # 解码层数
-    num_layers: Optional[int] = None
-    # 使用了 GQA 技术的 kv heads 头数
+    num_heads: Optional[int] = 32  # 设置合理的默认值
+    num_layers: Optional[int] = 32
     num_kv_heads: Optional[int] = None
     pretraining_tp: int = 1
     rms_norm_eps: float = 1e-5
@@ -34,43 +31,80 @@ class LlamaConfig:
     torch_dtype: str = "bfloat16"
     transformers_version: Optional[str] = None
     use_cache: bool = True
-    vocab_size: Optional[int] = None
-    max_batch_size: int = 4
+    vocab_size: Optional[int] = 32064
+
+    _name_or_path: Optional[str] = None
+    max_batch_size: int = 64
     max_seq_len: int = 2048
     device: str = "cuda"
 
-    def __init__(self, config_dict: Optional[Dict[str, Any]] = None, **kwargs):
-        
-        # 首先，设置默认属性值
-        for field_name, field_def in self.__dataclass_fields__.items():
-            setattr(self, field_name, field_def.default)
+    def __post_init__(self):
+        if self.num_heads and self.hidden_size:
+            self.head_dim = self.hidden_size // self.num_heads
+        else:
+            self.head_dim = None  # 或者设置一个默认值，例如 64
 
-        # 如果提供了 config_dict，从中更新属性
-        if config_dict is not None:
-            
-            for key, value in config_dict.items():
-                # 处理名称映射
-                if key == 'num_attention_heads':
-                    self.num_heads = value
-                elif key == 'num_hidden_layers':
-                    self.num_layers = value
-                elif key == 'num_key_value_heads':
-                    self.num_kv_heads = value
-                elif key == 'mm_hidden_size':
-                    self.hidden_size = value
-                else:
-                    setattr(self, key, value)
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'LlamaConfig':
+        # 定义字段映射
+        key_mappings = {
+            'num_attention_heads': 'num_heads',
+            'num_hidden_layers': 'num_layers',
+            'num_key_value_heads': 'num_kv_heads',
+        }
 
-        # 处理额外的关键字参数
-        for key, value in kwargs.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
-            else:
-                # 如果属性不存在，可以选择存储在 extra_args 中，或者直接添加
-                setattr(self, key, value)
+        # 创建一个复制的字典，以避免修改原始数据
+        data_copy = data.copy()
 
-        self.head_dim = self.hidden_size // self.num_heads
+        # 应用字段映射
+        for old_key, new_key in key_mappings.items():
+            if old_key in data_copy:
+                data_copy[new_key] = data_copy.pop(old_key)
 
+        # 获取 LlamaConfig 类中所有的字段名
+        valid_keys = {f.name for f in fields(cls)}
+
+        # 过滤掉不在 LlamaConfig 中定义的键
+        data_filtered = {k: v for k, v in data_copy.items() if k in valid_keys}
+
+        # 设置默认值，确保所有必要字段都有值
+        defaults = {
+            'architectures': ["LlamaForCausalLM"],
+            'attention_bias': False,
+            'attention_dropout': 0.0,
+            'bos_token_id': None,
+            'eos_token_id': None,
+            'hidden_act': "silu",
+            'initializer_range': 0.02,
+            'hidden_size': 2048,
+            'intermediate_size': 8192,
+            'max_position_embeddings': None,
+            'mlp_bias': False,
+            'model_type': "llama",
+            'num_heads': 32,
+            'num_layers': 32,
+            'num_kv_heads': None,
+            'pretraining_tp': 1,
+            'rms_norm_eps': 1e-5,
+            'rope_scaling': None,
+            'rope_theta': 10000.0,
+            'tie_word_embeddings': True,
+            'torch_dtype': "bfloat16",
+            'transformers_version': None,
+            'use_cache': True,
+            'vocab_size': 32064,
+            '_name_or_path': None,
+            'max_batch_size': 64,
+            'max_seq_len': 2048,
+            'device': "cuda",
+        }
+
+        # 更新缺失的字段
+        for key, value in defaults.items():
+            data_filtered.setdefault(key, value)
+
+        return cls(**data_filtered)
+    
 @dataclass
 class Qwen2Config:
     max_batch_size: int = 4
@@ -144,7 +178,7 @@ class Qwen2Config:
                 # 如果属性不存在，可以选择存储在 extra_args 中，或者直接添加
                 setattr(self, key, value)
         self.head_dim = self.hidden_size // self.num_heads
-
+    
 @dataclass
 class CLIPVisionConfig():
     """
@@ -204,31 +238,6 @@ class CLIPVisionConfig():
                 setattr(self, key, value)
         self.head_dim = self.hidden_size // self.num_heads
 
-from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
-import json
-
-@dataclass
-class TextConfig:
-    _name_or_path: str
-    architectures: List[str]
-    max_position_embeddings: int
-    model_type: str
-    rms_norm_eps: float
-    torch_dtype: str
-    vocab_size: int
-
-    @staticmethod
-    def from_dict(data: Dict[str, Any]) -> 'TextConfig':
-        return TextConfig(
-            _name_or_path=data.get("_name_or_path"),
-            architectures=data.get("architectures", []),
-            max_position_embeddings=data.get("max_position_embeddings", 512),
-            model_type=data.get("model_type", "llama"),
-            rms_norm_eps=data.get("rms_norm_eps", 1e-5),
-            torch_dtype=data.get("torch_dtype", "float32"),
-            vocab_size=data.get("vocab_size", 30522)
-        )
 
 @dataclass
 class VisionConfig:
@@ -264,7 +273,7 @@ class LlavaConfig:
     model_type: str
     pad_token_id: int
     projector_hidden_act: str
-    text_config: TextConfig
+    text_config: LlamaConfig
     tie_word_embeddings: bool
     torch_dtype: str
     transformers_version: str
@@ -272,10 +281,14 @@ class LlavaConfig:
     vision_feature_layer: int
     vision_feature_select_strategy: str
     vocab_size: int
-
+    image_seq_length: int = 576
+    max_batch_size: int = 64
+    max_seq_len: int = 2048
+    device: str = "cuda"
+    
     @staticmethod
     def from_dict(data: Dict[str, Any]) -> 'LlavaConfig':
-        text_cfg = TextConfig.from_dict(data.get("text_config", {}))
+        text_cfg = LlamaConfig.from_dict(data.get("text_config", {}))
         vision_cfg = VisionConfig.from_dict(data.get("vision_config", {}))
         return LlavaConfig(
             architectures=data.get("architectures", []),
@@ -299,59 +312,12 @@ class LlavaConfig:
         with open(json_path, 'r') as f:
             data = json.load(f)
         return cls.from_dict(data)
-    
 
-def test_llava_config():
-    # 示例配置 JSON 字符串
-    config_json = """
-    {
-      "architectures": [
-        "LlavaForConditionalGeneration"
-      ],
-      "ignore_index": -100,
-      "image_token_index": 32000,
-      "model_type": "llava",
-      "pad_token_id": 32001,
-      "projector_hidden_act": "gelu",
-      "text_config": {
-        "_name_or_path": "lmsys/vicuna-7b-v1.5",
-        "architectures": [
-          "LlamaForCausalLM"
-        ],
-        "max_position_embeddings": 4096,
-        "model_type": "llama",
-        "rms_norm_eps": 1e-05,
-        "torch_dtype": "float16",
-        "vocab_size": 32064
-      },
-      "tie_word_embeddings": false,
-      "torch_dtype": "float16",
-      "transformers_version": "4.36.0.dev0",
-      "vision_config": {
-        "hidden_size": 1024,
-        "image_size": 336,
-        "intermediate_size": 4096,
-        "model_type": "clip_vision_model",
-        "num_attention_heads": 16,
-        "num_hidden_layers": 24,
-        "patch_size": 14,
-        "projection_dim": 768,
-        "vocab_size": 32000
-      },
-      "vision_feature_layer": -2,
-      "vision_feature_select_strategy": "default",
-      "vocab_size": 32064
-    }
-    """
-
-    # 将 JSON 字符串解析为字典
-    config_dict = json.loads(config_json)
-
-    # 从字典创建 LlavaConfig 实例
-    llava_config = LlavaConfig.from_dict(config_dict)
-
-    # 打印配置以验证
-    print(llava_config)
-
-if __name__ == "__main__":
-    main()
+    @classmethod
+    def _dict_from_json_file(cls, json_file: Union[str, os.PathLike]):
+        """类方法，用于从指定的 JSON 文件中读取数据并将其解析为字典对象"""
+        with open(json_file, "r", encoding="utf-8") as reader:
+            text = reader.read()
+        
+        # NOTE: 使用 json.loads 函数将读取到的 JSON 格式字符串解析为 Python 字典对象
+        return json.loads(text)
