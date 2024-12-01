@@ -201,7 +201,7 @@ class GenerateText:
             max_gen_len = self.max_seq_len - 1
 
         prompts = "USER: <image>\nWhat's the content of the image? ASSISTANT:"
-        image_items = "https://www.ilankelman.org/stopsigns/australia.jpg"
+        image_items = ["https://www.ilankelman.org/stopsigns/australia.jpg"]
 
         # prompt_tokens = [self.tokenizer.encode(x, add_special_tokens=True) for x in prompts]
         prompt_tokens = (tokenizer_image_token(prompts, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).cuda())

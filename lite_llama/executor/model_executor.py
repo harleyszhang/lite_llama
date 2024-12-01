@@ -218,12 +218,10 @@ class ModelExecutor:
         self.compiled_model = False
         
         if self.compiled_model:
-            self.max_gpu_num_blocks, self.kv_mem_manager = self.apply_cuda_graph() # 调用 cuda graph 优化
+            max_gpu_num_blocks, self.kv_mem_manager = self.apply_cuda_graph() # 调用 cuda graph 优化
         else:
-            self.max_gpu_num_blocks, self.max_num_tokens = self._get_max_tokens(gpu_memory_utilization=0.9, block_size=1)
-            self.kv_mem_manager = self._init_mem_manager(
-                self.max_gpu_num_blocks, self.max_num_tokens, block_size=1, 
-                dtype=torch.float16,  device="cuda")
+            max_gpu_num_blocks, self.max_num_tokens = self._get_max_tokens(gpu_memory_utilization=0.9, block_size=1)
+            self.kv_mem_manager = self._init_mem_manager(max_gpu_num_blocks)
         
         self.gpu_kv_buffer = self.kv_mem_manager.gpu_kv_buffer
         self.atten_info = AttentionInfo() # 创建 AttentionInfo 实例

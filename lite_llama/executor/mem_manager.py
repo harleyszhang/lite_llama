@@ -124,9 +124,9 @@ class ComputeMaxAvailableBlocks:
 
 class KVCacheMemoryManager:
     def __init__(self, num_layers, num_kv_heads, head_dim, gpu_num_blocks, block_size=1, dtype=torch.float16, device="cuda"):
-        self.head_dim = head_dim
-        self.num_kv_heads = num_kv_heads
         self.num_layers = num_layers
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
         self.gpu_num_blocks = gpu_num_blocks # 手动设定的给kv cache 内存管理分配的可用 blocks 数目:gpu_num_blocks
         self.block_size = block_size
         self.max_num_tokens = gpu_num_blocks * block_size
