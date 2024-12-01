@@ -122,7 +122,7 @@ class LlavaLlama(nn.Module):
     def forward(
         self, 
         input_ids, start_pos, atten_info, 
-        image_tensor: Optional[torch.FloatTensor],
+        image_tensor: Optional[torch.FloatTensor] = None,
         position_ids: torch.Tensor = None,
     ):
         vision_embeddings = self.vision_encode(image_tensor)

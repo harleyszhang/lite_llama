@@ -1,5 +1,5 @@
 import os, sys, torch
-from transformers import AutoProcessor, LlavaForConditionalGeneration, LlavaConfig, \
+from transformers import LlavaForConditionalGeneration, LlavaConfig, \
                         LlavaNextConfig, LlavaNextForConditionalGeneration
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 
@@ -21,15 +21,15 @@ hf_sd = model.state_dict()
 
 from transformers import LlavaConfig
 
-with init_empty_weights():
-    llava_config = LlavaConfig.from_pretrained(checkpoints_dir)
-    text_config = llava_config.text_config # TODO: 将 text_config 转换成 LlamaConfig 类型
-    llama_config = LlamaConfig.from_dict(text_config.to_dict())
-
-# 使用 init_empty_weights 初始化空模型
 # with init_empty_weights():
 #     llava_config = LlavaConfig.from_pretrained(checkpoints_dir)
-#     model = LlavaLlama(llava_config)  
-#     model_config = model.llama_config
+#     text_config = llava_config.text_config # TODO: 将 text_config 转换成 LlamaConfig 类型
+#     llama_config = LlamaConfig.from_dict(text_config.to_dict())
+
+# 使用 init_empty_weights 初始化空模型
+with init_empty_weights():
+    llava_config = LlavaConfig.from_pretrained(checkpoints_dir)
+    model = LlavaLlama(llava_config)  
+    llama_config = model.llama_config
 
 convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, llama_config)

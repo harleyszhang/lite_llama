@@ -9,7 +9,8 @@ def build_new_weight_dir(checkpoints_dir:str, new_sd):
     current_dir = os.path.dirname(os.path.abspath(__file__)) # 获取当前文件所在的目录
     my_weight_dir = os.path.join(current_dir, "../../my_weight/" + model_id) # 项目所在根目录
     os.makedirs(my_weight_dir, exist_ok=True) # 创建文件夹（如果不存在）
-    torch.save(new_sd, os.path.join(my_weight_dir, model_id + ".pth"))
+    # 保存模型的状态字典。
+    torch.save(new_sd, os.path.join(my_weight_dir, model_id + ".pth"), _use_new_zipfile_serialization=True)
 
     # 获取所有 JSON 文件
     json_files = glob.glob(os.path.join(checkpoints_dir, "*.json"))

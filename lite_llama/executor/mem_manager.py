@@ -14,16 +14,16 @@ class ComputeMaxAvailableBlocks:
     and  calculate the maximum possible number of GPU blocks that can be allocated with the remaining free memory.
     if not execute dummy forward run, it should be run after cuda graph!
     """
-    def __init__(self, hidden_size, num_heads, num_kv_heads, head_dim = None, gpu_memory_utilization=0.9, block_size=1):
+    def __init__(self, num_layers, hidden_size, num_heads, num_kv_heads, head_dim = None, gpu_memory_utilization=0.9, block_size=1, dtype="float16"):
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
-        
+        self.num_layers = num_layers
         self.head_dim = head_dim
 
         self.gpu_memory_utilization = gpu_memory_utilization
         self.block_size = block_size # 一个 block 表示多少个 tokens
-        self.dtype = self.torch_dtype
+        self.dtype = dtype
         
         if self.dtype in ["float16", "bfloat16", "fp16", "bfp16"]:
             self.dtype_size = 2
@@ -123,7 +123,7 @@ class ComputeMaxAvailableBlocks:
     
 
 class KVCacheMemoryManager:
-    def __init__(self, head_dim, num_kv_heads, num_layers, gpu_num_blocks, block_size=1, dtype=torch.float16, device="cuda"):
+    def __init__(self, num_layers, num_kv_heads, head_dim, gpu_num_blocks, block_size=1, dtype=torch.float16, device="cuda"):
         self.head_dim = head_dim
         self.num_kv_heads = num_kv_heads
         self.num_layers = num_layers
