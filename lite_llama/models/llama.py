@@ -212,10 +212,8 @@ class Llama(nn.Module):
             hidden_states = inputs_embeds
         else:
             hidden_states = self.get_input_embeddings(input_ids)
-        
-        # h = self.embed_tokens(input_ids)
 
-        cache_position = torch.arange(start_pos, start_pos + seq_len, device=h.device)
+        cache_position = torch.arange(start_pos, start_pos + seq_len, device=hidden_states.device)
         position_ids = cache_position.unsqueeze(0)
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
         

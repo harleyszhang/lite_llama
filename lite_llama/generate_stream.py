@@ -12,7 +12,7 @@ class CompletionPrediction(TypedDict, total=False):
     tokens: List[str]  # not required
     logprobs: List[float]  # not required
 
-class GenerateText:
+class GenerateStreamText:
     """
     GenerateText 类用于加载LLaMA模型并执行迭代式生成式推理 (文本生成)。
     """

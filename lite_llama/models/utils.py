@@ -219,7 +219,7 @@ def merge_input_ids_with_image_features(
     将 input_ids 与 image_features 合并，生成最终的嵌入和位置 ID。
     
     Args:
-        image_features (torch.Tensor): 图像特征，形状为 (num_images, num_image_patches, embed_dim)
+        image_features (torch.Tensor): 视觉编码后的图像特征，形状为 (num_images, num_image_patches, embed_dim)
         inputs_embeds (torch.Tensor): 文本嵌入，形状为 (batch_size, sequence_length, embed_dim)
         input_ids (torch.Tensor): 输入的 token IDs, 形状为 (batch_size, sequence_length)
         pad_token_id (int): 填充 token 的 ID

@@ -48,7 +48,7 @@ def tokenizer_image_token(
     return input_ids
 
 
-class GenerateText:
+class LlavaGeneratorStream:
     """
     GenerateText 类用于加载LLaMA模型并执行迭代式生成式推理 (文本生成)。
     """
@@ -65,7 +65,7 @@ class GenerateText:
         self.checkpoints_dir = checkpoints_dir
         self.compiled_model = compiled_model
         self.max_batch_size = max_batch_size
-        self.max_batch_size = max_seq_len
+        self.max_seq_len = max_seq_len
 
         processor = AutoProcessor.from_pretrained(checkpoints_dir)
         self.image_processor = processor.image_processor
@@ -95,14 +95,16 @@ class GenerateText:
             images.append(image.convert("RGB"))
 
         images = self.image_processor.preprocess(images, return_tensors="pt")["pixel_values"]
-        return self.forward(images)
+        print(images)
+
+        return images
 
 
     @torch.inference_mode()
     def generate_stream(
         self,
         prompt_tokens: List[List[int]],
-        image_tensor: Optional[torch.FloatTensor] = None,
+        image_tensors: Optional[torch.FloatTensor] = None,
         max_gen_len: int = 2048,
         temperature: float = 0.6,
         top_p: float = 0.9,
@@ -138,17 +140,17 @@ class GenerateText:
         eos_reached = torch.tensor([False] * bsz, device="cuda")
 
         for k, t in enumerate(prompt_tokens):
-            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+            tokens[k, : len(t)] = t.clone().detach().to(dtype=torch.long, device="cuda")
 
         prev_pos = 0
         last_yielded_pos = [len(prompt_tokens[i]) if not echo else 0 for i in range(bsz)] # 初始化每个样本已输出的位置
 
         if min_prompt_len == total_len: # 如果 prompt 已经达到最大长度，无需生成
-            logits, _ = self.model.forward(tokens, prev_pos, image_tensor)
+            logits, _ = self.model.forward(tokens, prev_pos, image_tensors)
 
         for cur_pos in range(min_prompt_len, total_len):
             input_ids = tokens[:, prev_pos: cur_pos]
-            logits, select_index = self.model_executor.forward(input_ids, prev_pos, image_tensor)
+            logits, select_index = self.model_executor.forward(input_ids, prev_pos, image_tensors)
 
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
@@ -205,7 +207,7 @@ class GenerateText:
 
         # prompt_tokens = [self.tokenizer.encode(x, add_special_tokens=True) for x in prompts]
         prompt_tokens = (tokenizer_image_token(prompts, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).cuda())
-        image_tensors = self.encode_images(image_items)
+        image_tensors = self.encode_images(image_items).cuda()
 
         stream = self.generate_stream(
             prompt_tokens=prompt_tokens,

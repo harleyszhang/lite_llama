@@ -122,7 +122,8 @@ class ModelExecutor:
             logger.info(f"Loaded state dict in {time.time() - start_time:.2f}s")
             # torch.set_default_tensor_type(torch.cuda.HalfTensor)
 
-            # 将模型转换为半精度, 并验证抓换
+            # 将模型转换为半精度, 并验证转换
+            model.to(device)
             model.half()
             for param in model.parameters():
                 assert param.dtype == torch.float16, "Model parameters are not in FP16"

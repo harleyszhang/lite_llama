@@ -56,18 +56,18 @@ class LlavaMultiModalProjector(nn.Module):
 class LlavaLlama(nn.Module):
     def __init__(self, llava_config: LlavaConfig):
         super().__init__()
-        self.device = torch.device("cuda")
+        self.device = "cuda"
         self.llava_config = llava_config
         text_config = self.llava_config.text_config # TODO: 将 text_config 转换成 LlamaConfig 类型
         # self.llama_config = convert_transformers_to_custom_config(text_config)
         self.llama_config = LlamaConfig.from_dict(text_config.to_dict())
-
-        # print("self.text_config", text_config.to_dict())
-        # print("self.llama_config", self.llama_config)
+        
+        self.select_layer = llava_config.vision_feature_layer
+        self.select_feature = llava_config.vision_feature_select_strategy
 
         # 视觉处理模块（vision_tower）初始化
         self.vision_tower = AutoModel.from_config(llava_config.vision_config)
-
+        print("self.vision_tower ", self.vision_tower)
         # 多模态投影器（multi_modal_projector）初始化
         self.multi_modal_projector = LlavaMultiModalProjector(
             vision_hidden_size = llava_config.vision_config.hidden_size,
@@ -79,8 +79,11 @@ class LlavaLlama(nn.Module):
         
         self.pad_token_id = self.llava_config.pad_token_id if self.llava_config.pad_token_id is not None else -1
     
-    def _select_image_features(self, image_features: torch.Tensor, *,
-                               strategy: str) -> torch.Tensor:
+    def _select_image_features(
+        self, 
+        image_features: torch.Tensor,
+        strategy: str
+    ) -> torch.Tensor:
         """根据策略选择图像特征"""
         # Copied from https://github.com/huggingface/transformers/blob/39c3c0a72af6fbda5614dde02ff236069bb79827/src/transformers/models/llava/modeling_llava.py#L421  # noqa
         if strategy == "default" or strategy == "patch":
@@ -112,8 +115,8 @@ class LlavaLlama(nn.Module):
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         
         if vision_embeddings is not None:
-            inputs_embeds = merge_input_ids_with_image_features(
-                input_ids, inputs_embeds, vision_embeddings,
+            inputs_embeds, position_ids = merge_input_ids_with_image_features(
+                inputs_embeds, input_ids,
                 self.llava_config.pad_token_id, 
                 self.llava_config.image_token_index)
         
@@ -125,9 +128,16 @@ class LlavaLlama(nn.Module):
         image_tensor: Optional[torch.FloatTensor] = None,
         position_ids: torch.Tensor = None,
     ):
-        vision_embeddings = self.vision_encode(image_tensor)
-        inputs_embeds = self.get_multi_modal_input_embeddings(input_ids, vision_embeddings)
-        
+        input_ids = input_ids.to(self.device) # 将 input_ids 移动到设备
+        if position_ids is not None: # 如果提供了 position_ids，将其移动到设备
+            position_ids = position_ids.to(self.device)
+            
+        if input_ids.shape[1] != 1:
+            vision_embeddings = self.vision_encode(image_tensor)
+            inputs_embeds = self.get_multi_modal_input_embeddings(input_ids, vision_embeddings)
+        else: # 进入 decode 阶段, 无需再做视觉编码
+            inputs_embeds = None
+
         hidden_states = self.language_model(input_ids = input_ids,
                                             start_pos = start_pos,
                                             atten_info = atten_info,
