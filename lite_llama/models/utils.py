@@ -15,8 +15,7 @@ Uses a list instead of a tensor if the dimensions of each element do not match.
 
 def _flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
     """
-    Recursively flattens and concatenates NestedTensors on all but the last
-    dimension.
+    递归地将嵌套的张量结构 (NestedTensors) 在最后一个维度之外的所有维度展平, 并将它们连接成一个单一的二维张量。
     """
 
     if isinstance(embeddings, torch.Tensor):
@@ -28,8 +27,7 @@ def _flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
 
 def _embedding_count_expression(embeddings: NestedTensors) -> str:
     """
-    Constructs a debugging representation of the number of embeddings in the
-    NestedTensors.
+    Constructs a debugging representation of the number of embeddings in the NestedTensors.
     """
 
     if isinstance(embeddings, torch.Tensor):
@@ -38,10 +36,66 @@ def _embedding_count_expression(embeddings: NestedTensors) -> str:
     return " + ".join(
         _embedding_count_expression(inner) for inner in embeddings)
 
+# def _merge_multimodal_embeddings(
+#     inputs_embeds: torch.Tensor,
+#     is_multimodal: torch.Tensor,
+#     multimodal_embeddings: NestedTensors,
+# ) -> torch.Tensor:
+#     """
+#     Merge `multimodal_embeddings` into `inputs_embeds` by overwriting the
+#     positions in `inputs_embeds` corresponding to placeholder tokens in
+#     `input_ids`.
+
+#     Note:
+#         This updates ``inputs_embeds`` in place.
+#     """
+#     num_expected_tokens = is_multimodal.sum().item()
+#     assert isinstance(num_expected_tokens, int)
+
+#     flattened = _flatten_embeddings(multimodal_embeddings)
+#     if flattened.shape[0] != num_expected_tokens:
+#         expr = _embedding_count_expression(multimodal_embeddings)
+#         raise ValueError(
+#             f"Attempted to assign {expr} = {flattened.shape[0]} "
+#             f"multimodal tokens to {num_expected_tokens} placeholders")
+
+#     inputs_embeds[is_multimodal] = flattened
+#     return inputs_embeds
+
 def _merge_multimodal_embeddings(
     inputs_embeds: torch.Tensor,
     is_multimodal: torch.Tensor,
     multimodal_embeddings: NestedTensors,
+) -> torch.Tensor:
+    num_expected_tokens = is_multimodal.sum().item()
+    assert isinstance(num_expected_tokens, int)
+
+    flattened = _flatten_embeddings(multimodal_embeddings)
+    
+    if flattened.shape[0] != num_expected_tokens:
+        expr = _embedding_count_expression(multimodal_embeddings)
+        raise ValueError(
+            f"Attempted to assign {expr} = {flattened.shape[0]} "
+            f"multimodal tokens to {num_expected_tokens} placeholders")
+    
+    # Ensure that the assignment is valid
+    if flattened.shape[0] > num_expected_tokens:
+        # Option 1: Truncate the embeddings
+        flattened = flattened[:num_expected_tokens]
+    elif flattened.shape[0] < num_expected_tokens:
+        # Option 2: Repeat or pad the embeddings
+        # 例如，可以重复使用某些嵌入或使用零填充
+        padding = inputs_embeds.new_zeros(num_expected_tokens - flattened.shape[0], flattened.shape[1])
+        flattened = torch.cat([flattened, padding], dim=0)
+
+    inputs_embeds[is_multimodal] = flattened
+    return inputs_embeds
+
+def merge_multimodal_embeddings(
+    input_ids: torch.Tensor,
+    inputs_embeds: torch.Tensor,
+    multimodal_embeddings: NestedTensors,
+    placeholder_token_id: int,
 ) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
@@ -51,19 +105,11 @@ def _merge_multimodal_embeddings(
     Note:
         This updates ``inputs_embeds`` in place.
     """
-    num_expected_tokens = is_multimodal.sum().item()
-    assert isinstance(num_expected_tokens, int)
-
-    flattened = _flatten_embeddings(multimodal_embeddings)
-    if flattened.shape[0] != num_expected_tokens:
-        expr = _embedding_count_expression(multimodal_embeddings)
-        raise ValueError(
-            f"Attempted to assign {expr} = {flattened.shape[0]} "
-            f"multimodal tokens to {num_expected_tokens} placeholders")
-
-    inputs_embeds[is_multimodal] = flattened
-    return inputs_embeds
-
+    return _merge_multimodal_embeddings(
+        inputs_embeds,
+        (input_ids == placeholder_token_id),
+        multimodal_embeddings,
+    )
 
 def embed_multimodal(
     input_ids: torch.Tensor,
@@ -104,27 +150,7 @@ def embed_multimodal(
     )
 
 
-def merge_multimodal_embeddings(
-    input_ids: torch.Tensor,
-    inputs_embeds: torch.Tensor,
-    multimodal_embeddings: NestedTensors,
-    placeholder_token_id: int,
-) -> torch.Tensor:
-    """
-    Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
-    positions in ``inputs_embeds`` corresponding to placeholder tokens in
-    ``input_ids``.
-
-    Note:
-        This updates ``inputs_embeds`` in place.
-    """
-    return _merge_multimodal_embeddings(
-        inputs_embeds,
-        (input_ids == placeholder_token_id),
-        multimodal_embeddings,
-    )
-
-def merge_input_ids_with_image_features(
+def merge_input_ids_with_image_features2(
     image_features, 
     inputs_embeds, 
     input_ids, 

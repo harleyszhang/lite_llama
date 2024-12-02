@@ -8,7 +8,7 @@ from lite_llama.kernels.layernorm import layernorm
 from lite_llama.kernels.softmax import softmax, naive_softmax, online_softmax
 from lite_llama.kernels.rope import rope as rope_triton
 
-from torch_rope import LlamaRotaryEmbedding, apply_rotary_emb, apply_rotary_pos_emb
+from lite_llama.test.test_torch_rope import LlamaRotaryEmbedding, apply_rotary_emb, apply_rotary_pos_emb
 try:
     # This is https://github.com/NVIDIA/apex, NOT the apex on PyPi, so it
     # should not be added to extras_require in setup.py.

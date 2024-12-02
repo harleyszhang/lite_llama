@@ -1,5 +1,5 @@
 from typing import Optional
-import torch, logging
+import torch, logging, re
 from PIL import Image
 
 from typing import List, Literal, Optional, Tuple, TypedDict, Generator, Union
@@ -25,28 +25,45 @@ def tokenizer_image_token(
 ):
     """
     处理包含特殊标记 <image> 的文本提示, 将其转换为相应的 token 序列，并在 <image> 位置插入指定的图像 token 索引。
+    
+    "A cat <image> is sitting <image> on the mat."
+    [65,32,99,97,116,32000,32,105,115,32,115,105,116,116,105,110,103,32000,32,111,110,32,116,104,101,32,109,97,116,46]
+
+    参数:
+        prompt (str): 包含 <image> 标记的文本。
+        tokenizer: 分词器对象，需支持调用 tokenizer(chunk).input_ids。
+        image_token_index (int): 用于替换 <image> 标记的图像 token 索引。
+        return_tensors (str, optional): 指定返回的张量类型，例如 'pt' 表示 PyTorch 张量。
+    
+    返回:
+        list 或 torch.Tensor: 生成的 token 序列。
     """
-    # 分割并分词：将 prompt 按照 <image> 分割为多个片段，并对每个片段进行分词，生成对应的 input_ids 列表。
-    prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split('<image>')]
-
-    def insert_separator(X, sep):
-        return [ele for sublist in zip(X, [sep]*len(X)) for ele in sublist][:-1]
-
+    # 使用正则表达式分割，移除 '<image>' 前的空格，但保留后的空格
+    prompt_chunks = re.split(r'\s?<image>', prompt)
+    # 不过滤空片段，以处理多个连续的 '<image>' 标记
+    token_chunks = [tokenizer(chunk).input_ids for chunk in prompt_chunks]
+    
     input_ids = []
     offset = 0
-    if len(prompt_chunks) > 0 and len(prompt_chunks[0]) > 0 and prompt_chunks[0][0] == tokenizer.bos_token_id:
+    # 检查第一个片段是否以 BOS token 开始
+    if len(token_chunks) > 0 and len(token_chunks[0]) > 0 and token_chunks[0][0] == tokenizer.bos_token_id:
         offset = 1
-        input_ids.append(prompt_chunks[0][0])
-
-    for x in insert_separator(prompt_chunks, [image_token_index] * (offset + 1)):
-        input_ids.extend(x[offset:])
-
+        input_ids.append(token_chunks[0][0])
+    
+    # 插入图像 token
+    for i, chunk in enumerate(token_chunks):
+        # 添加当前片段的 token，跳过 BOS token（如果已添加）
+        input_ids.extend(chunk[offset:])
+        offset = 0  # 仅适用于第一个片段
+        # 如果不是最后一个片段，插入图像 token
+        if i < len(token_chunks) - 1:
+            input_ids.append(image_token_index)
+    
     if return_tensors is not None:
         if return_tensors == 'pt':
             return torch.tensor(input_ids, dtype=torch.long)
         raise ValueError(f'Unsupported tensor type: {return_tensors}')
     return input_ids
-
 
 class LlavaGeneratorStream:
     """
@@ -67,9 +84,6 @@ class LlavaGeneratorStream:
         self.max_batch_size = max_batch_size
         self.max_seq_len = max_seq_len
 
-        processor = AutoProcessor.from_pretrained(checkpoints_dir)
-        self.image_processor = processor.image_processor
-
         self.model_executor = ModelExecutor.build(
             checkpoints_dir = checkpoints_dir,
             tokenizer_path = tokenizer_path,
@@ -80,9 +94,12 @@ class LlavaGeneratorStream:
             device = device
         )
         self.tokenizer = self.model_executor.tokenizer
+        self.device = device
         # self.model_config = self.model_executor.model_config
 
     def encode_images(self, image_items: List[Union[str, Image.Image]]):
+        processor = AutoProcessor.from_pretrained(self.checkpoints_dir)
+        self.image_processor = processor.image_processor
         images = []
         for item in image_items:
             if isinstance(item, Image.Image):
@@ -94,10 +111,16 @@ class LlavaGeneratorStream:
                 image = Image.open(item)
             images.append(image.convert("RGB"))
 
-        images = self.image_processor.preprocess(images, return_tensors="pt")["pixel_values"]
-        print(images)
+        image_tensor = self.image_processor.preprocess(images, return_tensors="pt")["pixel_values"]
+        if type(image_tensor) is list:
+            image_tensor = [
+                image.to(self.device, dtype=torch.float16) for image in image_tensor
+            ]
+        else:
+            image_tensor = image_tensor.to(self.device, dtype=torch.float16)
+        print("image_processor images shape", image_tensor.shape)
 
-        return images
+        return image_tensor
 
 
     @torch.inference_mode()
@@ -150,6 +173,7 @@ class LlavaGeneratorStream:
 
         for cur_pos in range(min_prompt_len, total_len):
             input_ids = tokens[:, prev_pos: cur_pos]
+            print("input_ids is", input_ids)
             logits, select_index = self.model_executor.forward(input_ids, prev_pos, image_tensors)
 
             if temperature > 0:
@@ -208,7 +232,12 @@ class LlavaGeneratorStream:
         # prompt_tokens = [self.tokenizer.encode(x, add_special_tokens=True) for x in prompts]
         prompt_tokens = (tokenizer_image_token(prompts, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).cuda())
         image_tensors = self.encode_images(image_items).cuda()
+        
+        print("prompt_tokens is ", prompt_tokens)
 
+        print("prompt_tokens shape is ", prompt_tokens.shape)
+        print("image_tensors shape is ", image_tensors.shape)
+        
         stream = self.generate_stream(
             prompt_tokens=prompt_tokens,
             image_tensors=image_tensors,

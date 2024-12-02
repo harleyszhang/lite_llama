@@ -27,7 +27,7 @@ from transformers import AutoConfig,AutoModel, AutoModelForCausalLM, LlavaConfig
 from .llama import Llama
 from .model_config import LlamaConfig
 
-from .utils import merge_input_ids_with_image_features
+from .utils import merge_input_ids_with_image_features, merge_multimodal_embeddings
 from ..utils.llava_image_procss import process_images
 from ..utils.config_convert import convert_transformers_to_custom_config
 
@@ -112,12 +112,16 @@ class LlavaLlama(nn.Module):
         vision_embeddings = None,
     ) -> torch.Tensor:
         """获取输入嵌入，包括文本和视觉嵌入的合并。"""
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        llm_inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         
+        # torch.Size([1, 576, 4096]) torch.Size([1, 22, 4096]) torch.Size([1, 22])
+        print("vision_embeddings and inputs_embeds and input_ids shape is,", 
+              vision_embeddings.shape, llm_inputs_embeds.shape, input_ids.shape)
+        
+        print("self.llava_config.image_token_index is ", self.llava_config.image_token_index)
         if vision_embeddings is not None:
-            inputs_embeds, position_ids = merge_input_ids_with_image_features(
-                inputs_embeds, input_ids,
-                self.llava_config.pad_token_id, 
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, llm_inputs_embeds, vision_embeddings, 
                 self.llava_config.image_token_index)
         
         return inputs_embeds
