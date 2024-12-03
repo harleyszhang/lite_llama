@@ -11,7 +11,7 @@ def main(
     top_p: float = 0.9,
     max_seq_len: int = 2048,
     max_batch_size: int = 1,  # 每次处理一个 Prompt
-    max_gen_len: Optional[int] = 512,
+    max_gen_len: Optional[int] = 64,
     load_model: bool = True,
     compiled_model: bool = True,
     triton_weight: bool = True
@@ -31,9 +31,10 @@ def main(
 
     # 调用生成函数，开始流式生成
     prompts = "USER: <image>\nWhat's the content of the image? ASSISTANT:"
-    image_items = "https://www.ilankelman.org/stopsigns/australia.jpg"
+    image_items = ["https://www.ilankelman.org/stopsigns/australia.jpg"]
+
     stream = generator.text_completion_stream(
-        [prompts],
+        prompts,
         image_items,
         temperature=temperature,
         top_p=top_p,
@@ -45,7 +46,7 @@ def main(
     for batch_completions in stream:
         new_text = batch_completions[0]['generation'][len(completion):]
         completion = batch_completions[0]['generation']
-        print(new_text, end='', flush=True)
+        print(new_text, end=' ', flush=True)
     print("\n\n==================================\n")
     
     # while True:

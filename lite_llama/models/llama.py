@@ -33,7 +33,6 @@ class FusedAttention(nn.Module):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):         
         x = x.to(torch.float16)
-        print("context_forward input x shape is ", x.shape)
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
 
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
@@ -51,9 +50,6 @@ class FusedAttention(nn.Module):
         # 2. 获取 prefill 阶段的 select_index, 并更新 kv cache 张量
         select_index = atten_info.select_index
         layer_kv_buffer = atten_info.kv_buffer[layer_index]        
-        
-        print(f"xk shape before view: {xk.shape}")
-        print(f"layer_kv_buffer shape: {layer_kv_buffer.shape}")
 
         layer_kv_buffer[select_index, :self.num_kv_heads, :] = xk.view(batch_size * seq_len, self.num_kv_heads, -1)
         layer_kv_buffer[select_index, self.num_kv_heads:, :] = xv.view(batch_size * seq_len, self.num_kv_heads, -1)
@@ -220,12 +216,12 @@ class Llama(nn.Module):
     
         if inputs_embeds is not None:
             h = inputs_embeds
-            print("Llama inputs_embeds is ", inputs_embeds)
+            # print("Llama inputs_embeds is ", inputs_embeds)
             _, seq_len, _ = inputs_embeds.shape
         else:
+            _, seq_len = input_ids.shape
             h = self.get_input_embeddings(input_ids)
-            _, seq_len = h.shape
-
+           
         cache_position = torch.arange(start_pos, start_pos + seq_len, device=input_ids.device)
         position_ids = cache_position.unsqueeze(0)
         position_embeddings = self.rotary_emb(h, position_ids)

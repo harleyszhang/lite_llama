@@ -67,7 +67,6 @@ class LlavaLlama(nn.Module):
 
         # 视觉处理模块（vision_tower）初始化
         self.vision_tower = AutoModel.from_config(llava_config.vision_config)
-        print("self.vision_tower ", self.vision_tower)
 
         # 多模态投影器（multi_modal_projector）初始化
         self.multi_modal_projector = LlavaMultiModalProjector(
@@ -117,10 +116,9 @@ class LlavaLlama(nn.Module):
         llm_inputs_embeds = self.language_model.get_input_embeddings(input_ids) # torch.Size([1, 22]) --> torch.Size([1, 22, 4096])
         
         # torch.Size([1, 576, 4096]) torch.Size([1, 22, 4096]) torch.Size([1, 22])
-        print("vision_embeddings and inputs_embeds and input_ids shape is,", 
-              vision_embeddings.shape, llm_inputs_embeds.shape, input_ids.shape)
-        
-        print("self.llava_config.image_token_index is ", self.llava_config.image_token_index)
+        # print("vision_embeddings and inputs_embeds and input_ids shape is,", 
+        #       vision_embeddings.shape, llm_inputs_embeds.shape, input_ids.shape)
+        # print("self.llava_config.image_token_index is ", self.llava_config.image_token_index)
         
         if vision_embeddings is not None:
             inputs_embeds, position_ids = merge_input_ids_with_image_features(
@@ -128,8 +126,6 @@ class LlavaLlama(nn.Module):
                 self.llava_config.pad_token_id,
                 self.llava_config.image_token_index,
             )
-        print("position_ids is ", position_ids)
-        print("After merge inputs_embeds and position_ids shape ", inputs_embeds.shape, position_ids.shape)
         
         assert not torch.isnan(inputs_embeds).any(), f"After merge inputs_embeds tensor contains NaN values!"
 

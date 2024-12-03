@@ -63,6 +63,9 @@ def tokenizer_image_token(
         if return_tensors == 'pt':
             return torch.tensor(input_ids, dtype=torch.long)
         raise ValueError(f'Unsupported tensor type: {return_tensors}')
+    """
+    [1, 3148, 1001, 29901, 32000, 1, 29871, 13, 5618, 29915, 29879, 278, 2793, 310, 278, 1967, 29973, 319, 1799, 9047, 13566, 29901]
+    """
     return input_ids
 
 class LlavaGeneratorStream:
@@ -118,7 +121,6 @@ class LlavaGeneratorStream:
             ]
         else:
             image_tensors = image_tensors.to(self.device, dtype=torch.float16)
-            print("image_processor images shape", image_tensors.shape)
 
         return image_tensors
 
@@ -149,6 +151,7 @@ class LlavaGeneratorStream:
         说明：
             该方法在生成循环中，每生成一个新 token, 就立即输出对应的文本和概率(如果需要）。
         """
+        print("prompt_tokens ", prompt_tokens)
         bsz = len(prompt_tokens)
         assert bsz <= self.max_batch_size, (bsz, self.max_batch_size)
 
@@ -171,12 +174,18 @@ class LlavaGeneratorStream:
         if min_prompt_len == total_len: # 如果 prompt 已经达到最大长度，无需生成
             logits, _ = self.model.forward(tokens, prev_pos, image_tensors)
 
+        start_pos = 0
         for cur_pos in range(min_prompt_len, total_len):
             input_ids = tokens[:, prev_pos: cur_pos]
-            print("input_ids is", input_ids)
-            
-            logits, select_index = self.model_executor.forward(input_ids, prev_pos, image_tensors)
-            print("logits is ", logits)
+            batch_size, seq_len = input_ids.shape
+
+            logits, select_index = self.model_executor.forward(input_ids, start_pos, image_tensors)
+            # print("select_index ", select_index)
+            if start_pos == 0:
+                start_pos += len(select_index)
+            else:
+                start_pos += batch_size
+
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p)
@@ -227,18 +236,11 @@ class LlavaGeneratorStream:
         if max_gen_len is None:
             max_gen_len = self.max_seq_len - 1
 
-        prompts = "USER: <image>\nWhat's the content of the image? ASSISTANT:"
-        image_items = ["https://www.ilankelman.org/stopsigns/australia.jpg"]
-
         # prompt_tokens = [self.tokenizer.encode(x, add_special_tokens=True) for x in prompts]
-        prompt_tokens = (tokenizer_image_token(prompts, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).cuda())
+        prompt_tokens = (tokenizer_image_token(prompts, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).cuda()) # torch.Size([1, 22])
+        print("prompt_tokens shape ", prompt_tokens.shape)
         image_tensors = self.encode_images(image_items).cuda() # image_tensors shape is torch.Size([1, 3, 336, 336])
-        
-        print("prompt_tokens is ", prompt_tokens)
-
-        print("prompt_tokens shape is ", prompt_tokens.shape) # prompt_tokens shape is torch.Size([1, 22])
-        print("image_tensors shape is ", image_tensors.shape) # image_tensors shape is torch.Size([1, 3, 336, 336])
-        
+    
         stream = self.generate_stream(
             prompt_tokens=prompt_tokens,
             image_tensors=image_tensors,
