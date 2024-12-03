@@ -175,7 +175,7 @@ class LlavaGeneratorStream:
             input_ids = tokens[:, prev_pos: cur_pos]
             print("input_ids is", input_ids)
             logits, select_index = self.model_executor.forward(input_ids, prev_pos, image_tensors)
-
+            print("logits is ", logits)
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p)

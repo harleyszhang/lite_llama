@@ -284,7 +284,7 @@ class ModelExecutor:
         if seq_len > 1:
             # 一次性分配最大所需 kv cache. seq0: [token0, token1, token2, token3,], seq1: [token0, token1, token2, token3,]
             need_size = batch_size * (seq_len)
-            alloc_mem = self.kv_mem_manager.alloc_contiguous_kvcache(need_size)
+            alloc_mem = self.kv_mem_manager.alloc_contiguous_kvcache(597)
             if alloc_mem is not None:
                 select_index = alloc_mem[0]
             else:

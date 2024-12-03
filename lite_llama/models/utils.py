@@ -71,6 +71,8 @@ def _merge_multimodal_embeddings(
     assert isinstance(num_expected_tokens, int)
 
     flattened = _flatten_embeddings(multimodal_embeddings)
+    print(f"Attempted to assign {expr} = {flattened.shape[0]} \
+          multimodal tokens to {num_expected_tokens} placeholders")
     
     if flattened.shape[0] != num_expected_tokens:
         expr = _embedding_count_expression(multimodal_embeddings)
@@ -235,9 +237,9 @@ def merge_input_ids_with_image_features2(
     return final_embedding, final_attention_mask, position_ids
 
 def merge_input_ids_with_image_features(
-    image_features: torch.Tensor, 
-    inputs_embeds: torch.Tensor, 
     input_ids: torch.Tensor, 
+    inputs_embeds: torch.Tensor, 
+    image_features: torch.Tensor,
     pad_token_id: int,
     image_token_index: int
 ):
@@ -245,9 +247,9 @@ def merge_input_ids_with_image_features(
     将 input_ids 与 image_features 合并，生成最终的嵌入和位置 ID。
     
     Args:
-        image_features (torch.Tensor): 视觉编码后的图像特征，形状为 (num_images, num_image_patches, embed_dim)
-        inputs_embeds (torch.Tensor): 文本嵌入，形状为 (batch_size, sequence_length, embed_dim)
         input_ids (torch.Tensor): 输入的 token IDs, 形状为 (batch_size, sequence_length)
+        inputs_embeds (torch.Tensor): 文本嵌入，形状为 (batch_size, sequence_length, embed_dim)
+        image_features (torch.Tensor): 视觉编码后的图像特征，形状为 (num_images, num_image_patches, embed_dim)
         pad_token_id (int): 填充 token 的 ID
         image_token_index (int): 图像 token 的 ID
     

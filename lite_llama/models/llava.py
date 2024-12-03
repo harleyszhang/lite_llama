@@ -68,6 +68,7 @@ class LlavaLlama(nn.Module):
         # 视觉处理模块（vision_tower）初始化
         self.vision_tower = AutoModel.from_config(llava_config.vision_config)
         print("self.vision_tower ", self.vision_tower)
+
         # 多模态投影器（multi_modal_projector）初始化
         self.multi_modal_projector = LlavaMultiModalProjector(
             vision_hidden_size = llava_config.vision_config.hidden_size,
@@ -104,6 +105,7 @@ class LlavaLlama(nn.Module):
         # 2. 通过多模态投影器将图像特征转换为多模态嵌入
         image_features = self.multi_modal_projector(x)
 
+        assert not torch.isnan(image_features).any(), f"After vision_tower image_features tensor contains NaN values!"
         return image_features
     
     def get_multi_modal_input_embeddings(
@@ -122,8 +124,12 @@ class LlavaLlama(nn.Module):
         if vision_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, llm_inputs_embeds, vision_embeddings, 
-                self.llava_config.image_token_index)
+                # self.llava_config.pad_token_id,
+                self.llava_config.image_token_index,
+            )
         
+        assert not torch.isnan(inputs_embeds).any(), f"After merge inputs_embeds tensor contains NaN values!"
+
         return inputs_embeds
     
     def forward(
@@ -142,6 +148,8 @@ class LlavaLlama(nn.Module):
         else: # 进入 decode 阶段, 无需再做视觉编码
             inputs_embeds = None
 
+        print("inputs_embeds shape is ", inputs_embeds.shape)
+       
         hidden_states = self.language_model(input_ids = input_ids,
                                             start_pos = start_pos,
                                             atten_info = atten_info,
