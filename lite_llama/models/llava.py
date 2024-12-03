@@ -114,7 +114,7 @@ class LlavaLlama(nn.Module):
         vision_embeddings = None,
     ) -> torch.Tensor:
         """获取输入嵌入，包括文本和视觉嵌入的合并。"""
-        llm_inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        llm_inputs_embeds = self.language_model.get_input_embeddings(input_ids) # torch.Size([1, 22]) --> torch.Size([1, 22, 4096])
         
         # torch.Size([1, 576, 4096]) torch.Size([1, 22, 4096]) torch.Size([1, 22])
         print("vision_embeddings and inputs_embeds and input_ids shape is,", 
@@ -123,11 +123,13 @@ class LlavaLlama(nn.Module):
         print("self.llava_config.image_token_index is ", self.llava_config.image_token_index)
         
         if vision_embeddings is not None:
-            inputs_embeds, _ = merge_input_ids_with_image_features(
+            inputs_embeds, position_ids = merge_input_ids_with_image_features(
                 input_ids, llm_inputs_embeds, vision_embeddings, 
                 self.llava_config.pad_token_id,
                 self.llava_config.image_token_index,
             )
+        print("position_ids is ", position_ids)
+        print("After merge inputs_embeds and position_ids shape ", inputs_embeds.shape, position_ids.shape)
         
         assert not torch.isnan(inputs_embeds).any(), f"After merge inputs_embeds tensor contains NaN values!"
 
@@ -144,12 +146,11 @@ class LlavaLlama(nn.Module):
             position_ids = position_ids.to(self.device)
             
         if input_ids.shape[1] != 1:
-            vision_embeddings = self.vision_encode(image_tensor)
+            vision_embeddings = self.vision_encode(image_tensor) #  torch.Size([1, 3, 336, 336]) --> torch.Size([1, 576, 4096])
             inputs_embeds = self.get_multi_modal_input_embeddings(input_ids, vision_embeddings)
+            print("inputs_embeds shape is ", inputs_embeds.shape) # torch.Size([1, 597, 4096])
         else: # 进入 decode 阶段, 无需再做视觉编码
             inputs_embeds = None
-
-        print("inputs_embeds shape is ", inputs_embeds.shape)
        
         hidden_states = self.language_model(input_ids = input_ids,
                                             start_pos = start_pos,

@@ -111,16 +111,16 @@ class LlavaGeneratorStream:
                 image = Image.open(item)
             images.append(image.convert("RGB"))
 
-        image_tensor = self.image_processor.preprocess(images, return_tensors="pt")["pixel_values"]
-        if type(image_tensor) is list:
-            image_tensor = [
-                image.to(self.device, dtype=torch.float16) for image in image_tensor
+        image_tensors = self.image_processor.preprocess(images, return_tensors="pt")["pixel_values"]
+        if type(image_tensors) is list:
+            image_tensors = [
+                image.to(self.device, dtype=torch.float16) for image in image_tensors
             ]
         else:
-            image_tensor = image_tensor.to(self.device, dtype=torch.float16)
-        print("image_processor images shape", image_tensor.shape)
+            image_tensors = image_tensors.to(self.device, dtype=torch.float16)
+            print("image_processor images shape", image_tensors.shape)
 
-        return image_tensor
+        return image_tensors
 
 
     @torch.inference_mode()
@@ -174,6 +174,7 @@ class LlavaGeneratorStream:
         for cur_pos in range(min_prompt_len, total_len):
             input_ids = tokens[:, prev_pos: cur_pos]
             print("input_ids is", input_ids)
+            
             logits, select_index = self.model_executor.forward(input_ids, prev_pos, image_tensors)
             print("logits is ", logits)
             if temperature > 0:
@@ -231,12 +232,12 @@ class LlavaGeneratorStream:
 
         # prompt_tokens = [self.tokenizer.encode(x, add_special_tokens=True) for x in prompts]
         prompt_tokens = (tokenizer_image_token(prompts, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).cuda())
-        image_tensors = self.encode_images(image_items).cuda()
+        image_tensors = self.encode_images(image_items).cuda() # image_tensors shape is torch.Size([1, 3, 336, 336])
         
         print("prompt_tokens is ", prompt_tokens)
 
-        print("prompt_tokens shape is ", prompt_tokens.shape)
-        print("image_tensors shape is ", image_tensors.shape)
+        print("prompt_tokens shape is ", prompt_tokens.shape) # prompt_tokens shape is torch.Size([1, 22])
+        print("image_tensors shape is ", image_tensors.shape) # image_tensors shape is torch.Size([1, 3, 336, 336])
         
         stream = self.generate_stream(
             prompt_tokens=prompt_tokens,

@@ -257,39 +257,49 @@ def merge_input_ids_with_image_features(
         final_embedding (torch.Tensor): 合并后的嵌入，形状为 (batch_size, max_embed_dim, embed_dim)
         position_ids (torch.Tensor): 位置 ID, 形状为 (batch_size, max_embed_dim)
     """
-    num_images, num_image_patches, embed_dim = image_features.shape
-    batch_size, sequence_length = input_ids.shape
+    num_images, num_image_patches, embed_dim = image_features.shape # torch.Size([1, 576, 4096])
+    batch_size, sequence_length = input_ids.shape # torch.Size([1, 22])
 
     # 计算 attention_mask 从 input_ids
     attention_mask = (input_ids != pad_token_id).long()
 
     # 检查每个样本的最后一个 token 是否为填充 token
-    left_padding = not torch.sum(input_ids[:, -1] == pad_token_id).bool().any()
+    left_padding = not torch.sum(input_ids[:, -1] == pad_token_id).bool().any() # True
 
     # 创建图像 token 的掩码来获取特殊图像 token 的位置, 并计算新序列最大长度
+    """
+    tensor([[False, False, False, False,  True, False, False, False, False, False,
+         False, False, False, False, False, False, False, False, False, False,
+         False, False]], device='cuda:0')
+    """
     special_image_token_mask = input_ids == image_token_index
     # 每个样本中图像 token 的数量, 形状为 [batch_size, ]
-    num_special_image_tokens = torch.sum(special_image_token_mask, dim=-1)
+    num_special_image_tokens = torch.sum(special_image_token_mask, dim=-1) # 1
 
     # 计算合并图像特征后的新序列最大长度。
     # 每个图像 token 位置会被替换为 (num_image_patches - 1) 个图像 patches embedding token。
-    max_embed_dim = (num_special_image_tokens.max() * (num_image_patches - 1)) + sequence_length
+    max_embed_dim = (num_special_image_tokens.max() * (num_image_patches - 1)) + sequence_length # tensor(597, device='cuda:0')
 
     # 获取所有非图像 token 的位置索引
     batch_indices, non_image_indices = torch.where(input_ids != image_token_index) 
 
     # 计算文本应写入的位置
-    new_token_positions = torch.cumsum((special_image_token_mask * (num_image_patches - 1) + 1).float(), dim=-1).long() - 1
+    new_token_positions = torch.cumsum((special_image_token_mask * (num_image_patches - 1) + 1), -1) - 1 
+    new_token_positions = torch.cumsum((special_image_token_mask * (num_image_patches - 1) + 1).float(), dim=-1).long() - 1 # torch.Size([1, 22])
     nb_image_pad = max_embed_dim - 1 - new_token_positions[:, -1]  # 计算需要的图像填充数量，以达到 max_embed_dim。
 
     # 如果存在左侧填充 (left_padding 为 True)，则将 new_token_positions 进行偏移调整。
+    """
+    tensor([[  0,   1,   2,   3, 579, 580, 581, 582, 583, 584, 585, 586, 587, 588,
+         589, 590, 591, 592, 593, 594, 595, 596]], device='cuda:0')
+    """
     if left_padding:
         new_token_positions += nb_image_pad[:, None]  # offset for left padding
 
     # 获取需要覆盖的文本 token 在合并序列中的新位置。
     text_to_overwrite = new_token_positions[batch_indices, non_image_indices]
 
-    # 初始化最终的嵌入
+    # 初始化最终的嵌入, torch.Size([1, 597, 4096])
     final_embedding = torch.zeros(
         batch_size, max_embed_dim, embed_dim, dtype=inputs_embeds.dtype, device=inputs_embeds.device
     )

@@ -217,13 +217,14 @@ class Llama(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ):
         self.hidden_states = []
-        _, seq_len = input_ids.shape
-
+    
         if inputs_embeds is not None:
             h = inputs_embeds
             print("Llama inputs_embeds is ", inputs_embeds)
+            _, seq_len, _ = inputs_embeds.shape
         else:
             h = self.get_input_embeddings(input_ids)
+            _, seq_len = h.shape
 
         cache_position = torch.arange(start_pos, start_pos + seq_len, device=input_ids.device)
         position_ids = cache_position.unsqueeze(0)
