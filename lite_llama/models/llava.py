@@ -121,10 +121,11 @@ class LlavaLlama(nn.Module):
               vision_embeddings.shape, llm_inputs_embeds.shape, input_ids.shape)
         
         print("self.llava_config.image_token_index is ", self.llava_config.image_token_index)
+        
         if vision_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
+            inputs_embeds, _ = merge_input_ids_with_image_features(
                 input_ids, llm_inputs_embeds, vision_embeddings, 
-                # self.llava_config.pad_token_id,
+                self.llava_config.pad_token_id,
                 self.llava_config.image_token_index,
             )
         

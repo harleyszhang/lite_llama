@@ -27,6 +27,23 @@ def indexs_convert(indexs: torch.tensor, batch_size: int):
     """
     pass
 
+def get_conversion_func(model_type: str):
+    """
+    根据模型类型获取相应的权重转换函数。
+
+    参数:
+        model_type (str): 模型类型。
+
+    返回:
+        function: 相应的权重转换函数，如果不支持则返回 None。
+    """
+    conversion_funcs = {
+        "llama": convert_llama_torch_to_litellama,
+        "qwen2": convert_qwen2_hf_to_litellama,
+        "llava": convert_llavallama_hf_to_litellama,
+    }
+    return conversion_funcs.get(model_type.lower())
+    
 class ModelExecutor:
     # 定义类属性
     tokenizer = None
@@ -110,7 +127,7 @@ class ModelExecutor:
                 state_dict = hf_sd
                 print("Load Triton weight directly!")
             else:
-                conversion_func = ModelExecutor._get_conversion_func(model_config.model_type)
+                conversion_func = get_conversion_func(model_config.model_type)
                 if conversion_func is None:
                     logger.error(f"不支持的模型类型: {model_config.model_type}")
                     raise ValueError(f"Unsupported model type: {model_config.model_type}")
@@ -120,7 +137,6 @@ class ModelExecutor:
             model.load_state_dict(state_dict, strict=True, assign=True) # 将加载的 state_dict 应用到模型实例中。
             model.eval()
             logger.info(f"Loaded state dict in {time.time() - start_time:.2f}s")
-            # torch.set_default_tensor_type(torch.cuda.HalfTensor)
 
             # 将模型转换为半精度, 并验证转换
             model.to(device)
@@ -130,24 +146,6 @@ class ModelExecutor:
             logger.info("Converted model to half precision (FP16)")
         
         return model
-    
-    @staticmethod
-    def _get_conversion_func(model_type: str):
-        """
-        根据模型类型获取相应的权重转换函数。
-
-        参数:
-            model_type (str): 模型类型。
-
-        返回:
-            function: 相应的权重转换函数，如果不支持则返回 None。
-        """
-        conversion_funcs = {
-            "llama": convert_llama_torch_to_litellama,
-            "qwen2": convert_qwen2_hf_to_litellama,
-            "llava": convert_llavallama_hf_to_litellama,
-        }
-        return conversion_funcs.get(model_type.lower())
     
     @staticmethod
     def _initialize_model(model_config: LlamaConfig, device: str) -> nn.Module:

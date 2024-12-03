@@ -36,62 +36,62 @@ def _embedding_count_expression(embeddings: NestedTensors) -> str:
     return " + ".join(
         _embedding_count_expression(inner) for inner in embeddings)
 
-# def _merge_multimodal_embeddings(
-#     inputs_embeds: torch.Tensor,
-#     is_multimodal: torch.Tensor,
-#     multimodal_embeddings: NestedTensors,
-# ) -> torch.Tensor:
-#     """
-#     Merge `multimodal_embeddings` into `inputs_embeds` by overwriting the
-#     positions in `inputs_embeds` corresponding to placeholder tokens in
-#     `input_ids`.
-
-#     Note:
-#         This updates ``inputs_embeds`` in place.
-#     """
-#     num_expected_tokens = is_multimodal.sum().item()
-#     assert isinstance(num_expected_tokens, int)
-
-#     flattened = _flatten_embeddings(multimodal_embeddings)
-#     if flattened.shape[0] != num_expected_tokens:
-#         expr = _embedding_count_expression(multimodal_embeddings)
-#         raise ValueError(
-#             f"Attempted to assign {expr} = {flattened.shape[0]} "
-#             f"multimodal tokens to {num_expected_tokens} placeholders")
-
-#     inputs_embeds[is_multimodal] = flattened
-#     return inputs_embeds
-
 def _merge_multimodal_embeddings(
     inputs_embeds: torch.Tensor,
     is_multimodal: torch.Tensor,
     multimodal_embeddings: NestedTensors,
 ) -> torch.Tensor:
+    """
+    Merge `multimodal_embeddings` into `inputs_embeds` by overwriting the
+    positions in `inputs_embeds` corresponding to placeholder tokens in
+    `input_ids`.
+
+    Note:
+        This updates ``inputs_embeds`` in place.
+    """
     num_expected_tokens = is_multimodal.sum().item()
     assert isinstance(num_expected_tokens, int)
 
     flattened = _flatten_embeddings(multimodal_embeddings)
-    print(f"Attempted to assign {expr} = {flattened.shape[0]} \
-          multimodal tokens to {num_expected_tokens} placeholders")
-    
     if flattened.shape[0] != num_expected_tokens:
         expr = _embedding_count_expression(multimodal_embeddings)
         raise ValueError(
             f"Attempted to assign {expr} = {flattened.shape[0]} "
             f"multimodal tokens to {num_expected_tokens} placeholders")
-    
-    # Ensure that the assignment is valid
-    if flattened.shape[0] > num_expected_tokens:
-        # Option 1: Truncate the embeddings
-        flattened = flattened[:num_expected_tokens]
-    elif flattened.shape[0] < num_expected_tokens:
-        # Option 2: Repeat or pad the embeddings
-        # 例如，可以重复使用某些嵌入或使用零填充
-        padding = inputs_embeds.new_zeros(num_expected_tokens - flattened.shape[0], flattened.shape[1])
-        flattened = torch.cat([flattened, padding], dim=0)
 
     inputs_embeds[is_multimodal] = flattened
     return inputs_embeds
+
+# def _merge_multimodal_embeddings(
+#     inputs_embeds: torch.Tensor,
+#     is_multimodal: torch.Tensor,
+#     multimodal_embeddings: NestedTensors,
+# ) -> torch.Tensor:
+#     num_expected_tokens = is_multimodal.sum().item()
+#     assert isinstance(num_expected_tokens, int)
+
+#     flattened = _flatten_embeddings(multimodal_embeddings)
+#     print(f"Attempted to assign {num_expected_tokens} = {flattened.shape[0]} \
+#           multimodal tokens to {num_expected_tokens} placeholders")
+    
+#     if flattened.shape[0] != num_expected_tokens:
+#         expr = _embedding_count_expression(multimodal_embeddings)
+#         raise ValueError(
+#             f"Attempted to assign {expr} = {flattened.shape[0]} "
+#             f"multimodal tokens to {num_expected_tokens} placeholders")
+    
+#     # Ensure that the assignment is valid
+#     if flattened.shape[0] > num_expected_tokens:
+#         # Option 1: Truncate the embeddings
+#         flattened = flattened[:num_expected_tokens]
+#     elif flattened.shape[0] < num_expected_tokens:
+#         # Option 2: Repeat or pad the embeddings
+#         # 例如，可以重复使用某些嵌入或使用零填充
+#         padding = inputs_embeds.new_zeros(num_expected_tokens - flattened.shape[0], flattened.shape[1])
+#         flattened = torch.cat([flattened, padding], dim=0)
+
+#     inputs_embeds[is_multimodal] = flattened
+#     return inputs_embeds
 
 def merge_multimodal_embeddings(
     input_ids: torch.Tensor,
@@ -336,7 +336,7 @@ def unit_test_merge_input_ids_with_image_features():
     image_token_index = 999
 
     # 示例1：统一尺寸的 image_features
-    print("=== 示例1：统一尺寸的 image_features ===")
+    print("=== 示例1: 统一尺寸的 image_features ===")
     batch_size = 2
     # 计算总图像 token 数量
     input_ids = torch.tensor([

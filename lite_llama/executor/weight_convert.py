@@ -9,6 +9,7 @@ def build_new_weight_dir(checkpoints_dir:str, new_sd):
     current_dir = os.path.dirname(os.path.abspath(__file__)) # 获取当前文件所在的目录
     my_weight_dir = os.path.join(current_dir, "../../my_weight/" + model_id) # 项目所在根目录
     os.makedirs(my_weight_dir, exist_ok=True) # 创建文件夹（如果不存在）
+    
     # 保存模型的状态字典。
     torch.save(new_sd, os.path.join(my_weight_dir, model_id + ".pth"), _use_new_zipfile_serialization=True)
 
@@ -161,10 +162,10 @@ def convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, llm_config):
 
     layers = {
         # key 是原始权重值, value 是自定义模型结构权重参数
-        "language_model.model.layers.{i}.self_attn.q_proj.weight": "language_model.layers.{i}.attention.q_proj.weight",
-        "language_model.model.layers.{i}.self_attn.k_proj.weight": "language_model.layers.{i}.attention.k_proj.weight",
-        "language_model.model.layers.{i}.self_attn.v_proj.weight": "language_model.layers.{i}.attention.v_proj.weight",
-        "language_model.model.layers.{i}.self_attn.o_proj.weight": "language_model.layers.{i}.attention.o_proj.weight",
+        "language_model.model.layers.{i}.self_attn.q_proj.weight": "language_model.layers.{i}.self_attn.q_proj.weight",
+        "language_model.model.layers.{i}.self_attn.k_proj.weight": "language_model.layers.{i}.self_attn.k_proj.weight",
+        "language_model.model.layers.{i}.self_attn.v_proj.weight": "language_model.layers.{i}.self_attn.v_proj.weight",
+        "language_model.model.layers.{i}.self_attn.o_proj.weight": "language_model.layers.{i}.self_attn.o_proj.weight",
 
         "language_model.model.layers.{i}.mlp.gate_proj.weight": "language_model.layers.{i}.mlp.gate_proj.weight",
         "language_model.model.layers.{i}.mlp.up_proj.weight": "language_model.layers.{i}.mlp.up_proj.weight",

@@ -80,9 +80,9 @@ class FusedAttention(nn.Module):
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
 
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
-        xq = self.wq(x)
-        xk = self.wk(x)
-        xv = self.wv(x)
+        xq = self.q_proj(x)
+        xk = self.k_proj(x)
+        xv = self.v_proj(x)
 
         # (B, 1, H_Q * Head_Dim) -> (B, 1, H_Q, Head_Dim), 
         xq = xq.view(batch_size, seq_len, self.num_heads_q, self.head_dim)
@@ -125,7 +125,7 @@ class FusedAttention(nn.Module):
         output = flash_decoding(xq, keys, values, kv_actual_seq_len) # ouput shape is [batchs, num_heads, head_dim]
         output = output.view(batch_size, 1, self.num_heads_q * head_dim)
     
-        output = self.wo(output)
+        output = self.o_proj(output)
         return output
 
 class FusedMLP(nn.Module):
@@ -154,7 +154,7 @@ class LlamaDecoderLayer(nn.Module):
         self.attention_norm_weight = nn.Parameter(torch.ones(self.hidden_size,), requires_grad=False)
         self.ffn_norm_weight = nn.Parameter(torch.ones(self.hidden_size,), requires_grad=False)
         
-        self.attention = FusedAttention(config)
+        self.self_attn = FusedAttention(config)
         self.mlp = FusedMLP(config)
 
     def forward(self, 
@@ -163,24 +163,30 @@ class LlamaDecoderLayer(nn.Module):
         layer_index: int,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
-        # Normalization BEFORE the attention block. # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
+        # Normalization before the attention block. # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
         _, seq_len, _ = x.shape
         hidden_states = rmsnorm(x, self.attention_norm_weight.data, eps=self.config.rms_norm_eps)
+        assert not torch.isnan(hidden_states).any(), f"In {layer_index} decoder layer, attention rmsnorm output tensor contains NaN values!"
 
         # attention 部分计算结果正确, 张量尺寸符合要求
         if seq_len > 1:
-            h = x + self.attention.context_forward(
+            h = x + self.self_attn.context_forward(
                 hidden_states, atten_info, layer_index, position_embeddings
             )
         else:
-            h = x + self.attention.token_forward(
+            h = x + self.self_attn.token_forward(
                 hidden_states, atten_info, layer_index, position_embeddings
             )
         
+        assert not torch.isnan(h).any(), f"In {layer_index} decoder layer, attention output h tensor contains NaN values!"
+
         # Normalization BEFORE the feed forward block. # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
         hidden_states = rmsnorm(h, self.ffn_norm_weight.data, eps=self.config.rms_norm_eps)
+        assert not torch.isnan(hidden_states).any(), f"In {layer_index} decoder layer, mlp rmsnorm output h tensor contains NaN values!"
 
         out = h + self.mlp.forward(hidden_states)
+        assert not torch.isnan(out).any(), f"In {layer_index} decoder layer, mlp output h tensor contains NaN values!"
+
         return out
 
 class Llama(nn.Module):
@@ -212,9 +218,10 @@ class Llama(nn.Module):
     ):
         self.hidden_states = []
         _, seq_len = input_ids.shape
+
         if inputs_embeds is not None:
             h = inputs_embeds
-            print("inputs_embeds is ", inputs_embeds)
+            print("Llama inputs_embeds is ", inputs_embeds)
         else:
             h = self.get_input_embeddings(input_ids)
 
