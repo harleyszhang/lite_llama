@@ -50,9 +50,9 @@ llama3.2-1.5B-Instruct 模型流式输出结果测试：
 
 `Llava1.5-7b-hf` 模型流式输出结果测试:
 
-<div style="text-align: center;">
-    <img src="./images/llava_output.gif" style="width:70%; height:auto;" alt="llava_output">
-</div>
+<center>
+<img src="./images/llava_output.gif" width="70%" alt="llava_output">
+</center>
 
 ## 如何使用
 
