@@ -1,6 +1,6 @@
 from typing import List, Optional
 import torch
-from lite_llama.generate import GenerateText
+from ..lite_llama.generate import GenerateText
 
 checkpoints_dir = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/' # 改成自己的存放模型路径
 

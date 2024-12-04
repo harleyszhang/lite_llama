@@ -4,12 +4,13 @@ The llama model inference lite framework by triton.
 
 ## 特性
 
-- 支持最新的 llama3、Qwen2.5 模型推理，支持 top-p 采样, 支持流式输出。
-- 支持 GQA、cuda graph 优化。
+- 支持最新的 `llama3`、`Qwen2.5`、`Llava1.5` 模型推理，支持 `top-p` 采样, 支持流式输出。
+- 支持 GQA、cuda graph 优化（有限制）。
 - 支持 `flashattention1`、`flashattention2`、 `flashdecoding`。
-- 支持 kv cache 的高效动态管理（类似 `tokenattnetion`）。
+- 支持 kv cache 的高效动态管理（`auto tokenattnetion`）。
 - 支持算子融合，如：逐元素相乘 `*` 和 `silu` 的融合。
 - 部分自定义算子如：`rmsnorm`、`rope`、`逐元素相乘` 等采用高效 `triton` 内核实现
+
 
 ## GPU Information
 
@@ -52,6 +53,8 @@ llama3.2-1.5B-Instruct 模型流式输出结果测试：
 推荐 cuda 版本 12.0 及以上。下载 [llama3.2-1B-Instruct 模型](https://pan.quark.cn/s/6eef1f2921e0)并放到指定 `cli.py` 文件的指定 `checkpoints_dir` 目录。
 
 ```bash
+sudo apt update
+sudo apt install imagemagick
 conda create --name lite_llama python >= 3.10
 conda activate lite_llama
 git clone https://github.com/harleyszhang/lite_llama.git

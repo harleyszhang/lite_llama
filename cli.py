@@ -28,51 +28,31 @@ def main(
         triton_weight = triton_weight,
         device=device,
     )
-
-    # 调用生成函数，开始流式生成
-    prompts = "USER: <image>\nWhat's the content of the image? ASSISTANT:"
-    image_items = ["https://www.ilankelman.org/stopsigns/australia.jpg"]
-
-    stream = generator.text_completion_stream(
-        prompts,
-        image_items,
-        temperature=temperature,
-        top_p=top_p,
-        max_gen_len=max_gen_len,
-    )
-
-    completion = '' # 初始化生成结果
-    # NOTE: 创建了一个 generator 后，可以通过 for 循环来迭代它
-    for batch_completions in stream:
-        new_text = batch_completions[0]['generation'][len(completion):]
-        completion = batch_completions[0]['generation']
-        print(new_text, end=' ', flush=True)
-    print("\n\n==================================\n")
     
-    # while True:
-    #     prompt = input("请输入您的提示（输入 'exit' 退出）：\n") # 提示用户输入
-    #     # NOTE: strip() 是字符串方法，用于移除字符串开头和结尾的指定字符（默认为空格或换行符）。
-    #     if prompt.strip().lower() == 'exit':
-    #         print("程序已退出。")
-    #         break
+    while True:
+        prompt = input("请输入您的提示（输入 'exit' 退出）：\n") # 提示用户输入
+        # NOTE: strip() 是字符串方法，用于移除字符串开头和结尾的指定字符（默认为空格或换行符）。
+        if prompt.strip().lower() == 'exit':
+            print("程序已退出。")
+            break
 
-    #     print("\n生成结果: ", end='', flush=True)
+        print("\n生成结果: ", end='', flush=True)
 
-    #     # 调用生成函数，开始流式生成
-    #     stream = generator.text_completion_stream(
-    #         [prompt],
-    #         temperature=temperature,
-    #         top_p=top_p,
-    #         max_gen_len=max_gen_len,
-    #     )
+        # 调用生成函数，开始流式生成
+        stream = generator.text_completion_stream(
+            [prompt],
+            temperature=temperature,
+            top_p=top_p,
+            max_gen_len=max_gen_len,
+        )
 
-    #     completion = '' # 初始化生成结果
-    #     # NOTE: 创建了一个 generator 后，可以通过 for 循环来迭代它
-    #     for batch_completions in stream:
-    #         new_text = batch_completions[0]['generation'][len(completion):]
-    #         completion = batch_completions[0]['generation']
-    #         print(new_text, end='', flush=True)
-    #     print("\n\n==================================\n")
+        completion = '' # 初始化生成结果
+        # NOTE: 创建了一个 generator 后，可以通过 for 循环来迭代它
+        for batch_completions in stream:
+            new_text = batch_completions[0]['generation'][len(completion):]
+            completion = batch_completions[0]['generation']
+            print(new_text, end='', flush=True)
+        print("\n\n==================================\n")
 
 if __name__ == "__main__":
     main()

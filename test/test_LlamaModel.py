@@ -4,6 +4,10 @@ from tqdm.auto import tqdm
 import json, sys, os
 from pathlib import Path
 
+# 获取 lite_llama 目录的绝对路径并添加到 sys.path 中
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from lite_llama.models.llama import Llama, LlamaConfig
+
 def sample_top_p(probs, p):
     """
     Perform top-p (nucleus) sampling on a probability distribution.
@@ -28,10 +32,6 @@ def sample_top_p(probs, p):
     next_token = torch.multinomial(probs_sort, num_samples=1)
     next_token = torch.gather(probs_idx, -1, next_token)
     return next_token
-
-# 获取 lite_llama 目录的绝对路径并添加到 sys.path 中
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from lite_llama.models.llama import Llama, LlamaConfig
 
 def load_config_from_json(json_file_path: str, device: str="cuda") -> LlamaConfig:
     with open(json_file_path, "r") as f:

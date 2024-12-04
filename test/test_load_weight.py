@@ -7,7 +7,6 @@ from pathlib import Path
 # 获取 lite_llama 目录的绝对路径并添加到 sys.path 中
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from lite_llama.models.qwen2 import Qwen2Model, Qwen2Config
-from lite_llama.executor.model_executor import ModelExecutor
 
 def load_config_from_json(json_file_path: str, device: str="cuda") -> Qwen2Config:
     with open(json_file_path, "r") as f:

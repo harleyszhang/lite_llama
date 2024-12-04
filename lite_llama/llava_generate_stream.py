@@ -151,7 +151,6 @@ class LlavaGeneratorStream:
         说明：
             该方法在生成循环中，每生成一个新 token, 就立即输出对应的文本和概率(如果需要）。
         """
-        print("prompt_tokens ", prompt_tokens)
         bsz = len(prompt_tokens)
         assert bsz <= self.max_batch_size, (bsz, self.max_batch_size)
 
@@ -177,10 +176,10 @@ class LlavaGeneratorStream:
         start_pos = 0
         for cur_pos in range(min_prompt_len, total_len):
             input_ids = tokens[:, prev_pos: cur_pos]
-            batch_size, seq_len = input_ids.shape
+            batch_size, _ = input_ids.shape
 
             logits, select_index = self.model_executor.forward(input_ids, start_pos, image_tensors)
-            # print("select_index ", select_index)
+            
             if start_pos == 0:
                 start_pos += len(select_index)
             else:
@@ -236,11 +235,11 @@ class LlavaGeneratorStream:
         if max_gen_len is None:
             max_gen_len = self.max_seq_len - 1
 
-        # prompt_tokens = [self.tokenizer.encode(x, add_special_tokens=True) for x in prompts]
-        prompt_tokens = (tokenizer_image_token(prompts, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).cuda()) # torch.Size([1, 22])
-        print("prompt_tokens shape ", prompt_tokens.shape)
+        prompt_tokens = [tokenizer_image_token(x, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").cuda() for x in prompts] # torch.Size([1, 22])
         image_tensors = self.encode_images(image_items).cuda() # image_tensors shape is torch.Size([1, 3, 336, 336])
-    
+        
+        # print(f"prompt 0 shape: {prompt_tokens[0].shape}, image_tensors shape: {image_tensors.shape}")
+
         stream = self.generate_stream(
             prompt_tokens=prompt_tokens,
             image_tensors=image_tensors,

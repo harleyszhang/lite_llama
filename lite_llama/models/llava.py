@@ -13,25 +13,19 @@
 #    limitations under the License.
 
 
-from typing import List, Optional, Tuple, Union, Dict
-from PIL import Image
+from typing import Optional, Dict
 
 import torch,os
 import torch.nn as nn
 import torch.nn.functional as F
 from safetensors import safe_open
 
-from transformers import AutoConfig,AutoModel, AutoModelForCausalLM, LlavaConfig, \
-                         LlamaModel, LlamaForCausalLM
-
+from transformers import AutoModel, LlavaConfig
 from .llama import Llama
 from .model_config import LlamaConfig
-
-from .utils import merge_input_ids_with_image_features, merge_multimodal_embeddings
-from ..utils.llava_image_procss import process_images
-from ..utils.config_convert import convert_transformers_to_custom_config
-
 from ..kernels import ACT2FN
+from .utils import merge_input_ids_with_image_features, merge_multimodal_embeddings
+
 
 class LlavaMultiModalProjector(nn.Module):
     def __init__(self, vision_hidden_size: int, text_hidden_size: int,
@@ -59,7 +53,6 @@ class LlavaLlama(nn.Module):
         self.device = "cuda"
         self.llava_config = llava_config
         text_config = self.llava_config.text_config # TODO: 将 text_config 转换成 LlamaConfig 类型
-        # self.llama_config = convert_transformers_to_custom_config(text_config)
         self.llama_config = LlamaConfig.from_dict(text_config.to_dict())
         
         self.select_layer = llava_config.vision_feature_layer
@@ -116,10 +109,7 @@ class LlavaLlama(nn.Module):
         llm_inputs_embeds = self.language_model.get_input_embeddings(input_ids) # torch.Size([1, 22]) --> torch.Size([1, 22, 4096])
         
         # torch.Size([1, 576, 4096]) torch.Size([1, 22, 4096]) torch.Size([1, 22])
-        # print("vision_embeddings and inputs_embeds and input_ids shape is,", 
-        #       vision_embeddings.shape, llm_inputs_embeds.shape, input_ids.shape)
         # print("self.llava_config.image_token_index is ", self.llava_config.image_token_index)
-        
         if vision_embeddings is not None:
             inputs_embeds, position_ids = merge_input_ids_with_image_features(
                 input_ids, llm_inputs_embeds, vision_embeddings, 
@@ -144,7 +134,6 @@ class LlavaLlama(nn.Module):
         if input_ids.shape[1] != 1:
             vision_embeddings = self.vision_encode(image_tensor) #  torch.Size([1, 3, 336, 336]) --> torch.Size([1, 576, 4096])
             inputs_embeds = self.get_multi_modal_input_embeddings(input_ids, vision_embeddings)
-            print("inputs_embeds shape is ", inputs_embeds.shape) # torch.Size([1, 597, 4096])
         else: # 进入 decode 阶段, 无需再做视觉编码
             inputs_embeds = None
        
@@ -209,21 +198,3 @@ class LlavaLlama(nn.Module):
 
         return x
 
-if __name__ == "__main__":
-    model_path = "/gemini/code/liuhaotian/llava-v1.5-7b"
-    from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-    from transformers import LlavaConfig
-
-    # 使用 init_empty_weights 初始化空模型
-    with init_empty_weights():
-        config = LlavaConfig.from_pretrained(model_path)
-        model = LlavaLlama(config)
-        
-        # 打印模型结构
-        print(model)
-        # 打印模型的简单摘要
-        print(f"模型总参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
-
-        # 可选择打印部分参数信息
-        for name, param in list(model.named_parameters())[:]:  # 打印模型参数
-            print(name, param.shape)

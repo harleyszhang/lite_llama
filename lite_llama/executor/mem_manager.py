@@ -1,7 +1,6 @@
 import torch
 import logging, gc
 from typing import List
-from ..models.model_config import LlamaConfig
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +13,17 @@ class ComputeMaxAvailableBlocks:
     and  calculate the maximum possible number of GPU blocks that can be allocated with the remaining free memory.
     if not execute dummy forward run, it should be run after cuda graph!
     """
-    def __init__(self, num_layers, hidden_size, num_heads, num_kv_heads, head_dim = None, gpu_memory_utilization=0.9, block_size=1, dtype="float16"):
+    def __init__(
+        self, 
+        num_layers, 
+        hidden_size, 
+        num_heads, 
+        num_kv_heads, 
+        head_dim = None, 
+        gpu_memory_utilization=0.9, 
+        block_size=1, 
+        dtype="float16"
+    ):
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -102,10 +111,10 @@ class ComputeMaxAvailableBlocks:
 
         logger.info(
                 " Memory profiling results: total_gpu_memory = %.2f GB \n"
-                " initial_memory_usage = %.2f GB peak_torch_memory = %.2f GB \n"
-                " memory_usage_post_profile = %.2f GB \n"
-                " non_torch_memory = %.2f GB, kv_cache_size = %.2f GB \n"
-                " gpu_memory_utilization = %.2f", total_gpu_memory / (1024**3),
+                "    initial_memory_usage = %.2f GB peak_torch_memory = %.2f GB \n"
+                "    memory_usage_post_profile = %.2f GB \n"
+                "    non_torch_memory = %.2f GB, kv_cache_size = %.2f GB \n"
+                "    gpu_memory_utilization = %.2f", total_gpu_memory / (1024**3),
                 (total_gpu_memory - free_memory_pre_profile) / (1024**3),
                 (peak_memory - non_torch_allocations) / (1024**3),
                 total_allocated_bytes / (1024**3),
@@ -234,3 +243,10 @@ class KVCacheMemoryManager:
     def free_all(self,):
         self.can_use_mem_size = len(self.kv_mem_use_state)
         self.kv_mem_use_state[:] = 0
+
+def indexs_convert(indexs: torch.tensor, batch_size: int):
+    """
+    prefill 阶段分配的kv cache 索引和 decode 阶段分配的索引合并在一起需要做变换
+    TODO: 支持连续批处理开发时用上.
+    """
+    pass

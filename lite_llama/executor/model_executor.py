@@ -1,7 +1,6 @@
-import torch, json, time,logging, os, shutil, glob
+import torch, json, time, logging, glob
 from pathlib import Path
 from transformers import AutoTokenizer
-from tqdm import tqdm
 
 import torch.nn as nn
 from transformers import LlavaConfig
@@ -16,16 +15,11 @@ from ..models.llava import LlavaLlama
 from .cuda_graph import ModelRunner
 from .executor_struct import AttentionInfo, ModelRunnerConfig
 from .weight_convert import convert_llama_torch_to_litellama, \
-                            convert_llavallama_hf_to_litellama, convert_qwen2_hf_to_litellama
+                            convert_llavallama_hf_to_litellama, \
+                            convert_qwen2_hf_to_litellama
 
 logger = logging.getLogger(__name__)
 
-def indexs_convert(indexs: torch.tensor, batch_size: int):
-    """
-    prefill 阶段分配的kv cache 索引和 decode 阶段分配的索引合并在一起需要做变换
-    TODO: 支持连续批处理开发时用上.
-    """
-    pass
 
 def get_conversion_func(model_type: str):
     """
@@ -204,7 +198,8 @@ class ModelExecutor:
 
     def __init__(self, tokenizer:AutoTokenizer, model_config, model, compiled_model=True, device="cuda"):
         self.tokenizer = tokenizer
-        
+        self.model_config = model_config
+
         if isinstance(model_config, LlavaConfig):
             self.llm_config = LlamaConfig.from_dict(model_config.text_config.to_dict())
         else:
@@ -282,7 +277,15 @@ class ModelExecutor:
         if seq_len > 1:
             # 一次性分配最大所需 kv cache. seq0: [token0, token1, token2, token3,], seq1: [token0, token1, token2, token3,]
             need_size = batch_size * (seq_len)
-            alloc_mem = self.kv_mem_manager.alloc_contiguous_kvcache(597)
+            
+            if self.model_type == "llava":
+                image_size = self.model_config.vision_config.image_size
+                pathch_size = self.model_config.vision_config.patch_size
+                number_patchs = image_size // pathch_size
+                need_size += number_patchs * number_patchs - 1
+            
+            alloc_mem = self.kv_mem_manager.alloc_contiguous_kvcache(need_size)
+            
             if alloc_mem is not None:
                 select_index = alloc_mem[0]
             else:
