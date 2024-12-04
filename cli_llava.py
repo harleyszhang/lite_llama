@@ -6,6 +6,8 @@ from lite_llama.utils.prompt_templates import get_prompter, get_image_token
 from rich.console import Console
 from rich.prompt import Prompt
 import sys,os
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
 
 # 模型检查点目录，请根据实际情况修改
 checkpoints_dir = "/gemini/code/lite_llama/my_weight/llava-1.5-7b-hf"
@@ -59,7 +61,7 @@ def main(
         sys.exit(1)
 
     while True:
-        console.print("\n[bold green]请输入图片路径或URL (输入 'exit' 退出）：[/bold green]") # 获取用户输入的图片路径或URL
+        console.print("[bold green]请输入图片路径或URL (输入 'exit' 退出）：[/bold green]") # 获取用户输入的图片路径或URL
         while True: # 循环判断输入图像路径是否成功, 成功则跳出循环
             image_input = Prompt.ask("图片")
             if os.path.isfile(image_input):
@@ -78,8 +80,8 @@ def main(
         image_num = len(image_items) # 计算输入图片数量
         vis_images(image_items) # 在终端中显示图片
 
-        console.print("\n[bold blue]请输入提示词（输入 'exit' 退出）：[/bold blue]") # 获取用户的提示词
-        input_prompt = Prompt.ask("提示词")
+        # console.print("\n[bold blue]请输入提示词（输入 'exit' 退出）：[/bold blue]") # 获取用户的提示词
+        input_prompt = Prompt.ask("[bold green]提示词[/bold green]", end="").strip()
         if input_prompt.lower() == 'exit':
             break
 
@@ -88,8 +90,6 @@ def main(
 
         # prompts = "USER: <image>\nWhat's the content of the image? ASSISTANT:"
         prompts = [model_prompter.model_input] # 准备提示词，替换<image>标记
-        print("prompts ", prompts)
-        print("image_items ", image_items)
 
         # 调用生成器生成文本
         try:
@@ -107,14 +107,15 @@ def main(
         completion = ''  # 初始化生成结果
         console.print("[bold yellow]助手正在生成响应...[/bold yellow]")
         console.print("ASSISTANT: ", end='')
+        
         # 迭代生成的文本流
         try:
             for batch_completions in stream:
-                for completion_dict in batch_completions:
-                    next_text = completion_dict['generation'][len(completion):] # [len(completion):] 提取新生成的文本部分（自上次生成以来新增的部分）。
-                    completion = completion_dict['generation']
-                    console.print(next_text, end='')
-                console.print("\n\n[bold green]==================================[/bold green]\n")
+                next_text = batch_completions[0]['generation'][len(completion):]
+                completion = batch_completions[0]['generation']
+                console.print(f"[bold blue]{next_text}[/bold blue]", end=' ')
+            
+            console.print("\n[bold green]==================================[/bold green]\n")
         
         except KeyboardInterrupt:
             console.print("\n[red]用户中断操作。[/red]")

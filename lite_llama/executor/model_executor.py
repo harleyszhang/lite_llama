@@ -1,9 +1,8 @@
-import torch, json, time, logging, glob
+import torch, json, time, logging
 from pathlib import Path
-from transformers import AutoTokenizer
-
 import torch.nn as nn
-from transformers import LlavaConfig
+
+from transformers import LlavaConfig,AutoTokenizer
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 
 from .mem_manager import ComputeMaxAvailableBlocks, KVCacheMemoryManager
@@ -13,7 +12,7 @@ from ..models.qwen2 import Qwen2Model
 from ..models.llava import LlavaLlama
 
 from .cuda_graph import ModelRunner
-from .executor_struct import AttentionInfo, ModelRunnerConfig
+from .executor_struct import AttentionInfo
 from .weight_convert import convert_llama_torch_to_litellama, \
                             convert_llavallama_hf_to_litellama, \
                             convert_qwen2_hf_to_litellama
@@ -105,11 +104,11 @@ class ModelExecutor:
             checkpoints = sorted(Path(checkpoints_dir).glob("*.pth"))
             assert len(checkpoints) > 0, f"no checkpoint files found in {checkpoints_dir}"
             ckpt_path = str(checkpoints[0])
-            print("type(ckpt_path) ", type(ckpt_path))
-            print(f'Loading checkpoint "{ckpt_path}"')
+            logger.debug("type(ckpt_path) ", type(ckpt_path))
+            logger.debug(f'Loading checkpoint "{ckpt_path}"')
             # 使用 torch.load 加载权重文件。torch.load 可以根据需要将权重加载到指定的设备上
             hf_sd = torch.load(ckpt_path, mmap=True, weights_only=True, map_location=device)
-            print(f"Loaded weight checkpoints files in {time.time() - start_time:.2f}s")
+            logger.debug(f"Loaded weight checkpoints files in {time.time() - start_time:.2f}s")
             
         # 初始化模型
         with init_empty_weights():
@@ -119,25 +118,24 @@ class ModelExecutor:
         if load_model:
             if triton_weight:
                 state_dict = hf_sd
-                print("Load Triton weight directly!")
+                logger.debug("Load Triton weight directly!")
             else:
                 conversion_func = get_conversion_func(model_config.model_type)
                 if conversion_func is None:
                     logger.error(f"不支持的模型类型: {model_config.model_type}")
                     raise ValueError(f"Unsupported model type: {model_config.model_type}")
                 state_dict = conversion_func(checkpoints_dir, hf_sd, model_config)
-                logger.info(f"权重名称转换完成，耗时 {time.time() - start_time:.2f} 秒。")
+                logger.info(f" 权重名称转换完成，耗时 {time.time() - start_time:.2f} 秒。")
             
             model.load_state_dict(state_dict, strict=True, assign=True) # 将加载的 state_dict 应用到模型实例中。
             model.eval()
-            logger.info(f"Loaded state dict in {time.time() - start_time:.2f}s")
+            logger.info(f" Loaded state dict in {time.time() - start_time:.2f}s")
 
             # 将模型转换为半精度, 并验证转换
-            model.to(device)
-            model.half()
+            model.half().to(device)
             for param in model.parameters():
                 assert param.dtype == torch.float16, "Model parameters are not in FP16"
-            logger.info("Converted model to half precision (FP16)")
+            logger.info(" Converted model to half precision (FP16)")
         
         return model
     
@@ -173,8 +171,12 @@ class ModelExecutor:
         
         params_path = Path(checkpoints_dir) / "config.json" # 定义模型配置文件
         assert params_path.exists(), f"params.json not found in {checkpoints_dir}"
-        with open(params_path, "r") as f:
-            params = json.load(f)
+        try:
+            with open(params_path, "r") as f:
+                params = json.load(f)
+        except FileNotFoundError:
+            logger.error(f"配置文件 {params_path} 不存在，请检查路径是否正确。")
+            raise
 
         if params["model_type"]== "llama":
             model_config: LlamaConfig = LlamaConfig(
@@ -272,7 +274,7 @@ class ModelExecutor:
 
         return  max_gpu_num_blocks, kv_mem_manager
 
-    def forward(self, input_ids, prev_pos, image_tensor):
+    def forward(self, input_ids, prev_pos, image_tensor=None):
         batch_size, seq_len = input_ids.shape # 静态批处理, batch 中每个请求的 seq_len 都相等
         if seq_len > 1:
             # 一次性分配最大所需 kv cache. seq0: [token0, token1, token2, token3,], seq1: [token0, token1, token2, token3,]
@@ -302,8 +304,10 @@ class ModelExecutor:
         if prev_pos == 0 or not self.compiled_model:
             if self.model_type == "llava":
                 logits = self.model.forward(input_ids, prev_pos, self.atten_info, image_tensor)
-            else:
+            elif image_tensor is None:
                 logits = self.model.forward(input_ids, prev_pos, self.atten_info)
+            else:
+                print("Error! Unsupported model type!")
         else:
             logits = self.model_runner.decode(input_ids, prev_pos, self.atten_info) # TODO: cuda graph 可能执行失败, 待解决
         

@@ -231,6 +231,7 @@ class LlavaGeneratorStream:
         max_gen_len: Optional[int] = None,
         echo: bool = False,
     ) -> Generator[List[CompletionPrediction], None, None]:
+        """每次迭代时，生成器返回一个包含多个 CompletionPrediction 字典的列表。"""
         
         if max_gen_len is None:
             max_gen_len = self.max_seq_len - 1

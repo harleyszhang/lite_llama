@@ -150,7 +150,7 @@ class KVCacheMemoryManager:
 
         # Initialize the gpu_kv_buffer
         self.init_kv_buffers(
-            gpu_num_blocks,
+            self.max_num_tokens,
             head_dim, num_kv_heads, num_layers, 
             dtype, device)
 
@@ -161,13 +161,12 @@ class KVCacheMemoryManager:
         device: str="cuda"
     )-> List[torch.Tensor]:
         # kv cache shape: config.max_batch_size, config.max_seq_len, self.num_kv_heads, self.head_dim
-
         # max_num_tokens = max_num_blocks * self.block_size
         # TODO 修改 kv buffer 形状支持 PagedAttention
         self.gpu_kv_buffer = [
             torch.empty((max_num_tokens, 2 * num_kv_heads, head_dim), dtype=dtype, device=device) for _ in range(num_layers)
         ]
-        print(f"gpu_kv_buffer per layer shape: {self.gpu_kv_buffer[0].shape}")
+        logger.debug(f"gpu_kv_buffer per layer shape: {self.gpu_kv_buffer[0].shape}")
     
     @torch.no_grad()
     def alloc_kvcache(self, need_size):
