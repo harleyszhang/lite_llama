@@ -48,6 +48,10 @@ llama3.2-1.5B-Instruct 模型流式输出结果测试：
 
 ![流式输出](./images/output.gif)
 
+`Llava1.5-7b-hf` 模型流式输出结果测试:
+
+![llava_output](./images/llava_output.gif)
+
 ## 如何使用
 
 推荐 cuda 版本 12.0 及以上。下载 [llama3.2-1B-Instruct 模型](https://pan.quark.cn/s/6eef1f2921e0)并放到指定 `cli.py` 文件的指定 `checkpoints_dir` 目录。

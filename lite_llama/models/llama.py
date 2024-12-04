@@ -221,9 +221,10 @@ class Llama(nn.Module):
         else:
             _, seq_len = input_ids.shape
             h = self.get_input_embeddings(input_ids)
-           
-        cache_position = torch.arange(start_pos, start_pos + seq_len, device=input_ids.device)
-        position_ids = cache_position.unsqueeze(0)
+        if position_ids is None:
+            cache_position = torch.arange(start_pos, start_pos + seq_len, device=input_ids.device)
+            position_ids = cache_position.unsqueeze(0)
+        
         position_embeddings = self.rotary_emb(h, position_ids)
         
         for i, layer in enumerate(self.layers): # Consecutively apply all the encoder layers

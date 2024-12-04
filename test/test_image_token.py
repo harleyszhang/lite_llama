@@ -3,7 +3,7 @@ import torch
 import re
 
 # 假设 IMAGE_TOKEN_INDEX 为 1000
-IMAGE_TOKEN_INDEX = 1000
+IMAGE_TOKEN_INDEX = 32000
 
 class MockTokenizer:
     def __init__(self, bos_token_id=101, eos_token_id=102):
@@ -127,6 +127,7 @@ class TestTokenizerImageToken(unittest.TestCase):
             IMAGE_TOKEN_INDEX, 
             ord(' '), ord('e'), ord('n'), ord('d'), ord('.')
         ]
+        print("expected_input_ids ", expected_input_ids)
         result = tokenizer_image_token(prompt, self.tokenizer)
         self.assertEqual(result, expected_input_ids)
     

@@ -119,7 +119,7 @@ class LlavaLlama(nn.Module):
         
         assert not torch.isnan(inputs_embeds).any(), f"After merge inputs_embeds tensor contains NaN values!"
 
-        return inputs_embeds
+        return inputs_embeds, position_ids
     
     def forward(
         self, 
@@ -133,7 +133,7 @@ class LlavaLlama(nn.Module):
             
         if input_ids.shape[1] != 1:
             vision_embeddings = self.vision_encode(image_tensor) #  torch.Size([1, 3, 336, 336]) --> torch.Size([1, 576, 4096])
-            inputs_embeds = self.get_multi_modal_input_embeddings(input_ids, vision_embeddings)
+            inputs_embeds, position_ids = self.get_multi_modal_input_embeddings(input_ids, vision_embeddings)
         else: # 进入 decode 阶段, 无需再做视觉编码
             inputs_embeds = None
        

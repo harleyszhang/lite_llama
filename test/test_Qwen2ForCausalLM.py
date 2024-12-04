@@ -1,4 +1,4 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen2ForCausalLM
+from transformers import AutoTokenizer, Qwen2ForCausalLM
 
 model_name = "/gemini/code/Qwen2.5-1.5B-Instruct"
 

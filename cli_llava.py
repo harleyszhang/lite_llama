@@ -81,7 +81,7 @@ def main(
         vis_images(image_items) # 在终端中显示图片
 
         # console.print("\n[bold blue]请输入提示词（输入 'exit' 退出）：[/bold blue]") # 获取用户的提示词
-        input_prompt = Prompt.ask("[bold green]提示词[/bold green]", end="").strip()
+        input_prompt = Prompt.ask("[bold green]提示词[/bold green]").strip()
         if input_prompt.lower() == 'exit':
             break
 
@@ -105,25 +105,14 @@ def main(
             continue
         
         completion = ''  # 初始化生成结果
-        console.print("[bold yellow]助手正在生成响应...[/bold yellow]")
         console.print("ASSISTANT: ", end='')
         
-        # 迭代生成的文本流
-        try:
-            for batch_completions in stream:
-                next_text = batch_completions[0]['generation'][len(completion):]
-                completion = batch_completions[0]['generation']
-                console.print(f"[bold blue]{next_text}[/bold blue]", end=' ')
-            
-            console.print("\n[bold green]==================================[/bold green]\n")
+        for batch_completions in stream:
+            next_text = batch_completions[0]['generation'][len(completion):]
+            completion = batch_completions[0]['generation']
+            print(f"\033[91m{next_text}\033[0m", end=' ', flush=True)  # 红色文本
         
-        except KeyboardInterrupt:
-            console.print("\n[red]用户中断操作。[/red]")
-            sys.exit(0)
-        
-        except Exception as e:
-            console.print(f"\n[red]生成过程中出错: {e}[/red]")
-            continue
-
+        console.print("\n[bold green]==================================[/bold green]\n")
+    
 if __name__ == "__main__":
     main()

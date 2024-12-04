@@ -52,11 +52,9 @@ def tokenizer_image_token(
     
     # 插入图像 token
     for i, chunk in enumerate(token_chunks):
-        # 添加当前片段的 token，跳过 BOS token（如果已添加）
-        input_ids.extend(chunk[offset:])
+        input_ids.extend(chunk[offset:]) # 添加当前片段的 token，跳过 BOS token（如果已添加）
         offset = 0  # 仅适用于第一个片段
-        # 如果不是最后一个片段，插入图像 token
-        if i < len(token_chunks) - 1:
+        if i < len(token_chunks) - 1: # 如果不是最后一个片段，插入图像 token
             input_ids.append(image_token_index)
     
     if return_tensors is not None:
@@ -98,7 +96,6 @@ class LlavaGeneratorStream:
         )
         self.tokenizer = self.model_executor.tokenizer
         self.device = device
-        # self.model_config = self.model_executor.model_config
 
     def encode_images(self, image_items: List[Union[str, Image.Image]]):
         processor = AutoProcessor.from_pretrained(self.checkpoints_dir)
@@ -238,7 +235,6 @@ class LlavaGeneratorStream:
 
         prompt_tokens = [tokenizer_image_token(x, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").cuda() for x in prompts] # torch.Size([1, 22])
         image_tensors = self.encode_images(image_items).cuda() # image_tensors shape is torch.Size([1, 3, 336, 336])
-        
         # print(f"prompt 0 shape: {prompt_tokens[0].shape}, image_tensors shape: {image_tensors.shape}")
 
         stream = self.generate_stream(
