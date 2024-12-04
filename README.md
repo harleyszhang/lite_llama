@@ -57,8 +57,8 @@ llama3.2-1.5B-Instruct 模型流式输出结果测试：
 
 <table style="width: 100%; table-layout: fixed;">
   <tr>
-    <td align="center"><img src="./images/llava_output.gif" width="90%" alt="llava_output"></td>
-    <td align="center"><img src="./images/llava_output3.gif" width="100%" alt="llava_output2"></td>
+    <td align="center"><img src="./images/llava_output1.gif" width="90%" alt="llava_output"></td>
+    <td align="center"><img src="./images/llava_output2.gif" width="100%" alt="llava_output2"></td>
   </tr>
 </table>
 
@@ -77,9 +77,13 @@ pip install -r requirement.txt
 python cli.py # 已经下载好模型并放在指定目录的基础上运行
 ```
 
-程序运行成功后，终端显示界面如下所示，在终端中输入你的问题即可。
+`cli.py` 程序运行成功后，终端显示界面如下所示，在终端中输入你的问题即可。
 
 ![cli](./images/generate_stream.png)
+
+`cli——llava.py` 程序运行成功后，终端显示界面如下所示，在终端中输入你图片和提示词，然后回车即可。
+
+![llava 模型流式输出](./images/llava_output2.gif)
 
 ## 性能优化
 
