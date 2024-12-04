@@ -38,7 +38,9 @@ triton-nightly                 3.0.0.post20240716052845
 
 和 transformers 库回答结果对比、精度验证：
 
-![和 transformers 库回答结果对比及精度验证](./images/acc_test.jpg)
+<img src="./images/acc_test.jpg" width="70%" alt="和 transformers 库回答结果对比及精度验证">
+
+<!-- ![和 transformers 库回答结果对比及精度验证](./images/acc_test.jpg) -->
 
 llama3.2-1.5B-Instruct 模型流式输出结果测试：
 
@@ -50,15 +52,10 @@ llama3.2-1.5B-Instruct 模型流式输出结果测试：
 
 `Llava1.5-7b-hf` 模型流式输出结果测试:
 
-<!-- <div style="text-align: center; display: flex; justify-content: center; gap: 20px;">
-    <img src="./images/llava_output.gif" style="width:50%;" alt="llava_output">
-    <img src="./images/llava_output2.gif" style="width:50%;" alt="llava_output2">
-</div> -->
-
 <table style="width: 100%; table-layout: fixed;">
   <tr>
-    <td align="center"><img src="./images/llava_output1.gif" width="90%" alt="llava_output"></td>
-    <td align="center"><img src="./images/llava_output2.gif" width="100%" alt="llava_output2"></td>
+    <td align="center"><img src="./images/llava_output2.gif" width="90%" alt="llava_output2"></td>
+    <td align="center"><img src="./images/llava_output1.gif" width="100%" alt="llava_output"></td>
   </tr>
 </table>
 
