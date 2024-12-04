@@ -19,7 +19,14 @@ from .weight_convert import convert_llama_torch_to_litellama, \
 
 logger = logging.getLogger(__name__)
 
-
+def get_model_name_from_path(model_path):
+    model_path = model_path.strip("/")
+    model_paths = model_path.split("/")
+    if model_paths[-1].startswith('checkpoint-'):
+        return model_paths[-2] + "_" + model_paths[-1]
+    else:
+        return model_paths[-1]
+    
 def get_conversion_func(model_type: str):
     """
     根据模型类型获取相应的权重转换函数。
@@ -71,7 +78,13 @@ class ModelExecutor:
             ModelExecutor: 初始化后的 ModelExecutor 实例。
         """
         # 加载分词器
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        model_name = get_model_name_from_path(checkpoints_dir)
+
+        if 'mpt' in model_name.lower():
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=False)
+
         model_config = ModelExecutor._load_model_config(checkpoints_dir, max_batch_size, max_seq_len, device=device)
         # model = ModelExecutor._accelerate_load_weight(model_config, checkpoints_dir)
         model = ModelExecutor._load_model_weight(model_config, checkpoints_dir, load_model, triton_weight, device=device) # 加载权重后的模型
