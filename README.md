@@ -58,7 +58,7 @@ llama3.2-1.5B-Instruct 模型流式输出结果测试：
 <table style="width: 100%; table-layout: fixed;">
   <tr>
     <td align="center"><img src="./images/llava_output.gif" width="90%" alt="llava_output"></td>
-    <td align="center"><img src="./images/llava_output2.gif" width="100%" alt="llava_output2"></td>
+    <td align="center"><img src="./images/llava_output3.gif" width="100%" alt="llava_output2"></td>
   </tr>
 </table>
 
