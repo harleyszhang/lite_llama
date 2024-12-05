@@ -79,11 +79,11 @@ class ModelExecutor:
         """
         # 加载分词器
         model_name = get_model_name_from_path(checkpoints_dir)
-
-        if 'mpt' in model_name.lower():
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True)
-        else:
+            
+        if 'llava' in model_name.lower():
             tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=False)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True)
 
         model_config = ModelExecutor._load_model_config(checkpoints_dir, max_batch_size, max_seq_len, device=device)
         # model = ModelExecutor._accelerate_load_weight(model_config, checkpoints_dir)
