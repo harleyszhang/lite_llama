@@ -47,8 +47,8 @@ class GenerateText:
     def __init__(self, 
         checkpoints_dir: str,
         tokenizer_path: str,
-        max_gpu_num_blocks = None,
         max_seq_len = 1024,
+        max_gpu_num_blocks = None,
         load_model = True,
         triton_weight = True,
         compiled_model = False,
@@ -147,9 +147,9 @@ class GenerateText:
             )
 
         # 创建 CUDA 事件用于测量时间
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
+        # start_event = torch.cuda.Event(enable_timing=True)
+        # end_event = torch.cuda.Event(enable_timing=True)
+        # start_event.record()
         
         token_count = 0 # 累计生成 token 数
         for cur_pos in range(min_prompt_len, total_len):
@@ -200,14 +200,14 @@ class GenerateText:
                 break
         
         # 记录结束事件 
-        end_event.record()        
-        torch.cuda.synchronize() # 同步 CUDA 流以确保事件被记录
+        # end_event.record()        
+        # torch.cuda.synchronize() # 同步 CUDA 流以确保事件被记录
         
         # 计算总的运行时间和吞吐量
-        elapsed_time_sec = start_event.elapsed_time(end_event) / 1000.0
-        tokens_per_second = token_count / elapsed_time_sec if elapsed_time_sec > 0 else float('inf')
-        logger.info(f"Batch inference time, no decode: {elapsed_time_sec * 1000:.4f} ms")
-        logger.info(f"Tokens per second, no decode: {tokens_per_second:.2f} tokens/s")
+        # elapsed_time_sec = start_event.elapsed_time(end_event) / 1000.0
+        # tokens_per_second = token_count / elapsed_time_sec if elapsed_time_sec > 0 else float('inf')
+        # logger.info(f"Batch inference time, no decode: {elapsed_time_sec * 1000:.4f} ms")
+        # logger.info(f"Tokens per second, no decode: {tokens_per_second:.2f} tokens/s")
         
 		# 处理生成的 tokens 和对应的对数概率，提取最终的输出序列。
         out_tokens, out_logprobs = self.process_output_tokens(tokens, prompt_tokens, max_gen_len, 
