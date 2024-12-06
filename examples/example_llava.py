@@ -1,16 +1,17 @@
 import torch
 from typing import Optional
-# from lite_llama.generate_stream import GenerateText # 导入 GenerateText 类
-from ..lite_llama.llava_generate_stream import LlavaGeneratorStream # 导入 GenerateText 类\
 
-# checkpoints_dir = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/' # 改成自己的存放模型路径
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
+from lite_llama.llava_generate_stream import LlavaGeneratorStream # 导入 GenerateText 类\
+
 checkpoints_dir = "/gemini/code/lite_llama/my_weight/llava-1.5-7b-hf"
 
 def main(
     temperature: float = 0.6,
     top_p: float = 0.9,
     max_seq_len: int = 2048,
-    max_batch_size: int = 1,  # 每次处理一个 Prompt
+    max_gpu_num_blocks = None,
     max_gen_len: Optional[int] = 64,
     load_model: bool = True,
     compiled_model: bool = True,
@@ -21,7 +22,7 @@ def main(
     generator = LlavaGeneratorStream(
         checkpoints_dir=checkpoints_dir,
         tokenizer_path=checkpoints_dir,
-        max_batch_size = max_batch_size,
+        max_gpu_num_blocks = max_gpu_num_blocks,
         max_seq_len = max_seq_len,
         load_model = load_model,
         compiled_model = compiled_model,
