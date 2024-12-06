@@ -194,7 +194,7 @@ class LlamaModel(nn.Module):
         self.config = config
         self.vocab_size = config.vocab_size
         self.num_layers = config.num_layers
-        self.hidden_states = []
+        # self.hidden_states = []
 
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.embed_tokens = nn.Embedding(self.vocab_size, config.hidden_size, dtype=torch.float16)
@@ -212,7 +212,7 @@ class LlamaModel(nn.Module):
         position_ids: torch.Tensor = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ):
-        self.hidden_states = []
+        # self.hidden_states = []
     
         if inputs_embeds is not None:
             h = inputs_embeds
@@ -228,12 +228,12 @@ class LlamaModel(nn.Module):
         position_embeddings = self.rotary_emb(h, position_ids)
         
         for i, layer in enumerate(self.layers): # Consecutively apply all the encoder layers
-            self.hidden_states.append(h)
+            # self.hidden_states.append(h)
             h = layer(h, atten_info, i, position_embeddings)  # h.shape [batch_size, seq_len, hidden_dim]
             assert not torch.isnan(h).any(), f"In {i} decoder layer, h tensor contains NaN values!"
 
         h = rmsnorm(h, self.norm_weight.data, eps=self.config.rms_norm_eps)
-        self.hidden_states.append(h)
+        # self.hidden_states.append(h)
         output = self.lm_head(h)
 
         return output

@@ -92,16 +92,6 @@ class ModelExecutor:
     def _load_model_weight(model_config, checkpoints_dir, load_model = True, triton_weight=True, device="cuda"):
         start_time = time.time()
         hf_sd = None
-
-        if load_model:
-            checkpoints = sorted(Path(checkpoints_dir).glob("*.pth"))
-            assert len(checkpoints) > 0, f"no checkpoint files found in {checkpoints_dir}"
-            ckpt_path = str(checkpoints[0])
-            logger.debug("type(ckpt_path) ", type(ckpt_path))
-            logger.debug(f'Loading checkpoint "{ckpt_path}"')
-            # 使用 torch.load 加载权重文件。torch.load 可以根据需要将权重加载到指定的设备上
-            hf_sd = torch.load(ckpt_path, mmap=True, weights_only=True, map_location=device)
-            logger.debug(f"Loaded weight checkpoints files in {time.time() - start_time:.2f}s")
             
         # 初始化模型
         with init_empty_weights():
@@ -109,26 +99,30 @@ class ModelExecutor:
             state_dict = None
         
         if load_model:
-            if triton_weight:
-                state_dict = hf_sd
-                logger.debug("Load Triton weight directly!")
-            else:
-                conversion_func = get_conversion_func(model_config.model_type)
-                if conversion_func is None:
-                    logger.error(f"不支持的模型类型: {model_config.model_type}")
-                    raise ValueError(f"Unsupported model type: {model_config.model_type}")
-                state_dict = conversion_func(checkpoints_dir, hf_sd, model_config)
-                logger.info(f" 权重名称转换完成，耗时 {time.time() - start_time:.2f} 秒。")
+            checkpoints = sorted(Path(checkpoints_dir).glob("*.pth"))
+            assert len(checkpoints) > 0, f"no checkpoint files found in {checkpoints_dir}"
+            ckpt_path = str(checkpoints[0])
+            logger.debug("type(ckpt_path) ", type(ckpt_path))
+            logger.info(f'Loading checkpoint "{ckpt_path}"')
+            # 使用 torch.load 加载权重文件。torch.load 可以根据需要将权重加载到指定的设备上
+            state_dict = torch.load(ckpt_path, mmap=True, weights_only=True, map_location=device)
+        else:
+            conversion_func = get_conversion_func(model_config.model_type)
+            if conversion_func is None:
+                logger.error(f"不支持的模型类型: {model_config.model_type}")
+                raise ValueError(f"Unsupported model type: {model_config.model_type}")
+            state_dict = conversion_func(checkpoints_dir, hf_sd, model_config)
+            logger.info(f" 权重名称转换完成，耗时 {time.time() - start_time:.2f} 秒。")
             
-            model.load_state_dict(state_dict, strict=True, assign=True) # 将加载的 state_dict 应用到模型实例中。
-            model.eval()
-            logger.info(f" Loaded state dict in {time.time() - start_time:.2f}s")
+        model.load_state_dict(state_dict, strict=True, assign=True) # 将加载的 state_dict 应用到模型实例中。
+        model.eval()
+        logger.info(f" Loaded state dict in {time.time() - start_time:.2f}s")
 
-            # 将模型转换为半精度, 并验证转换
-            model.half().to(device)
-            for param in model.parameters():
-                assert param.dtype == torch.float16, "Model parameters are not in FP16"
-            logger.info(" Converted model to half precision (FP16)")
+        # 将模型转换为半精度, 并验证转换
+        model.half().to(device)
+        for param in model.parameters():
+            assert param.dtype == torch.float16, "Model parameters are not in FP16"
+        logger.info(" Converted model to half precision (FP16)")
         
         return model
     
@@ -175,11 +169,7 @@ class ModelExecutor:
             raise
 
         if params["model_type"]== "llama":
-            model_config: LlamaConfig = LlamaConfig(
-                params, 
-                max_seq_len = max_seq_len,
-                device=device
-            )
+            model_config: LlamaConfig = LlamaConfig.from_dict(params)
         elif params["model_type"] == "qwen2":
             model_config: Qwen2Config = Qwen2Config(
                 params, 
@@ -280,7 +270,6 @@ class ModelExecutor:
                 pathch_size = self.model_config.vision_config.patch_size
                 number_patchs = image_size // pathch_size
                 need_size += number_patchs * number_patchs - 1
-            
             alloc_mem = self.kv_mem_manager.alloc_contiguous_kvcache(need_size)
             
             if alloc_mem is not None:
@@ -296,15 +285,10 @@ class ModelExecutor:
                 decode_index, _, _  = self.kv_mem_manager.alloc_kvcache(batch_size)
             self.atten_info.decode_index = decode_index
 
-        if prev_pos == 0 or not self.compiled_model:
-            if self.model_type == "llava":
-                logits = self.model.forward(input_ids, prev_pos, self.atten_info, image_tensor)
-            elif image_tensor is None:
-                logits = self.model.forward(input_ids, prev_pos, self.atten_info)
-            else:
-                print("Error! Unsupported model type!")
+        if self.model_type == "llava":
+            logits = self.model.forward(input_ids, prev_pos, self.atten_info, image_tensor)
         else:
-            logits = self.model_runner.decode(input_ids, prev_pos, self.atten_info) # TODO: cuda graph 可能执行失败, 待解决
+            logits = self.model.forward(input_ids, prev_pos, self.atten_info)
         
         if seq_len == 1 and self.atten_info.select_index.numel() > 0:
             select_index = torch.cat([self.atten_info.select_index.view(batch_size, -1),

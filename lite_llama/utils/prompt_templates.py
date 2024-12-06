@@ -371,7 +371,7 @@ def get_prompter(model_type, model_path="", short_prompt=False, empty_prompt=Fal
         if "vicuna" in model_path.lower():
             return VicunaPrompter()
         elif (
-            "llama-3" in model_path.lower() or "llama3" in model_path.lower()
+            "llama-3" in model_path.lower() or "llama3" in model_path.lower() or "llama-3.2" in model_path.lower()
         ) and "30b" not in model_path.lower():
             if "vila" in model_path.lower():
                 # with system prompt by default

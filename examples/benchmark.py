@@ -5,11 +5,10 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, Qwen2F
 import sys, os, time
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from lite_llama.generate import GenerateText
+from lite_llama.utils.prompt_templates import get_prompter
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
-
-checkpoints_dir = "/gemini/code/lite_llama/my_weight/Qwen2.5-3B"  # 根据实际情况修改
 
 def load_lite_llama_generator(
     checkpoints_dir: str,
@@ -72,8 +71,7 @@ def lite_llama_inference(
     )
     end_time = time.time()
 
-    texts = [res['generation'] for res in results]
-    total_tokens = count_tokens(texts, generator.tokenizer)
+    total_tokens = count_tokens(results, generator.tokenizer)
 
     return results, end_time - start_time, total_tokens
 
@@ -90,11 +88,16 @@ def transformers_inference(
     """
     # from accelerate import init_empty_weights, load_checkpoint_and_dispatch
     tokenizer = AutoTokenizer.from_pretrained(hf_model_name)
-    model = Qwen2ForCausalLM.from_pretrained(
+    # 确保分词器有 eos_token
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+        
+    model = AutoModelForCausalLM.from_pretrained(
         hf_model_name,
         torch_dtype=torch.float16,
         device_map="auto"
     )
+    model.resize_token_embeddings(len(tokenizer))
     model.eval()
 
     # 预热步骤：让模型先对一个非常简单的 prompt 做一次推理
@@ -139,10 +142,25 @@ def compare_inference_speed(
     """
     对比 lite-llama 与 transformers 官方模型在相同 prompts 下的推理速度和吞吐量。
     """
+    if "qwen2" in lite_llama_ckpt_dir.lower():
+        model_type = "qwen2"
+    elif "llama" in lite_llama_ckpt_dir.lower():
+        model_type = "llama"
+    elif "llava" in lite_llama_ckpt_dir.lower():
+        model_type = "llava"
+    else:
+        print("Error! Unsupported model type!")
+
+    model_prompter = get_prompter(model_type, lite_llama_ckpt_dir)
+    update_prompts = []
+    for prompt in prompts:
+        model_prompter.insert_prompt(prompt)
+        update_prompts.append(model_prompter.model_input)
+
     # 1. lite-llama inference
     lite_llama_generator = load_lite_llama_generator(lite_llama_ckpt_dir, max_seq_len, max_gpu_num_blocks = 6000, device=device)
     lite_llama_results, lite_llama_time, lite_llama_tokens = lite_llama_inference(
-        lite_llama_generator, prompts, temperature, top_p, max_gen_len, device=device
+        lite_llama_generator, update_prompts, temperature, top_p, max_gen_len, device=device
     )
 
     # 使用完成后释放 lite_llama_generator 占用的显存
@@ -167,33 +185,34 @@ def compare_inference_speed(
 
     # 打印部分推理结果对比
     for i, (prompt, litellama_res, hf_res) in enumerate(zip(prompts, lite_llama_results, hf_results)):
-        print(f"[Prompt {i}]:\n{prompt}")
-        print("[lite_llama]: {}".format(litellama_res['generation']))
-        print("[Transformers]: {}".format(hf_res['generation']))
+        print(f"\n[Prompt {i}]:\n{prompt}")
+        print("\n[lite_llama]: {}".format(litellama_res))
+        print("\n[Transformers]: {}".format(hf_res['generation']))
         print("\n" + "="*40 + "\n")
 
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     prompts: List[str] = [
-        "I believe the meaning of life is",
-        "Simply put, the theory of relativity states that ",
+        "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.",
+        "Simply put, the theory of relativity states that 3D space is not fixed, but is relative to the observer's frame of reference. Time is also relative, and it appears to pass differently depending on the observer's speed and position",
         """A brief message congratulating the team on the launch:
 
         Hi everyone,
 
-        I just """,
-        "Roosevelt was the first president of the United States, he has",
+        I just heard about the launch of the new product and I wanted to take a moment to express my congratulations to the team. It's great to see such""",
+        "Roosevelt was the first president of the United States, he has a lot of information on the early history of the United States. He was born in 1883,",
     ]
     
-    hf_model_name = "/gemini/code/llm_weights/Qwen/Qwen2.5-3B-Instruct"
+    hf_model_name = "/gemini/code/Qwen2.5-1.5B-Instruct"
+    checkpoints_dir = "/gemini/code/lite_llama/my_weight/Qwen2.5-1.5B-Instruct"  # 根据实际情况修改
 
     compare_inference_speed(
         prompts=prompts,
         temperature=0.6,
         top_p=0.9,
-        max_seq_len=512,
-        max_gen_len=64,
+        max_seq_len=2048,
+        max_gen_len=256,
         lite_llama_ckpt_dir=checkpoints_dir,
         hf_model_name=hf_model_name,
         device=device

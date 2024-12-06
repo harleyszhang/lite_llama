@@ -1,17 +1,18 @@
 import os, sys, torch
-from transformers import LlavaForConditionalGeneration, LlavaConfig, \
+from transformers import LlavaForConditionalGeneration, AutoConfig, AutoModelForCausalLM, \
                         LlavaNextConfig, LlavaNextForConditionalGeneration
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 
 # 获取 lite_llama 目录的绝对路径并添加到 sys.path 中
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from lite_llama.executor.weight_convert import convert_llavallama_hf_to_litellama
+from lite_llama.executor.weight_convert import convert_llavallama_hf_to_litellama, convert_llama_hf_to_litellama, convert_qwen2_hf_to_litellama
 from lite_llama.models.llava import LlavaLlama
 from lite_llama.models.model_config import LlamaConfig
+from transformers import LlavaConfig
 
-checkpoints_dir = "/gemini/code/llm_weights/llava-hf/llava-1.5-7b-hf"
+checkpoints_dir = "/gemini/code/Qwen2.5-1.5B-Instruct"
 
-model = LlavaForConditionalGeneration.from_pretrained(
+model = AutoModelForCausalLM.from_pretrained(
     checkpoints_dir, 
     torch_dtype=torch.float16, 
     low_cpu_mem_usage=True,
@@ -19,7 +20,14 @@ model = LlavaForConditionalGeneration.from_pretrained(
 
 hf_sd = model.state_dict()
 
-from transformers import LlavaConfig
+for name, parameters in hf_sd.items():
+    print(name, parameters.shape)
+
+
+llm_config = AutoConfig.from_pretrained(checkpoints_dir)
+num_layers = llm_config.num_hidden_layers
+print("num_layers: ", num_layers)
+convert_qwen2_hf_to_litellama(checkpoints_dir, hf_sd, num_layers)
 
 # with init_empty_weights():
 #     llava_config = LlavaConfig.from_pretrained(checkpoints_dir)
@@ -27,9 +35,7 @@ from transformers import LlavaConfig
 #     llama_config = LlamaConfig.from_dict(text_config.to_dict())
 
 # 使用 init_empty_weights 初始化空模型
-with init_empty_weights():
-    llava_config = LlavaConfig.from_pretrained(checkpoints_dir)
-    model = LlavaLlama(llava_config)  
-    llama_config = model.llama_config
-
-convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, llama_config)
+# with init_empty_weights():
+#     llava_config = LlavaConfig.from_pretrained(checkpoints_dir)
+#     model = LlavaLlama(llava_config)  
+#     llama_config = model.llama_config
