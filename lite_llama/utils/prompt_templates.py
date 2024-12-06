@@ -1,3 +1,5 @@
+# Modified from https://github.com/mit-han-lab/llm-awq/blob/main/tinychat/utils/prompt_templates.py
+
 from typing import List
 
 IGNORE_INDEX = -100
@@ -236,6 +238,78 @@ class LlavaLlama3Prompter(BasePrompter):
         )
 
 
+class Qwen2Prompter(BasePrompter):
+    def __init__(self):
+        # 在 Qwen2 的提示格式下，system_inst 将包含系统信息（如角色设定）
+        system_inst = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+        
+        # role1 用作 user 信息块的起始标记，这里不需要额外标记，只需在模板中插入即可
+        # role2 用作 assistant 起始标记
+        # 我们在构造时，会通过 template 来定义最终的格式。
+        
+        role1 = "<|im_start|>user\n"    # 用户块开始 
+        role2 = "<|im_start|>assistant\n"  # 助手块开始
+        sen_spliter = "\n"
+        qa_spliter = "\n"
+        colon = ""  # 这里不再需要冒号
+        
+        # 调用父类构造函数
+        super().__init__(system_inst, role1, role2, sen_spliter, qa_spliter, colon=colon)
+
+        # 重写模板: 
+        # 若存在 system_inst，则模板为：
+        # <|im_start|>system
+        # {system_inst}
+        # <|im_end|>
+        # <|im_start|>user
+        # {prompt}
+        # <|im_end|>
+        # <|im_start|>assistant
+        #
+        # 若不存在 system_inst，则跳过 system 块，但这里我们默认有 system_inst。
+        
+        if self.system_inst is None:
+            self.template = (
+                self.role1 
+                + "{prompt}\n"
+                + "<|im_end|>\n"
+                + self.role2
+            )
+        else:
+            self.template = (
+                "<|im_start|>system\n"
+                + self.system_inst
+                + "\n<|im_end|>\n"
+                + self.role1
+                + "{prompt}\n"
+                + "<|im_end|>\n"
+                + self.role2
+            )
+
+    def update_template(self, outputs, chunk_prefilling=0):
+        # 对于 Qwen2 来说，我们通常不需要频繁更新模板。
+        # 若有特殊需求，可在此根据逻辑微调。
+        # 这里保持简单，不做改动：
+        if chunk_prefilling:
+            self.template = (
+                self.role1
+                + "{prompt}\n"
+                + "<|im_end|>\n"
+                + self.role2
+            )
+        else:
+            # 若需要将对话上下文追加到模板中，可在此实现
+            # 简单起见，不做复杂处理
+            self.template = (
+                "<|im_start|>system\n"
+                + self.system_inst
+                + "\n<|im_end|>\n"
+                + self.role1
+                + "{prompt}\n"
+                + "<|im_end|>\n"
+                + self.role2
+            )
+
 class FalconSimplePrompter(BasePrompter):
     def __init__(self):
         system_inst = None
@@ -316,6 +390,8 @@ def get_prompter(model_type, model_path="", short_prompt=False, empty_prompt=Fal
             return MPTChatPrompter()
         else:
             return MPTPrompter()
+    elif model_type.lower() == "qwen2":
+        return Qwen2Prompter()
     else:
         raise ValueError(f"model type {model_type} is not supported")
 
@@ -337,3 +413,9 @@ def get_stop_token_ids(model_type, model_path=""):
             return []
     else:
         raise ValueError(f"model type {model_type} is not supported")
+
+if __name__ == "__main__":
+    # 使用方法示例
+    prompter = get_prompter("qwen2")
+    prompter.insert_prompt("给出 c++ 多线程语法和编程示例代码.")
+    print(prompter.model_input)
