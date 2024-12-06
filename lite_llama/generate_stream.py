@@ -47,9 +47,9 @@ class GenerateStreamText:
         model_name = get_model_name_from_path(pretrained_model_name_or_path)
 
         if 'llava' in model_name.lower():
-            tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, use_fast=False)
+            tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, use_fast=False, trust_remote_code=True)
         else:
-            tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, use_fast=True)
+            tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, use_fast=True, trust_remote_code=True)
         
         return tokenizer
     

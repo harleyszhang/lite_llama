@@ -5,8 +5,10 @@ import sys, os, time
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from lite_llama.generate import GenerateText
 from lite_llama.generate_stream import GenerateStreamText
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
 
-checkpoints_dir = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/' # 改成自己的存放模型路径
+checkpoints_dir = "/gemini/code/lite_llama/my_weight/Qwen2.5-3B" # 改成自己的存放模型路径
 
 def cli_generate_stream(
     temperature: float = 0.6,
@@ -129,7 +131,7 @@ def cli_generate(
 		print(f"> {result['generation']}")
 		print("\n==================================\n")
 
-def main(stream_flag = True):
+def main(stream_flag = False):
     cli_generate_stream() if stream_flag else cli_generate()
 
 if __name__ == "__main__":

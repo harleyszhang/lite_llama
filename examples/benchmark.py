@@ -31,12 +31,10 @@ def load_lite_llama_generator(
     return generator
 
 def count_tokens(texts: List[str], tokenizer) -> int:
-    """
-    使用提供的 tokenizer 对列表中所有文本进行分词，并统计 tokens 总数。
-    """
+    # 优化后的分词统计
     total_tokens = 0
     for t in texts:
-        ids = tokenizer.encode(t, add_special_tokens=False)
+        ids = tokenizer(t, add_special_tokens=False)["input_ids"]
         total_tokens += len(ids)
     return total_tokens
 
@@ -63,7 +61,8 @@ def lite_llama_inference(
 
     # 使用 generator 内部的 tokenizer 来统计 tokens 数量
     # 假设 generator 有 tokenizer 属性或者可访问，如果没有则需自行创建 tokenizer
-    texts = [r['generation'] for r in results]
+    texts = [res['generation'] for res in results]
+    # total_tokens = sum(len(output) for output in texts)
     total_tokens = count_tokens(texts, generator.tokenizer)
 
     return results, end_time - start_time, total_tokens
@@ -77,36 +76,45 @@ def transformers_inference(
     device: str = "cuda"
 ):
     """
-    使用 Transformers 官方库加载模型并执行推理，返回结果与耗时、输出 tokens 数量。
+    使用 Transformers 官方库对一组 prompts 进行批量推理, 返回结果与耗时、输出 tokens 数量。
     """
+    # 加载模型，并移动到 GPU（如果可用）
     tokenizer = AutoTokenizer.from_pretrained(hf_model_name, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(hf_model_name, torch_dtype=torch.float16, device_map="auto", trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        hf_model_name, 
+        torch_dtype=torch.float16, 
+        device_map=device, 
+        trust_remote_code=True
+    )
+
     model.eval()
 
     generation_kwargs = {
         "max_new_tokens": max_gen_len,
         "top_p": top_p,
         "temperature": temperature,
-        "do_sample": True
+        "do_sample": True  # 此处可根据需求改为 True
     }
 
+    # 对 prompts 批量编码
+    inputs = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True).to(device).to(device)
+    input_ids = inputs.input_ids
+
     start_time = time.time()
-    results = []
-    for prompt in prompts:
-        input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
-        outputs = model.generate(
-            input_ids,
-            **generation_kwargs
-        )
-        text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        results.append({"generation": text})
+    # 一次性进行批量推理
+    with torch.no_grad():
+        outputs = model.generate(**inputs, **generation_kwargs)
+        # 根据 batch 输出的数量解码所有结果, outputs 的形状一般为 [batch_size, seq_length]. 输出序列批量解码，并且 skip_special_tokens=True 跳过特殊token
+        generated_ids = outputs[:, input_ids.size(-1):] 
+        generated_texts = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+    
     end_time = time.time()
+    # 将结果打包为字典列表，与输入 prompts 对齐, 将返回的结果中的输入提示词去除
+    results = [{"generation": text} for text in generated_texts]
+    texts = [res['generation'] for res in results]
+    total_tokens = count_tokens(texts, tokenizer) # 统计 tokens 数量
 
-    # 统计 transformers 输出 tokens 数量
-    texts = [r['generation'] for r in results]
-    total_tokens = count_tokens(texts, tokenizer)
-
-    return results, end_time - start_time, total_tokens
+    return results, (end_time - start_time), total_tokens
 
 def compare_inference_speed(
     prompts: List[str],
@@ -133,20 +141,20 @@ def compare_inference_speed(
     )
 
     # 打印时间对比
-    print("Lite-LLaMA inference time: {:.4f} s".format(lite_llama_time))
+    print("lite_llama inference time: {:.4f} s".format(lite_llama_time))
     print("Transformers inference time: {:.4f} s".format(hf_time))
 
     # 计算吞吐量（tokens/s）
     lite_llama_throughput = lite_llama_tokens / lite_llama_time if lite_llama_time > 0 else float('inf')
     hf_throughput = hf_tokens / hf_time if hf_time > 0 else float('inf')
 
-    print(f"Lite-LLaMA throughput: {lite_llama_throughput:.2f} tokens/s")
+    print(f"lite_llama throughput: {lite_llama_throughput:.2f} tokens/s")
     print(f"Transformers throughput: {hf_throughput:.2f} tokens/s")
 
     # 打印一些示例结果对比
-    for i, (prompt, ll_res, hf_res) in enumerate(zip(prompts, lite_llama_results, hf_results)):
+    for i, (prompt, litellama_res, hf_res) in enumerate(zip(prompts, lite_llama_results, hf_results)):
         print(f"Prompt {i}:\n{prompt}")
-        print("Lite-LLaMA: {}".format(ll_res['generation']))
+        print("lite_llama: {}".format(litellama_res['generation']))
         print("Transformers: {}".format(hf_res['generation']))
         print("\n" + "="*40 + "\n")
 

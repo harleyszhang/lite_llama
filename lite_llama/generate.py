@@ -1,17 +1,12 @@
 from typing import Optional
 import torch
-import time
-from pathlib import Path
-import json,logging
+import logging
 
-from typing import List, Literal, Optional, Tuple, TypedDict, Generator
+from typing import List, Literal, Optional, Tuple, TypedDict
 import torch.nn.functional as F 
-from torch.profiler import record_function
 from transformers import AutoTokenizer
 
 from .executor.model_executor import ModelExecutor
-from .models.llama import LlamaModel  # 确保这些类已正确定义和导入
-from .models.model_config import LlamaConfig
 from .utils.file_interface import get_model_name_from_path
 
 # 设置日志
@@ -135,7 +130,7 @@ class GenerateText:
         eos_reached = torch.tensor([False] * bsz, device = device) # 记录是否到达结束 token
 
         if logprobs:
-            token_logprobs, _ = torch.zeros_like(tokens, dtype=torch.float)
+            token_logprobs = torch.zeros_like(tokens, dtype=torch.float)
         else:
             token_logprobs = None
             
@@ -143,7 +138,7 @@ class GenerateText:
 
         # 如果最短提示长度已达总长度，直接计算 logprobs
         if min_prompt_len == total_len:
-            logits = self.model.forward(tokens, prev_pos)
+            logits = self.model_executor.forward(tokens, prev_pos)
             token_logprobs = -F.cross_entropy(
                 input=logits.transpose(1, 2),
                 target=tokens,
@@ -201,7 +196,7 @@ class GenerateText:
             batch_size = tokens.size(0)
             token_count += batch_size
 
-            if all(eos_reached): # 如果所有样本均到达结束 token，停止生成
+            if eos_reached.all(): # 如果所有样本均到达结束 token，停止生成
                 break
         
         # 记录结束事件 
@@ -211,8 +206,8 @@ class GenerateText:
         # 计算总的运行时间和吞吐量
         elapsed_time_sec = start_event.elapsed_time(end_event) / 1000.0
         tokens_per_second = token_count / elapsed_time_sec if elapsed_time_sec > 0 else float('inf')
-        logger.info(f"Decode stage Batch inference time: {elapsed_time_sec * 1000:.4f} ms")
-        logger.info(f"Decode stage tokens per second : {tokens_per_second:.2f} tokens/s")
+        logger.info(f"Batch inference time, no decode: {elapsed_time_sec * 1000:.4f} ms")
+        logger.info(f"Tokens per second, no decode: {tokens_per_second:.2f} tokens/s")
         
 		# 处理生成的 tokens 和对应的对数概率，提取最终的输出序列。
         out_tokens, out_logprobs = self.process_output_tokens(tokens, prompt_tokens, max_gen_len, 
@@ -277,8 +272,62 @@ class GenerateText:
                 }
                 for t, logprobs_i in zip(generation_tokens, generation_logprobs)
             ]
-        return [{"generation": self.tokenizer.decode(t)} for t in generation_tokens]
+        return [{"generation": self.tokenizer.decode(t), "number_tokens": len(t)} for t in generation_tokens]
 
+    def process_output_tokens(
+        self,
+        tokens: torch.Tensor,
+        prompt_tokens: List[List[int]],
+        max_gen_len: int,
+        logprobs: bool,
+        echo: bool,
+        eos_token_id,
+        token_logprobs: Optional[torch.Tensor] = None
+    ) -> Tuple[List[List[int]], Optional[List[List[float]]]]:
+        """
+        处理生成的 tokens 和对应的对数概率，提取最终的输出序列。
+
+        参数：	
+            tokens (torch.Tensor): 生成的 tokens 张量，形状为 [batch_size, total_len]。
+            prompt_tokens (List[List[int]]): 提示 tokens 的列表，每个元素是一个整数列表。
+            max_gen_len (int): 最大生成长度。
+            logprobs (bool): 是否计算并返回对数概率。
+            echo (bool): 是否在输出中包含提示 tokens。
+            eos_token_id: tokenizer.eos_token_id 对象。
+            token_logprobs (Optional[torch.Tensor]): 生成的 tokens 的对数概率张量，形状与 tokens 相同。
+        返回：
+            Tuple[List[List[int]], Optional[List[List[float]]]]: 处理后的 tokens 列表和对数概率列表（如果需要）。
+        """
+        # eos_token_id = tokenizer.eos_token_id
+        out_tokens, out_logprobs = [], [] # 初始化两个空列表，分别用于存储输出的 tokens（out_tokens）和对应的对数概率（out_logprobs）。
+
+        if logprobs:
+            # 将对数概率张量转换为列表
+            token_logprobs = token_logprobs.cpu().tolist()
+
+        for i, seq_tokens in enumerate(tokens.tolist()): # 将 tokens 转换为列表
+            prompt_len = len(prompt_tokens[i])
+            # 根据是否需要在输出中包含提示词，确定起始位置
+            start_idx = 0 if echo else prompt_len
+            end_idx = prompt_len + max_gen_len
+
+            # 截取从起始位置到最大生成长度的 tokens
+            generated_toks = seq_tokens[start_idx:end_idx]
+            probs = None
+            if logprobs: # 如果需要，对应地截取对数概率
+                probs = token_logprobs[i][start_idx:end_idx]
+            
+            # 检查是否存在结束符，若存在则截断到结束符之前
+            if eos_token_id in generated_toks:
+                eos_idx = generated_toks.index(eos_token_id)
+                generated_toks = generated_toks[:eos_idx]
+                probs = probs[:eos_idx] if logprobs else None
+
+            out_tokens.append(generated_toks)
+            out_logprobs.append(probs)
+
+        return (out_tokens, out_logprobs if logprobs else None)
+    
     def chat_completion(
         self,
         dialogs: List[Dialog],
@@ -387,60 +436,6 @@ class GenerateText:
             }
             for t, unsafe in zip(generation_tokens, unsafe_requests)
         ]
-
-    def process_output_tokens(
-        self,
-        tokens: torch.Tensor,
-        prompt_tokens: List[List[int]],
-        max_gen_len: int,
-        logprobs: bool,
-        echo: bool,
-        eos_token_id,
-        token_logprobs: Optional[torch.Tensor] = None
-    ) -> Tuple[List[List[int]], Optional[List[List[float]]]]:
-        """
-        处理生成的 tokens 和对应的对数概率，提取最终的输出序列。
-
-        参数：	
-            tokens (torch.Tensor): 生成的 tokens 张量，形状为 [batch_size, total_len]。
-            prompt_tokens (List[List[int]]): 提示 tokens 的列表，每个元素是一个整数列表。
-            max_gen_len (int): 最大生成长度。
-            logprobs (bool): 是否计算并返回对数概率。
-            echo (bool): 是否在输出中包含提示 tokens。
-            eos_token_id: tokenizer.eos_token_id 对象。
-            token_logprobs (Optional[torch.Tensor]): 生成的 tokens 的对数概率张量，形状与 tokens 相同。
-        返回：
-            Tuple[List[List[int]], Optional[List[List[float]]]]: 处理后的 tokens 列表和对数概率列表（如果需要）。
-        """
-        # eos_token_id = tokenizer.eos_token_id
-        out_tokens, out_logprobs = [], [] # 初始化两个空列表，分别用于存储输出的 tokens（out_tokens）和对应的对数概率（out_logprobs）。
-
-        if logprobs:
-            # 将对数概率张量转换为列表
-            token_logprobs = token_logprobs.cpu().tolist()
-
-        for i, out_tokens in enumerate(tokens.tolist()): # 将 tokens 转换为列表
-            prompt_len = len(prompt_tokens[i])
-            # 根据是否需要在输出中包含提示词，确定起始位置
-            start_idx = 0 if echo else prompt_len
-            end_idx = prompt_len + max_gen_len
-
-            # 截取从起始位置到最大生成长度的 tokens
-            generated_toks = out_tokens[start_idx:end_idx]
-            probs = None
-            if logprobs: # 如果需要，对应地截取对数概率
-                probs = token_logprobs[i][start_idx:end_idx]
-            
-            # 检查是否存在结束符，若存在则截断到结束符之前
-            if eos_token_id in generated_toks:
-                eos_idx = generated_toks.index(eos_token_id)
-                generated_toks = generated_toks[:eos_idx]
-                probs = probs[:eos_idx] if logprobs else None
-
-            out_tokens.append(generated_toks)
-            out_logprobs.append(probs)
-
-        return (out_tokens, out_logprobs if logprobs else None)
     
 def sample_top_p(probs, p):
     """
