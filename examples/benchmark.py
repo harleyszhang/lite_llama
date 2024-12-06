@@ -78,14 +78,14 @@ def transformers_inference(
     """
     使用 Transformers 官方库对一组 prompts 进行批量推理, 返回结果与耗时、输出 tokens 数量。
     """
+    from accelerate import init_empty_weights, load_checkpoint_and_dispatch
     # 加载模型，并移动到 GPU（如果可用）
     tokenizer = AutoTokenizer.from_pretrained(hf_model_name, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        hf_model_name, 
-        torch_dtype=torch.float16, 
-        device_map=device, 
-        trust_remote_code=True
-    )
+    
+    with init_empty_weights():
+        model = AutoModelForCausalLM.from_pretrained(hf_model_name, trust_remote_code=True)
+        
+    model = load_checkpoint_and_dispatch(model, hf_model_name, device_map="auto", dtype=torch.float16 )
 
     model.eval()
 
