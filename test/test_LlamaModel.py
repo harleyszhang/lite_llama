@@ -1,4 +1,4 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 from tqdm.auto import tqdm
 import json, sys, os
@@ -6,7 +6,7 @@ from pathlib import Path
 
 # 获取 lite_llama 目录的绝对路径并添加到 sys.path 中
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from lite_llama.models.llama import Llama, LlamaConfig
+from lite_llama.models.llama import LlamaModel, LlamaConfig
 
 def sample_top_p(probs, p):
     """
@@ -59,7 +59,7 @@ def load_custom_llam(model_name_or_path: str, model_args: LlamaConfig, device: s
     # 根据设备选择合适的 dtype
     torch.set_default_dtype(torch.half)
 
-    model = Llama(model_args).to(device)
+    model = LlamaModel(model_args).to(device)
     model.load_state_dict(state_dict, strict=True)
 
     return model
@@ -120,7 +120,7 @@ def load_and_convert_to_custom_llama(model_config: LlamaConfig, pretrained_model
     torch.save(new_sd, "/gemini/code/Llama-3.2-1B-Instruct/my_weight/my_llama3.2-1B.pth")
     # torch.set_default_tensor_type(torch.cuda.HalfTensor)
     torch.set_default_dtype(torch.half)
-    my_model = Llama(model_args).to(device)
+    my_model = LlamaModel(model_args).to(device)
     my_model.load_state_dict(new_sd, strict=True)
     
     return my_model

@@ -2,8 +2,8 @@ import torch,math
 import torch.nn as nn
 from transformers.activations import ACT2FN
 import pytest, sys, os
-
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
+
 from lite_llama.kernels.fused_linear import fused_linear
 from lite_llama.kernels.rmsnorm import rmsnorm
 from lite_llama.kernels.layernorm import layernorm

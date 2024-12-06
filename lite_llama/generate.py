@@ -10,7 +10,7 @@ from torch.profiler import record_function
 from transformers import AutoTokenizer
 
 from .executor.model_executor import ModelExecutor
-from .models.llama import Llama  # 确保这些类已正确定义和导入
+from .models.llama import LlamaModel  # 确保这些类已正确定义和导入
 from .models.model_config import LlamaConfig
 from .utils.file_interface import get_model_name_from_path
 
@@ -56,7 +56,7 @@ class GenerateText:
         max_seq_len = 1024,
         load_model = True,
         triton_weight = True,
-        compiled_model = True,
+        compiled_model = False,
         device="cuda",
     ):
         self.checkpoints_dir = checkpoints_dir
@@ -90,7 +90,7 @@ class GenerateText:
         max_gen_len: int,
         temperature: float = 0.6,
         top_p: float = 0.9,
-        logprobs: bool = False,
+        logprobs: bool = True,
         echo: bool = False,
         device = "cuda"
     ) -> Tuple[List[List[int]], Optional[List[List[float]]]]:
@@ -136,7 +136,9 @@ class GenerateText:
 
         if logprobs:
             token_logprobs, _ = torch.zeros_like(tokens, dtype=torch.float)
-
+        else:
+            token_logprobs = None
+            
         prev_pos = 0 # 初始化上一次生成的位置
 
         # 如果最短提示长度已达总长度，直接计算 logprobs

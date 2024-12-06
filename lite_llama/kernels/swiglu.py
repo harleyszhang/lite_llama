@@ -1,3 +1,5 @@
+# reference: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/swiglu.py
+
 import torch
 import triton
 import triton.language as tl

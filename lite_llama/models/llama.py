@@ -185,7 +185,7 @@ class LlamaDecoderLayer(nn.Module):
 
         return out
 
-class Llama(nn.Module):
+class LlamaModel(nn.Module):
     def __init__(self, config: LlamaConfig):
         super().__init__()
 

@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from safetensors import safe_open
 
 from transformers import AutoModel, LlavaConfig
-from .llama import Llama
+from .llama import LlamaModel
 from .model_config import LlamaConfig
 from ..kernels import ACT2FN
 from .utils import merge_input_ids_with_image_features, merge_multimodal_embeddings
@@ -68,7 +68,7 @@ class LlavaLlama(nn.Module):
             projector_hidden_act = llava_config.projector_hidden_act)
         
         # 语言模型初始化
-        self.language_model = Llama(self.llama_config)
+        self.language_model = LlamaModel(self.llama_config)
         
         self.pad_token_id = self.llava_config.pad_token_id if self.llava_config.pad_token_id is not None else -1
     

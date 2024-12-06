@@ -78,7 +78,7 @@ class LlavaGeneratorStream:
         max_seq_len = 2048,
         load_model = True,
         triton_weight = True,
-        compiled_model = True,
+        compiled_model = False,
         device="cuda",
     ):
         self.checkpoints_dir = checkpoints_dir
@@ -213,7 +213,7 @@ class LlavaGeneratorStream:
                 end = cur_pos + 1
                 if start < end:
                     token = tokens[i, start:end].tolist()
-                    text = self.tokenizer.decode(token)
+                    text = self.tokenizer.decode(token, skip_special_tokens=True)
                     batch_outputs.append(text)
                     last_yielded_pos[i] = end
                 else:

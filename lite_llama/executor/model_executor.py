@@ -2,24 +2,20 @@ import torch, json, time, logging
 from pathlib import Path
 import torch.nn as nn
 
-from transformers import LlavaConfig,AutoTokenizer
+from transformers import LlavaConfig
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 
-from
 from .mem_manager import ComputeMaxAvailableBlocks, KVCacheMemoryManager
-from ..models.model_config import LlamaConfig, Qwen2Config
-from ..models.llama import Llama
-from ..models.qwen2 import Qwen2Model
-from ..models.llava import LlavaLlama
 
 from .cuda_graph import ModelRunner
 from .executor_struct import AttentionInfo
+from ..models.model_config import LlamaConfig, Qwen2Config
 from .weight_convert import convert_llama_torch_to_litellama, \
                             convert_llavallama_hf_to_litellama, \
                             convert_qwen2_hf_to_litellama
 
-logger = logging.getLogger(__name__)
 
+logger = logging.getLogger(__name__)
 
     
 def get_conversion_func(model_type: str):
@@ -54,6 +50,7 @@ class ModelExecutor:
         max_gpu_num_blocks: None, 
         load_model: bool = True, 
         triton_weight: bool = True,
+        compiled_model: bool = False, 
         device: str = "cuda", 
     ):
         """
@@ -72,7 +69,7 @@ class ModelExecutor:
         # model = ModelExecutor._accelerate_load_weight(model_config, checkpoints_dir)
         model = ModelExecutor._load_model_weight(model_config, checkpoints_dir, load_model, triton_weight, device=device) # 加载权重后的模型
 
-        return ModelExecutor(model_config, model, max_gpu_num_blocks, True)
+        return ModelExecutor(model_config, model, max_gpu_num_blocks, compiled_model, device)
 
     @staticmethod
     def _accelerate_load_weight(model_config, checkpoints_dir, load_model = True, triton_weight=True, device="cuda"):
@@ -94,8 +91,8 @@ class ModelExecutor:
     @staticmethod
     def _load_model_weight(model_config, checkpoints_dir, load_model = True, triton_weight=True, device="cuda"):
         start_time = time.time()
-
         hf_sd = None
+
         if load_model:
             checkpoints = sorted(Path(checkpoints_dir).glob("*.pth"))
             assert len(checkpoints) > 0, f"no checkpoint files found in {checkpoints_dir}"
@@ -136,7 +133,7 @@ class ModelExecutor:
         return model
     
     @staticmethod
-    def _initialize_model(model_config: LlamaConfig, device: str) -> nn.Module:
+    def _initialize_model(model_config, device: str) -> nn.Module:
         """
         根据配置初始化模型并将其移动到指定设备。
 
@@ -148,18 +145,21 @@ class ModelExecutor:
             nn.Module: 初始化后的模型。
         """
         model_type = model_config.model_type.lower()
-        logger.info(f"初始化模型类型 '{model_type}' 并移动到设备 '{device}'...")
+        logger.info(f" 初始化模型类型 '{model_type}' 并移动到设备 '{device}'...")
         if model_type == "llama":
-            model = Llama(model_config)
+            from ..models.llama import LlamaModel
+            model = LlamaModel(model_config)
         elif model_type == "qwen2":
+            from ..models.qwen2 import Qwen2Model
             model = Qwen2Model(model_config)
         elif model_type == "llava":
+            from ..models.llava import LlavaLlama
             model = LlavaLlama(model_config)
         else:
             logger.error(f"不支持的模型类型: {model_type}")
             raise ValueError(f"Unsupported model type: {model_type}")
 
-        logger.info(f"模型已初始化并移动到设备 '{device}'。")
+        logger.info(f" 模型已初始化并移动到设备 '{device}'。")
         return model
 
     @staticmethod
@@ -187,8 +187,7 @@ class ModelExecutor:
                 device=device
             )
         elif params["model_type"] == "llava":
-            model_config: LlavaConfig = LlavaConfig.from_pretrained(checkpoints_dir)
-            # model_config: LlavaConfig = LlavaConfig(params_path)
+            model_config = LlavaConfig.from_pretrained(checkpoints_dir)
 
         return model_config
 
@@ -203,8 +202,8 @@ class ModelExecutor:
         self.model_type = model_config.model_type
         self.model = model
 
-        self.model_runner = None
         self.compiled_model = False
+        self.model_runner = None
         
         if max_gpu_num_blocks:
             self.kv_mem_manager = self._init_mem_manager(max_gpu_num_blocks)
@@ -254,7 +253,7 @@ class ModelExecutor:
             - prev_pos: 当前处于第几轮迭代循环, 生成第几个 token
         """
         # TODO: 修复支持多模态模型配置问题的错误
-        max_gpu_num_blocks, _ = self._get_max_tokens(gpu_memory_utilization=0.9, block_size=1)
+        max_gpu_num_blocks, _ = self._get_max_avaliable_tokens(gpu_memory_utilization=0.9, block_size=1)
         
         kv_mem_manager = self._init_mem_manager(
             max_gpu_num_blocks, block_size=1, 

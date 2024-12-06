@@ -26,11 +26,10 @@ class GenerateStreamText:
         max_seq_len = 1024,
         load_model = True,
         triton_weight = True,
-        compiled_model = True,
+        compiled_model = False,
         device="cuda",
     ):
         self.checkpoints_dir = checkpoints_dir
-        self.compiled_model = compiled_model
 
         self.model_executor = ModelExecutor.build(
             checkpoints_dir = checkpoints_dir,
@@ -38,6 +37,7 @@ class GenerateStreamText:
             max_gpu_num_blocks = max_gpu_num_blocks,
             max_seq_len = max_seq_len,
             triton_weight = triton_weight,
+            compiled_model = compiled_model,
             device = device
         )
         self.tokenizer = self.load_tokenizer(tokenizer_path)
@@ -126,7 +126,7 @@ class GenerateStreamText:
                 end = cur_pos + 1
                 if start < end:
                     token = tokens[i, start:end].tolist()
-                    text = self.tokenizer.decode(token)
+                    text = self.tokenizer.decode(token, skip_special_tokens=True) # 解码时跳过特殊标记。
                     batch_outputs.append(text)
                     last_yielded_pos[i] = end
                 else:

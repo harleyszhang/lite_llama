@@ -1,6 +1,5 @@
 import torch, math
 import torch.nn as nn
-import torch.nn.functional as F
 from typing import Optional, Tuple
 import logging
 from .model_config import LlamaConfig, Qwen2Config
