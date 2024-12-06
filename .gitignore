@@ -2,7 +2,7 @@ __pycache__
 .pytest_cache
 lite_llama/kernels/__pycache__
 lite_llama/models/__pycache__
-/lite_llama/executor/__pycache__
+lite_llama/executor/__pycache__
 
 lite_llama/__pycache__
 

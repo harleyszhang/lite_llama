@@ -1,7 +1,10 @@
 from typing import Optional
 import torch, logging
-from typing import List, Literal, Optional, Tuple, TypedDict, Generator
+from typing import List, Optional, Tuple, TypedDict, Generator
 from .executor.model_executor import ModelExecutor
+from .utils.file_interface import get_model_name_from_path
+
+from transformers import AutoTokenizer
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
@@ -19,7 +22,7 @@ class GenerateStreamText:
     def __init__(self, 
         checkpoints_dir: str,
         tokenizer_path: str,
-        max_batch_size = 32,
+        max_gpu_num_blocks = None,
         max_seq_len = 1024,
         load_model = True,
         triton_weight = True,
@@ -31,16 +34,25 @@ class GenerateStreamText:
 
         self.model_executor = ModelExecutor.build(
             checkpoints_dir = checkpoints_dir,
-            tokenizer_path = tokenizer_path,
             load_model = load_model,
-            max_batch_size =  max_batch_size,
+            max_gpu_num_blocks = max_gpu_num_blocks,
             max_seq_len = max_seq_len,
             triton_weight = triton_weight,
             device = device
         )
-        self.tokenizer = self.model_executor.tokenizer
+        self.tokenizer = self.load_tokenizer(tokenizer_path)
         self.model_config = self.model_executor.model_config
 
+    def load_tokenizer(self, pretrained_model_name_or_path):
+        model_name = get_model_name_from_path(pretrained_model_name_or_path)
+
+        if 'llava' in model_name.lower():
+            tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, use_fast=False)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, use_fast=True)
+        
+        return tokenizer
+    
     @torch.inference_mode()
     def generate_stream(
         self,
@@ -68,7 +80,6 @@ class GenerateStreamText:
         """
         model_config = self.model_config
         bsz = len(prompt_tokens)
-        assert bsz <= model_config.max_batch_size, (bsz, model_config.max_batch_size)
 
         min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)

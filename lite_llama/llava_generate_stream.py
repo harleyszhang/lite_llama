@@ -2,11 +2,12 @@ from typing import Optional
 import torch, logging, re
 from PIL import Image
 
-from typing import List, Literal, Optional, Tuple, TypedDict, Generator, Union
+from typing import List, Optional, Tuple, TypedDict, Generator, Union
 from .executor.model_executor import ModelExecutor
 from .utils.constants import *
+from .utils.file_interface import get_model_name_from_path
 
-from transformers import AutoConfig, AutoProcessor, LlavaForConditionalGeneration
+from transformers import AutoTokenizer, AutoProcessor
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
@@ -73,7 +74,7 @@ class LlavaGeneratorStream:
     def __init__(self, 
         checkpoints_dir: str,
         tokenizer_path: str,
-        max_batch_size = 32,
+        max_gpu_num_blocks = None,
         max_seq_len = 2048,
         load_model = True,
         triton_weight = True,
@@ -82,21 +83,30 @@ class LlavaGeneratorStream:
     ):
         self.checkpoints_dir = checkpoints_dir
         self.compiled_model = compiled_model
-        self.max_batch_size = max_batch_size
         self.max_seq_len = max_seq_len
 
         self.model_executor = ModelExecutor.build(
             checkpoints_dir = checkpoints_dir,
             tokenizer_path = tokenizer_path,
             load_model = load_model,
-            max_batch_size =  max_batch_size,
+            max_gpu_num_blocks =  max_gpu_num_blocks,
             max_seq_len = max_seq_len,
             triton_weight = triton_weight,
             device = device
         )
-        self.tokenizer = self.model_executor.tokenizer
+        self.tokenizer = self.load_tokenizer(tokenizer_path)
         self.device = device
 
+    def load_tokenizer(self, pretrained_model_name_or_path):
+        model_name = get_model_name_from_path(pretrained_model_name_or_path)
+
+        if 'llava' in model_name.lower():
+            tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, use_fast=False)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, use_fast=True)
+        
+        return tokenizer
+    
     def encode_images(self, image_items: List[Union[str, Image.Image]]):
         processor = AutoProcessor.from_pretrained(self.checkpoints_dir)
         self.image_processor = processor.image_processor
@@ -149,7 +159,6 @@ class LlavaGeneratorStream:
             该方法在生成循环中，每生成一个新 token, 就立即输出对应的文本和概率(如果需要）。
         """
         bsz = len(prompt_tokens)
-        assert bsz <= self.max_batch_size, (bsz, self.max_batch_size)
 
         min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)

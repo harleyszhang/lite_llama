@@ -16,7 +16,7 @@ def main(
     temperature: float = 0.6,
     top_p: float = 0.9,
     max_seq_len: int = 2048,
-    max_batch_size: int = 1,  # 每次处理一个 Prompt
+    max_gpu_num_blocks = None,
     max_gen_len: Optional[int] = 512,
     load_model: bool = True,
     compiled_model: bool = True,
@@ -49,7 +49,7 @@ def main(
         generator = LlavaGeneratorStream(
             checkpoints_dir=checkpoints_dir,
             tokenizer_path=checkpoints_dir,
-            max_batch_size=max_batch_size,
+            max_gpu_num_blocks=max_gpu_num_blocks,
             max_seq_len=max_seq_len,
             load_model=load_model,
             compiled_model=compiled_model,

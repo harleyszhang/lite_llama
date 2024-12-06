@@ -15,6 +15,7 @@ def get_image_token(model=None, model_name=None):
 
 
 class BasePrompter:
+    """用于构建模型的提示词 (Prompt) 模板和管理对话流程"""
     def __init__(
         self,
         system_inst,

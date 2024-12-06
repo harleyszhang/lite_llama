@@ -1,6 +1,7 @@
 import torch
 from typing import Optional
-from lite_llama.generate_stream import GenerateStreamText # 导入 GenerateText 类\
+from lite_llama.utils.prompt_templates import get_prompter
+from lite_llama.generate_stream import GenerateStreamText # 导入 GenerateText 类
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
 
@@ -11,18 +12,24 @@ def main(
     temperature: float = 0.6,
     top_p: float = 0.9,
     max_seq_len: int = 2048,
-    max_batch_size: int = 1,  # 每次处理一个 Prompt
+    max_gpu_num_blocks = None,
     max_gen_len: Optional[int] = 1024,
     load_model: bool = True,
     compiled_model: bool = True,
     triton_weight: bool = True
 ):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
+    if max_seq_len <= 1024:
+        short_prompt = True
+    else:
+        short_prompt = False
+    model_prompter = get_prompter("llama", checkpoints_dir, short_prompt)
+
+    # 初始化 LLM 文本生成器
     generator = GenerateStreamText(
         checkpoints_dir=checkpoints_dir,
         tokenizer_path=checkpoints_dir,
-        max_batch_size = max_batch_size,
+        max_gpu_num_blocks = max_gpu_num_blocks,
         max_seq_len = max_seq_len,
         load_model = load_model,
         compiled_model = compiled_model,
@@ -39,9 +46,12 @@ def main(
 
         print("\n生成结果: ", end='', flush=True)
 
+        model_prompter.insert(prompt)
+        prompts = [model_prompter.model_input]
+        
         # 调用生成函数，开始流式生成
         stream = generator.text_completion_stream(
-            [prompt],
+            prompts,
             temperature=temperature,
             top_p=top_p,
             max_gen_len=max_gen_len,

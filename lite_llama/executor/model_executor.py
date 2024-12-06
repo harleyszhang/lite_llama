@@ -5,6 +5,7 @@ import torch.nn as nn
 from transformers import LlavaConfig,AutoTokenizer
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 
+from
 from .mem_manager import ComputeMaxAvailableBlocks, KVCacheMemoryManager
 from ..models.model_config import LlamaConfig, Qwen2Config
 from ..models.llama import Llama
@@ -19,13 +20,7 @@ from .weight_convert import convert_llama_torch_to_litellama, \
 
 logger = logging.getLogger(__name__)
 
-def get_model_name_from_path(model_path):
-    model_path = model_path.strip("/")
-    model_paths = model_path.split("/")
-    if model_paths[-1].startswith('checkpoint-'):
-        return model_paths[-2] + "_" + model_paths[-1]
-    else:
-        return model_paths[-1]
+
     
 def get_conversion_func(model_type: str):
     """
@@ -46,7 +41,6 @@ def get_conversion_func(model_type: str):
     
 class ModelExecutor:
     # 定义类属性
-    tokenizer = None
     model_config = None
     model = None
     # model_runner_config = ModelRunnerConfig
@@ -56,9 +50,8 @@ class ModelExecutor:
     @staticmethod
     def build(
         checkpoints_dir: str, 
-        tokenizer_path: str, 
-        max_batch_size: int,
         max_seq_len: int,
+        max_gpu_num_blocks: None, 
         load_model: bool = True, 
         triton_weight: bool = True,
         device: str = "cuda", 
@@ -68,28 +61,18 @@ class ModelExecutor:
 
         参数:
             checkpoints_dir (str): 模型检查点目录路径。
-            tokenizer_path (str): 分词器模型文件路径。
             load_model (bool): 是否加载模型权重。
             max_seq_len (int): 最大序列长度。
-            max_batch_size (int): 最大批处理大小。
             device (str): 设备类型（'cuda'或'cpu'）。
 
         返回:
             ModelExecutor: 初始化后的 ModelExecutor 实例。
-        """
-        # 加载分词器
-        model_name = get_model_name_from_path(checkpoints_dir)
-            
-        if 'llava' in model_name.lower():
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=False)
-        else:
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True)
-
-        model_config = ModelExecutor._load_model_config(checkpoints_dir, max_batch_size, max_seq_len, device=device)
+        """            
+        model_config = ModelExecutor._load_model_config(checkpoints_dir, max_seq_len, device=device)
         # model = ModelExecutor._accelerate_load_weight(model_config, checkpoints_dir)
         model = ModelExecutor._load_model_weight(model_config, checkpoints_dir, load_model, triton_weight, device=device) # 加载权重后的模型
 
-        return ModelExecutor(tokenizer, model_config, model, True)
+        return ModelExecutor(model_config, model, max_gpu_num_blocks, True)
 
     @staticmethod
     def _accelerate_load_weight(model_config, checkpoints_dir, load_model = True, triton_weight=True, device="cuda"):
@@ -180,7 +163,7 @@ class ModelExecutor:
         return model
 
     @staticmethod
-    def _load_model_config(checkpoints_dir, max_batch_size, max_seq_len, device="cuda"):
+    def _load_model_config(checkpoints_dir, max_seq_len, device="cuda"):
         
         params_path = Path(checkpoints_dir) / "config.json" # 定义模型配置文件
         assert params_path.exists(), f"params.json not found in {checkpoints_dir}"
@@ -194,14 +177,12 @@ class ModelExecutor:
         if params["model_type"]== "llama":
             model_config: LlamaConfig = LlamaConfig(
                 params, 
-                max_batch_size = max_batch_size,
                 max_seq_len = max_seq_len,
                 device=device
             )
         elif params["model_type"] == "qwen2":
             model_config: Qwen2Config = Qwen2Config(
                 params, 
-                max_batch_size = max_batch_size,
                 max_seq_len = max_seq_len,
                 device=device
             )
@@ -211,8 +192,7 @@ class ModelExecutor:
 
         return model_config
 
-    def __init__(self, tokenizer:AutoTokenizer, model_config, model, compiled_model=True, device="cuda"):
-        self.tokenizer = tokenizer
+    def __init__(self, model_config, model, max_gpu_num_blocks=None, compiled_model=False, device="cuda"):
         self.model_config = model_config
 
         if isinstance(model_config, LlavaConfig):
@@ -226,17 +206,20 @@ class ModelExecutor:
         self.model_runner = None
         self.compiled_model = False
         
-        if self.compiled_model:
-            max_gpu_num_blocks, self.kv_mem_manager = self.apply_cuda_graph() # 调用 cuda graph 优化
-        else:
-            max_gpu_num_blocks, self.max_num_tokens = self._get_max_tokens(gpu_memory_utilization=0.9, block_size=1)
+        if max_gpu_num_blocks:
             self.kv_mem_manager = self._init_mem_manager(max_gpu_num_blocks)
+        else:
+            max_gpu_num_blocks, self.max_gpu_num_tokens = self._get_max_avaliable_tokens(gpu_memory_utilization=0.9, block_size=1)
+            self.kv_mem_manager = self._init_mem_manager(max_gpu_num_blocks, block_size=1)
         
+        if compiled_model:
+            self.apply_cuda_graph() # 调用 cuda graph 优化
+
         self.gpu_kv_buffer = self.kv_mem_manager.gpu_kv_buffer
         self.atten_info = AttentionInfo() # 创建 AttentionInfo 实例
         self.atten_info.kv_buffer = self.kv_mem_manager.gpu_kv_buffer
 
-    def _get_max_tokens(self, gpu_memory_utilization=0.9, block_size=1):
+    def _get_max_avaliable_tokens(self, gpu_memory_utilization=0.9, block_size=1):
         avaliable_blocks = ComputeMaxAvailableBlocks(
             num_layers = self.llm_config.num_layers, 
             hidden_size = self.llm_config.hidden_size, 

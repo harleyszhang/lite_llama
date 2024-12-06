@@ -12,6 +12,7 @@ from transformers import AutoTokenizer
 from .executor.model_executor import ModelExecutor
 from .models.llama import Llama  # 确保这些类已正确定义和导入
 from .models.model_config import LlamaConfig
+from .utils.file_interface import get_model_name_from_path
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
@@ -49,9 +50,9 @@ class GenerateText:
     """
 
     def __init__(self, 
-        checkpoints_dir = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/',
-        tokenizer_path = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/',
-        max_batch_size = 8,
+        checkpoints_dir: str,
+        tokenizer_path: str,
+        max_gpu_num_blocks = None,
         max_seq_len = 1024,
         load_model = True,
         triton_weight = True,
@@ -63,16 +64,25 @@ class GenerateText:
 
         self.model_executor = ModelExecutor.build(
             checkpoints_dir = checkpoints_dir,
-            tokenizer_path = tokenizer_path,
             load_model = load_model,
-            max_batch_size =  max_batch_size,
+            max_gpu_num_blocks = max_gpu_num_blocks,
             max_seq_len = max_seq_len,
             triton_weight = triton_weight,
             device = device
         )
-        self.tokenizer = self.model_executor.tokenizer
         self.model_config = self.model_executor.model_config
+        self.tokenizer = self.load_tokenizer(tokenizer_path)
+    
+    def load_tokenizer(self, pretrained_model_name_or_path):
+        model_name = get_model_name_from_path(pretrained_model_name_or_path)
+
+        if 'llava' in model_name.lower():
+            tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, use_fast=False)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, use_fast=True)
         
+        return tokenizer
+    
     @torch.inference_mode()
     def generate(
         self,
@@ -104,7 +114,6 @@ class GenerateText:
         """
         model_config = self.model_config
         bsz = len(prompt_tokens) # 批量大小
-        assert bsz <= model_config.max_batch_size, (bsz, model_config.max_batch_size)
 
         # 计算 batch 提示词的最小和最大长度
         min_prompt_len = min(len(t) for t in prompt_tokens)

@@ -1,6 +1,6 @@
 from transformers import AutoTokenizer, Qwen2ForCausalLM
 
-model_name = "/gemini/code/Qwen2.5-1.5B-Instruct"
+model_name = "/gemini/code/llm_weights/Qwen/Qwen2.5-3B-Instruct"
 
 model = Qwen2ForCausalLM.from_pretrained(
     model_name,
@@ -10,19 +10,24 @@ model = Qwen2ForCausalLM.from_pretrained(
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 print(model)
 print("my llama archetectue and shape")
+
 for name, param in model.named_parameters():
     print(name, param.shape)
 
-prompt = "秦始皇活了多少岁？."
+prompt = "给出 c++ 多线程语法和编程示例代码."
+
 messages = [
-    {"role": "system", "content": "You are llama model, You are a helpful assistant."},
+    {"role": "system", "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."},
     {"role": "user", "content": prompt}
 ]
+
 text = tokenizer.apply_chat_template(
     messages,
     tokenize=False,
     add_generation_prompt=True
 )
+print("After call apply_chat_template, text is ", text)
+
 model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
 
 generated_ids = model.generate(
