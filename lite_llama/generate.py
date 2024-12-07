@@ -104,7 +104,6 @@ class GenerateText:
             Tuple[List[List[int]], Optional[List[List[float]]]]: 生成的 token 序列和（可选）对应的 log 概率。
         """
         bsz = len(prompt_tokens) # 批量大小
-        prompt_lengths = [len(t) for t in prompt_tokens]
         max_prompt_len = max(len(t) for t in prompt_tokens)
         total_len = min(self.model_config.max_seq_len, max_gen_len + max_prompt_len)
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
@@ -143,8 +142,7 @@ class GenerateText:
             if eos_reached.all(): # 如果所有样本均到达结束 token，停止生成
                 break
         
-        out_tokens = self.process_output_tokens(tokens, prompt_tokens, max_gen_len, 
-								                echo, self.tokenizer.eos_token_id)
+        # out_tokens = self.process_output_tokens(tokens, prompt_tokens, max_gen_len, echo, self.tokenizer.eos_token_id)
         # 减少 kv cache 内存管理器的引用计数
         self.model_executor.kv_mem_manager.release_ref(select_index)
 

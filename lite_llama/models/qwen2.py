@@ -23,6 +23,7 @@ class Attention(nn.Module):
         atten_info,
         layer_index:int,
     ) -> torch.Tensor:
+        xq = xq.to(torch.float16)
         batch_size, seq_len, num_heads, head_dim = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
         
         # 1. 获取 prefill 阶段的 select_index, 并更新 kv cache 张量
@@ -49,6 +50,7 @@ class Attention(nn.Module):
         atten_info,
         layer_index:int,
     ) -> torch.Tensor:
+        xq = xq.to(torch.float16)
         batch_size, seq_len, num_head, head_dim = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
 
         # 1. 先获取 kv 缓冲向量再更新 kv 向量
@@ -65,9 +67,7 @@ class Attention(nn.Module):
         xv = torch.cat([past_v_cache_reshape, xv], dim=1)
 
         # print(f"atten_info.select_index.view(batch_size, seq_len) shape is {atten_info.select_index.view(batch_size, -1).shape}")
-        select_index = torch.cat([atten_info.select_index.view(batch_size, -1),
-                                  atten_info.decode_index.view(batch_size, -1)], dim=1).view(-1)
-        
+        select_index = torch.cat([atten_info.select_index, atten_info.decode_index])
         atten_info.kv_buffer[layer_index][select_index, :self.num_kv_heads, :] = xk.view(-1, self.num_kv_heads, head_dim)
         atten_info.kv_buffer[layer_index][select_index, self.num_kv_heads:, :] = xv.view(-1, self.num_kv_heads, head_dim)
         
@@ -201,6 +201,7 @@ class FusedMLP(nn.Module):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False, dtype=torch.float16) # torch.float32 cpu
 
     def forward(self, x):
+        # print("FusedMLP input shape is ", x.shape)
         return self.down_proj(swiglu_forward(self.gate_proj(x), self.up_proj(x)))
         
 class Qwen2DecoderLayer(nn.Module):
@@ -230,10 +231,7 @@ class Qwen2DecoderLayer(nn.Module):
         hidden_states = rmsnorm(x, self.input_layernorm_weight.data, eps=self.rms_norm_eps)
 
         # 调用 attention 模块
-        attn_output = self.self_attn(hidden_states, atten_info, layer_index, position_embeddings)
-        # if torch.isnan(attn_output).any(): # 检查 NaNs
-        #     raise ValueError(f"NaNs detected in attention output at layer {layer_index}")
-        
+        attn_output = self.self_attn(hidden_states, atten_info, layer_index, position_embeddings)        
         h = x + attn_output  # 残差连接
 
         # Normalization BEFORE the feed forward block. # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
@@ -245,8 +243,6 @@ class Qwen2DecoderLayer(nn.Module):
         #     raise ValueError(f"NaNs detected in feedforward output at layer {layer_index}")
         
         out = h + feedforward_output # 残差连接
-        # if torch.isnan(out).any(): # 检查 NaNs
-        #     raise ValueError(f"NaNs detected after residual connection at layer {layer_index}")
         
         return out
 
