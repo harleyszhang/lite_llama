@@ -104,7 +104,7 @@ def transformers_inference(
     warm_up_prompt = ["Hello World"]
     warm_up_inputs = tokenizer(warm_up_prompt, return_tensors="pt", padding=True, truncation=True).to(model.device)
     with torch.no_grad():
-        _ = model.generate(**warm_up_inputs, max_new_tokens=5, temperature=0.5, top_p=0.9, do_sample=True)
+        _ = model.generate(**warm_up_inputs, max_new_tokens=5, temperature=temperature, top_p=top_p, do_sample=True)
 
     start_time = time.time()
     model_inputs = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True).to(model.device)
@@ -204,8 +204,8 @@ def main():
         "Roosevelt was the first president of the United States, he has a lot of information on the early history of the United States. He was born in 1883,",
     ]
     
-    hf_model_name = "/gemini/code/Qwen2.5-1.5B-Instruct"
-    checkpoints_dir = "/gemini/code/lite_llama/my_weight/Qwen2.5-1.5B-Instruct"  # 根据实际情况修改
+    hf_model_name = "/gemini/code/Llama-3.2-1B-Instruct"
+    checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct"  # 根据实际情况修改
 
     compare_inference_speed(
         prompts=prompts,

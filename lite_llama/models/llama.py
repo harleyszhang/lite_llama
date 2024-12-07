@@ -14,16 +14,14 @@ class FusedAttention(nn.Module):
         # K V 头数相同，但和 Q 可能不同
         self.num_kv_heads = config.num_heads if config.num_kv_heads is None else config.num_kv_heads
         self.num_heads_q = config.num_heads
-        self.n_rep = self.num_heads_q // self.num_kv_heads # kv 重复次数
 
         # 每个头的维度大小, head_dim 和 hidden_size 不一样
         self.head_dim = config.hidden_size // config.num_heads
         self.hidden_size = config.num_heads * self.head_dim
 
-        self.q_proj = nn.Linear(config.hidden_size, config.num_heads * self.head_dim, bias=False, dtype=torch.float16)
-        self.k_proj = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=False, dtype=torch.float16)
-        self.v_proj = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=False, dtype=torch.float16)
-        self.o_proj = nn.Linear(config.num_heads * self.head_dim, config.hidden_size, bias=False, dtype=torch.float16)
+        self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False, dtype=torch.float16)
+        self.kv_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim * 2, bias=False, dtype=torch.float16)
+        self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False, dtype=torch.float16)
 
     def context_forward(
         self,
@@ -32,18 +30,15 @@ class FusedAttention(nn.Module):
         layer_index:int,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):         
-        x = x.to(torch.float16)
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
 
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
-        xq = self.q_proj(x)
-        xk = self.k_proj(x)
-        xv = self.v_proj(x)
+        xq = self.q_proj(x).view(batch_size, seq_len, self.num_heads_q, self.head_dim)
+        xkv = self.kv_proj(x)
+        xk, xv = xkv[:, :, 0 :self.num_kv_heads * self.head_dim], xkv[:, :, self.num_kv_heads * self.head_dim: ]
 
-        xq = xq.view(batch_size, seq_len, self.num_heads_q, self.head_dim)
         xk = xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-        
         cos, sin = position_embeddings
         xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
 
@@ -72,21 +67,16 @@ class FusedAttention(nn.Module):
         layer_index:int,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
-        x = x.to(torch.float16)
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
 
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
-        xq = self.q_proj(x)
-        xk = self.k_proj(x)
-        xv = self.v_proj(x)
+        xq = self.q_proj(x).view(batch_size, seq_len, self.num_heads_q, self.head_dim)
+        xkv = self.kv_proj(x)
+        xk, xv = xkv[:, :, 0 :self.num_kv_heads * self.head_dim], xkv[:, :, self.num_kv_heads * self.head_dim: ]
 
-        # (B, 1, H_Q * Head_Dim) -> (B, 1, H_Q, Head_Dim), 
-        xq = xq.view(batch_size, seq_len, self.num_heads_q, self.head_dim)
-        # (B, 1, H_KV * Head_Dim) -> (B, 1, H_KV, Head_Dim)
-        xk = xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-        # (B, 1, H_KV * Head_Dim) -> (B, 1, H_KV, Head_Dim)
+        xk =xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-        
+
         cos, sin = position_embeddings
         xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
 

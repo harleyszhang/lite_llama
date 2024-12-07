@@ -10,7 +10,7 @@ from lite_llama.models.llava import LlavaLlama
 from lite_llama.models.model_config import LlamaConfig
 from transformers import LlavaConfig
 
-checkpoints_dir = "/gemini/code/Qwen2.5-1.5B-Instruct"
+checkpoints_dir = "/gemini/code/Llama-3.2-1B-Instruct"
 
 model = AutoModelForCausalLM.from_pretrained(
     checkpoints_dir, 
@@ -20,14 +20,20 @@ model = AutoModelForCausalLM.from_pretrained(
 
 hf_sd = model.state_dict()
 
-for name, parameters in hf_sd.items():
-    print(name, parameters.shape)
+# for name, parameters in hf_sd.items():
+#     print(name, parameters.shape)
 
-
-llm_config = AutoConfig.from_pretrained(checkpoints_dir)
-num_layers = llm_config.num_hidden_layers
-print("num_layers: ", num_layers)
-convert_qwen2_hf_to_litellama(checkpoints_dir, hf_sd, num_layers)
+if "qwen2" in checkpoints_dir.lower():
+    llm_config = AutoConfig.from_pretrained(checkpoints_dir)
+    num_layers = llm_config.num_hidden_layers
+    print("num_layers: ", num_layers)
+    convert_qwen2_hf_to_litellama(checkpoints_dir, hf_sd, num_layers)
+    
+elif "llama" in checkpoints_dir.lower():
+    llm_config = AutoConfig.from_pretrained(checkpoints_dir)
+    num_layers = llm_config.num_hidden_layers
+    print("num_layers: ", num_layers)
+    convert_llama_hf_to_litellama(checkpoints_dir, hf_sd, num_layers)
 
 # with init_empty_weights():
 #     llava_config = LlavaConfig.from_pretrained(checkpoints_dir)

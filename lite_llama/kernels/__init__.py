@@ -10,3 +10,4 @@ from .rope import (precompute_freqs_cis, rope)
 from .softmax import softmax
 from .swiglu import (SiLUMulFunction, swiglu_forward)
 from .rope_layer import rope_forward
+from .rotary_emb import rotary_emb_fwd

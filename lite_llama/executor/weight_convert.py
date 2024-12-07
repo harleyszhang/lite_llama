@@ -189,8 +189,29 @@ def convert_llama_hf_to_litellama(checkpoints_dir, hf_sd, num_layers):
         else:
             print(f"Warning: Unmapped key {hf_key}")
     
-    # new_sd["lm_head.weight"] = new_sd["embed_tokens.weight"]
+    # 进行 kv_proj 合并操作
+    for i in range(num_layers):
+        k_key = f"layers.{i}.self_attn.k_proj.weight"
+        v_key = f"layers.{i}.self_attn.v_proj.weight"
+        if k_key in new_sd and v_key in new_sd:
+            k_tensor = new_sd[k_key]
+            v_tensor = new_sd[v_key]
+            # 假设 k_proj, v_proj 的 shape 都是 [hidden_size, hidden_size]
+            # 按最后一维拼接后成为 [2 * hidden_size, hidden_size]
+            kv_tensor = torch.cat([k_tensor, v_tensor], dim=0)
+            
+            # 新增 kv_proj.weight
+            kv_key = f"layers.{i}.self_attn.kv_proj.weight"
+            new_sd[kv_key] = kv_tensor
+            
+            # 删除原来的 k_proj, v_proj
+            del new_sd[k_key]
+            del new_sd[v_key]
 
+    for name, parameters in new_sd.items():
+        print(name, parameters.shape)
+
+    # 将处理后的权重保存到指定目录
     build_new_weight_dir(checkpoints_dir, new_sd)
     return new_sd
 
