@@ -123,7 +123,7 @@ def rope_forward(q, k, cos, sin):
     # note: q and k are incontiguous before the transformation and will become contiguous after transpose
     # q = q.transpose(1, 2)
     # k = k.transpose(1, 2)
-
+    
     batch_size, seq_len, n_q_head, head_dim = q.shape
     n_kv_head = k.shape[2]
     pad_hd = triton.next_power_of_2(head_dim)

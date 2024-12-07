@@ -3,11 +3,13 @@
 
 /gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct
 
-目前只做了简单常见 benchmark, 运行性能测试对比 `python benchmark.py`，结果如下所示:
+目前只做了简单常见 benchmark, 运行性能测试对比 `python benchmark.py`，lite_llama 的运行速度是 transformers 的 `1.7x` 倍。
+
+详细运行结果如下所示:
 
 ```bash
-lite_llama throughput: 179.17 tokens/s
-Transformers throughput: 218.09 tokens/s
+lite_llama throughput: 327.22 tokens/s
+Transformers throughput: 189.41 tokens/s
 
 [Prompt 0]:
 I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.

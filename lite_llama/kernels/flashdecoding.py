@@ -315,12 +315,12 @@ def flash_decode_stage2(
 def flash_decoding(
     q, 			 # q 查询向量，形状为 [bsz, num_head, head_dim]
     k, v, 	     # 键/值向量缓存，形状为 [ntokens, kv_num_head, head_dim]
-    actual_seq_len, # 最大序列长度, 即当前查询对应的 kv cache 大小。用于分区计算
+    actual_seq_len=None, # 最大序列长度, 即当前查询对应的 kv cache 大小。用于分区计算
 ):
 	# q.view(-1, num_heads, head_dim)
 	assert q.shape[-1] == k.shape[-1] == v.shape[-1]
 	batchs, num_heads, head_dim = q.shape # decode 阶段 q 的 seq_len = 1, 
-	# actual_seq_len = k.shape[0] // batchs
+	actual_seq_len = k.shape[0] // batchs
 	
 	kv_nums, _, _ = k.shape
 	# middle results

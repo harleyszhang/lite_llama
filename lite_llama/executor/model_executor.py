@@ -291,8 +291,7 @@ class ModelExecutor:
             logits = self.model.forward(input_ids, prev_pos, self.atten_info)
         
         if seq_len == 1 and self.atten_info.select_index.numel() > 0:
-            select_index = torch.cat([self.atten_info.select_index.view(batch_size, -1),
-                                     self.atten_info.decode_index.view(batch_size, -1)], dim=1).view(-1)
+            select_index = torch.cat([self.atten_info.select_index, self.atten_info.decode_index])
             self.atten_info.select_index = select_index
         
         return logits, self.atten_info.select_index
