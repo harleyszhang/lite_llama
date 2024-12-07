@@ -234,15 +234,15 @@ def main():
     #     "Roosevelt was the first president of the United States,",
     # ]
 
-    hf_model_name = "/gemini/code/Llama-3.2-1B-Instruct"
-    checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct"  # 根据实际情况修改
+    hf_model_name = "/gemini/code/llm_weights/Qwen/Qwen2.5-7B-Instruct"
+    checkpoints_dir = "/gemini/code/lite_llama/my_weight/Qwen2.5-7B-Instruct"  # 根据实际情况修改
 
     compare_inference_speed(
         prompts=prompts,
         temperature=0.6,
         top_p=0.9,
         max_seq_len=2048,
-        max_gen_len=512,
+        max_gen_len=128,
         lite_llama_ckpt_dir=checkpoints_dir,
         hf_model_name=hf_model_name,
         device=device

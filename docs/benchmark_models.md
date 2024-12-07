@@ -150,6 +150,17 @@ Roosevelt's leadership during World War II helped to shape
 ========================================
 ```
 
+## Qwen2.5-3B 模型性能测试对比
+
+```bash
+lite_llama inference time: 6.0808 s
+Transformers inference time: 3.7247 s
+lite_llama throughput: 94.07 tokens/s
+Transformers throughput: 137.46 tokens/s
+lite_llama per token latency: 10.630839 ms/token
+Transformers per token latency: 7.274835 ms/token
+```
+
 ### 历史记录
 
 详细运行结果如下所示:
