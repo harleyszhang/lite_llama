@@ -76,9 +76,9 @@ class FusedAttention(nn.Module):
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
         xq = self.q_proj(x).view(batch_size, seq_len, self.num_heads_q, self.head_dim)
         xkv = torch.matmul(x, self.kv_proj_weight.t())
-        # xk, xv = torch.split(xkv, [self.num_kv_heads * self.head_dim, xkv.size(-1) - self.num_kv_heads * self.head_dim], dim=-1)
+        xk, xv = torch.split(xkv, [self.num_kv_heads * self.head_dim, xkv.size(-1) - self.num_kv_heads * self.head_dim], dim=-1)
         # xkv = self.kv_proj(x)
-        xk, xv = xkv[:, :, 0 :self.num_kv_heads * self.head_dim], xkv[:, :, self.num_kv_heads * self.head_dim: ]
+        # xk, xv = xkv[:, :, 0 :self.num_kv_heads * self.head_dim], xkv[:, :, self.num_kv_heads * self.head_dim: ]
 
         xk =xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
