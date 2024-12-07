@@ -143,7 +143,7 @@ def flash_attention_v2_kernel(
     k_ptrs = k_ptr + offs_k
     v_ptrs = v_ptr + offs_v
     out_ptrs = o_ptr + offs_o
-
+    
     q_mask = offs_m[:, None] < m_size
     q = tl.load(q_ptrs, mask=q_mask, other=0.0)
 

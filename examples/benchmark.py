@@ -193,17 +193,28 @@ def compare_inference_speed(
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
+    # prompts: List[str] = [
+    #     "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.",
+    #     "Simply put, the theory of relativity states that 3D space is not fixed, but is relative to the observer's frame of reference. Time is also relative, and it appears to pass differently depending on the observer's speed and position",
+    #     """A brief message congratulating the team on the launch:
+
+    #     Hi everyone,
+
+    #     I just heard about the launch of the new product and I wanted to take a moment to express my congratulations to the team. It's great to see such""",
+    #     "Roosevelt was the first president of the United States, he has a lot of information on the early history of the United States. He was born in 1883,",
+    # ]
+    
     prompts: List[str] = [
-        "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.",
-        "Simply put, the theory of relativity states that 3D space is not fixed, but is relative to the observer's frame of reference. Time is also relative, and it appears to pass differently depending on the observer's speed and position",
+        "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person ",
+        "Simply put, the theory of relativity states that 3D space is not fixed, but is relative to the observer's frame of reference. Time is also relative, and it appears to ",
         """A brief message congratulating the team on the launch:
 
         Hi everyone,
 
-        I just heard about the launch of the new product and I wanted to take a moment to express my congratulations to the team. It's great to see such""",
-        "Roosevelt was the first president of the United States, he has a lot of information on the early history of the United States. He was born in 1883,",
+        I just heard about the launch of the new product and I wanted to take a moment to express my """,
+        "Roosevelt was the first president of the United States, he has a lot of information on the early history of the ,",
     ]
-    
+
     hf_model_name = "/gemini/code/Llama-3.2-1B-Instruct"
     checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct"  # 根据实际情况修改
 

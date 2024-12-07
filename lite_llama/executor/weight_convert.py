@@ -201,7 +201,7 @@ def convert_llama_hf_to_litellama(checkpoints_dir, hf_sd, num_layers):
             kv_tensor = torch.cat([k_tensor, v_tensor], dim=0)
             
             # 新增 kv_proj.weight
-            kv_key = f"layers.{i}.self_attn.kv_proj.weight"
+            kv_key = f"layers.{i}.self_attn.kv_proj_weight"
             new_sd[kv_key] = kv_tensor
             
             # 删除原来的 k_proj, v_proj

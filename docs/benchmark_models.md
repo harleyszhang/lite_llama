@@ -8,8 +8,11 @@
 详细运行结果如下所示:
 
 ```bash
-lite_llama throughput: 327.22 tokens/s
-Transformers throughput: 189.41 tokens/s
+
+lite_llama inference time: 3.1476 s
+Transformers inference time: 3.5534 s
+lite_llama throughput: 381.25 tokens/s
+Transformers throughput: 210.22 tokens/s
 
 [Prompt 0]:
 I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.

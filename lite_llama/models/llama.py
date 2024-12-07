@@ -20,7 +20,8 @@ class FusedAttention(nn.Module):
         self.hidden_size = config.num_heads * self.head_dim
 
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False, dtype=torch.float16)
-        self.kv_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim * 2, bias=False, dtype=torch.float16)
+        self.kv_proj_weight = nn.Parameter(torch.rand(self.num_kv_heads * self.head_dim * 2, self.hidden_size, dtype=torch.float16))
+        # self.kv_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim * 2, bias=False, dtype=torch.float16)
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False, dtype=torch.float16)
 
     def context_forward(
@@ -34,8 +35,11 @@ class FusedAttention(nn.Module):
 
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
         xq = self.q_proj(x).view(batch_size, seq_len, self.num_heads_q, self.head_dim)
-        xkv = self.kv_proj(x)
-        xk, xv = torch.split(xkv, [self.num_kv_heads * self.head_dim, xkv.size(-1) - self.num_kv_heads * self.head_dim], dim=-1)
+        xk = torch.matmul(x, self.kv_proj_weight[0 :self.num_kv_heads * self.head_dim, :].t())
+        xv = torch.matmul(x, self.kv_proj_weight[self.num_kv_heads * self.head_dim:, :].t())
+
+        # xkv = self.kv_proj(x)
+        # xk, xv = torch.split(xkv, [self.num_kv_heads * self.head_dim, xkv.size(-1) - self.num_kv_heads * self.head_dim], dim=-1)
         # xk, xv = xkv[:, :, 0 :self.num_kv_heads * self.head_dim], xkv[:, :, self.num_kv_heads * self.head_dim: ]
 
         xk = xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
@@ -71,9 +75,10 @@ class FusedAttention(nn.Module):
 
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
         xq = self.q_proj(x).view(batch_size, seq_len, self.num_heads_q, self.head_dim)
-        xkv = self.kv_proj(x)
-        xk, xv = torch.split(xkv, [self.num_kv_heads * self.head_dim, xkv.size(-1) - self.num_kv_heads * self.head_dim], dim=-1)
-        # xk, xv = xkv[:, :, 0 :self.num_kv_heads * self.head_dim], xkv[:, :, self.num_kv_heads * self.head_dim: ]
+        xkv = torch.matmul(x, self.kv_proj_weight.t())
+        # xk, xv = torch.split(xkv, [self.num_kv_heads * self.head_dim, xkv.size(-1) - self.num_kv_heads * self.head_dim], dim=-1)
+        # xkv = self.kv_proj(x)
+        xk, xv = xkv[:, :, 0 :self.num_kv_heads * self.head_dim], xkv[:, :, self.num_kv_heads * self.head_dim: ]
 
         xk =xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
