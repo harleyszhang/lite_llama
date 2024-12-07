@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from typing import Optional, Tuple
 from ..kernels import *
@@ -35,26 +36,24 @@ class FusedAttention(nn.Module):
 
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
         xq = self.q_proj(x).view(batch_size, seq_len, self.num_heads_q, self.head_dim)
-        xk = torch.matmul(x, self.kv_proj_weight[0 :self.num_kv_heads * self.head_dim, :].t())
-        xv = torch.matmul(x, self.kv_proj_weight[self.num_kv_heads * self.head_dim:, :].t())
+        xk = F.linear(x, self.kv_proj_weight[0 :self.num_kv_heads * self.head_dim, :])
+        xv = F.linear(x, self.kv_proj_weight[self.num_kv_heads * self.head_dim:, :])
+        xk = xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
 
         # xkv = self.kv_proj(x)
         # xk, xv = torch.split(xkv, [self.num_kv_heads * self.head_dim, xkv.size(-1) - self.num_kv_heads * self.head_dim], dim=-1)
         # xk, xv = xkv[:, :, 0 :self.num_kv_heads * self.head_dim], xkv[:, :, self.num_kv_heads * self.head_dim: ]
 
-        xk = xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-        xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         cos, sin = position_embeddings
         xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
 
-        # 2. 获取 prefill 阶段的 select_index, 并更新 kv cache 张量
-        layer_kv_buffer = atten_info.kv_buffer[layer_index]        
-
-        layer_kv_buffer[atten_info.select_index, :self.num_kv_heads, :] = xk.view(batch_size * seq_len, self.num_kv_heads, -1)
-        layer_kv_buffer[atten_info.select_index, self.num_kv_heads:, :] = xv.view(batch_size * seq_len, self.num_kv_heads, -1)
+        # 2. 将 xk, xv 合并, 并写入缓存
+        combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)
+        atten_info.kv_buffer[layer_index][atten_info.select_index] = combined_kv.view(-1, self.num_kv_heads*2, self.head_dim)
 
         # 3. sel-attention. flashattention 计算: softmax(qk^t) * v
-        xq = xq.transpose(1, 2)
+        xq = xq.transpose(1, 2) # (batch_size, seq_len, self.num_kv_heads, self.head_dim) -> (batch_size, self.num_kv_heads, seq_len, self.head_dim)
         keys = xk.transpose(1, 2)
         values = xv.transpose(1, 2)
         output = flash_attention_v2(xq, keys, values)
@@ -75,10 +74,9 @@ class FusedAttention(nn.Module):
 
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
         xq = self.q_proj(x).view(batch_size, seq_len, self.num_heads_q, self.head_dim)
-        xkv = torch.matmul(x, self.kv_proj_weight.t())
+        # xkv = torch.matmul(x, self.kv_proj_weight.t())
+        xkv = F.linear(x, self.kv_proj_weight) # (B, L, 2 * num_kv_heads * head_dim)
         xk, xv = torch.split(xkv, [self.num_kv_heads * self.head_dim, xkv.size(-1) - self.num_kv_heads * self.head_dim], dim=-1)
-        # xkv = self.kv_proj(x)
-        # xk, xv = xkv[:, :, 0 :self.num_kv_heads * self.head_dim], xkv[:, :, self.num_kv_heads * self.head_dim: ]
 
         xk =xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
@@ -98,11 +96,10 @@ class FusedAttention(nn.Module):
         
         xk = torch.cat([past_k_cache_reshape, xk], dim=1)
         xv = torch.cat([past_v_cache_reshape, xv], dim=1)
-        
+                
         select_index = torch.cat([atten_info.select_index, atten_info.decode_index])
-        
-        atten_info.kv_buffer[layer_index][select_index, :num_kv_heads, :] = xk.view(-1, num_kv_heads, self.head_dim)
-        atten_info.kv_buffer[layer_index][select_index, num_kv_heads:, :] = xv.view(-1, num_kv_heads, self.head_dim)
+        combined_kv = torch.cat([xk, xv], dim=2) # (B, L', 2 * num_kv_heads, head_dim)
+        atten_info.kv_buffer[layer_index][select_index] = combined_kv.view(-1, 2*num_kv_heads, self.head_dim)
         
         # 3. flashattention 计算: softmax(qk^t) * v
         batch_size, kv_actual_seq_len, num_kv_heads, head_dim = xk.shape
@@ -112,7 +109,6 @@ class FusedAttention(nn.Module):
         keys = xk.view(new_bs, num_kv_heads, head_dim)
         values = xv.view(new_bs, num_kv_heads, head_dim)
         
-        # 3. flashattention 计算: softmax(qk^t) * v
         output = flash_decoding(xq, keys, values) # ouput shape is [batchs, num_heads, head_dim]
         output = output.view(batch_size, 1, self.num_heads_q * self.head_dim)
 
