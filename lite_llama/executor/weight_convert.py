@@ -75,9 +75,40 @@ def convert_qwen2_hf_to_litellama(
             # 如果某些权重不需要映射，可以选择忽略或处理
             pass  # 忽略未映射的权重
     
+    # 进行 kv_proj 合并操作
+    for i in range(num_layers):
+        k_key = f"layers.{i}.self_attn.k_proj_weight"
+        v_key = f"layers.{i}.self_attn.v_proj_weight"
+        k_bias_key = f"layers.{i}.self_attn.k_proj_bias"
+        v_bias_key = f"layers.{i}.self_attn.v_proj_bias"
+        
+        if k_key in new_sd and v_key in new_sd and k_bias_key in new_sd and v_bias_key in new_sd:
+            # 1. kv weight 权重合并
+            k_tensor = new_sd[k_key]
+            v_tensor = new_sd[v_key]
+            # 按最后一维拼接后成为 [2 * hidden_size, hidden_size]
+            kv_tensor = torch.cat([k_tensor, v_tensor], dim=0)
+            
+            # 新增 kv_proj.weight
+            kv_key = f"layers.{i}.self_attn.kv_proj_weight"
+            new_sd[kv_key] = kv_tensor
+            
+            # 2. kv bias 权重合并
+            k_bias_tensor = new_sd[k_bias_key]
+            v_bias_tensor = new_sd[v_bias_key]
+            kv_bias_tensor = torch.cat([k_bias_tensor, v_bias_tensor], dim=0)
+            
+            kv_bias_key = f"layers.{i}.self_attn.kv_proj_bias"
+            new_sd[kv_bias_key] = kv_bias_tensor
+        
+            # 删除原来的 k_proj, v_proj
+            del new_sd[k_key]
+            del new_sd[v_key]
+            del new_sd[k_bias_key]
+            del new_sd[v_bias_key]
+
     # 保存转换好的自定义权重
     build_new_weight_dir(checkpoints_dir, new_sd)
-    # new_sd["lm_head_weight"] = hf_sd["model.embed_tokens.weight"]
     
     if print_params:
         # 打印预训练模型的参数名称

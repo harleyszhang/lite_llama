@@ -17,6 +17,7 @@ def _attn_fwd_inner(
 	n_size, # kv seq_len
 	causal_mask, 
 	BLOCK_M_SIZE: tl.constexpr, BLOCK_N_SIZE: tl.constexpr,
+    fp8_v: tl.constexpr
 ):
 	n_range_offs = tl.arange(0, BLOCK_N_SIZE) # head_dim 维度偏移
 
@@ -160,7 +161,8 @@ def flash_attention_v2_kernel(
                                 qk_scale, 
                                 n_size, # kv seq_len
                                 causal_mask,
-                                BLOCK_M_SIZE, BLOCK_N_SIZE)
+                                BLOCK_M_SIZE, BLOCK_N_SIZE,
+                                v_ptr.dtype.element_ty == tl.float8e5)
 
     acc = acc / d_i[:, None]
     out_mask = offs_m[:, None] < m_size

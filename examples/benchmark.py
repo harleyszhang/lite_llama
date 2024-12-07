@@ -126,8 +126,11 @@ def transformers_inference(
     results = [{"generation": text} for text in generated_texts]
     texts = [res['generation'] for res in results]
     total_tokens = count_tokens(texts, tokenizer)
+    total_time = end_time - start_time
+    prompts_tokens = input_ids.numel()
+    per_token_latency = total_time / total_tokens if total_tokens > 0 else float('inf')
 
-    return results, (end_time - start_time), total_tokens
+    return results, total_time, total_tokens, prompts_tokens, per_token_latency
 
 def compare_inference_speed(
     prompts: List[str],
@@ -157,31 +160,36 @@ def compare_inference_speed(
         model_prompter.insert_prompt(prompt)
         update_prompts.append(model_prompter.model_input)
 
-    # 1. lite-llama inference
+    # 1. transformers inference
+    hf_results, hf_time, hf_tokens, prompts_tokens, hf_pt_latency = transformers_inference(
+        hf_model_name, prompts, temperature, top_p, max_gen_len if max_gen_len else 64, device=device
+    )
+
+    torch.cuda.empty_cache() # 使用完成后释放 lite_llama_generator 占用的显存
+    
+    # 2. lite-llama inference
     lite_llama_generator = load_lite_llama_generator(lite_llama_ckpt_dir, max_seq_len, max_gpu_num_blocks = 6000, device=device)
     lite_llama_results, lite_llama_time, lite_llama_tokens = lite_llama_inference(
         lite_llama_generator, update_prompts, temperature, top_p, max_gen_len, device=device
     )
-
-    # 使用完成后释放 lite_llama_generator 占用的显存
     del lite_llama_generator
-    torch.cuda.empty_cache()
 
-    # 2. transformers inference
-    hf_results, hf_time, hf_tokens = transformers_inference(
-        hf_model_name, prompts, temperature, top_p, max_gen_len if max_gen_len else 64, device=device
-    )
+    lite_llama_pt_latency = lite_llama_time / (lite_llama_tokens - prompts_tokens)
 
     # 打印时间对比
     print("lite_llama inference time: {:.4f} s".format(lite_llama_time))
     print("Transformers inference time: {:.4f} s".format(hf_time))
 
     # 吞吐量计算
-    lite_llama_throughput = lite_llama_tokens / lite_llama_time if lite_llama_time > 0 else float('inf')
+    lite_llama_throughput = (lite_llama_tokens - prompts_tokens) / lite_llama_time if lite_llama_time > 0 else float('inf')
     print(f"lite_llama throughput: {lite_llama_throughput:.2f} tokens/s")
     
     hf_throughput = hf_tokens / hf_time if hf_time > 0 else float('inf')
     print(f"Transformers throughput: {hf_throughput:.2f} tokens/s")
+
+    # 打印 per token latency
+    print(f"lite_llama per token latency: {lite_llama_pt_latency * 1000:.6f} ms/token")
+    print(f"Transformers per token latency: {hf_pt_latency * 1000:.6f} ms/token")
 
     # 打印部分推理结果对比
     for i, (prompt, litellama_res, hf_res) in enumerate(zip(prompts, lite_llama_results, hf_results)):
@@ -193,27 +201,38 @@ def compare_inference_speed(
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    # prompts: List[str] = [
-    #     "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.",
-    #     "Simply put, the theory of relativity states that 3D space is not fixed, but is relative to the observer's frame of reference. Time is also relative, and it appears to pass differently depending on the observer's speed and position",
-    #     """A brief message congratulating the team on the launch:
-
-    #     Hi everyone,
-
-    #     I just heard about the launch of the new product and I wanted to take a moment to express my congratulations to the team. It's great to see such""",
-    #     "Roosevelt was the first president of the United States, he has a lot of information on the early history of the United States. He was born in 1883,",
-    # ]
-    
     prompts: List[str] = [
-        "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person ",
-        "Simply put, the theory of relativity states that 3D space is not fixed, but is relative to the observer's frame of reference. Time is also relative, and it appears to ",
+        "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.",
+        "Simply put, the theory of relativity states that 3D space is not fixed, but is relative to the observer's frame of reference. Time is also relative, and it appears to pass differently depending on the observer's speed and position",
         """A brief message congratulating the team on the launch:
 
         Hi everyone,
 
-        I just heard about the launch of the new product and I wanted to take a moment to express my """,
-        "Roosevelt was the first president of the United States, he has a lot of information on the early history of the ,",
+        I just heard about the launch of the new product and I wanted to take a moment to express my congratulations to the team. It's great to see such""",
+        "Roosevelt was the first president of the United States, he has a lot of information on the early history of the United States. He was born in 1883,",
     ]
+    
+    # prompts: List[str] = [
+    #     "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person ",
+    #     "Simply put, the theory of relativity states that 3D space is not fixed, but is relative to the observer's frame of reference. Time is also relative, and it appears to ",
+    #     """A brief message congratulating the team on the launch:
+
+    #     Hi everyone,
+
+    #     I just heard about the launch of the new product and I wanted to take a moment to express my """,
+    #     "Roosevelt was the first president of the United States, he has a lot of information on the early history of the ,",
+    # ]
+
+    # prompts: List[str] = [
+    #     "I believe the meaning of life is",
+    #     "Simply put, the theory of relativity states that 3D space",
+    #     """A brief message congratulating the team on the launch:
+
+    #     Hi everyone,
+
+    #     I just heard""",
+    #     "Roosevelt was the first president of the United States,",
+    # ]
 
     hf_model_name = "/gemini/code/Llama-3.2-1B-Instruct"
     checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct"  # 根据实际情况修改
@@ -223,7 +242,7 @@ def main():
         temperature=0.6,
         top_p=0.9,
         max_seq_len=2048,
-        max_gen_len=256,
+        max_gen_len=512,
         lite_llama_ckpt_dir=checkpoints_dir,
         hf_model_name=hf_model_name,
         device=device
