@@ -1,101 +1,164 @@
-import torch
+"""
+modified from https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/transformers/rms_norm.py
+"""
 
+import math
+import operator
+
+import torch
 import triton
 import triton.language as tl
 
+from .utils import (
+    calculate_settings,
+    compare_version,
+    ensure_contiguous,
+)
+
+if compare_version("triton", operator.ge, "3.0.0"):
+    try:
+        # typical import path with dispatch available
+        from triton.language.extra.libdevice import rsqrt
+    except ModuleNotFoundError:
+        # for working with NGC containers
+        from triton.language.extra.cuda.libdevice import rsqrt
+else:
+    from triton.language.math import rsqrt
+
+
+_CASTING_MODE_NONE = tl.constexpr(-1)
+_CASTING_MODE_LLAMA = tl.constexpr(0)
+_CASTING_MODE_GEMMA = tl.constexpr(1)
+
 
 @triton.jit
-def _rms_norm_fwd_fused(
-    X,  # pointer to the input
-    Y,  # pointer to the output
-    W,  # pointer to the weights
-    x_stride0,  # how much to increase the pointer when moving by 1 row
-    x_stride1,
-    y_stride0,
-    y_stride1,
-    N,  # number of columns in X
-    eps,  # epsilon to avoid division by zero
+def _rms_norm_forward_kernel(
+    Y_ptr,
+    Y_row_stride,
+    X_ptr,
+    X_row_stride,
+    W_ptr,
+    W_row_stride,
+    n_cols,
+    eps,
+    offset,
+    casting_mode: tl.constexpr,  # constexpr so the `if` blocks can be optimized out
     BLOCK_SIZE: tl.constexpr,
 ):
-    # Map the program id to the row of X and Y it should compute.
-    row = tl.program_id(0)
-    Y += row * y_stride0
-    X += row * x_stride0
-    # Compute variance
-    _var = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-    for off in range(0, N, BLOCK_SIZE):
-        cols = off + tl.arange(0, BLOCK_SIZE)
-        x = tl.load(X + cols * x_stride1, mask=cols < N, other=0.0).to(tl.float32)
-        _var += x * x
-    var = tl.sum(_var, axis=0) / N
-    rstd = 1 / tl.sqrt(var + eps)
-    # Normalize and apply linear transformation
-    for off in range(0, N, BLOCK_SIZE):
-        cols = off + tl.arange(0, BLOCK_SIZE)
-        mask = cols < N
-        w = tl.load(W + cols, mask=mask).to(tl.float32)
-        x = tl.load(X + cols, mask=mask, other=0.0).to(tl.float32)
-        x_hat = x * rstd
-        y = x_hat * w
-        # Write output
-        tl.store(Y + cols * y_stride1, y.to(Y.dtype.element_ty), mask=mask)
+    """
+    y_i = (x_i / (RMS)) * (offset_wi + wi), RMS = sqrt(sum(x_i^2) / N)
+
+    Reference:
+    1. https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
+    2. https://github.com/unslothai/unsloth/blob/fd753fed99ed5f10ef8a9b7139588d9de9ddecfb/unsloth/kernels/rms_layernorm.py#L22
+    3. https://arxiv.org/pdf/1910.07467
+    """
+
+    row_idx = tl.program_id(0)
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    mask = col_offsets < n_cols
+
+    Y_ptr += row_idx * Y_row_stride
+    X_ptr += row_idx * X_row_stride
+
+    X_row = tl.load(X_ptr + col_offsets, mask=mask, other=0)
+    W_row = tl.load(W_ptr + col_offsets, mask=mask, other=0)
+
+    # On Llama, only rstd is computed on fp32
+    X_row = X_row.to(tl.float32)
+
+    mean_square = tl.sum(X_row * X_row, axis=0) / n_cols
+    rstd = rsqrt(mean_square + eps)
+
+    X_row_normed = X_row * rstd
+    X_row_normed = X_row_normed.to(W_row.dtype) # Exact copy from HF
+    Y_row = X_row_normed * W_row
+
+    if casting_mode == _CASTING_MODE_GEMMA:
+        Y_row = Y_row.to(X_row.dtype)
+
+    tl.store(Y_ptr + col_offsets, Y_row, mask=mask)
 
 
-def rmsnorm_forward(x: torch.Tensor, weight, eps, out=None):
-    # allocate output
-    y = torch.empty_like(x) if out is None else out
-    # reshape input data into 2D tensor
-    x_arg = x.view(-1, x.shape[-1])
-    y_arg = y.view(-1, x.shape[-1])
-    assert y.data_ptr() == y_arg.data_ptr()
-    M, N = x_arg.shape
-    # Less than 64KB per feature: enqueue fused kernel
-    MAX_FUSED_SIZE = 65536 // x.element_size()
-    BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
-    # print("BLOCK_SIZE:", BLOCK_SIZE)
-    if N > BLOCK_SIZE:
-        raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    # heuristics for number of warps
-    num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
-    # print(BLOCK_SIZE, num_warps, "block_size, numwarps")
-    BLOCK_SIZE = 128 * 2 * 2 * 2 * 2 * 2 * 2 * 2
-    num_warps = 8
-    # enqueue kernel
-    _rms_norm_fwd_fused[(M,)](
-        x_arg,
-        y_arg,
-        weight,
-        x_arg.stride(0),
-        x_arg.stride(1),
-        y_arg.stride(0),
-        y_arg.stride(1),
-        N,
+_str_to_casting_mode = {
+    "llama": _CASTING_MODE_LLAMA.value,
+    "gemma": _CASTING_MODE_GEMMA.value,
+    "none": _CASTING_MODE_NONE.value,
+}
+
+
+@torch.no_grad()
+def rmsnorm_fwd(X, W, eps=1e-5, offset=0.0, casting_mode="llama"):
+    if not isinstance(casting_mode, int):
+        assert (
+            casting_mode in _str_to_casting_mode
+        ), f"Invalid casting mode: {casting_mode}"
+        casting_mode = _str_to_casting_mode[casting_mode]
+    else:
+        assert (
+            casting_mode in _str_to_casting_mode.values()
+        ), f"Invalid casting mode: {casting_mode}"
+
+    shape = X.shape
+    X = X.view(-1, shape[-1])
+    n_rows, n_cols = X.shape
+    BLOCK_SIZE, num_warps = calculate_settings(n_cols)
+
+    Y = torch.empty((n_rows, n_cols), dtype=X.dtype, device=X.device)
+
+    # Check constraints.
+    assert (
+        X.shape[1] == W.shape[0]
+    ), "Incompatible hidden size dimension between tensor1.shape[1] and tensor2.shape[0]"
+
+    _rms_norm_forward_kernel[(n_rows,)](
+        Y,
+        Y.stride(0),
+        X,
+        X.stride(0),
+        W,
+        W.stride(0),
+        n_cols,
         eps,
+        offset,
+        casting_mode,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
     )
-    return y
+    return Y.view(*shape)
 
 
-def torch_rms_norm(x, weight, eps):
-    return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * weight
+def test_rms_layernorm(
+    dim = 1024, eps = 1e-5, dtype = torch.float16,
+    bsz = 21, random_state = 3407, seqlen = 3341,
+):
+    from transformers.models.llama.modeling_llama import LlamaRMSNorm
+    layernorm = LlamaRMSNorm((dim,), eps = eps).to("cuda")
+    torch.cuda.manual_seed(random_state)
+    torch.manual_seed(random_state)
+    torch.nn.init.uniform_(layernorm.weight)
+    X = torch.randn((bsz, seqlen, dim), dtype = dtype, device = "cuda")
+    Y = layernorm(X)
+    Y2 = rmsnorm_fwd(X, layernorm.weight, eps)
+
+    assert(torch.amax(Y - Y2).item() <= 0.05)
+    print("max delta:", torch.max(torch.abs(Y - Y2)))
 
 
-def test_rms_norm(M, N, dtype, eps=1e-5, device="cuda"):
-    # create data
-    x_shape = (M, N)
-    w_shape = (x_shape[-1],)
-    weight = torch.rand(w_shape, dtype=dtype, device="cuda")
-    x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device="cuda")
-    # forward pass
-    y_tri = rmsnorm_forward(x, weight, eps)
-    y_ref = torch_rms_norm(x.to(torch.float32), weight.to(torch.float32), eps).to(dtype)
-
-    # compare
-    print("type:", y_tri.dtype, y_ref.dtype)
-    print("max delta:", torch.max(torch.abs(y_tri - y_ref)))
-    assert torch.allclose(y_tri, y_ref, atol=1e-3, rtol=0)
-    return
+def testing_suite_layernorm():
+    for dim in [512, 1024, 2048]:
+        for dtype in [torch.float16, torch.bfloat16]:
+            with torch.autocast(device_type = "cuda", dtype = dtype):
+                for seqlen in [3341, 2048, 349]:
+                    for random_state in [3407, 42]:
+                        test_rms_layernorm(
+                            dim = dim,
+                            eps = 1e-5,
+                            dtype = dtype,
+                            bsz = 21,
+                            random_state = random_state,
+                            seqlen = seqlen,
+                        )
 
 if __name__ == "__main__":
-    test_rms_norm(100, 256, torch.float16)
+    testing_suite_layernorm()
