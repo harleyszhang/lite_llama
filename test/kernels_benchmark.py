@@ -20,7 +20,7 @@ except ModuleNotFoundError:
 def is_cuda():
     return torch.cuda.is_available()
 
-result_path = "/gemini/code/lite_llama/images"
+result_path = "/gemini/code/lite_llama/images/benchamrk_result"
 ref_lib = 'cuBLAS' if is_cuda() else 'rocBLAS'
 TORCH_HAS_FP8 = hasattr(torch, "float8_e5m2")
 ################################benchamrk matmul################################
@@ -176,7 +176,7 @@ for fp8_inputs in [False, True]:
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['N'],  # argument names to use as an x-axis for the plot
-        x_vals=[128 * i for i in range(2, 100)],  # different possible values for `x_name`
+        x_vals=[1024 * i for i in range(1, 120, 10)],  # different possible values for `x_name`
         line_arg='provider',  # argument name whose value corresponds to a different line in the plot
         line_vals=['torch', 'triton', 'triton_online_v2_softmax'],  # possible values for `line_arg``
         line_names=[

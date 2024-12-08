@@ -4,32 +4,32 @@
 
 softmax benchmark test result:
 
-![softmax](../images/softmax-performance.png)
+![softmax](../images/benchamrk_result/softmax-performance.png)
 
 ### linear
 
 linear(matmul) benchmark test result:
 
-![matmul](../images/matmul-performance-fp16.png)
+![matmul](../images/benchamrk_result/matmul-performance-fp16.png)
 
 ### rmsnorm
 
 rmsnorm benchmark test result:
 
-![rms-norm](../images/rms-norm-forward.png)
+![rms-norm](../images/benchamrk_result/rms-norm-forward.png)
 
 ### layernorm
 
 layernorm benchmark test result:
 
-![layer-norm-forward](../images/layer-norm-forward.png)
+![layer-norm-forward](../images/benchamrk_result/layer-norm-forward.png)
 
 ### flashattention
 
 flashattention benchmark test result:
 
-![flashattention benchmark test](../images/fused-attention-batch8-head64-d64-fwd-causal=False.png)
-![flashattention benchmark test](../images/fused-attention-batch4-head32-d64-fwd-causal=False.png)
+![flashattention benchmark test](../images/benchamrk_result/fused-attention-batch8-head64-d64-fwd-causal=False.png)
+![flashattention benchmark test](../images/benchamrk_result/fused-attention-batch4-head32-d64-fwd-causal=False.png)
 
 ## 二 内核单元测试结果
 

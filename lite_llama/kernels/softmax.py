@@ -1,6 +1,5 @@
 import triton,torch
 import triton.language as tl 
-from .utils import calculate_settings
 
 def naive_softmax(x: torch.Tensor) -> torch.Tensor:
     """Compute row-wise softmax of X using native pytorch
@@ -73,8 +72,15 @@ def softmax_fwd(x: torch.Tensor) -> torch.Tensor:
     """Triton impl of Softmax, onlay support 2D tensor in fwd"""
     rows, cols = x.shape
     assert x.ndim == 2, f"only accepts 2D tensor now"
-    BLOCK_SIZE, num_warps = calculate_settings(cols)
-        
+    BLOCK_SIZE = min(65536, triton.next_power_of_2(cols))
+    num_warps = 4
+    if BLOCK_SIZE >= 32768:
+        num_warps = 32
+    elif BLOCK_SIZE >= 8192:
+        num_warps = 16
+    elif BLOCK_SIZE >= 2048:
+        num_warps = 8
+
     grid = (rows, 1)
     
     # allocate output buffer
