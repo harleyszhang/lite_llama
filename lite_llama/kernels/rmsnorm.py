@@ -1,3 +1,4 @@
+# modified from https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
 import triton,torch, os
 import triton.language as tl 
 
@@ -61,7 +62,7 @@ def rmsnorm(
     z = torch.empty(x.shape, device=x.device, dtype=x.dtype)
     
     # Less than 64KB per feature: enqueue fused kernel
-    MAX_FUSED_SIZE = 1024 // x.element_size()
+    MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(K))
 
     grid = (triton.cdiv(K, BLOCK_SIZE), 1)
