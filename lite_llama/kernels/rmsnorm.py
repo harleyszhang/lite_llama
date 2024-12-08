@@ -1,21 +1,20 @@
 # modified from https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
 import triton,torch, os
 import triton.language as tl 
+from .utils import calculate_settings
 
 @triton.jit
 def _rmsnorm_kernel_fwd(
-    x_ptr, # shape is [M, N]
+    x_ptr, # shape is [M, K]
     w_ptr, # gamma 参数地址
     z_ptr, # 输出结果首元素指针
-    K,
-    eps,  # epsilon to avoid division by zero
+    K,     # 权重 W 大小, 也是输入 X 的第二维度大小
+    eps,   # epsilon to avoid division by zero
     BLOCK_SIZE: tl.constexpr = 8,
 ):
-    # z = (x / (rms)) * w
-    
+    """z = (x / (rms)) * w"""
     row_idx = tl.program_id(0)
     x_row_ptr = x_ptr + row_idx * K # 一行有 K 个元素，K 是最后一维
-    w_row_ptr = w_ptr + row_idx * K
     z_row_ptr = z_ptr + row_idx * K
     
     # Compute variance
@@ -35,13 +34,13 @@ def _rmsnorm_kernel_fwd(
         col_offsets = col_index + tl.arange(0, BLOCK_SIZE)
         mask = col_offsets < K
         
-        x = tl.load(x_row_ptr + col_offsets, mask = mask, other=0.0)
+        x = tl.load(x_row_ptr + col_offsets, mask = mask, other=0.0).to(tl.float32)
         w = tl.load(w_ptr + col_offsets, mask = mask).to(tl.float32)
         
         normed = x * rsqrt
         normed = normed.to(w.dtype) # Exact copy from HF
-        z =normed * w
-        tl.store(z_row_ptr + col_offsets, z, mask = mask)
+        z = normed * w
+        tl.store(z_row_ptr + col_offsets, z.to(z.dtype), mask = mask)
         
 @torch.no_grad()
 def rmsnorm(
@@ -49,51 +48,60 @@ def rmsnorm(
     weight,
     eps = 1e-5
 ):
-    # 只针对 nlp 领域的 layernorm，省去了 normalized_shape 参数
-    assert x.is_contiguous()
-    assert weight.is_contiguous()
-    assert x.shape[-1] == weight.shape[0]
-    
+    z = torch.empty_like(x) # z 是三维的, [B, L, K]
     out_shape = x.shape
-    # 将 x 的所有维度压缩为二维张量, [B, L, K] -> [M, K], K 是隐藏层的维度。
-    x = x.view((-1, x.shape[-1]))
+    x = x.view((-1, x.shape[-1])) # 将 x 的所有维度压缩为二维张量, [B, L, K] -> [M, K], K 是隐藏层的维度。
     M, K = x.shape
-    x = x.view((M, K))
-    z = torch.empty(x.shape, device=x.device, dtype=x.dtype)
     
     # Less than 64KB per feature: enqueue fused kernel
-    MAX_FUSED_SIZE = 65536 // x.element_size()
-    BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(K))
-
-    grid = (triton.cdiv(K, BLOCK_SIZE), 1)
+    # MAX_FUSED_SIZE = 65536 // x.element_size() # 用于返回张量中单个元素的大小（以字节为单位）。 
+    BLOCK_SIZE, num_warps = calculate_settings(K)
+    if K > BLOCK_SIZE:
+        raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
+    # heuristics for number of warps
+    num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
     _rmsnorm_kernel_fwd[M, ](
         x,
         weight,
         z,
         K, 
-        eps = eps,
-        BLOCK_SIZE=BLOCK_SIZE,    
+        eps=eps,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=num_warps, 
     )  
     return z.view(out_shape)
 
-def torch_rms_norm(x, weight, eps):
-    return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * weight
+def test_rms_layernorm(
+    dim = 1024, eps = 1e-5, dtype = torch.float16,
+    bsz = 21, random_state = 3407, seqlen = 3341,
+):
+    from transformers.models.llama.modeling_llama import LlamaRMSNorm
+    layernorm = LlamaRMSNorm((dim,), eps = eps).to("cuda")
+    torch.cuda.manual_seed(random_state)
+    torch.manual_seed(random_state)
+    torch.nn.init.uniform_(layernorm.weight)
+    X = torch.randn((bsz, seqlen, dim), dtype = dtype, device = "cuda")
+    Y = layernorm(X)
+    Y2 = rmsnorm(X, layernorm.weight, eps)
 
-def test_rms_norm(M, N, dtype, eps=1e-5, device="cuda"):
-    # create data
-    x_shape = (M, N)
-    w_shape = (x_shape[-1],)
-    weight = torch.rand(w_shape, dtype=dtype, device="cuda")
-    x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device="cuda")
-    # forward pass
-    y_tri = rmsnorm(x, weight, eps)
-    y_ref = torch_rms_norm(x.to(torch.float32), weight.to(torch.float32), eps).to(dtype)
+    assert(torch.amax(Y - Y2).item() <= 0.05)
+    print("max delta:", torch.max(torch.abs(Y - Y2)))
 
-    # compare
-    print("type:", y_tri.dtype, y_ref.dtype)
-    print("max delta:", torch.max(torch.abs(y_tri - y_ref)))
-    assert torch.allclose(y_tri, y_ref, atol=1e-3, rtol=0)
-    return
+
+def testing_suite_layernorm():
+    for dim in [512, 1024, 2048]:
+        for dtype in [torch.float16, torch.bfloat16]:
+            with torch.autocast(device_type = "cuda", dtype = dtype):
+                for seqlen in [3341, 2048, 349]:
+                    for random_state in [3407, 42]:
+                        test_rms_layernorm(
+                            dim = dim,
+                            eps = 1e-5,
+                            dtype = dtype,
+                            bsz = 21,
+                            random_state = random_state,
+                            seqlen = seqlen,
+                        )
 
 if __name__ == "__main__":
-    test_rms_norm(100, 256, torch.float16)
+    testing_suite_layernorm()

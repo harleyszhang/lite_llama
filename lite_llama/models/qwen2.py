@@ -199,7 +199,7 @@ class Qwen2DecoderLayer(nn.Module):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         # Normalization BEFORE the attention block. # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
-        hidden_states = rmsnorm(x, self.input_layernorm_weight.data, eps=self.rms_norm_eps)
+        hidden_states = rmsnorm_fwd(x, self.input_layernorm_weight.data, eps=self.rms_norm_eps)
 
         # 调用 attention 模块
         attn_output = self.self_attn(hidden_states, atten_info, layer_index, position_embeddings)
@@ -208,7 +208,7 @@ class Qwen2DecoderLayer(nn.Module):
         h = x + attn_output  # 残差连接
 
         # Normalization BEFORE the feed forward block. # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
-        hidden_states = rmsnorm(h, self.post_attention_layernorm_weight.data, eps=self.rms_norm_eps)
+        hidden_states = rmsnorm_fwd(h, self.post_attention_layernorm_weight.data, eps=self.rms_norm_eps)
 
         # Feed Forward
         feedforward_output = self.mlp(hidden_states)
@@ -257,7 +257,7 @@ class Qwen2Model(nn.Module):
             # self.hidden_states.append(h)
             h = layer(h, atten_info, i, position_embeddings)  # h.shape [batch_size, seq_len, hidden_dim]
 
-        h = rmsnorm(h, self.norm_weight, eps=self.config.rms_norm_eps)
+        h = rmsnorm_fwd(h, self.norm_weight, eps=self.config.rms_norm_eps)
         # self.hidden_states.append(h)
         
         output = torch.matmul(h, self.lm_head_weight.t().contiguous()) # .t() 返回一个新的张量，表示原始张量的转置。

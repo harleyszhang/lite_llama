@@ -152,7 +152,7 @@ class LlamaDecoderLayer(nn.Module):
     ):
         # Normalization before the attention block.
         _, seq_len, _ = x.shape
-        hidden_states = rmsnorm(x, self.attention_norm_weight.data, eps=self.config.rms_norm_eps)
+        hidden_states = rmsnorm_fwd(x, self.attention_norm_weight.data, eps=self.config.rms_norm_eps)
 
         # attention 部分计算结果正确, 张量尺寸符合要求
         if seq_len > 1:
@@ -165,7 +165,7 @@ class LlamaDecoderLayer(nn.Module):
             )
         h = x + attn_output
         # Normalization before the feed forward block.
-        hidden_states = rmsnorm(h, self.ffn_norm_weight.data, eps=self.config.rms_norm_eps)
+        hidden_states = rmsnorm_fwd(h, self.ffn_norm_weight.data, eps=self.config.rms_norm_eps)
         out = h + self.mlp.forward(hidden_states)
 
         return out
@@ -218,7 +218,7 @@ class LlamaModel(nn.Module):
             h = layer(h, atten_info, i, position_embeddings)  # h.shape [batch_size, seq_len, hidden_dim]
             # assert not torch.isnan(h).any(), f"In {i} decoder layer, h tensor contains NaN values!"
 
-        h = rmsnorm(h, self.norm_weight.data, eps=self.config.rms_norm_eps)
+        h = rmsnorm_fwd(h, self.norm_weight.data, eps=self.config.rms_norm_eps)
         # self.hidden_states.append(h)
         output = self.lm_head(h)
 

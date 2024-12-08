@@ -239,3 +239,5 @@ class LigerRopeFunction(torch.autograd.Function):
         cos, sin = ctx.saved_tensors
         dq, dk = rope_backward(dq, dk, cos, sin)
         return dq, dk, None, None, None, None
+
+apply_rotary_pos_emb = LigerRopeFunction.apply
