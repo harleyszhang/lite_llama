@@ -53,19 +53,18 @@ def _rms_norm_forward_kernel(
     X_ptr += row_idx * X_row_stride
 
     X_row = tl.load(X_ptr + col_offsets, mask=mask, other=0)
+    X_row_dtype = X_row.dtype
     W_row = tl.load(W_ptr + col_offsets, mask=mask, other=0)
-
-    # On Llama, only rstd is computed on fp32
-    X_row = X_row.to(tl.float32)
+    X_row = X_row.to(tl.float32) # On Llama, only rstd is computed on fp32
 
     mean_square = tl.sum(X_row * X_row, axis=0) / n_cols
     rstd = rsqrt(mean_square + eps)
 
-    X_row_normed = X_row * rstd
-    X_row_normed = X_row_normed.to(W_row.dtype) # Exact copy from HF
-    Y_row = X_row_normed * W_row
+    X_row = X_row * rstd
+    X_row = X_row.to(X_row_dtype)
+    Y_row = X_row * (W_row + offset)
 
-    tl.store(Y_ptr + col_offsets, Y_row, mask=mask)
+    tl.store(Y_ptr + col_offsets, Y_row.to(X_row_dtype), mask=mask)
 
 
 @torch.no_grad()

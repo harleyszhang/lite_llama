@@ -296,7 +296,6 @@ def flash_decode_stage2(
 	batchs, num_heads, head_dim = mid_o.shape[0], mid_o.shape[1], mid_o.shape[-1]
 	grid = (batchs, num_heads)
 	
-	
 	_flash_decoding_stage2_kernel[grid](
 		mid_o,  	     # [batch, head, seq_block_num, head_dim]
 		mid_o_logexpsum, # [batch, head, seq_block_num]

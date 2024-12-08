@@ -6,7 +6,7 @@ from lite_llama.kernels.rmsnorm import rmsnorm
 from lite_llama.kernels.rmsnorm_layer import rmsnorm_fwd
 from lite_llama.kernels.layernorm import layernorm
 from lite_llama.kernels.softmax import softmax_fwd, naive_softmax, online_softmax
-from lite_llama.kernels.softmax_online_v2 import softmax_onlinev2
+from softmax_online_v2 import softmax_onlinev2
 from lite_llama.kernels.rope import rope as rope_triton
 from lite_llama.kernels.rope_layer import apply_rotary_pos_emb
 try:

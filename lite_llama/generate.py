@@ -5,9 +5,6 @@ from transformers import AutoTokenizer
 
 from .executor.model_executor import ModelExecutor
 from .utils.file_interface import get_model_name_from_path
-from .kernels.softmax import softmax_fwd
-from .kernels.softmax_online_v2 import softmax_onlinev2
-
 
 class CompletionPrediction(TypedDict, total=False):
     generation: str
