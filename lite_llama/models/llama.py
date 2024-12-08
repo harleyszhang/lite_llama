@@ -41,10 +41,6 @@ class FusedAttention(nn.Module):
         xk = xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
 
-        # xkv = self.kv_proj(x)
-        # xk, xv = torch.split(xkv, [self.num_kv_heads * self.head_dim, xkv.size(-1) - self.num_kv_heads * self.head_dim], dim=-1)
-        # xk, xv = xkv[:, :, 0 :self.num_kv_heads * self.head_dim], xkv[:, :, self.num_kv_heads * self.head_dim: ]
-
         cos, sin = position_embeddings
         xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
 
@@ -163,8 +159,10 @@ class LlamaDecoderLayer(nn.Module):
             attn_output = self.self_attn.token_forward(
                 hidden_states, atten_info, layer_index, position_embeddings
             )
-        h = x + attn_output
+        
         # Normalization before the feed forward block.
+        # hidden_states = skip_rmsnorm(attn_output, x, self.ffn_norm_weight.data, self.config.rms_norm_eps)
+        h = x + attn_output
         hidden_states = rmsnorm_fwd(h, self.ffn_norm_weight.data, eps=self.config.rms_norm_eps)
         out = h + self.mlp.forward(hidden_states)
 

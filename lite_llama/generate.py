@@ -5,7 +5,7 @@ from transformers import AutoTokenizer
 
 from .executor.model_executor import ModelExecutor
 from .utils.file_interface import get_model_name_from_path
-
+from .kernels.softmax import softmax_fwd
 class CompletionPrediction(TypedDict, total=False):
     generation: str
     tokens: List[str]  # not required
@@ -123,7 +123,7 @@ class GenerateText:
             logits, select_index = self.model_executor.forward(input_ids, prev_pos) # 模型执行器的前向推理
             
             if temperature > 0:
-                probs = torch.softmax(logits[:, -1] / temperature, dim=-1) # torch.softma 将 logits 转换为概率分布。
+                probs = softmax_fwd(logits[:, -1] / temperature) # torch.softma 将 logits 转换为概率分布。
                 next_token = sample_top_p(probs, top_p) # next_token 形状为 [batch_size, 1]
             else:
                 next_token = torch.argmax(logits[:, -1], dim=-1)

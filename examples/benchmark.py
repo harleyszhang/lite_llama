@@ -210,6 +210,10 @@ def main():
 
         I just heard about the launch of the new product and I wanted to take a moment to express my congratulations to the team. It's great to see such""",
         "Roosevelt was the first president of the United States, he has a lot of information on the early history of the United States. He was born in 1883,",
+        "How to learn c++, give me some example.",
+        "How to learn python, give me some examples.",
+        "How to learn llm, please introduce transformer architecture ",
+        "How to learn triton, give me some kernel code examples.",
     ]
     
     # prompts: List[str] = [
@@ -242,7 +246,7 @@ def main():
         temperature=0.6,
         top_p=0.9,
         max_seq_len=2048,
-        max_gen_len=128,
+        max_gen_len=256,
         lite_llama_ckpt_dir=checkpoints_dir,
         hf_model_name=hf_model_name,
         device=device

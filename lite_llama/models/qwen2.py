@@ -210,7 +210,7 @@ class Qwen2DecoderLayer(nn.Module):
         # Normalization BEFORE the feed forward block. # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
         hidden_states = rmsnorm_fwd(h, self.post_attention_layernorm_weight.data, eps=self.rms_norm_eps)
 
-        # Feed Forward
+        # 调用 Feed Forward 模块
         feedforward_output = self.mlp(hidden_states)
         # if torch.isnan(feedforward_output).any(): # 检查 NaNs
         #     raise ValueError(f"NaNs detected in feedforward output at layer {layer_index}")

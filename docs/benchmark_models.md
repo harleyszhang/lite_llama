@@ -354,4 +354,32 @@ lite_llama throughput: 345.51 tokens/s
 Transformers throughput: 203.82 tokens/s
 lite_llama per token latency: 2.894284 ms/token
 Transformers per token latency: 4.906200 ms/token
+
+lite_llama inference time: 2.9586 s
+Transformers inference time: 3.5738 s
+lite_llama throughput: 332.58 tokens/s
+Transformers throughput: 258.83 tokens/s
+lite_llama per token latency: 3.006753 ms/token
+Transformers per token latency: 3.863550 ms/token
+
+lite_llama inference time: 3.0514 s
+Transformers inference time: 3.6356 s
+lite_llama throughput: 323.13 tokens/s
+Transformers throughput: 202.72 tokens/s
+lite_llama per token latency: 3.094727 ms/token
+Transformers per token latency: 4.932961 ms/token
+
+lite_llama inference time: 2.9996 s
+Transformers inference time: 3.5939 s
+lite_llama throughput: 615.09 tokens/s
+Transformers throughput: 447.98 tokens/s
+lite_llama per token latency: 1.625784 ms/token
+Transformers per token latency: 2.232229 ms/token
+
+lite_llama inference time: 3.0903 s
+Transformers inference time: 3.8130 s
+lite_llama throughput: 595.09 tokens/s
+Transformers throughput: 457.13 tokens/s
+lite_llama per token latency: 1.680407 ms/token
+Transformers per token latency: 2.187585 ms/token
 ```

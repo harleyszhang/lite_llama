@@ -2,7 +2,6 @@
 modified from https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/transformers/rms_norm.py
 """
 
-import math
 import operator
 
 import torch
@@ -12,7 +11,6 @@ import triton.language as tl
 from .utils import (
     calculate_settings,
     compare_version,
-    ensure_contiguous,
 )
 
 if compare_version("triton", operator.ge, "3.0.0"):
@@ -25,12 +23,6 @@ if compare_version("triton", operator.ge, "3.0.0"):
 else:
     from triton.language.math import rsqrt
 
-
-_CASTING_MODE_NONE = tl.constexpr(-1)
-_CASTING_MODE_LLAMA = tl.constexpr(0)
-_CASTING_MODE_GEMMA = tl.constexpr(1)
-
-
 @triton.jit
 def _rms_norm_forward_kernel(
     Y_ptr,
@@ -42,7 +34,6 @@ def _rms_norm_forward_kernel(
     n_cols,
     eps,
     offset,
-    casting_mode: tl.constexpr,  # constexpr so the `if` blocks can be optimized out
     BLOCK_SIZE: tl.constexpr,
 ):
     """
@@ -74,30 +65,11 @@ def _rms_norm_forward_kernel(
     X_row_normed = X_row_normed.to(W_row.dtype) # Exact copy from HF
     Y_row = X_row_normed * W_row
 
-    if casting_mode == _CASTING_MODE_GEMMA:
-        Y_row = Y_row.to(X_row.dtype)
-
     tl.store(Y_ptr + col_offsets, Y_row, mask=mask)
 
 
-_str_to_casting_mode = {
-    "llama": _CASTING_MODE_LLAMA.value,
-    "gemma": _CASTING_MODE_GEMMA.value,
-    "none": _CASTING_MODE_NONE.value,
-}
-
-
 @torch.no_grad()
-def rmsnorm_fwd(X, W, eps=1e-5, offset=0.0, casting_mode="llama"):
-    if not isinstance(casting_mode, int):
-        assert (
-            casting_mode in _str_to_casting_mode
-        ), f"Invalid casting mode: {casting_mode}"
-        casting_mode = _str_to_casting_mode[casting_mode]
-    else:
-        assert (
-            casting_mode in _str_to_casting_mode.values()
-        ), f"Invalid casting mode: {casting_mode}"
+def rmsnorm_fwd(X, W, eps=1e-5, offset=0.0):
 
     shape = X.shape
     X = X.view(-1, shape[-1])
@@ -121,7 +93,6 @@ def rmsnorm_fwd(X, W, eps=1e-5, offset=0.0, casting_mode="llama"):
         n_cols,
         eps,
         offset,
-        casting_mode,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
     )

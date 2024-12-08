@@ -5,7 +5,8 @@ from lite_llama.kernels.fused_linear import fused_linear
 from lite_llama.kernels.rmsnorm import rmsnorm
 from lite_llama.kernels.rmsnorm_layer import rmsnorm_fwd
 from lite_llama.kernels.layernorm import layernorm
-from lite_llama.kernels.softmax import softmax, naive_softmax, online_softmax
+from lite_llama.kernels.softmax import softmax_fwd, naive_softmax, online_softmax
+from lite_llama.kernels.softmax_online_v2 import softmax_onlinev2
 from lite_llama.kernels.rope import rope as rope_triton
 from lite_llama.kernels.rope_layer import apply_rotary_pos_emb
 try:
@@ -44,131 +45,131 @@ for fp8_inputs in [False, True]:
         ))
 
 
-@triton.testing.perf_report(configs)
-def benchmark_matmul(M, N, K, provider, fp8_inputs):
-    a = torch.randn((M, K), device='cuda', dtype=torch.float16)
-    b = torch.randn((K, N), device='cuda', dtype=torch.float16)
-    if TORCH_HAS_FP8 and fp8_inputs:
-        a = a.to(torch.float8_e5m2)
-        b = b.T.contiguous()   # 确保 b 在转置后是连续的
-        b = b.to(torch.float8_e5m2)
+# @triton.testing.perf_report(configs)
+# def benchmark_matmul(M, N, K, provider, fp8_inputs):
+#     a = torch.randn((M, K), device='cuda', dtype=torch.float16)
+#     b = torch.randn((K, N), device='cuda', dtype=torch.float16)
+#     if TORCH_HAS_FP8 and fp8_inputs:
+#         a = a.to(torch.float8_e5m2)
+#         b = b.T.contiguous()   # 确保 b 在转置后是连续的
+#         b = b.to(torch.float8_e5m2)
     
-    # print("Weight is contiguous:", b.is_contiguous())  # 添加这一行
-    quantiles = [0.5, 0.2, 0.8]
-    if provider == ref_lib.lower():
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.matmul(a, b), quantiles=quantiles)
-    if provider == 'triton':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: fused_linear(a, b), quantiles=quantiles)
-    perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
-    return perf(ms), perf(max_ms), perf(min_ms)
+#     # print("Weight is contiguous:", b.is_contiguous())  # 添加这一行
+#     quantiles = [0.5, 0.2, 0.8]
+#     if provider == ref_lib.lower():
+#         ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.matmul(a, b), quantiles=quantiles)
+#     if provider == 'triton':
+#         ms, min_ms, max_ms = triton.testing.do_bench(lambda: fused_linear(a, b), quantiles=quantiles)
+#     perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
+#     return perf(ms), perf(max_ms), perf(min_ms)
 
-################################benchamrk rmsnorm################################
-import torch.nn as nn
-class RMSNorm(nn.Module):
-    """nlp 领域"""
-    def __init__(self, dim):
-        """
-        :param dim: 输入的维度
-        :param eps: 防止除以0的稳定项
-        """
-        super(RMSNorm, self).__init__()
-        self.weight = nn.Parameter(torch.ones(dim))  # 可学习的缩放参数
+# ################################benchamrk rmsnorm################################
+# import torch.nn as nn
+# class RMSNorm(nn.Module):
+#     """nlp 领域"""
+#     def __init__(self, dim):
+#         """
+#         :param dim: 输入的维度
+#         :param eps: 防止除以0的稳定项
+#         """
+#         super(RMSNorm, self).__init__()
+#         self.weight = nn.Parameter(torch.ones(dim))  # 可学习的缩放参数
     
-    def forward(self, x):
-        # x 的形状为 [batch_size, seq_len, dim]        
-        var = torch.mean(x ** 2, dim=-1, keepdim=True)
-        rms = torch.sqrt( var)
-        return x / rms * self.weight # 归一化，并应用缩放参数
+#     def forward(self, x):
+#         # x 的形状为 [batch_size, seq_len, dim]        
+#         var = torch.mean(x ** 2, dim=-1, keepdim=True)
+#         rms = torch.sqrt( var)
+#         return x / rms * self.weight # 归一化，并应用缩放参数
     
-@triton.testing.perf_report(
-    triton.testing.Benchmark(
-        x_names=['N'],
-        x_vals=[512 * i for i in range(1, 64)],
-        line_arg='provider',
-        line_vals=['triton_rmsnorm', 'triton_rmsnorm_fwd', 'torch'] + (['apex'] if HAS_APEX else []),
-        line_names=['Triton', 'Triton_rmsnorm_fwd', 'Torch_Py'] + (['Apex'] if HAS_APEX else []),
-        styles=[('blue', '-'), ('green', '-'), ('orange', '-')],
-        ylabel='GB/s',
-        plot_name='rms-norm-forward',
-        args={'M': 4096, 'dtype': torch.float16, 'mode': 'forward'},
-    ))
+# @triton.testing.perf_report(
+#     triton.testing.Benchmark(
+#         x_names=['N'],
+#         x_vals=[512 * i for i in range(1, 64)],
+#         line_arg='provider',
+#         line_vals=['triton_rmsnorm', 'triton_rmsnorm_fwd', 'torch'] + (['apex'] if HAS_APEX else []),
+#         line_names=['Triton', 'Triton_rmsnorm_fwd', 'Torch_Py'] + (['Apex'] if HAS_APEX else []),
+#         styles=[('blue', '-'), ('green', '-'), ('orange', '-')],
+#         ylabel='GB/s',
+#         plot_name='rms-norm-forward',
+#         args={'M': 4096, 'dtype': torch.float16, 'mode': 'forward'},
+#     ))
 
-def bench_rmsnorm(M, N, dtype, provider, mode='forward', eps=1e-5, device='cuda'):
-    # create data
-    x_shape = (M, N)
-    w_shape = (x_shape[-1], )
-    weight = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
-    bias = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
-    x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device=device)
-    dy = .1 * torch.randn_like(x)
-    x.requires_grad_(True)
-    quantiles = [0.5, 0.2, 0.8]
+# def bench_rmsnorm(M, N, dtype, provider, mode='forward', eps=1e-5, device='cuda'):
+#     # create data
+#     x_shape = (M, N)
+#     w_shape = (x_shape[-1], )
+#     weight = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
+#     bias = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
+#     x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device=device)
+#     dy = .1 * torch.randn_like(x)
+#     x.requires_grad_(True)
+#     quantiles = [0.5, 0.2, 0.8]
 
-    def y_fwd():
-        if provider == "triton_rmsnorm":
-            return rmsnorm(x, weight, eps=1e-6)  # noqa: F811, E704
+#     def y_fwd():
+#         if provider == "triton_rmsnorm":
+#             return rmsnorm(x, weight, eps=1e-6)  # noqa: F811, E704
 
-        if provider == "torch":
-            rmsnorm_pytorch = RMSNorm(x_shape[-1]).to(device)
-            return rmsnorm_pytorch(x)
-            # return torch.nn.functional.rms_norm(x, w_shape, weight, bias, eps)  # noqa: F811, E704
+#         if provider == "torch":
+#             rmsnorm_pytorch = RMSNorm(x_shape[-1]).to(device)
+#             return rmsnorm_pytorch(x)
+#             # return torch.nn.functional.rms_norm(x, w_shape, weight, bias, eps)  # noqa: F811, E704
 
-        if provider == "triton_rmsnorm_fwd":
-            return rmsnorm_fwd(x, weight, 1e-6)  # noqa: F811, E704
+#         if provider == "triton_rmsnorm_fwd":
+#             return rmsnorm_fwd(x, weight, 1e-6)  # noqa: F811, E704
 
-    # forward pass
-    if mode == 'forward':
-        gbps = lambda ms: 2 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
-        ms, min_ms, max_ms = triton.testing.do_bench(y_fwd, quantiles=quantiles, rep=500)
+#     # forward pass
+#     if mode == 'forward':
+#         gbps = lambda ms: 2 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
+#         ms, min_ms, max_ms = triton.testing.do_bench(y_fwd, quantiles=quantiles, rep=500)
         
-    return gbps(ms), gbps(max_ms), gbps(min_ms)
+#     return gbps(ms), gbps(max_ms), gbps(min_ms)
 
-bench_rmsnorm.run(print_data=True, save_path=result_path)
+# bench_rmsnorm.run(print_data=True, save_path=result_path)
 
-################################benchamrk layernorm################################
-@triton.testing.perf_report(
-    triton.testing.Benchmark(
-        x_names=['N'],
-        x_vals=[512 * i for i in range(2, 32)],
-        line_arg='provider',
-        line_vals=['triton', 'torch'] + (['apex'] if HAS_APEX else []),
-        line_names=['Triton', 'Torch'] + (['Apex'] if HAS_APEX else []),
-        styles=[('blue', '-'), ('green', '-'), ('orange', '-')],
-        ylabel='GB/s',
-        plot_name='layer-norm-forward',
-        args={'M': 4096, 'dtype': torch.float16, 'mode': 'forward'},
-    ))
+# ################################benchamrk layernorm################################
+# @triton.testing.perf_report(
+#     triton.testing.Benchmark(
+#         x_names=['N'],
+#         x_vals=[512 * i for i in range(2, 32)],
+#         line_arg='provider',
+#         line_vals=['triton', 'torch'] + (['apex'] if HAS_APEX else []),
+#         line_names=['Triton', 'Torch'] + (['Apex'] if HAS_APEX else []),
+#         styles=[('blue', '-'), ('green', '-'), ('orange', '-')],
+#         ylabel='GB/s',
+#         plot_name='layer-norm-forward',
+#         args={'M': 4096, 'dtype': torch.float16, 'mode': 'forward'},
+#     ))
 
-def bench_layer_norm(M, N, dtype, provider, mode='forward', eps=1e-5, device='cuda'):
-    # create data
-    x_shape = (M, N)
-    w_shape = (x_shape[-1], )
-    weight = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
-    bias = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
-    x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device=device)
-    dy = .1 * torch.randn_like(x)
-    x.requires_grad_(True)
-    quantiles = [0.5, 0.2, 0.8]
+# def bench_layer_norm(M, N, dtype, provider, mode='forward', eps=1e-5, device='cuda'):
+#     # create data
+#     x_shape = (M, N)
+#     w_shape = (x_shape[-1], )
+#     weight = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
+#     bias = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
+#     x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device=device)
+#     dy = .1 * torch.randn_like(x)
+#     x.requires_grad_(True)
+#     quantiles = [0.5, 0.2, 0.8]
 
-    def y_fwd():
+#     def y_fwd():
 
-        if provider == "triton":
-            return layernorm(x, weight, bias, eps)  # noqa: F811, E704
+#         if provider == "triton":
+#             return layernorm(x, weight, bias, eps)  # noqa: F811, E704
 
-        if provider == "torch":
-            return torch.nn.functional.layer_norm(x, w_shape, weight, bias, eps)  # noqa: F811, E704
+#         if provider == "torch":
+#             return torch.nn.functional.layer_norm(x, w_shape, weight, bias, eps)  # noqa: F811, E704
 
-        if provider == "apex":
-            apex_layer_norm = (apex.normalization.FusedLayerNorm(w_shape).to(x.device).to(x.dtype))
-            return apex_layer_norm(x)  # noqa: F811, E704
+#         if provider == "apex":
+#             apex_layer_norm = (apex.normalization.FusedLayerNorm(w_shape).to(x.device).to(x.dtype))
+#             return apex_layer_norm(x)  # noqa: F811, E704
 
-    # forward pass
-    if mode == 'forward':
-        gbps = lambda ms: 2 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
-        ms, min_ms, max_ms = triton.testing.do_bench(y_fwd, quantiles=quantiles, rep=500)
-    return gbps(ms), gbps(max_ms), gbps(min_ms)
+#     # forward pass
+#     if mode == 'forward':
+#         gbps = lambda ms: 2 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
+#         ms, min_ms, max_ms = triton.testing.do_bench(y_fwd, quantiles=quantiles, rep=500)
+#     return gbps(ms), gbps(max_ms), gbps(min_ms)
 
-bench_layer_norm.run(print_data=True, save_path=result_path)
+# bench_layer_norm.run(print_data=True, save_path=result_path)
 
 ################################benchamrk softmax################################
 # 对 softmax 操作的不同实现（Triton、PyTorch、PyTorch JIT）进行性能基准测试（Benchmark）
@@ -177,21 +178,20 @@ bench_layer_norm.run(print_data=True, save_path=result_path)
         x_names=['N'],  # argument names to use as an x-axis for the plot
         x_vals=[128 * i for i in range(2, 100)],  # different possible values for `x_name`
         line_arg='provider',  # argument name whose value corresponds to a different line in the plot
-        line_vals=['triton', 'torch', 'torch_jit', 'torch_online_softmax'],  # possible values for `line_arg``
+        line_vals=['torch', 'triton', 'triton_online_v2_softmax'],  # possible values for `line_arg``
         line_names=[
-            "Triton",
             "Torch",
-            'torch_jit',
-            'torch_online_softmax'
+            "Triton",
+            'Triton_online_v2_softmax',
+            
         ],  # label name for the lines
-        styles=[('blue', '-'), ('green', '-'), ('yellow', '-'), ('red', '-')],  # line styles
+        styles=[('blue', '-'), ('green', '-'), ('yellow', '-')],  # line styles
         ylabel="GB/s",  # label name for the y-axis
         plot_name="softmax-performance",  # name for the plot. Used also as a file name for saving the plot.
         args={'M': 4096},  # values for function arguments not in `x_names` and `y_name`
     ))
 
-@triton.testing.perf_report(configs)
-def benchmark_softmax(M, N, provider):
+def bench_softmax(M, N, provider, mode='forward', eps=1e-5, device='cuda'):
     x = torch.randn(M, N, device='cuda', dtype=torch.float32)
     quantiles = [0.5, 0.2, 0.8]
     stream = torch.cuda.Stream()
@@ -199,17 +199,17 @@ def benchmark_softmax(M, N, provider):
     
     if provider == 'torch':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.softmax(x, axis=-1), quantiles=quantiles)
-    if provider == 'torch_jit':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: naive_softmax(x), quantiles=quantiles)
-    if provider == 'torch_online_softmax':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: online_softmax(x), quantiles=quantiles)
-    if provider == 'triton':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: softmax(x), quantiles=quantiles)
-    
+    elif provider == 'triton':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: softmax_fwd(x), quantiles=quantiles)
+    elif provider == 'triton_online_v2_softmax':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: softmax_onlinev2(x), quantiles=quantiles)
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
     # * 3e-9 是将 bytes 转换为 gb 单位，* 1e-3 是将 s 转换成 ms 单位
     gbps = lambda ms: 2 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
     return gbps(ms), gbps(max_ms), gbps(min_ms)
 
+bench_softmax.run(print_data=True, save_path=result_path)
 """
 1. gbps(ms): 基于中位数 (median) 执行时间计算的 GB/s。通常用于表示典型性能。
 2.	gbps(max_ms)：基于最大执行时间计算的 GB/s。表示在最差情况下的性能。
@@ -293,7 +293,7 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider, dev
 
 if __name__ == "__main__":
     # only works on post-Ampere GPUs right now
-    bench_flash_attention.run(save_path=".", print_data=True)
+    bench_flash_attention.run(save_path=result_path, print_data=True)
 
 ################################ benchamrk rope ################################
 """

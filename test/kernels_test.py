@@ -7,7 +7,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from lite_llama.kernels.fused_linear import fused_linear
 from lite_llama.kernels.rmsnorm import rmsnorm
 from lite_llama.kernels.layernorm import layernorm
-from lite_llama.kernels.softmax import naive_softmax, softmax
+from lite_llama.kernels.softmax import naive_softmax, softmax_fwd
 from lite_llama.kernels.flashattention import flash_attention_v1
 from lite_llama.kernels.rope import rope
 from typing import Callable, Dict, Tuple, Union
@@ -115,7 +115,7 @@ def test_softmax(M, K):
     
     # 模块及其所有参数（如 self.weight）都位于指定设备上（CPU 或 GPU）
     output_torch = torch.softmax(x, axis=-1).to(device)
-    output = softmax(x).to(device)
+    output = softmax_fwd(x).to(device)
     assert torch.allclose(output, output_torch, atol=1e-5)
 
 def torch_attention(q, k, v, attention_mask=None, is_causal=False):

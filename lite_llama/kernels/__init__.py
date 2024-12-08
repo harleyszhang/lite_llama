@@ -8,7 +8,8 @@ from .flashattentionv2 import flash_attention_v2
 from .flashdecoding import flash_decoding
 from .fused_linear import (fused_linear)
 from .rope import (precompute_freqs_cis, rope)
-from .softmax import softmax
+from .softmax import softmax_fwd
+from .softmax_online_v2 import softmax_onlinev2
 from .swiglu import (SiLUMulFunction, swiglu_forward)
 from .rope_layer import rope_forward
 from .rotary_emb import rotary_emb_fwd
