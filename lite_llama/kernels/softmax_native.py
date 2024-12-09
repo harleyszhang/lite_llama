@@ -68,11 +68,11 @@ def _softmax_kernel_fwd(
     tl.store(output_pointers, softmax_out, mask = row_data_mask)
 
 @torch.no_grad()
-def softmax_fwd(x: torch.Tensor) -> torch.Tensor:
+def softmax_native_fwd(x: torch.Tensor) -> torch.Tensor:
     """Triton impl of Softmax, onlay support 2D tensor in fwd"""
     rows, cols = x.shape
     assert x.ndim == 2, f"only accepts 2D tensor now"
-    BLOCK_SIZE = min(65536, triton.next_power_of_2(cols))
+    BLOCK_SIZE = triton.next_power_of_2(cols)
     num_warps = 4
     if BLOCK_SIZE >= 32768:
         num_warps = 32

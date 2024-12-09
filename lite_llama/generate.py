@@ -5,9 +5,8 @@ from transformers import AutoTokenizer
 
 from .executor.model_executor import ModelExecutor
 from .utils.file_interface import get_model_name_from_path
-from .kernels.softmax import softmax_fwd
-from .kernels.softmax_online_v2 import softmax_split
-
+from .kernels.softmax_split import softmax_split
+.kernels.softmax_split
 class CompletionPrediction(TypedDict, total=False):
     generation: str
     tokens: List[str]  # not required
@@ -122,16 +121,10 @@ class GenerateText:
         
         for cur_pos in range(max_prompt_len, total_len):
             input_ids = tokens[:, prev_pos: cur_pos] # 当前输入 token ids, decode 阶段 input_ids shape is [4, 1]
-            logits, select_index = self.model_executor.forward(input_ids, prev_pos) # 模型执行器的前向推理
-            print("logits shape is ", logits.shape)
-            assert not torch.isnan(logits).any(), f"In pos: {cur_pos}, Model forward output logits tensor contains NaN values!"
-
-            if temperature > 0:
-                probs = softmax_split(logits[:, -1] / temperature) # torch.softma 将 logits 转换为概率分布。
-                assert not torch.isnan(probs).any(), f"In pos: {cur_pos}, logits probs tensor contains NaN values!"
-                next_token = sample_top_p(probs, top_p) # next_token 形状为 [batch_size, 1]
-            else:
-                next_token = torch.argmax(logits[:, -1], dim=-1)
+            logits, select_index = self.model_executor.forward(input_ids, prev_pos) # 模型执行器的前向推理, logits shape is [batch_size, shape, vocab_size]
+            
+            probs = softmax_split(logits[:, -1] / temperature) # torch.softma 将 logits 转换为概率分布。
+            next_token = sample_top_p(probs, top_p) # next_token 形状为 [batch_size, 1]
 
             next_token = next_token.reshape(-1) # 调整为一维, shape is batch_size
             
