@@ -210,9 +210,9 @@ def bench_softmax(M, N, provider, mode='forward', eps=1e-5, device='cuda'):
     if provider == 'torch_softmax':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.softmax(x, axis=-1), quantiles=quantiles)
     elif provider == 'triton_softmax':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: softmax_fwd(x), quantiles=quantiles)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: softmax_native_fwd(x), quantiles=quantiles)
     elif provider == 'triton_online_v2_softmax':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: softmax_onlinev2(x), quantiles=quantiles)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: softmax_split(x), quantiles=quantiles)
     else:
         raise ValueError(f"Unknown provider: {provider}")
     # * 3e-9 是将 bytes 转换为 gb 单位，* 1e-3 是将 s 转换成 ms 单位
