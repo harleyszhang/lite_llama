@@ -173,33 +173,42 @@ for fp8_inputs in [False, True]:
 
 ################################benchamrk softmax################################
 # 对 softmax 操作的不同实现（Triton、PyTorch、PyTorch JIT）进行性能基准测试（Benchmark）
-@triton.testing.perf_report(
-    triton.testing.Benchmark(
+@triton.testing.perf_report( # 一个装饰器，用于测试和记录函数性能
+    triton.testing.Benchmark( # 定义了性能测试的不同维度，包括 x 轴参数、线条配置等
         x_names=['N'],  # argument names to use as an x-axis for the plot
-        x_vals=[1024 * i for i in range(1, 120, 10)],  # different possible values for `x_name`
+        x_vals=[4096 * i for i in range(1, 128, 2)],  # different possible values for `x_name`
         line_arg='provider',  # argument name whose value corresponds to a different line in the plot
-        line_vals=['torch', 'triton', 'triton_online_v2_softmax'],  # possible values for `line_arg``
+        line_vals=['torch_softmax', 'triton_softmax', 'triton_online_v2_softmax'],  # possible values for `line_arg``
         line_names=[
-            "Torch",
-            "Triton",
+            "Torch_softmax",
+            "Triton_softmax",
             'Triton_online_v2_softmax',
             
         ],  # label name for the lines
         styles=[('blue', '-'), ('green', '-'), ('yellow', '-')],  # line styles
         ylabel="GB/s",  # label name for the y-axis
         plot_name="softmax-performance",  # name for the plot. Used also as a file name for saving the plot.
-        args={'M': 4096},  # values for function arguments not in `x_names` and `y_name`
+        args={'M': 16},  # 设置除 x_names 和 line_arg 外的固定参数值，这里 M 表示批量大小。
     ))
 
 def bench_softmax(M, N, provider, mode='forward', eps=1e-5, device='cuda'):
+    """定义性能测试函数 bench_softmax。
+    参数：
+        M: 批量大小（固定为 4096)。
+        N: 特征维度大小（作为 x 轴变量变化）。
+        provider: 测试的实现提供者（如 'torch', 'triton' 等）。
+        mode='forward'：执行的模式，默认为前向传播。
+        eps=1e-5: 数值稳定性参数。
+        device='cuda'：运行设备。
+    """
     x = torch.randn(M, N, device='cuda', dtype=torch.float32)
     quantiles = [0.5, 0.2, 0.8]
     stream = torch.cuda.Stream()
     torch.cuda.set_stream(stream)
     
-    if provider == 'torch':
+    if provider == 'torch_softmax':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.softmax(x, axis=-1), quantiles=quantiles)
-    elif provider == 'triton':
+    elif provider == 'triton_softmax':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: softmax_fwd(x), quantiles=quantiles)
     elif provider == 'triton_online_v2_softmax':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: softmax_onlinev2(x), quantiles=quantiles)
@@ -211,7 +220,7 @@ def bench_softmax(M, N, provider, mode='forward', eps=1e-5, device='cuda'):
 
 bench_softmax.run(print_data=True, save_path=result_path)
 """
-1. gbps(ms): 基于中位数 (median) 执行时间计算的 GB/s。通常用于表示典型性能。
+1.  gbps(ms): 基于中位数 (median) 执行时间计算的 GB/s。通常用于表示典型性能。
 2.	gbps(max_ms)：基于最大执行时间计算的 GB/s。表示在最差情况下的性能。
 3.	gbps(min_ms)：基于最小执行时间计算的 GB/s。表示在最佳情况下的性能。
 gbps(ms): 这是基于中位数(median) 执行时间计算的 GB/s, 代表了典型的性能表现。
