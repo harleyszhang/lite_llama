@@ -6,7 +6,7 @@ from transformers import AutoTokenizer
 from .executor.model_executor import ModelExecutor
 from .utils.file_interface import get_model_name_from_path
 from .kernels.softmax import softmax_fwd
-from .kernels.softmax_online_v2 import softmax_onlinev2
+from .kernels.softmax_online_v2 import softmax_split
 
 class CompletionPrediction(TypedDict, total=False):
     generation: str
@@ -127,7 +127,7 @@ class GenerateText:
             assert not torch.isnan(logits).any(), f"In pos: {cur_pos}, Model forward output logits tensor contains NaN values!"
 
             if temperature > 0:
-                probs = softmax_onlinev2(logits[:, -1] / temperature) # torch.softma 将 logits 转换为概率分布。
+                probs = softmax_split(logits[:, -1] / temperature) # torch.softma 将 logits 转换为概率分布。
                 assert not torch.isnan(probs).any(), f"In pos: {cur_pos}, logits probs tensor contains NaN values!"
                 next_token = sample_top_p(probs, top_p) # next_token 形状为 [batch_size, 1]
             else:

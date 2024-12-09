@@ -52,7 +52,7 @@ def softmax_kernel(out_ptr, in_ptr, logz_ptr, M, N, TILE_N: tl.constexpr):
 
 
 
-def softmax_onlinev2(x):
+def softmax_split(x):
     M, N = x.shape
 
     num_sms = torch.cuda.get_device_properties(x.device).multi_processor_count
