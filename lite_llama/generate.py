@@ -6,7 +6,7 @@ from transformers import AutoTokenizer
 from .executor.model_executor import ModelExecutor
 from .utils.file_interface import get_model_name_from_path
 from .kernels.softmax_split import softmax_split
-.kernels.softmax_split
+
 class CompletionPrediction(TypedDict, total=False):
     generation: str
     tokens: List[str]  # not required

@@ -5,10 +5,11 @@ from lite_llama.kernels.fused_linear import fused_linear
 from lite_llama.kernels.rmsnorm import rmsnorm
 from lite_llama.kernels.rmsnorm_layer import rmsnorm_fwd
 from lite_llama.kernels.layernorm import layernorm
-from lite_llama.kernels.softmax_native import softmax_native_fwd
-from lite_llama.test.softmax_split import softmax_onlinev2
 from lite_llama.kernels.rope import rope as rope_triton
 from lite_llama.kernels.rope_layer import apply_rotary_pos_emb
+from lite_llama.kernels.softmax_native import softmax_native_fwd
+from lite_llama.kernels.softmax_split import softmax_split
+
 try:
     # This is https://github.com/NVIDIA/apex, NOT the apex on PyPi, so it
     # should not be added to extras_require in setup.py.
