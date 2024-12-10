@@ -11,7 +11,7 @@ from lite_llama.kernels.softmax import naive_softmax, softmax_fwd
 from lite_llama.kernels.flashattention import flash_attention_v1
 from lite_llama.kernels.rope import rope
 from typing import Callable, Dict, Tuple, Union
-from lite_llama.test.test_torch_rope import RotaryPositionEmbedding, apply_rotary_pos_emb
+from lite_llama.tests.test_torch_rope import RotaryPositionEmbedding, apply_rotary_pos_emb
 
 class RMSNorm(nn.Module):
     """nlp 领域"""

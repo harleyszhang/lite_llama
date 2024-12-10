@@ -195,12 +195,8 @@ def flash_attention_v2(
     
     # sequence length of q, also be rows of Q matrix
     bs, n_heads, m_size, head_dim = q.size()
-    
-    if m_size > 1:
-        causal_mask = True
-    else:
-        causal_mask = False
-		
+    causal_mask = True
+	
     n_size = k.shape[2]
     qk_scale = 1 / (head_dim ** 0.5) * 1.4426950408889634 # 1/log(2)
     # BLOCK_M_SIZE = 128

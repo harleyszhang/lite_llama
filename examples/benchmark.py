@@ -191,12 +191,12 @@ def compare_inference_speed(
     print(f"lite_llama per token latency: {lite_llama_pt_latency * 1000:.6f} ms/token")
     print(f"Transformers per token latency: {hf_pt_latency * 1000:.6f} ms/token")
 
-    # 打印部分推理结果对比
-    for i, (prompt, litellama_res, hf_res) in enumerate(zip(prompts, lite_llama_results, hf_results)):
-        print(f"\n[Prompt {i}]:\n{prompt}")
-        print("\n[lite_llama]: {}".format(litellama_res))
-        print("\n[Transformers]: {}".format(hf_res['generation']))
-        print("\n" + "="*40 + "\n")
+    # # 打印部分推理结果对比
+    # for i, (prompt, litellama_res, hf_res) in enumerate(zip(prompts, lite_llama_results, hf_results)):
+    #     print(f"\n[Prompt {i}]:\n{prompt}")
+    #     print("\n[lite_llama]: {}".format(litellama_res))
+    #     print("\n[Transformers]: {}".format(hf_res['generation']))
+    #     print("\n" + "="*40 + "\n")
 
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'

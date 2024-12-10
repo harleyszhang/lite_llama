@@ -24,6 +24,12 @@ layernorm benchmark test result:
 
 ![layer-norm-forward](../images/benchamrk_result/layer-norm-forward.png)
 
+### mlp_silu
+
+MLP_Silu test result:
+
+![MLP_Silu ](../images/benchamrk_result/mlp-silu-performance_ret.png)
+
 ### flashattention
 
 flashattention benchmark test result:

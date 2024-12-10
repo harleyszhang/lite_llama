@@ -1,7 +1,7 @@
 import torch, os,sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from lite_llama.models.llama import *
-from lite_llama.test.test_torch_rope import apply_rotary_emb
+from lite_llama.tests.test_torch_rope import apply_rotary_emb
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """同一组的 kv cache 复制多份"""

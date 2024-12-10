@@ -1,3 +1,5 @@
+# modified from https://github.com/iclementine/optimize_softmax/blob/master/softmax_split.py
+
 import triton
 from triton import language as tl
 import torch

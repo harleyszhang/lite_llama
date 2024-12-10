@@ -410,4 +410,11 @@ lite_llama throughput: 619.84 tokens/s
 Transformers throughput: 537.96 tokens/s
 lite_llama per token latency: 1.613316 ms/token
 Transformers per token latency: 1.858890 ms/token
+
+lite_llama inference time: 2.9701 s
+Transformers inference time: 3.6748 s
+lite_llama throughput: 620.52 tokens/s
+Transformers throughput: 536.62 tokens/s
+lite_llama per token latency: 1.611547 ms/token
+Transformers per token latency: 1.863501 ms/token
 ```
