@@ -1,16 +1,11 @@
-import torch,math
-import triton
+import triton, torch
 import triton.language as tl
 from torch.cuda.amp import custom_fwd
-from typing import List, Optional, Union
-import torch.nn.functional as F
-import pdb
 
 @triton.jit
 def _flash_decoding_stage1_kernel(
     Q, K, V, sm_scale,
-
-    actual_seq_len,  # 实际序列长度
+	B_Start_Loc, B_Seqlen, 
 	num_kv_groups, # group of kv heads
     Mid_O, Mid_O_LogExpSum,
 
@@ -29,16 +24,17 @@ def _flash_decoding_stage1_kernel(
 	# 获取当前程序的 block 在各个维度上的索引
 	batch_pid = tl.program_id(0)
 	head_pid = tl.program_id(1)
+	seq_block_pid = tl.program_id(2)
 	kv_head_pid = head_pid // num_kv_groups
 
-	seq_block_pid = tl.program_id(2)
-
 	# 计算当前批次的起始位置
-	cur_batch_start_loc = batch_pid * actual_seq_len
-
+	cur_batch_seq_len = tl.load(B_Seqlen + batch_pid)
+	cur_batch_start_loc = tl.load(B_Start_Loc + batch_pid)
+	# cur_batch_start_loc = batch_pid * actual_seq_len
+	
 	# 计算当前分区的起始和结束索引
 	cur_batch_partition_start_index = seq_block_pid * BLOCK_SEQ
-	cur_batch_partition_end_index = tl.minimum(actual_seq_len, cur_batch_partition_start_index + BLOCK_SEQ)
+	cur_batch_partition_end_index = tl.minimum(cur_batch_seq_len, cur_batch_partition_start_index + BLOCK_SEQ)
 
 	# 计算需要处理的块数
 	num_blocks = tl.where(cur_batch_partition_end_index - cur_batch_partition_start_index <= 0, 0, (cur_batch_partition_end_index - cur_batch_partition_start_index + BLOCK_N - 1) // BLOCK_N)
@@ -79,14 +75,6 @@ def _flash_decoding_stage1_kernel(
 	d_i = 0.0  # 标量
 	m_i = -float("inf")  # 标量
 	acc = tl.zeros([BLOCK_DMODEL], dtype=tl.float32)  # [BLOCK_DMODEL]
-	
-	# if (batch_pid == 1) & (kv_head_pid == 1) & (seq_block_pid == 1):
-	# 	tl.device_print(f"cur_batch_partition_start_index", cur_batch_partition_start_index)
-	# 	tl.device_print(f"cur_batch_partition_end_index", cur_batch_partition_end_index)
-	# 	tl.device_print(f"offs_n", offs_n)
-	# 	tl.device_print(f"offs_d", offs_d)
-	# 	tl.device_print(f"k_offs", k_offs)
-	# 	tl.device_print(f"cur_batch_start_loc", cur_batch_start_loc)
 
 	# 迭代处理每个块
 	for start_n in range(0, num_blocks, 1):
@@ -127,32 +115,6 @@ def _flash_decoding_stage1_kernel(
 		k_ptrs += BLOCK_N * k_bs_stride
 		v_ptrs += BLOCK_N * v_bs_stride
 
-		# if (batch_pid == 1) & (head_pid == 1) & (seq_block_pid == 1):
-		# 	tl.device_print(f"offs_n_new: ", offs_n_new)
-		# 	tl.device_print(f"Loaded k", k)
-		# 	tl.device_print(f"qk - m_ij", qk)
-		# 	tl.device_print(f"current_max: ", current_max)
-		# 	tl.device_print(f"exp(qk)", p)
-		# 	tl.device_print(f"updated d_i", d_i)
-		# 	tl.device_print(f"updated acc", acc)
-        
-	# need_store = tl.where(num_blocks == 0, 0, 1)
-	# for _ in range(0, need_store, 1):
-	# 	# 计算存储的偏移量
-	# 	off_mid_o = (
-	# 		batch_pid * mido_batch_stride
-	# 		+ head_pid * mido_heads_stride
-	# 		+ seq_block_pid * mido_partitions_stride
-	# 		+ offs_d * mido_dim_stride
-	# 	)
-
-	# 	off_mid_o_les = (
-	# 		batch_pid * mido_les_batch_stride
-	# 		+ head_pid * mido_les_heads_stride
-	# 		+ seq_block_pid * mido_les_partitions_stride
-	# 	)
-	# 	tl.store(Mid_O + off_mid_o, acc / d_i)
-	# 	tl.store(Mid_O_LogExpSum + off_mid_o_les, m_i + tl.log(d_i))
         
 	# 计算是否需要存储
 	need_store = num_blocks > 0  # 标量布尔值
@@ -187,7 +149,8 @@ def _flash_decoding_stage1_kernel(
 @torch.no_grad()
 def flash_decode_stage1(
     q, k, v,         # Q: [batchs, num_heads, head_dim], K, V: [batchs * seq_len, num_heads, head_dim]
-	actual_seq_len,  # 实际的序列长度
+	b_start_loc, b_seq_len, 
+	max_actual_seq_len,  # 最大的实际序列长度
     mid_o, mid_o_logexpsum, # Mid_O: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE), head_dim], Mid_O_LogExpSum: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE)]
     PARTITION_SIZE,
 ):
@@ -196,16 +159,16 @@ def flash_decode_stage1(
 	# BLOCK_DMODEL = q.shape[-1]
 	assert PARTITION_SIZE % BLOCK_N_SIZE == 0, "PARTITION_SIZE 必须是 BLOCK_N_SIZE 的倍数"
 
-	batchs, num_heads, head_dim = q.shape
+	batchs, num_heads, head_dim = q.shape # decode 阶段 q 张量的 seq_len = 1, 这里的 batchs 实际就是 batch_size
 	sm_scale = 1.0 / (head_dim ** 0.5)
 	
 	# grid 配置的并行度比 flashattention1-2 多了 kv cache seq 维度
-	grid = (batchs, num_heads, triton.cdiv(actual_seq_len + PARTITION_SIZE - 1, PARTITION_SIZE))
+	grid = (batchs, num_heads, triton.cdiv(max_actual_seq_len + PARTITION_SIZE - 1, PARTITION_SIZE))
 	num_kv_groups = q.shape[1] // k.shape[1] # num_q_heads // num_k_heads
 
 	_flash_decoding_stage1_kernel[grid](
 		q, k, v, sm_scale,
-		actual_seq_len,  # 使用实际序列长度
+        b_start_loc, b_seq_len, 
 		num_kv_groups,   # kv 组数量
 		mid_o, mid_o_logexpsum,
 		*q.stride(),
@@ -229,9 +192,7 @@ def _flash_decoding_stage2_kernel(
 	mido_batch_stride, mido_heads_stride, mido_partitions_stride, mido_dim_stride,
 	mido_les_batch_stride, mido_les_heads_stride, mido_les_partitions_stride,
 	o_bs_stride, o_heads_stride, o_dim_stride,
-
-	actual_seq_len,   # TODO 支持 PagedAttention 和连续批处理
-
+	B_Seqlen,   # TODO 支持 PagedAttention 和连续批处理
 	BLOCK_DMODEL: tl.constexpr,
 	BLOCK_SEQ: tl.constexpr, # type: ignore
 ):
@@ -239,7 +200,8 @@ def _flash_decoding_stage2_kernel(
     """
     batch_pid = tl.program_id(0)
     head_pid = tl.program_id(1)
-
+    cur_batch_seq_len = tl.load(B_Seqlen + batch_pid)
+    
     # 初始化偏移 
     offs_d = tl.arange(0, BLOCK_DMODEL)
 
@@ -258,7 +220,8 @@ def _flash_decoding_stage2_kernel(
     d_i = 0.0
     m_i = -float("inf")
     acc = tl.zeros([BLOCK_DMODEL], dtype=tl.float32)
-    num_partitions = (actual_seq_len + BLOCK_SEQ - 1) // BLOCK_SEQ
+    
+    num_partitions = (cur_batch_seq_len + BLOCK_SEQ - 1) // BLOCK_SEQ
     
     for block_seq_n in range(0, num_partitions, 1): # TODO 有 bug 需要修复
         part_v = tl.load(part_v_ptrs)
@@ -290,7 +253,7 @@ def _flash_decoding_stage2_kernel(
 def flash_decode_stage2(
     mid_o, mid_o_logexpsum, # 存储每个批次、每个头、每个分区的中间分数输出及 log(sum(exp(scores)))
 	atten_output,           # attention 输出首地址
-	actual_seq_len,  	    # kv cache 在 seq_len 维度的最大长度
+	b_seq_len,  	            # kv cache 在 seq_len 维度的长度向量
     PARTITION_SIZE
 ):	
 	batchs, num_heads, head_dim = mid_o.shape[0], mid_o.shape[1], mid_o.shape[-1]
@@ -303,7 +266,7 @@ def flash_decode_stage2(
 		*mid_o.stride(),
 		*mid_o_logexpsum.stride(),
 		*atten_output.stride(),
-		actual_seq_len,   # TODO 支持 PagedAttention 和连续批处理
+		b_seq_len,   # TODO 支持 PagedAttention 和连续批处理
 		BLOCK_DMODEL = head_dim,
 		BLOCK_SEQ = PARTITION_SIZE, # type: ignore	
 		num_warps = 4,
@@ -313,19 +276,19 @@ def flash_decode_stage2(
 @torch.no_grad()
 def flash_decoding(
     q, 			 # q 查询向量，形状为 [bsz, num_head, head_dim]
-    k, v, 	     # 键/值向量缓存，形状为 [ntokens, kv_num_head, head_dim]
-    actual_seq_len=None, # 最大序列长度, 即当前查询对应的 kv cache 大小。用于分区计算
+    k_cache, v_cache, 	     # 键/值向量缓存，形状为 [max_tokens, kv_num_head, head_dim]
+    b_start_loc, b_seq_len, # start locations and sequence lengths for kv cache in a batch
+    max_actual_seq_len
 ):
 	# q.view(-1, num_heads, head_dim)
-	assert q.shape[-1] == k.shape[-1] == v.shape[-1]
-	batchs, num_heads, head_dim = q.shape # decode 阶段 q 的 seq_len = 1, 
-	actual_seq_len = k.shape[0] // batchs
-	
-	kv_nums, _, _ = k.shape
-	# middle results
+	assert q.shape[-1] == k_cache.shape[-1] == v_cache.shape[-1]
 	PARTITION_SIZE = 32
+	batchs, num_heads, head_dim = q.shape # decode 阶段 q 的 seq_len = 1, 
+	# actual_seq_len = k_cache.shape[0] // batchs
+	# kv_nums, _, _ = k_cache.shape
+	
 	# 最大可用分区数量计算
-	max_num_partitions = (actual_seq_len + PARTITION_SIZE -1) // PARTITION_SIZE
+	max_num_partitions = (max_actual_seq_len + PARTITION_SIZE -1) // PARTITION_SIZE
 
 	# mid_o: 存储每个批次、每个头、每个分区的中间输出
 	mid_o = torch.empty((batchs, num_heads, max_num_partitions, head_dim), dtype=torch.float32, device=q.device)
@@ -333,12 +296,57 @@ def flash_decoding(
 	mid_o_logexpsum = torch.empty((batchs, num_heads, max_num_partitions), dtype=torch.float32, device=q.device)
 
 	# decode stage 1: attention in partitions
-	flash_decode_stage1(q, k, v, actual_seq_len, mid_o, mid_o_logexpsum, PARTITION_SIZE)
+	flash_decode_stage1(q, k_cache, v_cache, b_start_loc, b_seq_len, max_actual_seq_len, mid_o, mid_o_logexpsum, PARTITION_SIZE)
     
 	# decode stage 2: reduction among partitions
 	atten_output = torch.empty_like(q)
 
-	flash_decode_stage2(mid_o, mid_o_logexpsum, atten_output, actual_seq_len, PARTITION_SIZE)
+	flash_decode_stage2(mid_o, mid_o_logexpsum, atten_output, b_seq_len, PARTITION_SIZE)
 
 	return atten_output
 
+
+def _naive_attention(q, k, v):
+    import math
+    head_dim = q.shape[-1]
+    q = q.transpose(0, 1)  #(nhead, 1, head_dim)
+    k = k.transpose(0, 1)  #(nhead, seqlen, head_dim)
+    v = v.transpose(0, 1)  #(nhead, seqlen, head_dim)
+    scores = torch.matmul(q, k.transpose(1, 2)) / math.sqrt(head_dim)
+    scores = torch.nn.functional.softmax(scores.float(), dim=-1).to(q.dtype)
+    output = torch.matmul(scores, v).transpose(0, 1).contiguous() #(1, nhead, head_dim)
+    return output
+
+def torch_attention_with_kvcache(q, k_cache, v_cache, b_start_loc, b_seq_len):
+    out = torch.empty_like(q)
+    Z = q.shape[0]
+    for i in range(Z):
+        start = b_start_loc[i]
+        end = start + b_seq_len[i]
+        qi = q[i:i+1]            #(1, nhead, head_dim)
+        ki = k_cache[start:end]  #(seqlen, nhead, head_dim)
+        vi = v_cache[start:end]  #(seqlen, nhead, head_dim)
+        oi = _naive_attention(qi, ki, vi)
+        out[i:i+1] = oi
+    return out
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    # inputs
+    batch, head, head_dim = 4, 32, 64
+    expand = 1
+    max_input_len = 1024 * expand
+    dtype = torch.float16
+    q = torch.randn((batch, head, head_dim), device='cuda', dtype=dtype)
+    k_cache = torch.randn((16 * 10000, head, head_dim), device='cuda', dtype=dtype)
+    v_cache = torch.randn((16 * 10000, head, head_dim), device='cuda', dtype=dtype)
+    # meta data for kv cache
+    b_start_loc = torch.tensor([0, 1024, 2048, 3072], dtype=torch.int32, device="cuda") * expand
+    b_seq_len = torch.tensor([512, 1024, 512, 1024], dtype=torch.int32, device="cuda") * expand
+    # compute attention
+    triton_output = flash_decoding(q, k_cache, v_cache, b_start_loc, b_seq_len, max_input_len)
+    torch_output = torch_attention_with_kvcache(q, k_cache, v_cache, b_start_loc, b_seq_len)
+    print(f'The maximum difference between torch and triton is {torch.max(torch.abs(torch_output - triton_output))}')
+    # benchmark 
+    print('torch:', triton.testing.do_bench(lambda: torch_attention_with_kvcache(q, k_cache, v_cache, b_start_loc, b_seq_len)))
+    print('triton:', triton.testing.do_bench(lambda: flash_decoding(q, k_cache, v_cache, b_start_loc, b_seq_len, max_input_len)))

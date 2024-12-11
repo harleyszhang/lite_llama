@@ -1,8 +1,6 @@
 import torch
-
 import triton
 import triton.language as tl
-
 
 @triton.jit
 def _rotary_kernel(
@@ -123,7 +121,7 @@ def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.):
     assert q.shape[0] == cos.shape[0] and q.shape[0] == sin.shape[0], f"q shape {q.shape} cos shape {cos.shape}"
     assert k.shape[0] == cos.shape[0] and k.shape[0] == sin.shape[0], f"k shape {k.shape} cos shape {cos.shape}"
 
-    BLOCK_SEQ = 16
+    BLOCK_SEQ = 64
     BLOCK_HEAD = 4
     if head_dim >= 128:
         num_warps = 8
@@ -155,34 +153,45 @@ def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.):
         num_warps=num_warps,
         num_stages=1,
     )
-    return
-
+    return q, k
 
 def torch_rotary_emb(x, cos, sin):
-    seq_len, h, dim = x.shape
-    dim = dim // 4
-    x0 = x[:, :, 0 : dim // 2]
-    x1 = x[:, :, dim // 2 : dim]
-    cos = cos.view((seq_len, 1, dim // 2))
-    sin = sin.view((seq_len, 1, dim // 2))
+    seq_len, h, d = x.shape
+    # cos, sin 的形状为 (seq_len, d//2)
+    half_dim = cos.shape[-1]
+    x0 = x[:, :, :half_dim]
+    x1 = x[:, :, half_dim:2*half_dim]
+
+    cos = cos.view(seq_len, 1, half_dim)
+    sin = sin.view(seq_len, 1, half_dim)
+
     o0 = x0 * cos - x1 * sin
     o1 = x0 * sin + x1 * cos
-    return torch.cat((o0, o1), dim=-1)
 
+    if 2 * half_dim < d:
+        out = torch.cat([o0, o1, x[:, :, 2*half_dim:]], dim=-1)
+    else:
+        out = torch.cat([o0, o1], dim=-1)
 
-def test_rotary_emb(SEQ_LEN, H, D, dtype, eps=1e-5, device="cuda"):
-    # create data
-    x_shape = (SEQ_LEN, H, D)
-    x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device="cuda")
-    cos_shape = (SEQ_LEN, D // 2)
-    cos = -1.2 + 0.5 * torch.randn(cos_shape, dtype=dtype, device="cuda")
-    sin = -2.0 + 0.5 * torch.randn(cos_shape, dtype=dtype, device="cuda")
-    # forward pass
-    y_tri = torch_rotary_emb(x, cos, sin)
-    rotary_emb_fwd(x, cos, sin)
-    y_ref = x
+    return out
 
-    # compare
-    print("type:", y_tri.dtype, y_ref.dtype)
-    print("max delta:", torch.max(torch.abs(y_tri - y_ref)))
-    assert torch.allclose(y_tri, y_ref, atol=1e-2, rtol=0)
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    x_shape = (128, 32, 64)  # (seq_len, num_heads, head_dim)
+    dtype = torch.float16
+    q = torch.randn(x_shape, dtype=dtype, device='cuda')
+    k = torch.clone(q)
+
+    # 生成 cos 和 sin，与 head_dim 对应，这里 head_dim=64，因此 cos, sin=(seq_len, head_dim//2)=(128,32)
+    cos_shape = (128, 32)  
+    y = torch.randn(cos_shape, dtype=dtype, device='cuda')
+    cos = y.cos()
+    sin = y.sin()
+
+    output_torch = torch_rotary_emb(q, cos, sin)
+    q_out, k_out = rotary_emb_fwd(q, k, cos, sin)
+    print(output_torch)
+    print(q_out)
+    print(f'The maximum difference between torch and triton is {torch.max(torch.abs(output_torch - q_out))}')
+    print('torch:', triton.testing.do_bench(lambda: torch_rotary_emb(q, cos, sin)))
+    print('triton:', triton.testing.do_bench(lambda: torch_rotary_emb(q, cos, sin)))

@@ -14,3 +14,5 @@ class AttentionInfo:
     select_index = torch.tensor([])
     kv_buffer = List[torch.tensor([])]
     decode_index = torch.tensor([])
+    start_index = torch.tensor([])
+    cur_select_index = torch.empty((0,),dtype=torch.long)

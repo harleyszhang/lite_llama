@@ -45,15 +45,21 @@ class FusedAttention(nn.Module):
         xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
 
         # 2. 将 xk, xv 合并, 并写入缓存
-        combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)
-        atten_info.kv_buffer[layer_index][atten_info.select_index] = combined_kv.view(-1, self.num_kv_heads*2, self.head_dim)
+        combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)  
+        # combined_kv_reshaped = combined_kv.view(-1, self.num_kv_heads*2, self.head_dim)
+        
+        for i in range(batch_size):
+            start_index = int(atten_info.start_index[i])
+            end_index = int(atten_info.start_index[i]) + int(atten_info.b_seq_len[i])
+            atten_info.kv_buffer[layer_index][start_index: end_index] = combined_kv[i][:atten_info.b_seq_len[i], :, :]
+        
+        # atten_info.kv_buffer[layer_index][atten_info.cur_select_index] = combined_kv
 
         # 3. sel-attention. flashattention 计算: softmax(qk^t) * v
         xq = xq.transpose(1, 2) # (batch_size, seq_len, self.num_kv_heads, self.head_dim) -> (batch_size, self.num_kv_heads, seq_len, self.head_dim)
         keys = xk.transpose(1, 2)
         values = xv.transpose(1, 2)
         output = flash_attention_v2(xq, keys, values)
-        # (B, H_Q, Seq_Len_Q, Head_Dim) -> (B, Seq_Len_Q, Num_Heads_Q, Head_Dim) -> (B, Seq_Len_Q, Hidden_Size)
         output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1))
         
         # 4. attention 输出做线性变换
@@ -67,7 +73,8 @@ class FusedAttention(nn.Module):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
-
+        num_kv_heads = self.num_kv_heads
+        
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
         xq = self.q_proj(x).view(batch_size, seq_len, self.num_heads_q, self.head_dim)
         # xkv = torch.matmul(x, self.kv_proj_weight.t())
@@ -79,39 +86,25 @@ class FusedAttention(nn.Module):
 
         cos, sin = position_embeddings
         xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
+        xq = xq.view(batch_size, self.num_heads_q, self.head_dim)
+        
+        # 2. 获取 kv 缓冲向量并更新 kv 向量
 
-        # 2. 获取 kv 缓冲向量并更新 kv 向量        
-        num_kv_heads = self.num_kv_heads
-        
-        past_k_cache = atten_info.kv_buffer[layer_index][atten_info.select_index, :num_kv_heads, :]
-        past_v_cache = atten_info.kv_buffer[layer_index][atten_info.select_index, num_kv_heads:, :]
-        
-        # 获取指定上一轮 token 的键和值, 键和值在第二个维度上分别占据前后各一半
-        past_k_cache_reshape = past_k_cache.view(batch_size, -1, num_kv_heads, self.head_dim)
-        past_v_cache_reshape = past_v_cache.view(batch_size, -1, num_kv_heads, self.head_dim)
-        
-        xk = torch.cat([past_k_cache_reshape, xk], dim=1)
-        xv = torch.cat([past_v_cache_reshape, xv], dim=1)
-                
-        select_index = torch.cat([atten_info.select_index, atten_info.decode_index])
-        combined_kv = torch.cat([xk, xv], dim=2) # (B, L', 2 * num_kv_heads, head_dim)
-        atten_info.kv_buffer[layer_index][select_index] = combined_kv.view(-1, 2*num_kv_heads, self.head_dim)
+        k_buffer = atten_info.kv_buffer[layer_index][:, :num_kv_heads, :] # k_buffer and v_buffer shape is  torch.Size([6000, 8, 64]) torch.Size([6000, 8, 64])
+        v_buffer = atten_info.kv_buffer[layer_index][:, num_kv_heads:, :]
+
+        k_buffer[atten_info.cur_select_index] = xk.squeeze(dim=1)
+        v_buffer[atten_info.cur_select_index] = xv.squeeze(dim=1)
         
         # 3. flashattention 计算: softmax(qk^t) * v
-        batch_size, kv_actual_seq_len, num_kv_heads, head_dim = xk.shape
-        new_bs = batch_size * kv_actual_seq_len
-
-        xq = xq.view(batch_size, self.num_heads_q, head_dim) # q seq_len is 1
-        keys = xk.view(new_bs, num_kv_heads, head_dim)
-        values = xv.view(new_bs, num_kv_heads, head_dim)
-        
-        output = flash_decoding(xq, keys, values) # ouput shape is [batchs, num_heads, head_dim]
+        output = flash_decoding(xq, k_buffer, v_buffer, atten_info.start_index, atten_info.b_seq_len, atten_info.max_actual_seq_len) # ouput shape is [batchs, num_heads, head_dim]
         output = output.view(batch_size, 1, self.num_heads_q * self.head_dim)
 
         output = self.o_proj(output)
         return output
 
 class FusedMLP(nn.Module):
+
     def __init__(self, config: LlamaConfig):
         super().__init__()
         

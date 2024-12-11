@@ -209,6 +209,16 @@ class KVCacheMemoryManager:
 
         return None
     
+    @torch.no_grad()
+    def alloc_kvcache_index(self, need_size):
+        alloc_mem = self.alloc_contiguous_kvcache(need_size)
+        if alloc_mem is not None:
+            select_index, start_index, _ = alloc_mem
+        else:
+            select_index, start_index, _  = self.alloc_kvcache(need_size)
+        
+        return select_index
+    
     # 增加引用计数
     @torch.no_grad()
     def add_ref(self, token_index: torch.Tensor):

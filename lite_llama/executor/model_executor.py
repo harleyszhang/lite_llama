@@ -261,37 +261,40 @@ class ModelExecutor:
 
     def forward(self, input_ids, prev_pos, image_tensor=None):
         batch_size, seq_len = input_ids.shape # 静态批处理, batch 中每个请求的 seq_len 都相等
-        if seq_len > 1:
-            # 一次性分配最大所需 kv cache. seq0: [token0, token1, token2, token3,], seq1: [token0, token1, token2, token3,]
-            need_size = batch_size * (seq_len)
+        # if seq_len > 1:
+        #     # 一次性分配最大所需 kv cache. seq0: [token0, token1, token2, token3,], seq1: [token0, token1, token2, token3,]
+        #     need_size = batch_size * (seq_len)
             
-            if self.model_type == "llava":
-                image_size = self.model_config.vision_config.image_size
-                pathch_size = self.model_config.vision_config.patch_size
-                number_patchs = image_size // pathch_size
-                need_size += number_patchs * number_patchs - 1
-            alloc_mem = self.kv_mem_manager.alloc_contiguous_kvcache(need_size)
+        #     if self.model_type == "llava":
+        #         image_size = self.model_config.vision_config.image_size
+        #         pathch_size = self.model_config.vision_config.patch_size
+        #         number_patchs = image_size // pathch_size
+        #         need_size += number_patchs * number_patchs - 1
+            # alloc_mem = self.kv_mem_manager.alloc_contiguous_kvcache(need_size)
             
-            if alloc_mem is not None:
-                select_index = alloc_mem[0]
-            else:
-                select_index, _, _  = self.kv_mem_manager.alloc_kvcache(need_size)
-            self.atten_info.select_index = select_index
-        else:
-            alloc_mem = self.kv_mem_manager.alloc_contiguous_kvcache(batch_size)
-            if alloc_mem is not None:
-                decode_index = alloc_mem[0]
-            else:
-                decode_index, _, _  = self.kv_mem_manager.alloc_kvcache(batch_size)
-            self.atten_info.decode_index = decode_index
+            # if alloc_mem is not None:
+            #     select_index, start_index, _ = alloc_mem
+            # else:
+            #     select_index, start_index, _  = self.kv_mem_manager.alloc_kvcache(need_size)
+            # self.atten_info.select_index = select_index
 
+        # else:
+            # alloc_mem = self.kv_mem_manager.alloc_contiguous_kvcache(batch_size)
+            # if alloc_mem is not None:
+            #     decode_index = alloc_mem[0]
+            # else:
+            #     decode_index, _, _  = self.kv_mem_manager.alloc_kvcache(batch_size)
+            # self.atten_info.decode_index = decode_index
+            # select_index = torch.cat([self.atten_info.select_index, self.atten_info.decode_index])
+            # self.atten_info.select_index = select_index
+
+        # total_length = len(kv_seq_len)
+        # if total_length % batch_size != 0:
+        #     raise ValueError("select_index 的长度必须是 batch_size 的整数倍")  
+            
         if self.model_type == "llava":
             logits = self.model.forward(input_ids, prev_pos, self.atten_info, image_tensor)
         else:
-            logits = self.model.forward(input_ids, prev_pos, self.atten_info)
+            logits = self.model.forward(input_ids, prev_pos, self.atten_info)            
         
-        if seq_len == 1 and self.atten_info.select_index.numel() > 0:
-            select_index = torch.cat([self.atten_info.select_index, self.atten_info.decode_index])
-            self.atten_info.select_index = select_index
-        
-        return logits, self.atten_info.select_index
+        return logits

@@ -5,8 +5,8 @@ from lite_llama.generate_stream import GenerateStreamText # 导入 GenerateText 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
 
-# checkpoints_dir = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/' # 改成自己的存放模型路径
-checkpoints_dir = "/gemini/code/lite_llama/my_weight/Qwen2.5-1.5B-Instruct"
+checkpoints_dir = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/' # 改成自己的存放模型路径
+# checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct"
 
 def main(
     temperature: float = 0.6,

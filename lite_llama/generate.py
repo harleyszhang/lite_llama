@@ -108,26 +108,62 @@ class GenerateText:
         max_prompt_len = max(len(t) for t in prompt_tokens)
         total_len = min(self.model_config.max_seq_len, max_gen_len + max_prompt_len)
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
-        
+        self.model_executor.atten_info.max_actual_seq_len = max_prompt_len
+
         # 预分配tokens张量
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device = device)
+        total_number_tokens = bsz * total_len
+
+        self.model_executor.atten_info.select_index = self.model_executor.kv_mem_manager.alloc_kvcache_index(total_number_tokens)
+        select_index = self.model_executor.atten_info.select_index
+
+        # 初始化每个批次项的序列长度
+        actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=device)
+        self.model_executor.atten_info.b_seq_len = actual_prompt_lens
+        # print("self.model_executor.atten_info.b_seq_len ", self.model_executor.atten_info.b_seq_len)  
+
+        # 初始化起始索引张量
+        start_indexs = torch.zeros(bsz, dtype=torch.long, device=device)
+
+        # 累加每个批次的实际长度，计算起始索引
+        for i in range(1, bsz):
+            start_indexs[i] = start_indexs[i - 1] + actual_prompt_lens[i - 1] + max_gen_len
+        # 设置起始索引到模型执行器中
+        self.model_executor.atten_info.start_index = start_indexs
+
+        # total_kv_seq_len = total_number_tokens // bsz
+        # self.model_executor.atten_info.start_index = select_index[::total_kv_seq_len].to(torch.int32)
+        start_indices = self.model_executor.atten_info.start_index
+        # print("start_indexs: ", self.model_executor.atten_info.start_index)
+
+        # 填充提示词到 tokens 张量
         for seq_id, token_ids in enumerate(prompt_tokens):
             tokens[seq_id, : len(token_ids)] = torch.tensor(token_ids, dtype=torch.long, device = device)
         
-        # 生成一个布尔张量，它的值为 True 的位置表示输入序列的实际内容（即非填充部分），False 表示待填充位置。形状为 (batch_size, total_len)
+        # 生成一个布尔张量，它的值为 True 的位置表示输入序列的实际内容（即非填充部分）, 形状为 (batch_size, total_len)
         input_text_mask = tokens != pad_id
         eos_reached = torch.zeros(bsz, dtype=torch.bool, device=device)
         prev_pos = 0 # 初始化上一次生成的位置
+                
+        # self.model_executor.atten_info.cur_select_index = select_index.unfold(0, max_prompt_len, total_len).reshape(-1)
+        # print("Prefill stage cur_select_index: ", self.model_executor.atten_info.cur_select_index)
         
         for cur_pos in range(max_prompt_len, total_len):
-            input_ids = tokens[:, prev_pos: cur_pos] # 当前输入 token ids, decode 阶段 input_ids shape is [4, 1]
-            logits, select_index = self.model_executor.forward(input_ids, prev_pos) # 模型执行器的前向推理, logits shape is [batch_size, shape, vocab_size]
+            input_ids = tokens[:, prev_pos: cur_pos] # 当前输入 token ids, decode 阶段 input_ids shape is [4, 1]         
+            logits = self.model_executor.forward(input_ids, prev_pos) # 模型执行器的前向推理, logits shape is [batch_size, shape, vocab_size]
             
+            if prev_pos > 0:
+                self.model_executor.atten_info.max_actual_seq_len += 1
+                self.model_executor.atten_info.b_seq_len += 1
+            
+            b_seq_lens = self.model_executor.atten_info.b_seq_len
+            self.model_executor.atten_info.cur_select_index = (start_indices + b_seq_lens)
+            # print("Decode stage cur_select_index: ", self.model_executor.atten_info.cur_select_index)
+
             probs = softmax_split(logits[:, -1] / temperature) # torch.softma 将 logits 转换为概率分布。
             next_token = sample_top_p(probs, top_p) # next_token 形状为 [batch_size, 1]
-
             next_token = next_token.reshape(-1) # 调整为一维, shape is batch_size
-            
+
             # 仅替换生成部分的token
             mask = ~input_text_mask[:, cur_pos]
             next_token = torch.where(mask, next_token, tokens[:, cur_pos])
@@ -141,8 +177,7 @@ class GenerateText:
                 break
         
         # out_tokens = self.process_output_tokens(tokens, prompt_tokens, max_gen_len, echo, self.tokenizer.eos_token_id)
-        # 减少 kv cache 内存管理器的引用计数
-        self.model_executor.kv_mem_manager.release_ref(select_index)
+        self.model_executor.kv_mem_manager.release_ref(select_index) # 减少 kv cache 内存管理器的引用计数
 
         return tokens
     

@@ -417,4 +417,36 @@ lite_llama throughput: 620.52 tokens/s
 Transformers throughput: 536.62 tokens/s
 lite_llama per token latency: 1.611547 ms/token
 Transformers per token latency: 1.863501 ms/token
+
+lite_llama inference time: 2.7616 s
+Transformers inference time: 3.6814 s
+lite_llama throughput: 605.09 tokens/s
+Transformers throughput: 472.37 tokens/s
+lite_llama per token latency: 1.652648 ms/token
+Transformers per token latency: 2.116973 ms/token
+
+lite_llama inference time: 2.6675 s
+Transformers inference time: 3.6356 s
+lite_llama throughput: 558.20 tokens/s
+Transformers throughput: 480.25 tokens/s
+lite_llama per token latency: 1.791472 ms/token
+Transformers per token latency: 2.082228 ms/token
+
+lite_llama inference time: 2.7426 s
+Transformers inference time: 3.7099 s
+lite_llama throughput: 589.59 tokens/s
+Transformers throughput: 467.40 tokens/s
+lite_llama per token latency: 1.696087 ms/token
+Transformers per token latency: 2.139481 ms/token
+```
+
+### batch_size = 4
+
+```bash
+lite_llama inference time: 2.9676 s
+Transformers inference time: 3.4976 s
+lite_llama throughput: 310.35 tokens/s
+Transformers throughput: 168.12 tokens/s
+lite_llama per token latency: 3.222125 ms/token
+Transformers per token latency: 5.948238 ms/token
 ```
