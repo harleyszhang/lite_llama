@@ -161,7 +161,7 @@ lite_llama per token latency: 10.630839 ms/token
 Transformers per token latency: 7.274835 ms/token
 ```
 
-### 历史记录
+### ### batch_size = 8, 历史记录
 
 详细运行结果如下所示:
 
@@ -440,6 +440,12 @@ lite_llama per token latency: 1.696087 ms/token
 Transformers per token latency: 2.139481 ms/token
 ```
 
+### batch_size = 2
+
+```bash
+
+```
+
 ### batch_size = 4
 
 ```bash
@@ -449,4 +455,36 @@ lite_llama throughput: 310.35 tokens/s
 Transformers throughput: 168.12 tokens/s
 lite_llama per token latency: 3.222125 ms/token
 Transformers per token latency: 5.948238 ms/token
+
+lite_llama inference time: 4.1124 s
+Transformers inference time: 5.2652 s
+lite_llama throughput: 355.02 tokens/s
+Transformers throughput: 134.28 tokens/s
+lite_llama per token latency: 2.816733 ms/token
+Transformers per token latency: 7.447176 ms/token
+
+lite_llama inference time: 6.2097 s
+Transformers inference time: 7.5764 s
+lite_llama throughput: 400.99 tokens/s
+Transformers throughput: 337.76 tokens/s
+lite_llama per token latency: 2.493845 ms/token
+Transformers per token latency: 2.960688 ms/token
+
+lite_llama inference time: 5.8347 s
+Transformers inference time: 7.2182 s
+lite_llama throughput: 341.23 tokens/s
+Transformers throughput: 283.73 tokens/s
+lite_llama per token latency: 2.930534 ms/token
+Transformers per token latency: 3.524501 ms/token
+```
+
+### batch_size = 16
+
+```bash
+lite_llama inference time: 6.0915 s
+Transformers inference time: 7.3608 s
+lite_llama throughput: 963.15 tokens/s
+Transformers throughput: 834.28 tokens/s
+lite_llama per token latency: 1.038260 ms/token
+Transformers per token latency: 1.198638 ms/token
 ```

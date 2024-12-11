@@ -97,7 +97,13 @@ class FusedAttention(nn.Module):
         v_buffer[atten_info.cur_select_index] = xv.squeeze(dim=1)
         
         # 3. flashattention 计算: softmax(qk^t) * v
-        output = flash_decoding(xq, k_buffer, v_buffer, atten_info.start_index, atten_info.b_seq_len, atten_info.max_actual_seq_len) # ouput shape is [batchs, num_heads, head_dim]
+        output = flash_decoding(
+            xq, k_buffer, v_buffer, 
+            atten_info.start_index, 
+            atten_info.b_seq_len, 
+            atten_info.max_actual_seq_len
+        ) # ouput shape is [batchs, num_heads, head_dim]
+        
         output = output.view(batch_size, 1, self.num_heads_q * self.head_dim)
 
         output = self.o_proj(output)

@@ -166,11 +166,11 @@ def compare_inference_speed(
     )
 
     torch.cuda.empty_cache() # 使用完成后释放 lite_llama_generator 占用的显存
-    
+
     # 2. lite-llama inference
     lite_llama_generator = load_lite_llama_generator(lite_llama_ckpt_dir, max_seq_len, max_gpu_num_blocks = 9000, device=device)
     lite_llama_results, lite_llama_time, lite_llama_tokens = lite_llama_inference(
-        lite_llama_generator, update_prompts, temperature, top_p, max_gen_len, device=device
+        lite_llama_generator, prompts, temperature, top_p, max_gen_len, device=device
     )
     del lite_llama_generator
 
@@ -194,38 +194,62 @@ def compare_inference_speed(
     # 打印部分推理结果对比
     for i, (prompt, litellama_res, hf_res) in enumerate(zip(prompts, lite_llama_results, hf_results)):
         # print(f"\n[Prompt {i}]:\n{prompt}")
-        print("\n[lite_llama]: {}".format(litellama_res))
-        print("\n[Transformers]: {}".format(hf_res['generation']))
-        print("\n" + "="*40 + "\n")
+        if i // 2 == 0:
+            print("\n[lite_llama]: {}".format(litellama_res))
+            print("\n[Transformers]: {}".format(hf_res['generation']))
+            print("\n" + "="*40 + "\n")
 
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # prompts: List[str] = [
+    #     "I believe the meaning of life is to find happiness in the simple things. but how to achieve the meaning of life?",
+    #     "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
+    #     "Can you introduce the History of the American Civil War. ",
+    #     "who is the first president of the United States and what's his life story?",
+    #     "How to learn c++, give me some code example.",
+    #     "How to learn python, give me some code examples.",
+    #     "How to learn llm, please introduce transformer architecture ",
+    #     "How to learn cnn, please introduce resnet architecture and give code ",
+    #     "How to learn cuda programming, give me some code example.",
+    #     "How to learn rust, give me some code examples.",
+    #     "How to learn java, give me some code example.",
+    #     "How to learn linux c, give me some code examples.",
+    # ]
+
+    prompts: List[str] = [
+        "How to learn cnn, please introduce resnet architecture and give code ",
+        "How to learn cuda programming, give me some code example.",
+    ]
+
+    # prompts: List[str] = [
+    #     "How to learn cnn, please introduce resnet architecture and give code ",
+    #     "How to learn cuda programming, give me some code example.",
+    #     "How to learn rust, give me some code examples.",
+    #     "How to learn java, give me some code example.",
+    # ]
+
+    # prompts: List[str] = [
     #     "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.",
-    #     "Simply put, the theory of relativity states that 3D space is not fixed, but is relative to the observer's frame of reference. Time is also relative,",
-    #     """A brief message congratulating the team on the launch:
-
-    #     Hi everyone,
-
-    #     I just heard about the launch of the new product and I wanted to take a moment to express my congratulations """,
+    #     "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
+    #     "A Complete Introduction to the History of the American Civil War",
     #     "Roosevelt was the first president of the United States, he has a lot of information on the early history of the United States. He was born in 1883,",
     #     "How to learn c++, give me some code example.",
     #     "How to learn python, give me some code examples.",
     #     "How to learn llm, please introduce transformer architecture ",
-    #     "How to learn openai triton programming, give me some kernel code examples.",
+    #     "How to learn cnn, please introduce resnet architecture and give code ",
     # ]
-    
-    prompts: List[str] = [
-        "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person ",
-        "Simply put, the theory of relativity states that 3D space is not fixed, but is relative to the observer's frame of reference. Time is also relative, and it appears to ",
-        """A brief message congratulating the team on the launch:
 
-        Hi everyone,
+    # prompts: List[str] = [
+    #     "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person ",
+    #     "Simply put, the theory of relativity states that 3D space is not fixed, but is relative to the observer's frame of reference. Time is also relative, and it appears to ",
+    #     """A brief message congratulating the team on the launch:
 
-        I just heard about the launch of the new product and I wanted to take a moment to express my """,
-        "Roosevelt was the first president of the United States, he has a lot of information on the early history of the ,",
-    ]
+    #     Hi everyone,
+
+    #     I just heard about the launch of the new product and I wanted to take a moment to express my """,
+    #     "Roosevelt was the first president of the United States, he has a lot of information on the early history of the ,",
+    # ]
 
     # prompts: List[str] = [
     #     "I believe the meaning of life is",
@@ -246,7 +270,7 @@ def main():
         temperature=0.6,
         top_p=0.9,
         max_seq_len=2048,
-        max_gen_len=256,
+        max_gen_len=1024,
         lite_llama_ckpt_dir=checkpoints_dir,
         hf_model_name=hf_model_name,
         device=device
