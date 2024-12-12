@@ -10,7 +10,7 @@ from lite_llama.models.llava import LlavaLlama
 from lite_llama.models.model_config import LlamaConfig
 from transformers import LlavaConfig
 
-checkpoints_dir = "/gemini/code/llm_weights/Qwen/Qwen2.5-7B-Instruct"
+checkpoints_dir = "/gemini/code/llm_weights/Llama-3.2-3B-hf/"
 
 model = AutoModelForCausalLM.from_pretrained(
     checkpoints_dir, 

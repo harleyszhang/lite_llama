@@ -488,3 +488,64 @@ Transformers throughput: 834.28 tokens/s
 lite_llama per token latency: 1.038260 ms/token
 Transformers per token latency: 1.198638 ms/token
 ```
+
+## Llama-3.2-3B 模型性能测试对比
+
+### batch_size = 2
+
+```bash
+lite_llama inference time: 17.2832 s
+Transformers inference time: 23.8896 s
+lite_llama throughput: 116.70 tokens/s
+Transformers throughput: 85.73 tokens/s
+lite_llama per token latency: 8.568749 ms/token
+Transformers per token latency: 11.664852 ms/token
+
+lite_llama inference time: 17.7575 s
+Transformers inference time: 24.9250 s
+lite_llama throughput: 113.47 tokens/s
+Transformers throughput: 75.39 tokens/s
+lite_llama per token latency: 8.812653 ms/token
+Transformers per token latency: 13.265052 ms/token
+
+lite_llama inference time: 13.9446 s
+Transformers inference time: 23.8336 s
+lite_llama throughput: 117.47 tokens/s
+Transformers throughput: 85.93 tokens/s
+lite_llama per token latency: 8.513157 ms/token
+Transformers per token latency: 11.637489 ms/token
+
+lite_llama inference time: 17.5637 s
+Transformers inference time: 24.9061 s
+lite_llama throughput: 114.55 tokens/s
+Transformers throughput: 77.37 tokens/s
+lite_llama per token latency: 8.729455 ms/token
+Transformers per token latency: 12.924809 ms/token
+
+lite_llama inference time: 12.4941 s
+Transformers inference time: 23.0477 s
+lite_llama throughput: 116.38 tokens/s
+Transformers throughput: 80.18 tokens/s
+lite_llama per token latency: 8.592891 ms/token
+Transformers per token latency: 12.471709 ms/token
+
+lite_llama inference time: 18.6984 s
+Transformers inference time: 23.8708 s
+lite_llama throughput: 215.10 tokens/s
+Transformers throughput: 153.24 tokens/s
+lite_llama per token latency: 4.649040 ms/token
+Transformers per token latency: 6.525653 ms/token
+```
+
+### batch_size = 4
+
+```bash
+lite_llama inference time: 17.4635 s
+Transformers inference time: 23.7927 s
+lite_llama throughput: 230.31 tokens/s
+Transformers throughput: 148.91 tokens/s
+lite_llama per token latency: 4.341982 ms/token
+Transformers per token latency: 6.715409 ms/toke
+```
+
+## Llama-3.1-8B 模型性能测试对比

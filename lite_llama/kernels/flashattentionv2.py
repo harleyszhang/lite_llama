@@ -7,6 +7,8 @@ import triton.language as tl
 from torch.cuda.amp import custom_fwd
 from typing import List, Optional, Union
 
+# TESLA = "Tesla" in torch.cuda.get_device_name(0)
+
 @triton.jit
 def _attn_fwd_inner(
 	acc, m_i, d_i, q,
@@ -216,8 +218,8 @@ def flash_attention_v2(
         m_size,
         n_size,
         head_dim,
-        32,  # BLOCK_M_SIZE
-        32,  # BLOCK_N_SIZE
+        64,  # BLOCK_M_SIZE
+        64,  # BLOCK_N_SIZE
         qk_scale,
         causal_mask
     )

@@ -177,13 +177,14 @@ def torch_rotary_emb(x, cos, sin):
 
 if __name__ == "__main__":
     torch.manual_seed(0)
-    x_shape = (128, 32, 64)  # (seq_len, num_heads, head_dim)
+    batch_tokens = 24800
+    x_shape = (batch_tokens, 32, 64)  # (seq_len, num_heads, head_dim)
     dtype = torch.float16
     q = torch.randn(x_shape, dtype=dtype, device='cuda')
     k = torch.clone(q)
 
     # 生成 cos 和 sin，与 head_dim 对应，这里 head_dim=64，因此 cos, sin=(seq_len, head_dim//2)=(128,32)
-    cos_shape = (128, 32)  
+    cos_shape = (batch_tokens, 32)  
     y = torch.randn(cos_shape, dtype=dtype, device='cuda')
     cos = y.cos()
     sin = y.sin()

@@ -217,17 +217,17 @@ def main():
     #     "How to learn linux c, give me some code examples.",
     # ]
 
-    prompts: List[str] = [
-        "How to learn cnn, please introduce resnet architecture and give code ",
-        "How to learn cuda programming, give me some code example.",
-    ]
-
     # prompts: List[str] = [
     #     "How to learn cnn, please introduce resnet architecture and give code ",
     #     "How to learn cuda programming, give me some code example.",
-    #     "How to learn rust, give me some code examples.",
-    #     "How to learn java, give me some code example.",
     # ]
+
+    prompts: List[str] = [
+        "How to learn cnn, please introduce resnet architecture and give code ",
+        "How to learn cuda programming, give me some code example.",
+        "How to learn rust, give me some code examples.",
+        "How to learn java, give me some code example.",
+    ]
 
     # prompts: List[str] = [
     #     "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.",
@@ -262,8 +262,8 @@ def main():
     #     "Roosevelt was the first president of the United States,",
     # ]
 
-    hf_model_name = "/gemini/code/Llama-3.2-1B-Instruct"
-    checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct"  # 根据实际情况修改
+    hf_model_name = "/gemini/code/llm_weights/Llama-3.2-3B-hf"
+    checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-3B-hf"  # 根据实际情况修改
 
     compare_inference_speed(
         prompts=prompts,

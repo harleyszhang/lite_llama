@@ -128,11 +128,9 @@ class GenerateText:
         # 累加每个批次的实际长度，计算起始索引
         for i in range(1, bsz):
             start_indexs[i] = start_indexs[i - 1] + actual_prompt_lens[i - 1] + max_gen_len
+        
         # 设置起始索引到模型执行器中
         self.model_executor.atten_info.start_index = start_indexs
-
-        # total_kv_seq_len = total_number_tokens // bsz
-        # self.model_executor.atten_info.start_index = select_index[::total_kv_seq_len].to(torch.int32)
         start_indices = self.model_executor.atten_info.start_index
         # print("start_indexs: ", self.model_executor.atten_info.start_index)
 
@@ -145,7 +143,7 @@ class GenerateText:
         eos_reached = torch.zeros(bsz, dtype=torch.bool, device=device)
         prev_pos = 0 # 初始化上一次生成的位置
                 
-        # self.model_executor.atten_info.cur_select_index = select_index.unfold(0, max_prompt_len, total_len).reshape(-1)
+        self.model_executor.atten_info.cur_select_index = select_index.unfold(0, max_prompt_len, total_len).reshape(-1)
         # print("Prefill stage cur_select_index: ", self.model_executor.atten_info.cur_select_index)
         
         for cur_pos in range(max_prompt_len, total_len):

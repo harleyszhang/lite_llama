@@ -14,15 +14,13 @@ class FusedAttention(nn.Module):
 
         # K V 头数相同，但和 Q 可能不同
         self.num_kv_heads = config.num_heads if config.num_kv_heads is None else config.num_kv_heads
+        self.head_dim = config.head_dim if config.head_dim is not None else config.hidden_size // config.num_heads
+        
         self.num_heads_q = config.num_heads
-
-        # 每个头的维度大小, head_dim 和 hidden_size 不一样
-        self.head_dim = config.hidden_size // config.num_heads
         self.hidden_size = config.num_heads * self.head_dim
 
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False, dtype=torch.float16)
         self.kv_proj_weight = nn.Parameter(torch.rand(self.num_kv_heads * self.head_dim * 2, self.hidden_size, dtype=torch.float16))
-        # self.kv_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim * 2, bias=False, dtype=torch.float16)
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False, dtype=torch.float16)
 
     def context_forward(
@@ -38,22 +36,18 @@ class FusedAttention(nn.Module):
         xq = self.q_proj(x).view(batch_size, seq_len, self.num_heads_q, self.head_dim)
         xk = F.linear(x, self.kv_proj_weight[0 :self.num_kv_heads * self.head_dim, :])
         xv = F.linear(x, self.kv_proj_weight[self.num_kv_heads * self.head_dim:, :])
+
+        # 2. 应用旋转位置编码到 Q 和 K, 将 xk, xv 合并, 并写入缓存
         xk = xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
 
         cos, sin = position_embeddings
         xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
 
-        # 2. 将 xk, xv 合并, 并写入缓存
         combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)  
-        # combined_kv_reshaped = combined_kv.view(-1, self.num_kv_heads*2, self.head_dim)
-        
-        for i in range(batch_size):
-            start_index = int(atten_info.start_index[i])
-            end_index = int(atten_info.start_index[i]) + int(atten_info.b_seq_len[i])
-            atten_info.kv_buffer[layer_index][start_index: end_index] = combined_kv[i][:atten_info.b_seq_len[i], :, :]
-        
-        # atten_info.kv_buffer[layer_index][atten_info.cur_select_index] = combined_kv
+        combined_kv_reshaped = combined_kv.view(-1, self.num_kv_heads*2, self.head_dim)
+       
+        atten_info.kv_buffer[layer_index][atten_info.cur_select_index] = combined_kv_reshaped
 
         # 3. sel-attention. flashattention 计算: softmax(qk^t) * v
         xq = xq.transpose(1, 2) # (batch_size, seq_len, self.num_kv_heads, self.head_dim) -> (batch_size, self.num_kv_heads, seq_len, self.head_dim)
@@ -77,18 +71,15 @@ class FusedAttention(nn.Module):
         
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
         xq = self.q_proj(x).view(batch_size, seq_len, self.num_heads_q, self.head_dim)
-        # xkv = torch.matmul(x, self.kv_proj_weight.t())
         xkv = F.linear(x, self.kv_proj_weight) # (B, L, 2 * num_kv_heads * head_dim)
+        
+        # 2. 应用旋转位置编码到 Q 和 K, 获取 kv 缓冲向量并更新 kv 向量
         xk, xv = torch.split(xkv, [self.num_kv_heads * self.head_dim, xkv.size(-1) - self.num_kv_heads * self.head_dim], dim=-1)
-
         xk =xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-
         cos, sin = position_embeddings
         xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
         xq = xq.view(batch_size, self.num_heads_q, self.head_dim)
-        
-        # 2. 获取 kv 缓冲向量并更新 kv 向量
 
         k_buffer = atten_info.kv_buffer[layer_index][:, :num_kv_heads, :] # k_buffer and v_buffer shape is  torch.Size([6000, 8, 64]) torch.Size([6000, 8, 64])
         v_buffer = atten_info.kv_buffer[layer_index][:, num_kv_heads:, :]
@@ -104,7 +95,7 @@ class FusedAttention(nn.Module):
             atten_info.max_actual_seq_len
         ) # ouput shape is [batchs, num_heads, head_dim]
         
-        output = output.view(batch_size, 1, self.num_heads_q * self.head_dim)
+        output = output.view(batch_size, seq_len, self.num_heads_q * self.head_dim)
 
         output = self.o_proj(output)
         return output
@@ -131,7 +122,7 @@ class LlamaDecoderLayer(nn.Module):
         self.config= config
         self.num_heads = config.num_heads
         self.hidden_size = config.hidden_size
-        self.head_dim = config.hidden_size // config.num_heads
+        self.head_dim = config.head_dim if config.head_dim is not None else config.hidden_size // config.num_heads
 
         self.attention_norm_weight = nn.Parameter(torch.ones(self.hidden_size,), requires_grad=False)
         self.ffn_norm_weight = nn.Parameter(torch.ones(self.hidden_size,), requires_grad=False)
@@ -160,7 +151,6 @@ class LlamaDecoderLayer(nn.Module):
             )
         
         # Normalization before the feed forward block.
-        # hidden_states = skip_rmsnorm(attn_output, x, self.ffn_norm_weight.data, self.config.rms_norm_eps)
         h = x + attn_output
         hidden_states = rmsnorm_fwd(h, self.ffn_norm_weight.data, eps=self.config.rms_norm_eps)
         out = h + self.mlp.forward(hidden_states)
@@ -195,10 +185,8 @@ class LlamaModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ):
         # self.hidden_states = []
-    
         if inputs_embeds is not None:
             h = inputs_embeds
-            # print("Llama inputs_embeds is ", inputs_embeds)
             _, seq_len, _ = inputs_embeds.shape
         else:
             _, seq_len = input_ids.shape
