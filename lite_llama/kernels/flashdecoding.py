@@ -4,7 +4,7 @@ from torch.cuda.amp import custom_fwd
 
 @triton.jit
 def _flash_decoding_stage1_kernel(
-    Q, K, V, sm_scale,
+    Q, K, V, qk_scale,
 	B_Start_Loc, B_Seqlen, 
 	num_kv_groups, # group of kv heads
     Mid_O, Mid_O_LogExpSum,
@@ -89,7 +89,7 @@ def _flash_decoding_stage1_kernel(
 		# 计算 qk^T
 		# qk = tl.zeros((BLOCK_M_SIZE, BLOCK_N_SIZE), dtype=tl.float32)
 		qk = tl.sum(q[None, :] * k, axis=1)  # [BLOCK_N]
-		qk *= sm_scale
+		qk *= qk_scale
 		qk = tl.where(k_mask, qk, -1.0e8)  # [BLOCK_N]
 
 		# tl.device_print(f"q: ", q)
@@ -149,6 +149,7 @@ def _flash_decoding_stage1_kernel(
 @torch.no_grad()
 def flash_decode_stage1(
     q, k, v,         # Q: [batchs, num_heads, head_dim], K, V: [batchs * seq_len, num_heads, head_dim]
+    qk_scale, 
 	b_start_loc, b_seq_len, 
 	max_actual_seq_len,  # 最大的实际序列长度
     mid_o, mid_o_logexpsum, # Mid_O: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE), head_dim], Mid_O_LogExpSum: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE)]
@@ -160,14 +161,14 @@ def flash_decode_stage1(
 	assert PARTITION_SIZE % BLOCK_N_SIZE == 0, "PARTITION_SIZE 必须是 BLOCK_N_SIZE 的倍数"
 
 	batchs, num_heads, head_dim = q.shape # decode 阶段 q 张量的 seq_len = 1, 这里的 batchs 实际就是 batch_size
-	sm_scale = 1.0 / (head_dim ** 0.5)
+	
 	
 	# grid 配置的并行度比 flashattention1-2 多了 kv cache seq 维度
 	grid = (batchs, num_heads, triton.cdiv(max_actual_seq_len + PARTITION_SIZE - 1, PARTITION_SIZE))
 	num_kv_groups = q.shape[1] // k.shape[1] # num_q_heads // num_k_heads
 
 	_flash_decoding_stage1_kernel[grid](
-		q, k, v, sm_scale,
+		q, k, v, qk_scale,
         b_start_loc, b_seq_len, 
 		num_kv_groups,   # kv 组数量
 		mid_o, mid_o_logexpsum,
@@ -277,6 +278,7 @@ def flash_decode_stage2(
 def flash_decoding(
     q, 			 # q 查询向量，形状为 [bsz, num_head, head_dim]
     k_cache, v_cache, 	     # 键/值向量缓存，形状为 [max_tokens, kv_num_head, head_dim]
+    qk_scale,
     b_start_loc, b_seq_len, # start locations and sequence lengths for kv cache in a batch
     max_actual_seq_len
 ):
@@ -294,7 +296,7 @@ def flash_decoding(
 	mid_o_logexpsum = torch.empty((batchs, num_heads, max_num_partitions), dtype=torch.float32, device=q.device)
 
 	# decode stage 1: attention in partitions
-	flash_decode_stage1(q, k_cache, v_cache, b_start_loc, b_seq_len, max_actual_seq_len, mid_o, mid_o_logexpsum, PARTITION_SIZE)
+	flash_decode_stage1(q, k_cache, v_cache, qk_scale, b_start_loc, b_seq_len, max_actual_seq_len, mid_o, mid_o_logexpsum, PARTITION_SIZE)
     
 	# decode stage 2: reduction among partitions
 	atten_output = torch.empty_like(q)

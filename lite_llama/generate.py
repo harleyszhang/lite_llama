@@ -114,6 +114,16 @@ class GenerateText:
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device = device)
         total_number_tokens = bsz * total_len
 
+        # 填充提示词到 tokens 张量
+        for seq_id, token_ids in enumerate(prompt_tokens):
+            tokens[seq_id, : len(token_ids)] = torch.tensor(token_ids, dtype=torch.long, device = device)
+        
+        # 生成一个布尔张量，它的值为 True 的位置表示输入序列的实际内容（即非填充部分）, 形状为 (batch_size, total_len)
+        input_text_mask = tokens != pad_id
+        eos_reached = torch.zeros(bsz, dtype=torch.bool, device=device)
+        prev_pos = 0 # 初始化上一次生成的位置
+
+        # 一次性分配 bsz * total_len 个索引
         self.model_executor.atten_info.select_index = self.model_executor.kv_mem_manager.alloc_kvcache_index(total_number_tokens)
         select_index = self.model_executor.atten_info.select_index
 
@@ -123,26 +133,18 @@ class GenerateText:
         # print("self.model_executor.atten_info.b_seq_len ", self.model_executor.atten_info.b_seq_len)  
 
         # 初始化起始索引张量
-        start_indexs = torch.zeros(bsz, dtype=torch.long, device=device)
+        self.model_executor.atten_info.start_index = select_index[::total_len].to(torch.int32)
+        # print("start_index: ", self.model_executor.atten_info.start_index)
 
-        # 累加每个批次的实际长度，计算起始索引
-        for i in range(1, bsz):
-            start_indexs[i] = start_indexs[i - 1] + actual_prompt_lens[i - 1] + max_gen_len
+        # start_indexs = torch.zeros(bsz, dtype=torch.long, device=device)
+        # # 累加每个批次的实际长度，计算起始索引
+        # for i in range(1, bsz):
+        #     start_indexs[i] = start_indexs[i - 1] + actual_prompt_lens[i - 1] + max_gen_len
         
-        # 设置起始索引到模型执行器中
-        self.model_executor.atten_info.start_index = start_indexs
-        start_indices = self.model_executor.atten_info.start_index
-        # print("start_indexs: ", self.model_executor.atten_info.start_index)
-
-        # 填充提示词到 tokens 张量
-        for seq_id, token_ids in enumerate(prompt_tokens):
-            tokens[seq_id, : len(token_ids)] = torch.tensor(token_ids, dtype=torch.long, device = device)
+        # # 设置起始索引到模型执行器中
+        # self.model_executor.atten_info.start_index = start_indexs
         
-        # 生成一个布尔张量，它的值为 True 的位置表示输入序列的实际内容（即非填充部分）, 形状为 (batch_size, total_len)
-        input_text_mask = tokens != pad_id
-        eos_reached = torch.zeros(bsz, dtype=torch.bool, device=device)
-        prev_pos = 0 # 初始化上一次生成的位置
-                
+        # 初始化当前已选择的批次项索引
         self.model_executor.atten_info.cur_select_index = select_index.unfold(0, max_prompt_len, total_len).reshape(-1)
         # print("Prefill stage cur_select_index: ", self.model_executor.atten_info.cur_select_index)
         
@@ -154,8 +156,9 @@ class GenerateText:
                 self.model_executor.atten_info.max_actual_seq_len += 1
                 self.model_executor.atten_info.b_seq_len += 1
             
-            b_seq_lens = self.model_executor.atten_info.b_seq_len
-            self.model_executor.atten_info.cur_select_index = (start_indices + b_seq_lens)
+            self.model_executor.atten_info.cur_select_index = (self.model_executor.atten_info.start_index 
+                                                               + self.model_executor.atten_info.b_seq_len)
+            
             # print("Decode stage cur_select_index: ", self.model_executor.atten_info.cur_select_index)
 
             probs = softmax_split(logits[:, -1] / temperature) # torch.softma 将 logits 转换为概率分布。

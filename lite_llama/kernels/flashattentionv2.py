@@ -175,6 +175,7 @@ def flash_attention_v2(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+	qk_scale
     ):
     """Compute Flash-attention, can't support fp32 input
     参数:
@@ -184,6 +185,7 @@ def flash_attention_v2(
         output: Attention ouput tensor, shape is consistent with q. 
         attention_mask: Attention mask matrix broadcastable to (batch, head_size, m_size, n_size).
     """
+    BLOCK_SIZE = 64
     num_kv_groups = q.shape[1] // k.shape[1] # num_q_heads // num_k_heads
     # (B, Seq_Len_Q, Num_Heads_Q, Head_Dim) -> (B, H_Q, Seq_Len_Q, Head_Dim)
     output = torch.empty_like(q)
@@ -194,13 +196,13 @@ def flash_attention_v2(
     assert (
             q.dtype == k.dtype == v.dtype == output.dtype
         ), f"All tensors must have the same dtype: {q.dtype}, {k.dtype}, {v.dtype}, {output.dtype}"
-    
+
     # sequence length of q, also be rows of Q matrix
     bs, n_heads, m_size, head_dim = q.size()
     causal_mask = True
-	
+
     n_size = k.shape[2]
-    qk_scale = 1 / (head_dim ** 0.5) * 1.4426950408889634 # 1/log(2)
+    qk_scale *= 1.4426950408889634 # 1/log(2)
     # BLOCK_M_SIZE = 128
     grid = lambda meta: (triton.cdiv(m_size, meta["BLOCK_M_SIZE"]), bs*n_heads, 1) # 二维 grid
 
@@ -218,8 +220,8 @@ def flash_attention_v2(
         m_size,
         n_size,
         head_dim,
-        64,  # BLOCK_M_SIZE
-        64,  # BLOCK_N_SIZE
+        BLOCK_SIZE,  # BLOCK_M_SIZE
+        BLOCK_SIZE,  # BLOCK_N_SIZE
         qk_scale,
         causal_mask
     )

@@ -443,7 +443,67 @@ Transformers per token latency: 2.139481 ms/token
 ### batch_size = 2
 
 ```bash
+lite_llama inference time: 10.9391 s
+Transformers inference time: 17.3322 s
+lite_llama throughput: 184.11 tokens/s
+Transformers throughput: 117.70 tokens/s
+lite_llama per token latency: 5.431554 ms/token
+Transformers per token latency: 8.496181 ms/token
 
+lite_llama inference time: 11.1826 s
+Transformers inference time: 18.4221 s
+lite_llama throughput: 184.11 tokens/s
+Transformers throughput: 105.80 tokens/s
+lite_llama per token latency: 5.546929 ms/token
+Transformers per token latency: 9.452091 ms/token
+```
+
+`max_gen_len = 1900` 的性能对比:
+
+```bash
+lite_llama inference time: 26.7723 s
+Transformers inference time: 39.3844 s
+lite_llama throughput: 140.97 tokens/s
+Transformers throughput: 59.26 tokens/s
+lite_llama per token latency: 7.093890 ms/token
+Transformers per token latency: 16.874198 ms/token
+```
+
+flash_decoding 内核的 `PARTITION_SIZE` 并不是越大越好, 有最佳取值上限, 取决于所用硬件的 L1 cache 大小。
+
+`B1.small` 等同于 `3090` 的 `1/4` 之一卡的硬件测试环境。
+
+PARTITION_SIZE = 128, `max_gen_len = 1900` 的性能对比:
+
+```bash
+lite_llama inference time: 15.4511 s
+Transformers inference time: 18.2848 s
+lite_llama throughput: 166.78 tokens/s
+Transformers throughput: 92.97 tokens/s
+lite_llama per token latency: 5.995785 ms/token
+Transformers per token latency: 10.755746 ms/token
+```
+
+PARTITION_SIZE = 64, `max_gen_len = 1900` 的性能对比:
+
+```bash
+lite_llama inference time: 13.4375 s
+Transformers inference time: 24.3835 s
+lite_llama throughput: 179.35 tokens/s
+Transformers throughput: 82.60 tokens/s
+lite_llama per token latency: 5.575740 ms/token
+Transformers per token latency: 12.106991 ms/token
+```
+
+PARTITION_SIZE = 32, `max_gen_len = 1900` 的性能对比:
+
+```bash
+lite_llama inference time: 22.1291 s
+Transformers inference time: 18.3136 s
+lite_llama throughput: 170.32 tokens/s
+Transformers throughput: 111.07 tokens/s
+lite_llama per token latency: 5.871336 ms/token
+Transformers per token latency: 9.003733 ms/token
 ```
 
 ### batch_size = 4
@@ -546,6 +606,34 @@ lite_llama throughput: 230.31 tokens/s
 Transformers throughput: 148.91 tokens/s
 lite_llama per token latency: 4.341982 ms/token
 Transformers per token latency: 6.715409 ms/toke
+
+lite_llama inference time: 14.9727 s
+Transformers inference time: 23.6734 s
+lite_llama throughput: 219.60 tokens/s
+Transformers throughput: 153.00 tokens/s
+lite_llama per token latency: 4.553744 ms/token
+Transformers per token latency: 6.535990 ms/token
+
+lite_llama inference time: 17.1098 s
+Transformers inference time: 23.4731 s
+lite_llama throughput: 235.48 tokens/s
+Transformers throughput: 157.97 tokens/s
+lite_llama per token latency: 4.246664 ms/token
+Transformers per token latency: 6.330387 ms/token
+
+lite_llama inference time: 12.0832 s
+Transformers inference time: 23.4623 s
+lite_llama throughput: 236.03 tokens/s
+Transformers throughput: 156.46 tokens/s
+lite_llama per token latency: 4.236730 ms/token
+Transformers per token latency: 6.391267 ms/token
+
+lite_llama inference time: 17.0733 s
+Transformers inference time: 24.0625 s
+lite_llama throughput: 236.16 tokens/s
+Transformers throughput: 141.67 tokens/s
+lite_llama per token latency: 4.234456 ms/token
+Transformers per token latency: 7.058520 ms/token
 ```
 
 ## Llama-3.1-8B 模型性能测试对比

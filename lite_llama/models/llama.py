@@ -29,6 +29,7 @@ class FusedAttention(nn.Module):
         atten_info,
         layer_index:int,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        qk_scale = None,
     ):         
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
 
@@ -46,14 +47,14 @@ class FusedAttention(nn.Module):
 
         combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)  
         combined_kv_reshaped = combined_kv.view(-1, self.num_kv_heads*2, self.head_dim)
-       
+
         atten_info.kv_buffer[layer_index][atten_info.cur_select_index] = combined_kv_reshaped
 
         # 3. sel-attention. flashattention 计算: softmax(qk^t) * v
         xq = xq.transpose(1, 2) # (batch_size, seq_len, self.num_kv_heads, self.head_dim) -> (batch_size, self.num_kv_heads, seq_len, self.head_dim)
         keys = xk.transpose(1, 2)
         values = xv.transpose(1, 2)
-        output = flash_attention_v2(xq, keys, values)
+        output = flash_attention_v2(xq, keys, values, qk_scale)
         output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1))
         
         # 4. attention 输出做线性变换
@@ -65,6 +66,7 @@ class FusedAttention(nn.Module):
         atten_info,
         layer_index:int,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        qk_scale = None, 
     ):
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
         num_kv_heads = self.num_kv_heads
@@ -90,6 +92,7 @@ class FusedAttention(nn.Module):
         # 3. flashattention 计算: softmax(qk^t) * v
         output = flash_decoding(
             xq, k_buffer, v_buffer, 
+            qk_scale,
             atten_info.start_index, 
             atten_info.b_seq_len, 
             atten_info.max_actual_seq_len
@@ -135,6 +138,7 @@ class LlamaDecoderLayer(nn.Module):
         atten_info,
         layer_index: int,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        qk_scale = None,
     ):
         # Normalization before the attention block.
         _, seq_len, _ = x.shape
@@ -143,11 +147,11 @@ class LlamaDecoderLayer(nn.Module):
         # attention 部分计算结果正确, 张量尺寸符合要求
         if seq_len > 1:
             attn_output = self.self_attn.context_forward(
-                hidden_states, atten_info, layer_index, position_embeddings
+                hidden_states, atten_info, layer_index, position_embeddings, qk_scale
             )
         else:
             attn_output = self.self_attn.token_forward(
-                hidden_states, atten_info, layer_index, position_embeddings
+                hidden_states, atten_info, layer_index, position_embeddings, qk_scale
             )
         
         # Normalization before the feed forward block.
@@ -166,6 +170,9 @@ class LlamaModel(nn.Module):
         self.config = config
         self.vocab_size = config.vocab_size
         self.num_layers = config.num_layers
+        self.head_dim = config.head_dim if config.head_dim is not None else config.hidden_size // config.num_heads
+        self.qk_scale = 1.0 / (self.head_dim ** 0.5)
+
         # self.hidden_states = []
 
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
@@ -200,7 +207,7 @@ class LlamaModel(nn.Module):
         
         for i, layer in enumerate(self.layers): # Consecutively apply all the encoder layers
             # self.hidden_states.append(h)
-            h = layer(h, atten_info, i, position_embeddings)  # h.shape [batch_size, seq_len, hidden_dim]
+            h = layer(h, atten_info, i, position_embeddings, self.qk_scale)  # h.shape [batch_size, seq_len, hidden_dim]
             # assert not torch.isnan(h).any(), f"In {i} decoder layer, h tensor contains NaN values!"
 
         h = rmsnorm_fwd(h, self.norm_weight.data, eps=self.config.rms_norm_eps)
