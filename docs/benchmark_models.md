@@ -3,7 +3,7 @@
 
 ### Llama-3.2-1B 模型性能测试对比
 
-运行性能测试对比 `python benchmark.py`，lite_llama 的运行速度是 transformers 的 `2.4x` 倍。
+趋动云 `B1.small` 等同于 `3090` 的 `1/4` 之一卡的硬件测试环境。运行性能测试对比 `python benchmark.py`，lite_llama 的运行速度最高是 transformers 的 `2.6x` 倍。
 
 batch_size = 2 的提示词：
 
@@ -17,19 +17,19 @@ prompts: List[str] = [
 `max_gen_len = 1900` 时，benchmark 性能测试运行结果:
 
 ```bash
-lite_llama inference time: 26.7723 s
-Transformers inference time: 39.3844 s
-lite_llama throughput: 140.97 tokens/s
-Transformers throughput: 59.26 tokens/s
-lite_llama per token latency: 7.093890 ms/token
-Transformers per token latency: 16.874198 ms/token
+lite_llama inference time: 8.8116 s
+Transformers inference time: 16.1942 s
+lite_llama throughput: 481.50 tokens/s
+Transformers throughput: 186.28 tokens/s
+lite_llama per token latency: 2.07 ms/token
+Transformers per token latency: 5.37 ms/token
 ```
 
 ### Llama-3.2-3B 模型性能测试对比
 
 /gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct
 
-运行性能测试对比 `python benchmark.py`，lite_llama 的运行速度是 transformers 的 `3.4x` 倍。
+趋动云 `B1.big` 等同于 `3090` 卡的硬件测试环境。运行性能测试对比 `python benchmark.py`，lite_llama 的运行速度最高是 transformers 的 `3.4x` 倍。
 
 batch_size = 8 的提示词：
 
@@ -49,12 +49,12 @@ prompts: List[str] = [
 `max_gen_len = 1900` 时，benchmark 性能测试运行结果:
 
 ```bash
-lite_llama inference time: 33.6013 s
-Transformers inference time: 58.5963 s
-lite_llama throughput: 437.60 tokens/s
-Transformers throughput: 127.88 tokens/s
-lite_llama per token latency: 2.285179 ms/token
-Transformers per token latency: 7.820134 ms/token
+lite_llama inference time: 32.0826 s
+Transformers inference time: 51.2225 s
+lite_llama throughput: 458.97 tokens/s
+Transformers throughput: 134.37 tokens/s
+lite_llama per token latency: 2.178783 ms/token
+Transformers per token latency: 7.441883 ms/token
 ```
 
 batch_size = 12 的提示词：

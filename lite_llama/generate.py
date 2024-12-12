@@ -71,6 +71,7 @@ class GenerateText:
             device = device
         )
         self.model_config = self.model_executor.model_config
+        assert self.model_config.vocab_size != -1, "Vocab size must be set"
         self.tokenizer = self.load_tokenizer(tokenizer_path)
     
     def load_tokenizer(self, pretrained_model_name_or_path):

@@ -162,7 +162,6 @@ def flash_decode_stage1(
 
 	batchs, num_heads, head_dim = q.shape # decode 阶段 q 张量的 seq_len = 1, 这里的 batchs 实际就是 batch_size
 	
-	
 	# grid 配置的并行度比 flashattention1-2 多了 kv cache seq 维度
 	grid = (batchs, num_heads, triton.cdiv(max_actual_seq_len + PARTITION_SIZE - 1, PARTITION_SIZE))
 	num_kv_groups = q.shape[1] // k.shape[1] # num_q_heads // num_k_heads
@@ -284,7 +283,7 @@ def flash_decoding(
 ):
 	# q.view(-1, num_heads, head_dim)
 	assert q.shape[-1] == k_cache.shape[-1] == v_cache.shape[-1]
-	PARTITION_SIZE = 128
+	PARTITION_SIZE = 256
 	batchs, num_heads, head_dim = q.shape # decode 阶段 q 的 seq_len = 1, 
 	
 	# 最大可用分区数量计算

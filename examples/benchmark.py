@@ -169,7 +169,6 @@ def compare_inference_speed(
     del lite_llama_generator
     torch.cuda.empty_cache() # 使用完成后释放 lite_llama_generator 占用的显存
 
-
     # 2. transformers inference
     hf_results, hf_time, hf_tokens, prompts_tokens, hf_pt_latency = transformers_inference(
         hf_model_name, update_prompts, temperature, top_p, max_gen_len if max_gen_len else 64, device=device
@@ -204,20 +203,20 @@ def compare_inference_speed(
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    # prompts: List[str] = [
-    #     "I believe the meaning of life is to find happiness in the simple things. but how to achieve the meaning of life?",
-    #     "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
-    #     "Can you introduce the History of the American Civil War. ",
-    #     "who is the first president of the United States and what's his life story?",
-    #     "How to learn c++, give me some code example.",
-    #     "How to learn python, give me some code examples.",
-    #     "How to learn llm, please introduce transformer architecture ",
-    #     "How to learn cnn, please introduce resnet architecture and give code ",
-    #     "How to learn cuda programming, give me some code example.",
-    #     "How to learn rust, give me some code examples.",
-    #     "How to learn java, give me some code example.",
-    #     "How to learn linux c, give me some code examples.",
-    # ]
+    prompts: List[str] = [
+        "I believe the meaning of life is to find happiness in the simple things. but how to achieve the meaning of life?",
+        "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
+        "Can you introduce the History of the American Civil War. ",
+        "who is the first president of the United States and what's his life story?",
+        "How to learn c++, give me some code example.",
+        "How to learn python, give me some code examples.",
+        "How to learn llm, please introduce transformer architecture ",
+        "How to learn cnn, please introduce resnet architecture and give code ",
+        "How to learn cuda programming, give me some code example.",
+        "How to learn rust, give me some code examples.",
+        "How to learn java, give me some code example.",
+        "How to learn linux c, give me some code examples.",
+    ]
 
     # prompts: List[str] = [
     #     "How to learn cnn, please introduce resnet architecture and give code ",
@@ -231,16 +230,16 @@ def main():
     #     "How to learn java, give me some code example.",
     # ]
 
-    prompts: List[str] = [
-        "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.",
-        "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
-        "A Complete Introduction to the History of the American Civil War",
-        "Roosevelt was the first president of the United States, he has a lot of information on the early history of the United States. He was born in 1883,",
-        "How to learn c++, give me some code example.",
-        "How to learn python, give me some code examples.",
-        "How to learn llm, please introduce transformer architecture ",
-        "How to learn cnn, please introduce resnet architecture and give code ",
-    ]
+    # prompts: List[str] = [
+    #     "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.",
+    #     "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
+    #     "A Complete Introduction to the History of the American Civil War",
+    #     "Roosevelt was the first president of the United States, he has a lot of information on the early history of the United States. He was born in 1883,",
+    #     "How to learn c++, give me some code example.",
+    #     "How to learn python, give me some code examples.",
+    #     "How to learn llm, please introduce transformer architecture ",
+    #     "How to learn cnn, please introduce resnet architecture and give code ",
+    # ]
 
     # prompts: List[str] = [
     #     "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person ",

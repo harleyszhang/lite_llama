@@ -165,8 +165,6 @@ class LlamaModel(nn.Module):
     def __init__(self, config: LlamaConfig):
         super().__init__()
 
-        assert config.vocab_size != -1, "Vocab size must be set"
-
         self.config = config
         self.vocab_size = config.vocab_size
         self.num_layers = config.num_layers

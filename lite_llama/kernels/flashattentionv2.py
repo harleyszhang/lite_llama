@@ -185,12 +185,9 @@ def flash_attention_v2(
         output: Attention ouput tensor, shape is consistent with q. 
         attention_mask: Attention mask matrix broadcastable to (batch, head_size, m_size, n_size).
     """
-    BLOCK_SIZE = 64
+    BLOCK_SIZE = 64 # default: BLOCK_M_SIZE = 64
     num_kv_groups = q.shape[1] // k.shape[1] # num_q_heads // num_k_heads
-    # (B, Seq_Len_Q, Num_Heads_Q, Head_Dim) -> (B, H_Q, Seq_Len_Q, Head_Dim)
     output = torch.empty_like(q)
-    assert q.device.type == 'cuda', "Input tensor q must be on CUDA device"
-    assert k.device.type == 'cuda', "Input tensor keys must be on CUDA device"
 
     assert q.shape[-1] == k.shape[-1] == v.shape[-1]
     assert (
@@ -203,8 +200,8 @@ def flash_attention_v2(
 
     n_size = k.shape[2]
     # qk_scale *= 1.4426950408889634 # 1/log(2)
-    # BLOCK_M_SIZE = 128
-    grid = lambda meta: (triton.cdiv(m_size, meta["BLOCK_M_SIZE"]), bs*n_heads, 1) # 二维 grid
+    
+    grid = lambda meta: (triton.cdiv(m_size, BLOCK_SIZE), bs*n_heads, 1) # 二维 grid
 
     flash_attention_v2_kernel[grid](
         q,
