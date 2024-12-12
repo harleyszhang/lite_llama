@@ -283,7 +283,7 @@ def flash_decoding(
 ):
 	# q.view(-1, num_heads, head_dim)
 	assert q.shape[-1] == k_cache.shape[-1] == v_cache.shape[-1]
-	PARTITION_SIZE = 256
+	PARTITION_SIZE = 128
 	batchs, num_heads, head_dim = q.shape # decode 阶段 q 的 seq_len = 1, 
 	
 	# 最大可用分区数量计算
