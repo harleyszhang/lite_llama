@@ -202,7 +202,7 @@ def flash_attention_v2(
     causal_mask = True
 
     n_size = k.shape[2]
-    qk_scale *= 1.4426950408889634 # 1/log(2)
+    # qk_scale *= 1.4426950408889634 # 1/log(2)
     # BLOCK_M_SIZE = 128
     grid = lambda meta: (triton.cdiv(m_size, meta["BLOCK_M_SIZE"]), bs*n_heads, 1) # 二维 grid
 

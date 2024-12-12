@@ -40,7 +40,6 @@ class Attention(nn.Module):
         # if torch.isnan(flash_attention_v2_out).any(): # 检查 NaNs
         #     raise ValueError(f"NaNs detected in flash_attention_v2_out output at layer {layer_index}")
         
-        # (B, H_Q, Seq_Len_Q, Head_Dim) -> (B, Seq_Len_Q, num_heads, Head_Dim) -> (B, Seq_Len_Q, Hidden_Size)
         flash_attention_v2_out = (flash_attention_v2_out.transpose(1, 2).contiguous().view(batch_size, seq_len, -1))
         
         return flash_attention_v2_out

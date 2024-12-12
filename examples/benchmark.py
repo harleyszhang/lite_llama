@@ -140,6 +140,7 @@ def compare_inference_speed(
     max_gen_len: Optional[int],
     lite_llama_ckpt_dir: str,
     hf_model_name: str,
+    print_result=False,
     device: str = "cuda"
 ):
     """
@@ -192,12 +193,13 @@ def compare_inference_speed(
     print(f"Transformers per token latency: {hf_pt_latency * 1000:.6f} ms/token")
 
     # 打印部分推理结果对比
-    for i, (prompt, litellama_res, hf_res) in enumerate(zip(prompts, lite_llama_results, hf_results)):
-        # print(f"\n[Prompt {i}]:\n{prompt}")
-        # if i // 2 == 0:
-        print("\n[lite_llama]: {}".format(litellama_res))
-        print("\n[Transformers]: {}".format(hf_res['generation']))
-        print("\n" + "="*40 + "\n")
+    if print_result:
+        for i, (prompt, litellama_res, hf_res) in enumerate(zip(prompts, lite_llama_results, hf_results)):
+            # print(f"\n[Prompt {i}]:\n{prompt}")
+            if i // 2 == 0: # 省略部分打印
+                print("\n[lite_llama]: {}".format(litellama_res))
+                print("\n[Transformers]: {}".format(hf_res['generation']))
+                print("\n" + "="*40 + "\n")
 
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -270,9 +272,10 @@ def main():
         temperature=0.6,
         top_p=0.9,
         max_seq_len=2048,
-        max_gen_len=1024,
+        max_gen_len=1900,
         lite_llama_ckpt_dir=checkpoints_dir,
         hf_model_name=hf_model_name,
+        print_result=False,
         device=device
     )
 

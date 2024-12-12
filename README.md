@@ -4,13 +4,13 @@ The llama model inference lite framework by triton.
 
 ## 特性
 
-- 支持最新的 `llama3`、`Qwen2.5`、`Llava1.5` 模型推理，支持 `top-p` 采样, 支持流式输出。
+- 相比 transformers, llama3 1B 和 3B 模型加速比最高达 3.4x倍。
+- 支持最新的 `llama3`、`Qwen2.5`、`Llava1.5` 模型推理，支持 `top-p` 采样, 支持流式输出,。
 - 支持 GQA、cuda graph 优化（有限制）。
 - 支持 `flashattention1`、`flashattention2`、 `flashdecoding`。
 - 支持 kv cache 的高效动态管理（`auto tokenattnetion`）。
 - 支持算子融合，如：逐元素相乘 `*` 和 `silu` 的融合。
 - 部分自定义算子如：`rmsnorm`、`rope`、`逐元素相乘` 等采用高效 `triton` 内核实现
-
 
 ## GPU Information
 
@@ -144,6 +144,19 @@ INFO:lite_llama.generate:Decode stage tokens per second : 217.84 tokens/s
 ```
 
 6, 一个简单的优化, 使用 `GQA_KV_heads_index` 替代 `repeat_kv` 函数。
+
+7, 一个常见且简单的优化, kv 线性层融合。
+
+8, 重构并优化 `MHA` 模块：
+
+- token_attention 支持直接传入 kv_cache 索引和序列实际长度 seq_len, 减少了 kv cache 在 `MHA` 模块中的 `concat` 和 `view` 操作，并实现了 `Nopad` token_attention。
+- 将每次 decode 过程分配对应 kv cache 索引，改为在模型推理之前一次性分配连续的 `(max(promptes_len) + max_gen_len) * batch_size` 个 tokens 的 kv cache 空间。
+
+## TODO
+
+- 连续批处理。
+- 支持 AWQ 和 SmoothQuant 量化。
+- 重构代码以及修复 cuda graph 在 使用 AutoTokenAttention 优化后无法正常运行的问题。
 
 ## Acknowledgement
 

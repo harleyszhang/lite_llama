@@ -199,6 +199,9 @@ class LlamaModel(nn.Module):
             _, seq_len = input_ids.shape
             h = self.get_input_embeddings(input_ids)
         
+        if seq_len > 1:
+            self.qk_scale *= 1.4426950408889634
+        
         if position_ids is None:
             cache_position = torch.arange(start_pos, start_pos + seq_len, device=input_ids.device)
             position_ids = cache_position.unsqueeze(0)

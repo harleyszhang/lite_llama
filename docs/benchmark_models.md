@@ -1,12 +1,95 @@
 
-## Llama-3.2-1B 模型性能测试对比
+## benchmark 性能测试
+
+### Llama-3.2-1B 模型性能测试对比
+
+运行性能测试对比 `python benchmark.py`，lite_llama 的运行速度是 transformers 的 `2.4x` 倍。
+
+batch_size = 2 的提示词：
+
+```bash
+prompts: List[str] = [
+    "How to learn cnn, please introduce resnet architecture and give code ",
+    "How to learn cuda programming, give me some code example.",
+]
+```
+
+`max_gen_len = 1900` 时，benchmark 性能测试运行结果:
+
+```bash
+lite_llama inference time: 26.7723 s
+Transformers inference time: 39.3844 s
+lite_llama throughput: 140.97 tokens/s
+Transformers throughput: 59.26 tokens/s
+lite_llama per token latency: 7.093890 ms/token
+Transformers per token latency: 16.874198 ms/token
+```
+
+### Llama-3.2-3B 模型性能测试对比
 
 /gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct
 
-目前只做了简单常见 benchmark, 运行性能测试对比 `python benchmark.py`，lite_llama 的运行速度是 transformers 的 `1.7x` 倍。
+运行性能测试对比 `python benchmark.py`，lite_llama 的运行速度是 transformers 的 `3.4x` 倍。
 
+batch_size = 8 的提示词：
 
-### 推理结果
+```bash
+prompts: List[str] = [
+        "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.",
+        "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
+        "A Complete Introduction to the History of the American Civil War",
+        "Roosevelt was the first president of the United States, he has a lot of information on the early history of the United States. He was born in 1883,",
+        "How to learn c++, give me some code example.",
+        "How to learn python, give me some code examples.",
+        "How to learn llm, please introduce transformer architecture ",
+        "How to learn cnn, please introduce resnet architecture and give code ",
+    ]
+```
+
+`max_gen_len = 1900` 时，benchmark 性能测试运行结果:
+
+```bash
+lite_llama inference time: 33.6013 s
+Transformers inference time: 58.5963 s
+lite_llama throughput: 437.60 tokens/s
+Transformers throughput: 127.88 tokens/s
+lite_llama per token latency: 2.285179 ms/token
+Transformers per token latency: 7.820134 ms/token
+```
+
+batch_size = 12 的提示词：
+
+```bash
+prompts: List[str] = [
+    "I believe the meaning of life is to find happiness in the simple things. but how to achieve the meaning of life?",
+    "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
+    "Can you introduce the History of the American Civil War. ",
+    "who is the first president of the United States and what's his life story?",
+    "How to learn c++, give me some code example.",
+    "How to learn python, give me some code examples.",
+    "How to learn llm, please introduce transformer architecture ",
+    "How to learn cnn, please introduce resnet architecture and give code ",
+    "How to learn cuda programming, give me some code example.",
+    "How to learn rust, give me some code examples.",
+    "How to learn java, give me some code example.",
+    "How to learn linux c, give me some code examples.",
+]
+```
+
+`max_gen_len = 1900` 时，benchmark 性能测试运行结果:
+
+```bash
+lite_llama inference time: 31.5618 s
+Transformers inference time: 55.1494 s
+lite_llama throughput: 711.59 tokens/s
+Transformers throughput: 220.91 tokens/s
+lite_llama per token latency: 1.405308 ms/token
+Transformers per token latency: 4.526747 ms/token
+```
+
+## Llama-3.2-1B 模型性能测试对比
+
+### 推理结果历史记录
 
 ```bash
 ite_llama inference time: 2.9248 s
@@ -150,47 +233,11 @@ Roosevelt's leadership during World War II helped to shape
 ========================================
 ```
 
-## Qwen2.5-3B 模型性能测试对比
-
-```bash
-lite_llama inference time: 6.0808 s
-Transformers inference time: 3.7247 s
-lite_llama throughput: 94.07 tokens/s
-Transformers throughput: 137.46 tokens/s
-lite_llama per token latency: 10.630839 ms/token
-Transformers per token latency: 7.274835 ms/token
-```
-
-### ### batch_size = 8, 历史记录
+### batch_size = 8
 
 详细运行结果如下所示:
 
 ```bash
-lite_llama inference time: 3.1476 s
-Transformers inference time: 3.5534 s
-lite_llama throughput: 381.25 tokens/s
-Transformers throughput: 210.22 tokens/s
-
-lite_llama inference time: 3.1759 s
-Transformers inference time: 3.6203 s
-lite_llama throughput: 360.21 tokens/s
-Transformers throughput: 230.37 tokens/s
-
-lite_llama inference time: 2.9175 s
-Transformers inference time: 3.6375 s
-lite_llama throughput: 392.12 tokens/s
-Transformers throughput: 213.33 tokens/s
-
-lite_llama inference time: 3.0007 s
-Transformers inference time: 4.7675 s
-lite_llama throughput: 400.57 tokens/s
-Transformers throughput: 214.79 tokens/s
-
-lite_llama inference time: 2.9248 s
-Transformers inference time: 3.9163 s
-lite_llama throughput: 410.28 tokens/s
-Transformers throughput: 184.36 tokens/s
-
 # 生成长度变成 1024
 lite_llama inference time: 4.9287 s
 Transformers inference time: 7.6845 s
@@ -634,6 +681,34 @@ lite_llama throughput: 236.16 tokens/s
 Transformers throughput: 141.67 tokens/s
 lite_llama per token latency: 4.234456 ms/token
 Transformers per token latency: 7.058520 ms/token
+```
+
+### batch_size = 8
+
+提示词：
+
+```bash
+prompts: List[str] = [
+        "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.",
+        "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
+        "A Complete Introduction to the History of the American Civil War",
+        "Roosevelt was the first president of the United States, he has a lot of information on the early history of the United States. He was born in 1883,",
+        "How to learn c++, give me some code example.",
+        "How to learn python, give me some code examples.",
+        "How to learn llm, please introduce transformer architecture ",
+        "How to learn cnn, please introduce resnet architecture and give code ",
+    ]
+```
+
+benchmark 性能测试运行结果:
+
+```bash
+lite_llama inference time: 25.2621 s
+Transformers inference time: 57.7682 s
+lite_llama throughput: 377.28 tokens/s
+Transformers throughput: 131.92 tokens/s
+lite_llama per token latency: 2.650524 ms/token
+Transformers per token latency: 7.580133 ms/token
 ```
 
 ## Llama-3.1-8B 模型性能测试对比

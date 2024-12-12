@@ -135,14 +135,6 @@ class GenerateText:
         # 初始化起始索引张量
         self.model_executor.atten_info.start_index = select_index[::total_len].to(torch.int32)
         # print("start_index: ", self.model_executor.atten_info.start_index)
-
-        # start_indexs = torch.zeros(bsz, dtype=torch.long, device=device)
-        # # 累加每个批次的实际长度，计算起始索引
-        # for i in range(1, bsz):
-        #     start_indexs[i] = start_indexs[i - 1] + actual_prompt_lens[i - 1] + max_gen_len
-        
-        # # 设置起始索引到模型执行器中
-        # self.model_executor.atten_info.start_index = start_indexs
         
         # 初始化当前已选择的批次项索引
         self.model_executor.atten_info.cur_select_index = select_index.unfold(0, max_prompt_len, total_len).reshape(-1)
