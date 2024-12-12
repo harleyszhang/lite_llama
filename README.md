@@ -10,7 +10,7 @@ The llama model inference lite framework by triton.
 - 支持 `flashattention1`、`flashattention2`、 `flashdecoding`。
 - 支持 kv cache 的高效动态管理（`auto tokenattnetion`）。
 - 支持算子融合，如：逐元素相乘 `*` 和 `silu` 的融合, k v 线性层融合。
-- 部分自定义算子如：`rmsnorm`、`rope`、`softmax`、`逐元素相乘` 等采用高效 `triton` 内核实现
+- 部分自定义算子如：`rmsnorm`、`rope`、`softmax`、`逐元素相乘` 等采用高效 `triton` 内核实现。
 
 ## GPU Information
 
@@ -61,7 +61,7 @@ llama3.2-1.5B-Instruct 模型流式输出结果测试：
 
 ## 如何使用
 
-推荐 cuda 版本 12.0 及以上。~~下载 [llama3.2-1B-Instruct 模型](https://pan.quark.cn/s/6eef1f2921e0)并放到指定 `cli.py` 文件的指定 `checkpoints_dir` 目录~~。运行 `python lite_llama/tests/test_weight_convert.py` 文件进行模型权重转换。
+推荐 cuda 版本 12.0 及以上。~~下载 [llama3.2-1B-Instruct 模型](https://pan.quark.cn/s/6eef1f2921e0)并放到指定 `cli.py` 文件的指定 `checkpoints_dir` 目录~~。`cli.py` 运行前，需要先运行 `python lite_llama/tests/test_weight_convert.py` 将 hf 模型权重转换为 `lite_llama` 权重格式。
 
 ```bash
 apt update
