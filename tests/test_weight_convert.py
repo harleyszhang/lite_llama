@@ -10,13 +10,20 @@ from lite_llama.models.llava import LlavaLlama
 from lite_llama.models.model_config import LlamaConfig
 from transformers import LlavaConfig
 
-checkpoints_dir = "/gemini/code/llm_weights/Llama-3.2-3B-hf/"
+checkpoints_dir = "/gemini/code/llm_weights/llava-hf/llava-1.5-7b-hf"
 
-model = AutoModelForCausalLM.from_pretrained(
-    checkpoints_dir, 
-    torch_dtype=torch.float16, 
-    low_cpu_mem_usage=True,
-).to("cuda")
+if "llava" in checkpoints_dir.lower():
+    model = LlavaForConditionalGeneration.from_pretrained( # LlavaForConditionalGeneration
+        checkpoints_dir, 
+        torch_dtype=torch.float16, 
+        low_cpu_mem_usage=True,
+    ).to("cuda")
+else:
+    model = AutoModelForCausalLM.from_pretrained( # LlavaForConditionalGeneration
+        checkpoints_dir, 
+        torch_dtype=torch.float16, 
+        low_cpu_mem_usage=True,
+    ).to("cuda")
 
 hf_sd = model.state_dict()
 

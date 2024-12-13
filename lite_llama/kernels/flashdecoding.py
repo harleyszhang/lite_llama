@@ -103,6 +103,9 @@ def _flash_decoding_stage1_kernel(
 		# 加载 K 和 V
 		k = tl.load(k_ptrs, mask=k_mask[:, None], other=0.0)  # [BLOCK_N, BLOCK_DMODEL]
 		v = tl.load(v_ptrs, mask=k_mask[:, None], other=0.0)  # [BLOCK_N, BLOCK_DMODEL]
+		# if head_pid == 3:
+		# 	tl.device_print(f"k", k)
+		# 	tl.device_print(f"v", v)
 
 		# 计算 qk^T
 		# qk = tl.zeros((BLOCK_M_SIZE, BLOCK_N_SIZE), dtype=tl.float32)
@@ -160,6 +163,10 @@ def _flash_decoding_stage1_kernel(
 	tl.store(Mid_O + off_mid_o, part_atten_out, mask=need_store)
 	tl.store(Mid_O_LogExpSum + off_mid_o_les, logexpsum, mask=need_store)
 
+	# need_store = tl.where(num_blocks == 0, 0, 1)
+	# for _ in range(0, need_store, 1):
+	# 	tl.store(Mid_O + off_mid_o, acc / d_i)
+	# 	tl.store(Mid_O_LogExpSum + off_mid_o_les, m_i + tl.log(d_i))
 
 @torch.no_grad()
 def flash_decode_stage1(

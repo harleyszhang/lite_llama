@@ -25,7 +25,7 @@ class Attention(nn.Module):
         layer_index:int,
         qk_scale = None,
     ) -> torch.Tensor:
-        # xq = xq.to(torch.float16)
+        xq = xq.to(torch.float16)
         batch_size, seq_len, num_heads_q, head_dim = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
         
         # 1. 获取 prefill 阶段的 select_index, 并更新 kv cache 张量
@@ -51,11 +51,11 @@ class Attention(nn.Module):
         layer_index:int,
         qk_scale = None, # 计算 attention 分数缩放的系数
     ) -> torch.Tensor:
-        # xq = xq.to(torch.float16)
+        xq = xq.to(torch.float16)
         batch_size, seq_len, num_heads_q, head_dim = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
 
         # 1. 先获取 kv 缓冲向量再更新 kv 向量
-        xq = xq.view(batch_size, self.num_heads_q, self.head_dim)
+        xq = xq.view(batch_size, num_heads_q, self.head_dim)
         k_buffer = atten_info.kv_buffer[layer_index][:, :self.num_kv_heads, :] # k_buffer and v_buffer shape is  torch.Size([6000, 8, 64]) torch.Size([6000, 8, 64])
         v_buffer = atten_info.kv_buffer[layer_index][:, self.num_kv_heads:, :]
 

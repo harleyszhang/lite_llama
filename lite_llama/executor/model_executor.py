@@ -160,7 +160,7 @@ class ModelExecutor:
     def _load_model_config(checkpoints_dir, max_seq_len, device="cuda"):
         
         params_path = Path(checkpoints_dir) / "config.json" # 定义模型配置文件
-        assert params_path.exists(), f"params.json not found in {checkpoints_dir}"
+        assert params_path.exists(), f"config.json not found in {checkpoints_dir}"
         try:
             with open(params_path, "r") as f:
                 params = json.load(f)
