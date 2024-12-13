@@ -108,13 +108,13 @@ class GenerateText:
         bsz = len(prompt_tokens) # 批量大小
         max_prompt_len = max(len(t) for t in prompt_tokens)
         total_len = min(self.model_config.max_seq_len, max_gen_len + max_prompt_len)
+        total_number_tokens = bsz * total_len
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
         self.model_executor.atten_info.max_actual_seq_len = max_prompt_len
 
         # 预分配tokens张量
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device = device)
-        total_number_tokens = bsz * total_len
-
+        
         # 填充提示词到 tokens 张量
         for seq_id, token_ids in enumerate(prompt_tokens):
             tokens[seq_id, : len(token_ids)] = torch.tensor(token_ids, dtype=torch.long, device = device)

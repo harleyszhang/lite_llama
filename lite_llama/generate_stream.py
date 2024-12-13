@@ -110,21 +110,39 @@ class GenerateStreamText:
         说明：
             该方法在生成循环中，每生成一个新 token, 就立即输出对应的文本和概率(如果需要）。
         """
-        model_config = self.model_config
         bsz = len(prompt_tokens)
 
         min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
-        assert max_prompt_len <= model_config.max_seq_len
-        total_len = min(model_config.max_seq_len, max_gen_len + max_prompt_len)
-        
+        assert max_prompt_len <= self.model_config.max_seq_len
+        total_len = min(self.model_config.max_seq_len, max_gen_len + max_prompt_len)
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+        
+        # 预分配tokens张量
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
         input_text_mask = tokens != pad_id
         eos_reached = torch.tensor([False] * bsz, device="cuda")
-
+        
+        # 填充提示词到 tokens 张量
         for k, t in enumerate(prompt_tokens):
             tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+
+        # 一次性分配 bsz * total_len 个索引
+        self.model_executor.atten_info.select_index = self.model_executor.kv_mem_manager.alloc_kvcache_index(total_number_tokens)
+        select_index = self.model_executor.atten_info.select_index
+
+        # 初始化每个批次项的序列长度
+        actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=device)
+        self.model_executor.atten_info.b_seq_len = actual_prompt_lens
+        # print("self.model_executor.atten_info.b_seq_len ", self.model_executor.atten_info.b_seq_len)  
+
+        # 初始化起始索引张量
+        self.model_executor.atten_info.start_index = select_index[::total_len].to(torch.int32)
+        # print("start_index: ", self.model_executor.atten_info.start_index)
+        
+        # 初始化当前已选择的批次项索引
+        self.model_executor.atten_info.cur_select_index = select_index.unfold(0, max_prompt_len, total_len).reshape(-1)
+        # print("Prefill stage cur_select_index: ", self.model_executor.atten_info.cur_select_index)
 
         prev_pos = 0
         last_yielded_pos = [len(prompt_tokens[i]) if not echo else 0 for i in range(bsz)] # 初始化每个样本已输出的位置
@@ -134,8 +152,15 @@ class GenerateStreamText:
 
         for cur_pos in range(min_prompt_len, total_len):
             input_ids = tokens[:, prev_pos: cur_pos]
-            logits, select_index = self.model_executor.forward(input_ids, prev_pos)
+            logits = self.model_executor.forward(input_ids, prev_pos)
 
+            if prev_pos > 0:
+                self.model_executor.atten_info.max_actual_seq_len += 1
+                self.model_executor.atten_info.b_seq_len += 1
+            
+            self.model_executor.atten_info.cur_select_index = (self.model_executor.atten_info.start_index 
+                                                               + self.model_executor.atten_info.b_seq_len)
+            
             if temperature > 0:
                 # NOTE: logits[:, -1] 表示选择的是最后一个位置（seq_len 维度的最后一项）对应的 logits。
                 # NOTE: 在生成模型中的 prefill 阶段，我们只关心当前生成的最后一个 token 的分布。

@@ -25,7 +25,7 @@ class Attention(nn.Module):
         layer_index:int,
         qk_scale = None,
     ) -> torch.Tensor:
-        xq = xq.to(torch.float16)
+        # xq = xq.to(torch.float16)
         batch_size, seq_len, num_heads_q, head_dim = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
         
         # 1. 获取 prefill 阶段的 select_index, 并更新 kv cache 张量
@@ -51,7 +51,7 @@ class Attention(nn.Module):
         layer_index:int,
         qk_scale = None, # 计算 attention 分数缩放的系数
     ) -> torch.Tensor:
-        xq = xq.to(torch.float16)
+        # xq = xq.to(torch.float16)
         batch_size, seq_len, num_heads_q, head_dim = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
 
         # 1. 先获取 kv 缓冲向量再更新 kv 向量
@@ -141,12 +141,16 @@ class Qwen2Attention(nn.Module):
                 atten_info, layer_index,
                 qk_scale,
             )
+            if torch.isnan(attn_output).any(): # 检查 NaNs
+                raise ValueError(f"NaNs detected in context_forward output at layer {layer_index}")    
         else:
             attn_output = self.attn.token_forward(
                 xq, xk, xv, 
                 atten_info, layer_index,
                 qk_scale,
             )
+            if torch.isnan(attn_output).any(): # 检查 NaNs
+                raise ValueError(f"NaNs detected in token_forward output at layer {layer_index}")    
 
         # 进行张量矩阵乘法, 需要对原始的 o_proj_weight 权重进行转置, attn_output shape is [batch_size, seq_len, hidden_size]
         output = F.linear(attn_output, self.o_proj_weight)
@@ -199,7 +203,7 @@ class Qwen2DecoderLayer(nn.Module):
         # 调用 attention 模块
         attn_output = self.self_attn(hidden_states, atten_info, layer_index, position_embeddings, qk_scale)
         if torch.isnan(attn_output).any(): # 检查 NaNs
-            raise ValueError(f"NaNs detected in feedforward output at layer {layer_index}")    
+            raise ValueError(f"NaNs detected in attn_output output at layer {layer_index}")    
         h = x + attn_output  # 残差连接
 
         hidden_states = rmsnorm_fwd(h, self.post_attention_layernorm_weight.data, eps=self.rmsnorm_eps)
@@ -256,8 +260,10 @@ class Qwen2Model(nn.Module):
             h = self.get_input_embeddings(input_ids)
 
         if seq_len > 1:
-            self.qk_scale *= 1.4426950408889634
-        
+            qk_scale = self.qk_scale * 1.4426950408889634
+        else:
+            qk_scale = self.qk_scale
+
         if position_ids is None:
             cache_position = torch.arange(start_pos, start_pos + seq_len, device=h.device)
             position_ids = cache_position.unsqueeze(0)
@@ -267,7 +273,7 @@ class Qwen2Model(nn.Module):
         # Consecutively apply all the encoder layers
         for i, layer in enumerate(self.layers):            
             # self.hidden_states.append(h)
-            h = layer(h, atten_info, i, position_embeddings, self.qk_scale)  # h.shape [batch_size, seq_len, hidden_dim]
+            h = layer(h, atten_info, i, position_embeddings, qk_scale)  # h.shape [batch_size, seq_len, hidden_dim]
 
         h = rmsnorm_fwd(h, self.norm_weight, eps=self.rmsnorm_eps)
         # self.hidden_states.append(h)

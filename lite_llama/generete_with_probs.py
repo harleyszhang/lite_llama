@@ -95,25 +95,47 @@ class GenerateText:
         echo: bool = False,
         device = "cuda"
     ) -> Tuple[List[List[int]], Optional[List[List[float]]]]:
-        model_config = self.model_config
+        """
+        基于提供的提示词 (prompts) 使用语言生成模型生成文本序列。
+        """
         bsz = len(prompt_tokens)
-
         min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
-        assert max_prompt_len <= model_config.max_seq_len
-        total_len = min(model_config.max_seq_len, max_gen_len + max_prompt_len)
-
+        assert max_prompt_len <= self.model_config.max_seq_len
+        total_len = min(self.model_config.max_seq_len, max_gen_len + max_prompt_len)
+        total_number_tokens = bsz * total_len
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+        
+        # 预分配tokens张量
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device=device)
+        
+        # 填充提示词到 tokens 张量
         for seq_id, token_ids in enumerate(prompt_tokens):
             length = len(token_ids)
             tokens[seq_id, :length] = torch.tensor(token_ids, dtype=torch.long, device=device)
 
+        # 生成一个布尔张量，它的值为 True 的位置表示输入序列的实际内容（即非填充部分）, 形状为 (batch_size, total_len)
         input_text_mask = tokens != pad_id
         eos_reached = torch.zeros(bsz, dtype=torch.bool, device=device)
 
-        token_logprobs = torch.zeros((bsz, total_len), dtype=torch.float, device=device) if logprobs else None
+        # 一次性分配 bsz * total_len 个索引
+        self.model_executor.atten_info.select_index = self.model_executor.kv_mem_manager.alloc_kvcache_index(total_number_tokens)
+        select_index = self.model_executor.atten_info.select_index
 
+        # 初始化每个批次项的序列长度
+        actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=device)
+        self.model_executor.atten_info.b_seq_len = actual_prompt_lens
+        # print("self.model_executor.atten_info.b_seq_len ", self.model_executor.atten_info.b_seq_len)  
+
+        # 初始化起始索引张量
+        self.model_executor.atten_info.start_index = select_index[::total_len].to(torch.int32)
+        # print("start_index: ", self.model_executor.atten_info.start_index)
+        
+        # 初始化当前已选择的批次项索引
+        self.model_executor.atten_info.cur_select_index = select_index.unfold(0, max_prompt_len, total_len).reshape(-1)
+        # print("Prefill stage cur_select_index: ", self.model_executor.atten_info.cur_select_index)
+
+        token_logprobs = torch.zeros((bsz, total_len), dtype=torch.float, device=device) if logprobs else None
         if min_prompt_len == total_len and logprobs:
             # 若无生成空间，直接计算已存在 tokens 的对数似然（可选）
             logits = self.model_executor.forward(tokens, 0)
@@ -130,20 +152,24 @@ class GenerateText:
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
 
-        # 仅在需要生成时进入循环
         token_count = 0
-        prev_pos = 0
+        prev_pos = 0 # 初始化上一次生成的位置
         # 为减少循环中的判断逻辑，这里将range起点由min_prompt_len改成max_prompt_len
         # 因为在[min_prompt_len, max_prompt_len)区间，有的样本已经完成输入填充，有的刚好开始生成
         # 实际上可以统一从 max_prompt_len 开始生成，因为在 (min_prompt_len, max_prompt_len) 的位置上，有的样本还属于prompt部分
         # 这样减少复杂判断逻辑
-        gen_start = max_prompt_len
-        for cur_pos in range(gen_start, total_len):
+        for cur_pos in range(max_prompt_len, total_len):
             # 取出新加入模型的 token (一般为单步输入)
             input_ids = tokens[:, cur_pos - 1: cur_pos] if cur_pos > 0 else tokens[:, :1]
-            logits, select_index = self.model_executor.forward(input_ids, prev_pos)
-            prev_pos = cur_pos
-
+            logits = self.model_executor.forward(input_ids, prev_pos)
+            
+            if prev_pos > 0:
+                self.model_executor.atten_info.max_actual_seq_len += 1
+                self.model_executor.atten_info.b_seq_len += 1
+            
+            self.model_executor.atten_info.cur_select_index = (self.model_executor.atten_info.start_index 
+                                                               + self.model_executor.atten_info.b_seq_len)
+            
             # 对最后一个位置进行 softmax
             step_logits = logits[:, -1, :]
             if temperature > 0:
@@ -174,6 +200,7 @@ class GenerateText:
             # 检查终止条件
             finished = to_generate & (next_token == self.tokenizer.eos_token_id)
             eos_reached |= finished
+            prev_pos = cur_pos
 
             token_count += (to_generate).sum().item()
             if eos_reached.all():
@@ -192,9 +219,7 @@ class GenerateText:
         )
 
         # 减少 kv cache 内存管理器的引用计数
-        # 若最后一次生成失败，select_index可能为上一次保留值，这里加个判断
-        if 'select_index' in locals():
-            self.model_executor.kv_mem_manager.release_ref(select_index)
+        self.model_executor.kv_mem_manager.release_ref(select_index)
 
         return out_tokens, out_logprobs
 

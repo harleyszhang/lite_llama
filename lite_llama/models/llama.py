@@ -69,7 +69,6 @@ class FusedAttention(nn.Module):
         qk_scale = None, 
     ):
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
-        num_kv_heads = self.num_kv_heads
         
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
         xq = self.q_proj(x).view(batch_size, seq_len, self.num_heads_q, self.head_dim)
@@ -79,12 +78,13 @@ class FusedAttention(nn.Module):
         xk, xv = torch.split(xkv, [self.num_kv_heads * self.head_dim, xkv.size(-1) - self.num_kv_heads * self.head_dim], dim=-1)
         xk =xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        
         cos, sin = position_embeddings
         xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
-        xq = xq.view(batch_size, self.num_heads_q, self.head_dim)
 
-        k_buffer = atten_info.kv_buffer[layer_index][:, :num_kv_heads, :] # k_buffer and v_buffer shape is  torch.Size([6000, 8, 64]) torch.Size([6000, 8, 64])
-        v_buffer = atten_info.kv_buffer[layer_index][:, num_kv_heads:, :]
+        xq = xq.view(batch_size, self.num_heads_q, self.head_dim)
+        k_buffer = atten_info.kv_buffer[layer_index][:, :self.num_kv_heads, :] # k_buffer and v_buffer shape is  torch.Size([6000, 8, 64]) torch.Size([6000, 8, 64])
+        v_buffer = atten_info.kv_buffer[layer_index][:, self.num_kv_heads:, :]
 
         k_buffer[atten_info.cur_select_index] = xk.squeeze(dim=1)
         v_buffer[atten_info.cur_select_index] = xv.squeeze(dim=1)
@@ -190,6 +190,7 @@ class LlamaModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ):
         # self.hidden_states = []
+        # To support Multi-model Model
         if inputs_embeds is not None:
             h = inputs_embeds
             _, seq_len, _ = inputs_embeds.shape
@@ -198,7 +199,9 @@ class LlamaModel(nn.Module):
             h = self.get_input_embeddings(input_ids)
         
         if seq_len > 1:
-            self.qk_scale *= 1.4426950408889634
+            qk_scale = self.qk_scale * 1.4426950408889634
+        else:
+            qk_scale = self.qk_scale
         
         if position_ids is None:
             cache_position = torch.arange(start_pos, start_pos + seq_len, device=input_ids.device)
@@ -208,7 +211,7 @@ class LlamaModel(nn.Module):
         
         for i, layer in enumerate(self.layers): # Consecutively apply all the encoder layers
             # self.hidden_states.append(h)
-            h = layer(h, atten_info, i, position_embeddings, self.qk_scale)  # h.shape [batch_size, seq_len, hidden_dim]
+            h = layer(h, atten_info, i, position_embeddings, qk_scale)  # h.shape [batch_size, seq_len, hidden_dim]
             # assert not torch.isnan(h).any(), f"In {i} decoder layer, h tensor contains NaN values!"
 
         h = rmsnorm_fwd(h, self.norm_weight.data, eps=self.config.rms_norm_eps)

@@ -203,25 +203,25 @@ def compare_inference_speed(
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    prompts: List[str] = [
-        "I believe the meaning of life is to find happiness in the simple things. but how to achieve the meaning of life?",
-        "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
-        "Can you introduce the History of the American Civil War. ",
-        "who is the first president of the United States and what's his life story?",
-        "How to learn c++, give me some code example.",
-        "How to learn python, give me some code examples.",
-        "How to learn llm, please introduce transformer architecture ",
-        "How to learn cnn, please introduce resnet architecture and give code ",
-        "How to learn cuda programming, give me some code example.",
-        "How to learn rust, give me some code examples.",
-        "How to learn java, give me some code example.",
-        "How to learn linux c, give me some code examples.",
-    ]
-
     # prompts: List[str] = [
+    #     "I believe the meaning of life is to find happiness in the simple things. but how to achieve the meaning of life?",
+    #     "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
+    #     "Can you introduce the History of the American Civil War. ",
+    #     "who is the first president of the United States and what's his life story?",
+    #     "How to learn c++, give me some code example.",
+    #     "How to learn python, give me some code examples.",
+    #     "How to learn llm, please introduce transformer architecture ",
     #     "How to learn cnn, please introduce resnet architecture and give code ",
     #     "How to learn cuda programming, give me some code example.",
+    #     "How to learn rust, give me some code examples.",
+    #     "How to learn java, give me some code example.",
+    #     "How to learn linux c, give me some code examples.",
     # ]
+
+    prompts: List[str] = [
+        "How to learn cnn, please introduce resnet architecture and give code ",
+        "How to learn cuda programming, give me some code example.",
+    ]
 
     # prompts: List[str] = [
     #     "How to learn cnn, please introduce resnet architecture and give code.",
@@ -274,7 +274,7 @@ def main():
         max_gen_len=1900,
         lite_llama_ckpt_dir=checkpoints_dir,
         hf_model_name=hf_model_name,
-        print_result=False,
+        print_result=True,
         device=device
     )
 

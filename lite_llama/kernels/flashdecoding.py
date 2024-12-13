@@ -3,6 +3,23 @@ import triton.language as tl
 from torch.cuda.amp import custom_fwd
 
 @triton.jit
+def detect_nan_kernel(input_ptr, output_ptr, N, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < N
+    x = tl.load(input_ptr + offsets, mask=mask, other=0.0)
+    is_nan = x!=x # NaN != NaN
+    tl.store(output_ptr + offsets, is_nan, mask=mask)
+
+def detect_nan(input_tensor):
+    N = input_tensor.numel()
+    BLOCK_SIZE = 1024
+    grid = (triton.cdiv(N, BLOCK_SIZE),)
+    output = torch.zeros_like(input_tensor, dtype=torch.int32)
+    detect_nan_kernel[grid](input_tensor, output, N, BLOCK_SIZE)
+    return output
+
+@triton.jit
 def _flash_decoding_stage1_kernel(
     Q, K, V, qk_scale,
 	B_Start_Loc, B_Seqlen, 
@@ -72,7 +89,7 @@ def _flash_decoding_stage1_kernel(
 	q = tl.load(q_ptrs)  # [BLOCK_DMODEL]
 
 	# 初始化归一化项和累加器
-	d_i = 0.0  # 标量
+	d_i = 1e-6  # 标量 # 使用小的正数而不是0
 	m_i = -float("inf")  # 标量
 	acc = tl.zeros([BLOCK_DMODEL], dtype=tl.float32)  # [BLOCK_DMODEL]
 
@@ -90,12 +107,8 @@ def _flash_decoding_stage1_kernel(
 		# qk = tl.zeros((BLOCK_M_SIZE, BLOCK_N_SIZE), dtype=tl.float32)
 		qk = tl.sum(q[None, :] * k, axis=1)  # [BLOCK_N]
 		qk *= qk_scale
-		qk = tl.where(k_mask, qk, -1.0e8)  # [BLOCK_N]
+		qk = tl.where(k_mask, qk, float("-inf"))  # [BLOCK_N]
 
-		# tl.device_print(f"q: ", q)
-		# tl.device_print(f"k: ", k)
-		# tl.device_print(f"qk: ", qk)
-        
 		# 更新最大值项和 qk 项
 		current_max = tl.max(qk)  # 标量
 		m_ij = tl.maximum(m_i, current_max)  # 标量
@@ -134,8 +147,9 @@ def _flash_decoding_stage1_kernel(
 	)
 
 	# 计算最终的 attention 输出和 log-sum-exp
-	part_atten_out = acc / d_i  # [BLOCK_DMODEL]
-	logexpsum = m_i + tl.log(d_i)  # 标量
+    # 为了防止 d_i 为零，添加一个小的常数
+	part_atten_out = acc / (d_i) # [BLOCK_DMODEL]
+	logexpsum = m_i + tl.log(d_i) # 标量
 
 	# 条件存储
 	part_atten_out = tl.where(need_store, part_atten_out, 0.0)  # [BLOCK_DMODEL]
@@ -285,7 +299,7 @@ def flash_decoding(
 	assert q.shape[-1] == k_cache.shape[-1] == v_cache.shape[-1]
 	PARTITION_SIZE = 128
 	batchs, num_heads, head_dim = q.shape # decode 阶段 q 的 seq_len = 1, 
-	
+
 	# 最大可用分区数量计算
 	max_num_partitions = (max_actual_seq_len + PARTITION_SIZE -1) // PARTITION_SIZE
 
@@ -296,7 +310,9 @@ def flash_decoding(
 
 	# decode stage 1: attention in partitions
 	flash_decode_stage1(q, k_cache, v_cache, qk_scale, b_start_loc, b_seq_len, max_actual_seq_len, mid_o, mid_o_logexpsum, PARTITION_SIZE)
-    
+	# print(detect_nan(mid_o))
+	# print(detect_nan(mid_o_logexpsum))
+	
 	# decode stage 2: reduction among partitions
 	atten_output = torch.empty_like(q)
 
@@ -332,7 +348,8 @@ def torch_attention_with_kvcache(q, k_cache, v_cache, b_start_loc, b_seq_len):
 if __name__ == "__main__":
     torch.manual_seed(0)
     # inputs
-    batch, head, head_dim = 4, 32, 64
+    batch, head, head_dim = 6, 8, 256
+    qk_scale = 1.0 / (head_dim ** 0.5)
     expand = 1
     max_input_len = 1024 * expand
     dtype = torch.float16
@@ -340,12 +357,12 @@ if __name__ == "__main__":
     k_cache = torch.randn((16 * 10000, head, head_dim), device='cuda', dtype=dtype)
     v_cache = torch.randn((16 * 10000, head, head_dim), device='cuda', dtype=dtype)
     # meta data for kv cache
-    b_start_loc = torch.tensor([0, 1024, 2048, 3072], dtype=torch.int32, device="cuda") * expand
-    b_seq_len = torch.tensor([512, 1024, 512, 1024], dtype=torch.int32, device="cuda") * expand
+    b_start_loc = torch.tensor([0, 1024, 2048, 3072, 4096, 5120], dtype=torch.int32, device="cuda") * expand
+    b_seq_len = torch.tensor([512, 1024, 512, 1024, 512, 512], dtype=torch.int32, device="cuda") * expand
     # compute attention
-    triton_output = flash_decoding(q, k_cache, v_cache, b_start_loc, b_seq_len, max_input_len)
+    triton_output = flash_decoding(q, k_cache, v_cache, qk_scale, b_start_loc, b_seq_len, max_input_len)
     torch_output = torch_attention_with_kvcache(q, k_cache, v_cache, b_start_loc, b_seq_len)
     print(f'The maximum difference between torch and triton is {torch.max(torch.abs(torch_output - triton_output))}')
     # benchmark 
     print('torch:', triton.testing.do_bench(lambda: torch_attention_with_kvcache(q, k_cache, v_cache, b_start_loc, b_seq_len)))
-    print('triton:', triton.testing.do_bench(lambda: flash_decoding(q, k_cache, v_cache, b_start_loc, b_seq_len, max_input_len)))
+    print('triton:', triton.testing.do_bench(lambda: flash_decoding(q, k_cache, v_cache, qk_scale, b_start_loc, b_seq_len, max_input_len)))
