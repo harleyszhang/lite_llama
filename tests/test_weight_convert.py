@@ -43,8 +43,8 @@ elif "llama" in checkpoints_dir.lower():
     convert_llama_hf_to_litellama(checkpoints_dir, hf_sd, num_layers)
 
 elif "llava" in checkpoints_dir.lower():
-    llm_config = AutoConfig.from_pretrained(checkpoints_dir)
-    num_layers = llm_config.num_hidden_layers
+    llava_config = LlavaConfig.from_pretrained(checkpoints_dir)
+    num_layers = llava_config.text_config.num_hidden_layers
     print("num_layers: ", num_layers)
     convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, num_layers)
 else:

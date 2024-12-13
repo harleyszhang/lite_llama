@@ -87,7 +87,6 @@ class LlavaGeneratorStream:
 
         self.model_executor = ModelExecutor.build(
             checkpoints_dir = checkpoints_dir,
-            tokenizer_path = tokenizer_path,
             load_model = load_model,
             max_gpu_num_blocks =  max_gpu_num_blocks,
             max_seq_len = max_seq_len,
