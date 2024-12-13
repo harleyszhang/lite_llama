@@ -118,7 +118,7 @@ def load_and_convert_to_custom_qwen2(model_config: Qwen2Config, pretrained_model
         print(name, parameters.shape)
 
     # 保存转换好的自定义权重
-    torch.save(new_sd, "/gemini/code/Qwen2.5-3B-Instruct/my_qwen2.5-3B.pth")
+    torch.save(new_sd, "/gemini/code/Qwen2.5-1.5B-Instruct/my_qwen2.5-3B.pth")
 
     # torch.set_default_tensor_type(torch.cuda.HalfTensor)
     torch.set_default_dtype(torch.half)
@@ -280,7 +280,7 @@ class Qwen2ModelInferTest():
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # 定义模型配置参数
-    original_model_path = "/gemini/pretrain/Qwen2.5-3B"
+    original_model_path = "/gemini/code/Qwen/Qwen2.5-1.5B-Instruct"
     my_model_path = "/gemini/code/Qwen2.5-3B-Instruct/"
     json_file_path = os.path.join(original_model_path, 'config.json') # JSON 文件的路径
     model_config = load_config_from_json(json_file_path, device) # 加载配置
@@ -290,15 +290,15 @@ if __name__ == "__main__":
     custom_model = Qwen2Model(model_config)
 
     # 加载自定义模型
-    # custom_model, _ = load_and_convert_to_custom_qwen2(model_config, original_model, device)
-    Qwen2ModelInferTest(my_model_path,my_model_path,
+    custom_model, _ = load_and_convert_to_custom_qwen2(model_config, original_model, device)
+    qwen2_test = Qwen2ModelInferTest(my_model_path,my_model_path,
         max_batch_size = 64,
         max_seq_len = 2048,
         load_model = True,
         triton_weight = True,
         device = "cuda",
-    ):
+    )
     # 测试文本
     test_text = "Once upon a time in a distant land,"
     # 比较模型输出
-    compare_models(original_model, model_executor, tokenizer, test_text, device)
+    qwen2_test.compare_models(original_model, tokenizer, test_text, device)

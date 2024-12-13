@@ -3,6 +3,8 @@ from pathlib import Path
 from transformers import AutoTokenizer
 from tqdm import tqdm
 
+from accelerate import init_empty_weights, load_checkpoint_and_dispatch
+
 from .mem_manager import ComputeMaxAvailableBlocks, KVCacheMemoryManager
 
 from ..models.model_config import LlamaConfig, Qwen2Config
@@ -124,54 +126,63 @@ class ModelExecutor:
         return ModelExecutor(tokenizer, model_config, model, True)
 
     @staticmethod
-    def _load_model_weight(model_args, checkpoints_dir, load_model = True, triton_weight=True, device="cuda"):
-        prev_time = time.time()
-        
+    def _load_model_weight(model_config, checkpoints_dir, load_model = True, triton_weight=True, device="cuda"):
+        start_time = time.time()
+
+        hf_sd = None
         if load_model:
             checkpoints = sorted(Path(checkpoints_dir).glob("*.pth"))
             assert len(checkpoints) > 0, f"no checkpoint files found in {checkpoints_dir}"
-            ckpt_path = checkpoints[0]
-            print(f'Loading checkpoint "{ckpt_path}"')
-
-            hf_sd = torch.load(ckpt_path, map_location="cuda")
-            print(f"Loaded weight checkpoints files in {time.time() - prev_time:.2f}s")
-            prev_time = time.time()
-        else:
-            hf_sd = None
-
-        # 设置默认张量类型
-        if device == "cuda":
-            torch.set_default_tensor_type(torch.cuda.HalfTensor)
-        else:
-            torch.set_default_tensor_type(torch.BFloat16Tensor)
-
-        if load_model:
-            if triton_weight:
-                state_dict = hf_sd
-                print("Load Triton weight directly!")
-            else:
-                state_dict = convert_llama_hf_to_triton(checkpoints_dir, hf_sd, model_args) # 转换权重名称
-        else:
-            state_dict = None
-
-        torch.set_default_tensor_type(torch.cuda.HalfTensor)
+            ckpt_path = str(checkpoints[0])
+            logger.debug("type(ckpt_path) ", type(ckpt_path))
+            logger.debug(f'Loading checkpoint "{ckpt_path}"')
+            # 使用 torch.load 加载权重文件。torch.load 可以根据需要将权重加载到指定的设备上
+            hf_sd = torch.load(ckpt_path, mmap=True, weights_only=True, map_location=device)
+            logger.debug(f"Loaded weight checkpoints files in {time.time() - start_time:.2f}s")
+            
+        # 初始化模型
+        with init_empty_weights():
+            model = ModelExecutor._initialize_model(model_config, device=device)
         
-        # 初始化自定义的 Llama 模型
-        if model_args.model_type == "llama":
-            model = Llama(model_args).to(device)
-        elif model_args.model_type == "qwen2":
-            model = Qwen2Model(model_args).to(device) # 将模型移动到设备并转换为半精度
+        state_dict = hf_sd
+
+        model.load_state_dict(state_dict, strict=True, assign=True) # 将加载的 state_dict 应用到模型实例中。
+        model.eval()
+        logger.info(f" Loaded state dict in {time.time() - start_time:.2f}s")
+
+        # 将模型转换为半精度, 并验证转换
+        model.half().to(device)
+        for param in model.parameters():
+            assert param.dtype == torch.float16, "Model parameters are not in FP16"
+        logger.info(" Converted model to half precision (FP16)")
+        
+        return model
+    
+    @staticmethod
+    def _initialize_model(model_config, device: str):
+        """
+        根据配置初始化模型并将其移动到指定设备。
+
+        参数:
+            model_config (LlamaConfig): 自定义模型的配置参数。
+            device (str): 设备类型（'cuda'或'cpu'）。
+
+        返回:
+            nn.Module: 初始化后的模型。
+        """
+        model_type = model_config.model_type.lower()
+        logger.info(f" 初始化模型类型 '{model_type}' 并移动到设备 '{device}'...")
+        if model_type == "llama":
+            from ..models.llama import LlamaModel
+            model = LlamaModel(model_config)
+        elif model_type == "qwen2":
+            from ..models.qwen2 import Qwen2Model
+            model = Qwen2Model(model_config)
         else:
-            print("Error, unsupported model!")
+            logger.error(f"不支持的模型类型: {model_type}")
+            raise ValueError(f"Unsupported model type: {model_type}")
 
-        if load_model:
-            # The only unmatched key in the checkpoint is rope.freqs. Remove it
-            if 'rope.freqs' in hf_sd:
-                del hf_sd['rope.freqs']  # 删除检查点中未匹配的键（例如rope.freqs）
-            # 使用转换后的 state_dict 加载模型
-            model.load_state_dict(state_dict, strict=True)
-            print(f"Loaded state dict in {time.time() - prev_time:.2f}s")
-
+        logger.info(f" 模型已初始化并移动到设备 '{device}'。")
         return model
     
     @staticmethod
