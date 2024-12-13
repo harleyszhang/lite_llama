@@ -74,6 +74,7 @@ class GenerateStreamText:
         )
         self.tokenizer = self.load_tokenizer(tokenizer_path)
         self.model_config = self.model_executor.model_config
+        self.device = device
 
     def load_tokenizer(self, pretrained_model_name_or_path):
         model_name = get_model_name_from_path(pretrained_model_name_or_path)
@@ -116,7 +117,9 @@ class GenerateStreamText:
         max_prompt_len = max(len(t) for t in prompt_tokens)
         assert max_prompt_len <= self.model_config.max_seq_len
         total_len = min(self.model_config.max_seq_len, max_gen_len + max_prompt_len)
+        total_number_tokens = bsz * total_len
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+        self.model_executor.atten_info.max_actual_seq_len = max_prompt_len
         
         # 预分配tokens张量
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
@@ -132,7 +135,7 @@ class GenerateStreamText:
         select_index = self.model_executor.atten_info.select_index
 
         # 初始化每个批次项的序列长度
-        actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=device)
+        actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=self.device)
         self.model_executor.atten_info.b_seq_len = actual_prompt_lens
         # print("self.model_executor.atten_info.b_seq_len ", self.model_executor.atten_info.b_seq_len)  
 

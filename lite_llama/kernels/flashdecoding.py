@@ -54,7 +54,8 @@ def _flash_decoding_stage1_kernel(
 	cur_batch_partition_end_index = tl.minimum(cur_batch_seq_len, cur_batch_partition_start_index + BLOCK_SEQ)
 
 	# 计算需要处理的块数
-	num_blocks = tl.where(cur_batch_partition_end_index - cur_batch_partition_start_index <= 0, 0, (cur_batch_partition_end_index - cur_batch_partition_start_index + BLOCK_N - 1) // BLOCK_N)
+	num_blocks = tl.where(cur_batch_partition_end_index - cur_batch_partition_start_index <= 0, 
+                       	0, (cur_batch_partition_end_index - cur_batch_partition_start_index + BLOCK_N - 1) // BLOCK_N)
 
 	# 初始化偏移向量
 	offs_n = cur_batch_partition_start_index + tl.arange(0, BLOCK_N)  # [BLOCK_N]
@@ -89,7 +90,7 @@ def _flash_decoding_stage1_kernel(
 	q = tl.load(q_ptrs)  # [BLOCK_DMODEL]
 
 	# 初始化归一化项和累加器
-	d_i = 1e-6  # 标量 # 使用小的正数而不是0
+	d_i = 0.0  # 标量 # 使用小的正数而不是0
 	m_i = -float("inf")  # 标量
 	acc = tl.zeros([BLOCK_DMODEL], dtype=tl.float32)  # [BLOCK_DMODEL]
 

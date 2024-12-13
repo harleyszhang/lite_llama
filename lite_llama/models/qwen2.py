@@ -204,16 +204,10 @@ class Qwen2DecoderLayer(nn.Module):
         attn_output = self.self_attn(hidden_states, atten_info, layer_index, position_embeddings, qk_scale)
         if torch.isnan(attn_output).any(): # 检查 NaNs
             raise ValueError(f"NaNs detected in attn_output output at layer {layer_index}")    
-        h = x + attn_output  # 残差连接
-
-        hidden_states = rmsnorm_fwd(h, self.post_attention_layernorm_weight.data, eps=self.rmsnorm_eps)
-        if torch.isnan(hidden_states).any(): # 检查 NaNs
-            raise ValueError(f"NaNs detected in post attention_layernorm output at layer {layer_index}") 
         
-        # 调用 Feed Forward 模块
-        feedforward_output = self.mlp(hidden_states)
-
-        out = h + feedforward_output # 残差连接
+        h = x + attn_output  # 残差连接
+        hidden_states = rmsnorm_fwd(h, self.post_attention_layernorm_weight.data, eps=self.rmsnorm_eps)
+        out = h + self.mlp.forward(hidden_states) # 调用 Feed Forward 模块并做残差连接
         
         return out
 
@@ -278,7 +272,8 @@ class Qwen2Model(nn.Module):
         h = rmsnorm_fwd(h, self.norm_weight, eps=self.rmsnorm_eps)
         # self.hidden_states.append(h)
         
-        output = F.linear(h, self.lm_head_weight)
+        # output = F.linear(h, self.lm_head_weight)
+        output = torch.matmul(h, self.lm_head_weight.t().contiguous())
 
         return output
     

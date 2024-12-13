@@ -141,7 +141,6 @@ class LlavaGeneratorStream:
         temperature: float = 0.6,
         top_p: float = 0.9,
         echo: bool = False,
-        device = "cuda"
     ) -> Generator[Tuple[List[str], Optional[List[float]]], None, None]:
         """
         基于提供的 prompt_tokens, 使用语言生成模型逐个生成 token, 并在生成时立即输出。
@@ -166,6 +165,7 @@ class LlavaGeneratorStream:
         total_len = min(self.max_seq_len, max_gen_len + max_prompt_len)
         total_number_tokens = bsz * total_len
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+        self.model_executor.atten_info.max_actual_seq_len = max_prompt_len
         
         # 预分配tokens张量
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
@@ -173,18 +173,18 @@ class LlavaGeneratorStream:
         # 填充提示词到 tokens 张量
         for seq_id, token_ids in enumerate(prompt_tokens):
             # NOTE: torch.long 等同于 torch.int64
-            tokens[seq_id, : len(token_ids)] = torch.tensor(token_ids, dtype=torch.long, device = device)
+            tokens[seq_id, : len(token_ids)] = torch.tensor(token_ids, dtype=torch.long, device=self.device)
         
         # 生成一个布尔张量，它的值为 True 的位置表示输入序列的实际内容（即非填充部分）, 形状为 (batch_size, total_len)
         input_text_mask = tokens != pad_id
-        eos_reached = torch.tensor([False] * bsz, device="cuda")
+        eos_reached = torch.tensor([False] * bsz, device=self.device)
 
         # 一次性分配 bsz * total_len 个索引
         self.model_executor.atten_info.select_index = self.model_executor.kv_mem_manager.alloc_kvcache_index(total_number_tokens)
         select_index = self.model_executor.atten_info.select_index
 
         # 初始化每个批次项的序列长度
-        actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=device)
+        actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=self.device)
         self.model_executor.atten_info.b_seq_len = actual_prompt_lens
         # print("self.model_executor.atten_info.b_seq_len ", self.model_executor.atten_info.b_seq_len)  
 
