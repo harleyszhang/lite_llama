@@ -14,7 +14,7 @@ The llama model inference lite framework by triton.
 
 ## GPU Information
 
-趋动云 GPU 开发环境，cuda 版本以及 torch、triton 版本：
+[趋动云 GPU 开发环境](https://platform.virtaicloud.com/gemini_web/auth/register?inviteCode=925075646a652bf5be29c77f25e5d5ed)，cuda 版本以及 torch、triton 版本：
 
 ```bash
 # nvcc -V

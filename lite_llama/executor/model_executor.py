@@ -102,14 +102,14 @@ class ModelExecutor:
             checkpoints = sorted(Path(checkpoints_dir).glob("*.pth"))
             assert len(checkpoints) > 0, f"no checkpoint files found in {checkpoints_dir}"
             ckpt_path = str(checkpoints[0])
-            logger.debug("type(ckpt_path) ", type(ckpt_path))
-            logger.info(f'Loading checkpoint "{ckpt_path}"')
+            logger.debug(" type(ckpt_path) ", type(ckpt_path))
+            logger.info(f' Loading checkpoint "{ckpt_path}"')
             # 使用 torch.load 加载权重文件。torch.load 可以根据需要将权重加载到指定的设备上
             state_dict = torch.load(ckpt_path, mmap=True, weights_only=True, map_location=device)
         else:
             conversion_func = get_conversion_func(model_config.model_type)
             if conversion_func is None:
-                logger.error(f"不支持的模型类型: {model_config.model_type}")
+                logger.error(f" 不支持的模型类型: {model_config.model_type}")
                 raise ValueError(f"Unsupported model type: {model_config.model_type}")
             state_dict = conversion_func(checkpoints_dir, hf_sd, model_config)
             logger.info(f" 权重名称转换完成，耗时 {time.time() - start_time:.2f} 秒。")
