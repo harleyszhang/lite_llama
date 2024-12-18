@@ -23,7 +23,7 @@ def convert_qwen2_hf_to_litellama(
     checkpoints_dir: str, 
     hf_sd, 
     num_layers, 
-    print_params: bool = False,
+    print_params: bool = True,
     device: str = "cuda"
 ) -> Dict[str, torch.Tensor]:
     """
@@ -57,12 +57,11 @@ def convert_qwen2_hf_to_litellama(
         'model.layers.{i}.post_attention_layernorm.weight': 'layers.{i}.post_attention_layernorm_weight',
     }
 
-    #  根据 Transformer 层数量生成映射
+    # 根据 Transformer 层数量生成映射
     for i in range(num_layers):
         for hf_key, custom_key in layers.items():
-            mapped_key = hf_key.format(i=i) # hf 权重参数字典 key
-            custom_mapped_key = custom_key.format(i=i) # 自定义模型权重参数字典 key
-            mapping[mapped_key] = custom_mapped_key
+            # 左边是 hf 权重参数字典 key, 右边是自定义模型权重参数字典 key
+            mapping[hf_key.format(i=i)] = custom_key.format(i=i)
 
     # 创建新的状态字典
     new_sd = {}
@@ -74,10 +73,9 @@ def convert_qwen2_hf_to_litellama(
             new_sd[custom_key] = tensor # 浅拷贝
         else:
             print(f"custom_key: {custom_key}, hf_key: {hf_key}")
-            # 如果某些权重不需要映射，可以选择忽略或处理
             pass  # 忽略未映射的权重
     
-    del hf_sd
+    # del hf_sd
 
     # 进行 kv_proj 合并操作
     for i in range(num_layers):
@@ -92,19 +90,21 @@ def convert_qwen2_hf_to_litellama(
             v_tensor = new_sd[v_key]
             # 按最后一维拼接后成为 [2 * hidden_size, hidden_size]
             kv_tensor = torch.cat([k_tensor, v_tensor], dim=0)
-            
+            print(f"{k_key} and {v_key} concat success!")
+
             # 新增 kv_proj.weight
             kv_key = f"layers.{i}.self_attn.kv_proj_weight"
             new_sd[kv_key] = kv_tensor
-            
+            print(f"new {kv_key} key init success!")
+
             # 2. kv bias 权重合并
             k_bias_tensor = new_sd[k_bias_key]
             v_bias_tensor = new_sd[v_bias_key]
             kv_bias_tensor = torch.cat([k_bias_tensor, v_bias_tensor], dim=0)
-            
+
             kv_bias_key = f"layers.{i}.self_attn.kv_proj_bias"
             new_sd[kv_bias_key] = kv_bias_tensor
-        
+
             # 删除原来的 k_proj, v_proj
             del new_sd[k_key]
             del new_sd[v_key]
@@ -226,8 +226,6 @@ def convert_llama_hf_to_litellama(checkpoints_dir, hf_sd, num_layers):
         else:
             print(f"Warning: Unmapped key {hf_key}")
     
-    del hf_sd
-
     # 进行 kv_proj 合并操作
     for i in range(num_layers):
         k_key = f"layers.{i}.self_attn.k_proj.weight"
@@ -302,23 +300,23 @@ def convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, num_layers):
             new_sd[hf_key] = tensor
             print(f"Warning: Unmapped key {hf_key}")
     
-    del hf_sd
-
     # 进行 kv_proj 合并操作
-    for i in range(num_layers):
-        k_key = f"language_model.model.layers.{i}.self_attn.k_proj.weight"
-        v_key = f"language_model.model.layers.{i}.self_attn.v_proj.weight"
+    for i in tqdm(range(num_layers), desc="Mapping kv fusedweights"):
+        k_key = f"language_model.layers.{i}.self_attn.k_proj.weight"
+        v_key = f"language_model.layers.{i}.self_attn.v_proj.weight"
         if k_key in new_sd and v_key in new_sd:
             k_tensor = new_sd[k_key]
             v_tensor = new_sd[v_key]
             # 假设 k_proj, v_proj 的 shape 都是 [hidden_size, hidden_size]
             # 按最后一维拼接后成为 [2 * hidden_size, hidden_size]
             kv_tensor = torch.cat([k_tensor, v_tensor], dim=0)
-            
+            print(f"{k_key} and {k_key} concat success!")
+
             # 新增 kv_proj.weight
             kv_key = f"language_model.layers.{i}.self_attn.kv_proj_weight"
             new_sd[kv_key] = kv_tensor
-            
+            print(f"new {kv_key} key init success!")
+
             # 删除原来的 k_proj, v_proj
             del new_sd[k_key]
             del new_sd[v_key]

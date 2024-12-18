@@ -28,10 +28,12 @@ class Attention(nn.Module):
         xq = xq.to(torch.float16)
         batch_size, seq_len, num_heads_q, head_dim = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
         
-        # 1. 获取 prefill 阶段的 select_index, 并更新 kv cache 张量
-        combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)  
+        # 1. 获取 prefill 阶段的 cur_select_index, 并更新 kv cache 张量
+        combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)
         combined_kv_reshaped = combined_kv.view(-1, self.num_kv_heads*2, self.head_dim)
-        atten_info.kv_buffer[layer_index][atten_info.cur_select_index] = combined_kv_reshaped
+        # 更新 kv_buffer, atten_info.kv_buffer[layer_index]
+        updtae_kv_buffer(combined_kv_reshaped, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
+        # atten_info.kv_buffer[layer_index][atten_info.cur_select_index] = combined_kv_reshaped
 
         # 2. sel-attention. flashattention 计算: softmax(qk^t) * v
         xq = xq.transpose(1, 2)
@@ -52,19 +54,21 @@ class Attention(nn.Module):
         qk_scale = None, # 计算 attention 分数缩放的系数
     ) -> torch.Tensor:
         xq = xq.to(torch.float16)
-        batch_size, seq_len, num_heads_q, head_dim = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
+        batch_size, seq_len, num_heads_q, _ = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
 
         # 1. 先获取 kv 缓冲向量再更新 kv 向量
         xq = xq.view(batch_size, num_heads_q, self.head_dim)
-        k_buffer = atten_info.kv_buffer[layer_index][:, :self.num_kv_heads, :] # k_buffer and v_buffer shape is  torch.Size([6000, 8, 64]) torch.Size([6000, 8, 64])
-        v_buffer = atten_info.kv_buffer[layer_index][:, self.num_kv_heads:, :]
-
-        k_buffer[atten_info.cur_select_index] = xk.squeeze(dim=1)
-        v_buffer[atten_info.cur_select_index] = xv.squeeze(dim=1)
+        combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)
+        reshaped_kv = combined_kv.view(-1, 2 * self.num_kv_heads, self.head_dim)
+        
+        # 更新 kv_buffer, atten_info.kv_buffer[layer_index]
+        updtae_kv_buffer(reshaped_kv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
 
         # 2. flashattention 计算: softmax(qk^t) * v
         output = flash_decoding(
-            xq, k_buffer, v_buffer, 
+            xq,
+            atten_info.kv_buffer[layer_index][:, : self.num_kv_heads, :], 
+            atten_info.kv_buffer[layer_index][:, self.num_kv_heads:, :], 
             qk_scale,
             atten_info.start_index, 
             atten_info.b_seq_len, 
@@ -80,7 +84,6 @@ class Qwen2Attention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        head_dim: int,
         dtype = torch.float16,
     ) -> None:
         super().__init__()
@@ -88,7 +91,7 @@ class Qwen2Attention(nn.Module):
         # K V 头数相同，但和 Q 可能不同
         self.num_kv_heads = num_kv_heads
         self.num_heads = num_heads
-        self.head_dim = head_dim
+        self.head_dim = hidden_size // num_heads
 
         self.q_proj_weight = nn.Parameter(torch.rand(hidden_size, hidden_size, dtype=torch.float16))
         self.q_proj_bias = nn.Parameter(torch.rand(hidden_size, dtype=torch.float16))
@@ -105,7 +108,7 @@ class Qwen2Attention(nn.Module):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
-        
+
         xq = F.linear(x, self.q_proj_weight, bias=self.q_proj_bias)
         xkv = F.linear(x, self.kv_proj_weight, bias=self.kv_proj_bias)
         xk, xv = torch.split(xkv, self.num_kv_heads * self.head_dim, dim=-1)
@@ -141,16 +144,16 @@ class Qwen2Attention(nn.Module):
                 atten_info, layer_index,
                 qk_scale,
             )
-            if torch.isnan(attn_output).any(): # 检查 NaNs
-                raise ValueError(f"NaNs detected in context_forward output at layer {layer_index}")    
+            # if torch.isnan(attn_output).any(): # 检查 NaNs
+            #     raise ValueError(f"NaNs detected in context_forward output at layer {layer_index}")    
         else:
             attn_output = self.attn.token_forward(
                 xq, xk, xv, 
                 atten_info, layer_index,
                 qk_scale,
             )
-            if torch.isnan(attn_output).any(): # 检查 NaNs
-                raise ValueError(f"NaNs detected in token_forward output at layer {layer_index}")    
+            # if torch.isnan(attn_output).any(): # 检查 NaNs
+            #     raise ValueError(f"NaNs detected in token_forward output at layer {layer_index}")    
 
         # 进行张量矩阵乘法, 需要对原始的 o_proj_weight 权重进行转置, attn_output shape is [batch_size, seq_len, hidden_size]
         output = F.linear(attn_output, self.o_proj_weight)
@@ -185,7 +188,7 @@ class Qwen2DecoderLayer(nn.Module):
         self.input_layernorm_weight = nn.Parameter(torch.ones(self.hidden_size, dtype=torch.float16))
         self.post_attention_layernorm_weight = nn.Parameter(torch.ones(self.hidden_size, dtype=torch.float16))
         
-        self.self_attn = Qwen2Attention(self.hidden_size, self.num_heads, self.num_kv_heads, self.head_dim)
+        self.self_attn = Qwen2Attention(self.hidden_size, self.num_heads, self.num_kv_heads)
         self.mlp = FusedMLP(config)
 
     def forward(self, 
@@ -197,13 +200,13 @@ class Qwen2DecoderLayer(nn.Module):
     ) -> torch.Tensor:
         # Normalization BEFORE the attention block. # (B, Seq_Len, Hidden_Size) 
         hidden_states = rmsnorm_fwd(x, self.input_layernorm_weight.data, eps=self.rmsnorm_eps)
-        if torch.isnan(hidden_states).any(): # 检查 NaNs
-            raise ValueError(f"NaNs detected in post input layernorm output at layer {layer_index}") 
+        # if torch.isnan(hidden_states).any(): # 检查 NaNs
+        #     raise ValueError(f"NaNs detected in post input layernorm output at layer {layer_index}") 
         
         # 调用 attention 模块
         attn_output = self.self_attn(hidden_states, atten_info, layer_index, position_embeddings, qk_scale)
-        if torch.isnan(attn_output).any(): # 检查 NaNs
-            raise ValueError(f"NaNs detected in attn_output output at layer {layer_index}")    
+        # if torch.isnan(attn_output).any(): # 检查 NaNs
+        #     raise ValueError(f"NaNs detected in attn_output output at layer {layer_index}")    
         
         h = x + attn_output  # 残差连接
         hidden_states = rmsnorm_fwd(h, self.post_attention_layernorm_weight.data, eps=self.rmsnorm_eps)
@@ -272,8 +275,7 @@ class Qwen2Model(nn.Module):
         h = rmsnorm_fwd(h, self.norm_weight, eps=self.rmsnorm_eps)
         # self.hidden_states.append(h)
         
-        # output = F.linear(h, self.lm_head_weight)
-        output = torch.matmul(h, self.lm_head_weight.t().contiguous())
+        output = F.linear(h, self.lm_head_weight)
 
         return output
     

@@ -61,33 +61,16 @@ def _flash_decoding_stage1_kernel(
 	offs_n = cur_batch_partition_start_index + tl.arange(0, BLOCK_N)  # [BLOCK_N]
 	offs_d = tl.arange(0, BLOCK_DMODEL)  # [BLOCK_DMODEL]
     
-	# 计算 Q 的偏移量
+	# 计算 Q K 的偏移量
 	q_offs = (
-		batch_pid * q_bs_stride
+		batch_pid * q_bs_stride 
 		+ head_pid * q_heads_stride
 		+ offs_d * q_dim_stride
 	)
-
-	# 计算 K 和 V 的偏移量
-	k_offs = (
-		(cur_batch_start_loc + offs_n[:, None]) * k_bs_stride
-		+ kv_head_pid * k_heads_stride
-		+ offs_d[None, :] * k_dim_stride
-	)
-
-	v_offs = (
-		(cur_batch_start_loc + offs_n[:, None]) * v_bs_stride
-		+ kv_head_pid * v_heads_stride
-		+ offs_d[None, :] * v_dim_stride
-	)
-    
-	# 获取指针
-	q_ptrs = Q + q_offs
-	k_ptrs = K + k_offs
-	v_ptrs = V + v_offs
-
-	# 加载 Q 向量
-	q = tl.load(q_ptrs)  # [BLOCK_DMODEL]
+	k_offs = kv_head_pid * k_heads_stride + offs_d[None, :] * k_dim_stride 
+	
+	q_ptrs = Q + q_offs # 获取 Q 指针
+	q = tl.load(q_ptrs)  # # 加载 Q 向量 [BLOCK_DMODEL]
 
 	# 初始化归一化项和累加器
 	d_i = 0.0  # 标量 # 使用小的正数而不是0
@@ -96,19 +79,14 @@ def _flash_decoding_stage1_kernel(
 
 	# 迭代处理每个块
 	for start_n in range(0, num_blocks, 1):
-		offs_n_new = start_n * BLOCK_N + offs_n  # [BLOCK_N]
-		# 生成 K 的掩码
+		offs_n_new = offs_n + start_n * BLOCK_N  # [BLOCK_N]
+        # k 位置索引计算
+		k_ptrs = (cur_batch_start_loc + offs_n_new)[:, None] * k_bs_stride + k_offs
 		k_mask = offs_n_new < cur_batch_partition_end_index  # [BLOCK_N]
-
-		# 加载 K 和 V
-		k = tl.load(k_ptrs, mask=k_mask[:, None], other=0.0)  # [BLOCK_N, BLOCK_DMODEL]
-		v = tl.load(v_ptrs, mask=k_mask[:, None], other=0.0)  # [BLOCK_N, BLOCK_DMODEL]
-		# if head_pid == 3:
-		# 	tl.device_print(f"k", k)
-		# 	tl.device_print(f"v", v)
-
+		k = tl.load(K + k_ptrs, mask=k_mask[:, None], other=0.0)
+		v = tl.load(V + k_ptrs, mask=k_mask[:, None], other=0.0)
+		
 		# 计算 qk^T
-		# qk = tl.zeros((BLOCK_M_SIZE, BLOCK_N_SIZE), dtype=tl.float32)
 		qk = tl.sum(q[None, :] * k, axis=1)  # [BLOCK_N]
 		qk *= qk_scale
 		qk = tl.where(k_mask, qk, float("-inf"))  # [BLOCK_N]
@@ -128,10 +106,6 @@ def _flash_decoding_stage1_kernel(
 		
 		# 更新归一化器
 		m_i = m_ij
-		# 更新 K 和 V 的指针
-		k_ptrs += BLOCK_N * k_bs_stride
-		v_ptrs += BLOCK_N * v_bs_stride
-
         
 	# 计算是否需要存储
 	need_store = num_blocks > 0  # 标量布尔值
@@ -149,24 +123,12 @@ def _flash_decoding_stage1_kernel(
 		+ head_pid * mido_les_heads_stride
 		+ seq_block_pid * mido_les_partitions_stride
 	)
-
+	
 	# 计算最终的 attention 输出和 log-sum-exp
-    # 为了防止 d_i 为零，添加一个小的常数
-	part_atten_out = acc / (d_i) # [BLOCK_DMODEL]
-	logexpsum = m_i + tl.log(d_i) # 标量
-
-	# 条件存储
-	part_atten_out = tl.where(need_store, part_atten_out, 0.0)  # [BLOCK_DMODEL]
-	logexpsum = tl.where(need_store, logexpsum, float("-inf"))  # 标量
-
-	# 存储结果
-	tl.store(Mid_O + off_mid_o, part_atten_out, mask=need_store)
-	tl.store(Mid_O_LogExpSum + off_mid_o_les, logexpsum, mask=need_store)
-
-	# need_store = tl.where(num_blocks == 0, 0, 1)
-	# for _ in range(0, need_store, 1):
-	# 	tl.store(Mid_O + off_mid_o, acc / d_i)
-	# 	tl.store(Mid_O_LogExpSum + off_mid_o_les, m_i + tl.log(d_i))
+	need_store = tl.where(num_blocks == 0, 0, 1)
+	for _ in range(0, need_store, 1):
+		tl.store(Mid_O + off_mid_o, acc / d_i)
+		tl.store(Mid_O_LogExpSum + off_mid_o_les, m_i + tl.log(d_i))
 
 @torch.no_grad()
 def flash_decode_stage1(
@@ -208,9 +170,9 @@ def flash_decode_stage1(
 
 @triton.jit
 def _flash_decoding_stage2_kernel(
-	Mid_O,  		# [batch, head, seq_block_num, head_dim]
+	Mid_O,  		  # [batch, head, seq_block_num, head_dim]
 	Mid_O_LogExpSum,  # [batch, head, seq_block_num]
-	Ouput,          # attention 输出首地址
+	Ouput,            # attention 输出首地址
 	mido_batch_stride, mido_heads_stride, mido_partitions_stride, mido_dim_stride,
 	mido_les_batch_stride, mido_les_heads_stride, mido_les_partitions_stride,
 	o_bs_stride, o_heads_stride, o_dim_stride,
@@ -246,12 +208,11 @@ def _flash_decoding_stage2_kernel(
     num_partitions = (cur_batch_seq_len + BLOCK_SEQ - 1) // BLOCK_SEQ
     
     for block_seq_n in range(0, num_partitions, 1): # TODO 有 bug 需要修复
-        part_v = tl.load(part_v_ptrs)
-        part_max = tl.load(part_max_ptrs)
+        part_v = tl.load(part_v_ptrs + block_seq_n * mido_partitions_stride)
+        part_max = tl.load(part_max_ptrs + block_seq_n) # mido_les_partitions_stride = 1
 
         # -- 更新局部最大值 -- #
         m_ij = tl.maximum(part_max, m_i)
-
         # -- 计算 alpha = exp(m{j-1} - m{j}) 值 -- #
         alpha = tl.exp(m_i - m_ij)
 
@@ -264,8 +225,6 @@ def _flash_decoding_stage2_kernel(
 
         # 更新 max 值和指针偏移
         m_i = m_ij
-        part_v_ptrs += mido_partitions_stride
-        part_max_ptrs += mido_les_partitions_stride
 
     # -- 更新 attention 输出累加器 -- #
     offs_out = batch_pid * o_bs_stride + head_pid * o_heads_stride + offs_d * o_dim_stride
@@ -275,7 +234,7 @@ def _flash_decoding_stage2_kernel(
 def flash_decode_stage2(
     mid_o, mid_o_logexpsum, # 存储每个批次、每个头、每个分区的中间分数输出及 log(sum(exp(scores)))
 	atten_output,           # attention 输出首地址
-	b_seq_len,  	            # kv cache 在 seq_len 维度的长度向量
+	b_seq_len,  	        # kv cache 在 seq_len 维度的长度向量
     PARTITION_SIZE
 ):	
 	batchs, num_heads, head_dim = mid_o.shape[0], mid_o.shape[1], mid_o.shape[-1]
@@ -318,8 +277,6 @@ def flash_decoding(
 
 	# decode stage 1: attention in partitions
 	flash_decode_stage1(q, k_cache, v_cache, qk_scale, b_start_loc, b_seq_len, max_actual_seq_len, mid_o, mid_o_logexpsum, PARTITION_SIZE)
-	# print(detect_nan(mid_o))
-	# print(detect_nan(mid_o_logexpsum))
 	
 	# decode stage 2: reduction among partitions
 	atten_output = torch.empty_like(q)

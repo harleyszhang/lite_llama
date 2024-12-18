@@ -64,9 +64,9 @@ class GenerateText:
 
         self.model_executor = ModelExecutor.build(
             checkpoints_dir = checkpoints_dir,
-            load_model = load_model,
-            max_gpu_num_blocks = max_gpu_num_blocks,
             max_seq_len = max_seq_len,
+            max_gpu_num_blocks = max_gpu_num_blocks,
+            load_model = load_model,
             triton_weight = triton_weight,
             device = device
         )
@@ -106,13 +106,14 @@ class GenerateText:
             Tuple[List[List[int]], Optional[List[List[float]]]]: 生成的 token 序列和（可选）对应的 log 概率。
         """
         bsz = len(prompt_tokens) # 批量大小
+        # min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
         total_len = min(self.model_config.max_seq_len, max_gen_len + max_prompt_len)
         total_number_tokens = bsz * total_len
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
         self.model_executor.atten_info.max_actual_seq_len = max_prompt_len
 
-        # 预分配tokens张量
+        # 预分配 tokens 张量
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device = device)
         
         # 填充提示词到 tokens 张量
@@ -124,35 +125,40 @@ class GenerateText:
         eos_reached = torch.zeros(bsz, dtype=torch.bool, device=device)
         prev_pos = 0 # 初始化上一次生成的位置
 
-        # 一次性分配 bsz * total_len 个索引
+        # 一次性分配 bsz * total_len 个索引, 270 * 4
         self.model_executor.atten_info.select_index = self.model_executor.kv_mem_manager.alloc_kvcache_index(total_number_tokens)
         select_index = self.model_executor.atten_info.select_index
 
         # 初始化每个批次项的序列长度
         actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=device)
         self.model_executor.atten_info.b_seq_len = actual_prompt_lens
-        # print("self.model_executor.atten_info.b_seq_len ", self.model_executor.atten_info.b_seq_len)  
-
+        
         # 初始化起始索引张量
         self.model_executor.atten_info.start_index = select_index[::total_len].to(torch.int32)
-        # print("start_index: ", self.model_executor.atten_info.start_index)
         
         # 初始化当前已选择的批次项索引
         self.model_executor.atten_info.cur_select_index = select_index.unfold(0, max_prompt_len, total_len).reshape(-1)
-        # print("Prefill stage cur_select_index: ", self.model_executor.atten_info.cur_select_index)
-        
+    
+        """
+        start_index:        tensor([  0, 270, 540, 810], device='cuda:0', dtype=torch.int32)
+        b_seq_len:          tensor([14, 12, 11, 11], device='cuda:0')
+        Prefill Stage, cur_select_index: tensor([  0,   1,   2,   3,   4,   5,   6,   7,   8,   9,  10,  11,  12,  13,
+                                    270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283,
+                                    540, 541, 542, 543, 544, 545, 546, 547, 548, 549, 550, 551, 552, 553,
+                                    810, 811, 812, 813, 814, 815, 816, 817, 818, 819, 820, 821, 822, 823
+                                ], device='cuda:0')
+        Decode Stage, 0 step, cur_select_index: tensor([ 14, 282, 551, 821], device='cuda:0'), cur_b_seq_len: tensor([15, 13, 12, 12], device='cuda:0')
+        Decode Stage, 1 step, cur_select_index: tensor([ 15, 283, 552, 822], device='cuda:0'), cur_b_seq_len: tensor([16, 14, 13, 13], device='cuda:0')
+        """
+
         for cur_pos in range(max_prompt_len, total_len):
             input_ids = tokens[:, prev_pos: cur_pos] # 当前输入 token ids, decode 阶段 input_ids shape is [4, 1]         
             logits = self.model_executor.forward(input_ids, prev_pos) # 模型执行器的前向推理, logits shape is [batch_size, shape, vocab_size]
-            
-            if prev_pos > 0:
-                self.model_executor.atten_info.max_actual_seq_len += 1
-                self.model_executor.atten_info.b_seq_len += 1
-            
             self.model_executor.atten_info.cur_select_index = (self.model_executor.atten_info.start_index 
                                                                + self.model_executor.atten_info.b_seq_len)
-            
-            # print("Decode stage cur_select_index: ", self.model_executor.atten_info.cur_select_index)
+          
+            self.model_executor.atten_info.b_seq_len += 1
+            self.model_executor.atten_info.max_actual_seq_len += 1
 
             probs = softmax_split(logits[:, -1] / temperature) # torch.softma 将 logits 转换为概率分布。
             next_token = sample_top_p(probs, top_p) # next_token 形状为 [batch_size, 1]
@@ -170,10 +176,10 @@ class GenerateText:
             if eos_reached.all(): # 如果所有样本均到达结束 token，停止生成
                 break
         
-        # out_tokens = self.process_output_tokens(tokens, prompt_tokens, max_gen_len, echo, self.tokenizer.eos_token_id)
+        out_tokens = self.process_output_tokens(tokens, prompt_tokens, max_gen_len, echo, self.tokenizer.eos_token_id)
         self.model_executor.kv_mem_manager.release_ref(select_index) # 减少 kv cache 内存管理器的引用计数
 
-        return tokens
+        return out_tokens
     
     def text_completion(
         self,
@@ -221,9 +227,10 @@ class GenerateText:
             # 截取从起始位置到最大生成长度的 tokens
             generated_toks = seq_tokens[start_idx:end_idx]
             # 检查是否存在结束符，若存在则截断到结束符之前
-            if eos_token_id in generated_toks:
-                eos_idx = generated_toks.index(eos_token_id)
-                generated_toks = generated_toks[:eos_idx]
+            
+            # if eos_token_id in generated_toks:
+            #     eos_idx = generated_toks.index(eos_token_id)
+            #     generated_toks = generated_toks[:eos_idx]
 
             out_tokens.append(generated_toks)
 

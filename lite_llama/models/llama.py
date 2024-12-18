@@ -47,8 +47,7 @@ class FusedAttention(nn.Module):
 
         combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)  
         combined_kv_reshaped = combined_kv.view(-1, self.num_kv_heads*2, self.head_dim)
-
-        atten_info.kv_buffer[layer_index][atten_info.cur_select_index] = combined_kv_reshaped
+        updtae_kv_buffer(combined_kv_reshaped, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
 
         # 3. sel-attention. flashattention 计算: softmax(qk^t) * v
         xq = xq.transpose(1, 2) # (batch_size, seq_len, self.num_kv_heads, self.head_dim) -> (batch_size, self.num_kv_heads, seq_len, self.head_dim)
@@ -82,16 +81,19 @@ class FusedAttention(nn.Module):
         cos, sin = position_embeddings
         xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
 
+        # 3. 完成形状变换, 并更新 kv_buffer, 即类似 torch.concat[past_kv_values, kv_values]
         xq = xq.view(batch_size, self.num_heads_q, self.head_dim)
-        k_buffer = atten_info.kv_buffer[layer_index][:, :self.num_kv_heads, :] # k_buffer and v_buffer shape is  torch.Size([6000, 8, 64]) torch.Size([6000, 8, 64])
-        v_buffer = atten_info.kv_buffer[layer_index][:, self.num_kv_heads:, :]
-
-        k_buffer[atten_info.cur_select_index] = xk.squeeze(dim=1)
-        v_buffer[atten_info.cur_select_index] = xv.squeeze(dim=1)
+        combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)
+        reshaped_kv = combined_kv.view(-1, 2 * self.num_kv_heads, self.head_dim)
         
-        # 3. flashattention 计算: softmax(qk^t) * v
+        # 更新 kv_buffer, atten_info.kv_buffer[layer_index]
+        updtae_kv_buffer(reshaped_kv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
+        
+        # 4. flashattention 计算: softmax(qk^t) * v
         output = flash_decoding(
-            xq, k_buffer, v_buffer, 
+            xq, 
+            atten_info.kv_buffer[layer_index][:, : self.num_kv_heads, :], 
+            atten_info.kv_buffer[layer_index][:, self.num_kv_heads:, :], 
             qk_scale,
             atten_info.start_index, 
             atten_info.b_seq_len, 

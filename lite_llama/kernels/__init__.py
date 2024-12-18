@@ -12,3 +12,4 @@ from .swiglu import (SiLUMulFunction, swiglu_forward)
 from .rope_layer import rope_forward
 from .rotary_emb import rotary_emb_fwd
 from .softmax_split import softmax_split
+from .update_kv_buffer import updtae_kv_buffer

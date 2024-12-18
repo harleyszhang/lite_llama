@@ -57,7 +57,7 @@ def lite_llama_inference(
         warm_up_prompt,
         temperature=temperature,
         top_p=top_p,
-        max_gen_len=10,
+        max_gen_len=5,
         device=device,
     )
 
@@ -104,7 +104,7 @@ def transformers_inference(
     warm_up_prompt = ["Hello World"]
     warm_up_inputs = tokenizer(warm_up_prompt, return_tensors="pt", padding=True, truncation=True).to(model.device)
     with torch.no_grad():
-        _ = model.generate(**warm_up_inputs, max_new_tokens=5, temperature=temperature, top_p=top_p, do_sample=True)
+        _ = model.generate(**warm_up_inputs, max_new_tokens=10, temperature=temperature, top_p=top_p, do_sample=True)
 
     start_time = time.time()
     model_inputs = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True).to(model.device)
@@ -171,17 +171,17 @@ def compare_inference_speed(
 
     # 2. transformers inference
     hf_results, hf_time, hf_tokens, prompts_tokens, hf_pt_latency = transformers_inference(
-        hf_model_name, update_prompts, temperature, top_p, max_gen_len if max_gen_len else 64, device=device
+        hf_model_name, prompts, temperature, top_p, max_gen_len if max_gen_len else 64, device=device
     )
 
-    lite_llama_pt_latency = lite_llama_time / (lite_llama_tokens - prompts_tokens)
+    lite_llama_pt_latency = lite_llama_time / (lite_llama_tokens)
 
     # 打印时间对比
     print("lite_llama inference time: {:.4f} s".format(lite_llama_time))
     print("Transformers inference time: {:.4f} s".format(hf_time))
 
     # 吞吐量计算
-    lite_llama_throughput = (lite_llama_tokens - prompts_tokens) / lite_llama_time if lite_llama_time > 0 else float('inf')
+    lite_llama_throughput = (lite_llama_tokens) / lite_llama_time if lite_llama_time > 0 else float('inf')
     print(f"lite_llama throughput: {lite_llama_throughput:.2f} tokens/s")
     
     hf_throughput = hf_tokens / hf_time if hf_time > 0 else float('inf')
@@ -195,10 +195,10 @@ def compare_inference_speed(
     if print_result:
         for i, (prompt, litellama_res, hf_res) in enumerate(zip(prompts, lite_llama_results, hf_results)):
             # print(f"\n[Prompt {i}]:\n{prompt}")
-            if i // 2 == 0: # 省略部分打印
-                print("\n[lite_llama]: {}".format(litellama_res))
-                print("\n[Transformers]: {}".format(hf_res['generation']))
-                print("\n" + "="*40 + "\n")
+            # if i // 2 == 0: # 省略部分打印
+            print("\n[lite_llama]: {}".format(litellama_res))
+            print("\n[Transformers]: {}".format(hf_res['generation']))
+            print("\n" + "="*40 + "\n")
 
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -218,17 +218,17 @@ def main():
     #     "How to learn linux c, give me some code examples.",
     # ]
 
-    prompts: List[str] = [
-        "How to learn cnn, please introduce resnet architecture and give code ",
-        "How to learn cuda programming, give me some code example.",
-    ]
-
     # prompts: List[str] = [
-    #     "How to learn cnn, please introduce resnet architecture and give code.",
+    #     "How to learn cnn, please introduce resnet architecture and give code ",
     #     "How to learn cuda programming, give me some code example.",
-    #     "How to learn rust, give me some code examples.",
-    #     "How to learn java, give me some code example.",
     # ]
+
+    prompts: List[str] = [
+        "How to learn cnn, please introduce resnet architecture and give code.",
+        "How to learn cuda programming, give me some code example.",
+        "How to learn rust, give me some code examples.",
+        "How to learn java, give me some code example.",
+    ]
 
     # prompts: List[str] = [
     #     "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.",
@@ -249,7 +249,7 @@ def main():
     #     Hi everyone,
 
     #     I just heard about the launch of the new product and I wanted to take a moment to express my """,
-    #     "Roosevelt was the first president of the United States, he has a lot of information on the early history of the ,",
+    #     "Roosevelt was the 26th president of the United States, he has a lot of information on the early history of the ,",
     # ]
 
     # prompts: List[str] = [
@@ -260,19 +260,19 @@ def main():
     #     Hi everyone,
 
     #     I just heard""",
-    #     "Roosevelt was the first president of the United States,",
+    #     "Roosevelt was the 26th president of the United States,",
     # ]
 
     hf_model_name = "/gemini/code/llm_weights/Qwen/Qwen2.5-3B-Instruct"
-    checkpoints_dir = "/gemini/code/lite_llama/my_weight/Qwen2.5-3B-Instruct"  # 根据实际情况修改
+    custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Qwen2.5-3B-Instruct"  # 根据实际情况修改
 
     compare_inference_speed(
         prompts=prompts,
-        temperature=0.6,
-        top_p=0.9,
+        temperature=0.7,
+        top_p=0.8,
         max_seq_len=2048,
-        max_gen_len=1900,
-        lite_llama_ckpt_dir=checkpoints_dir,
+        max_gen_len=256,
+        lite_llama_ckpt_dir=custom_checkpoints_dir,
         hf_model_name=hf_model_name,
         print_result=True,
         device=device
