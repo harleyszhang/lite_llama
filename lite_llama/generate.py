@@ -150,9 +150,8 @@ class GenerateText:
         Decode Stage, 0 step, cur_select_index: tensor([ 14, 282, 551, 821], device='cuda:0'), cur_b_seq_len: tensor([15, 13, 12, 12], device='cuda:0')
         Decode Stage, 1 step, cur_select_index: tensor([ 15, 283, 552, 822], device='cuda:0'), cur_b_seq_len: tensor([16, 14, 13, 13], device='cuda:0')
         """
-
+        input_ids = tokens[:, 0: max_prompt_len] # 当前输入 token ids, decode 阶段 input_ids shape is [4, 1] 
         for cur_pos in range(max_prompt_len, total_len):
-            input_ids = tokens[:, prev_pos: cur_pos] # 当前输入 token ids, decode 阶段 input_ids shape is [4, 1]         
             logits = self.model_executor.forward(input_ids, prev_pos) # 模型执行器的前向推理, logits shape is [batch_size, shape, vocab_size]
             self.model_executor.atten_info.cur_select_index = (self.model_executor.atten_info.start_index 
                                                                + self.model_executor.atten_info.b_seq_len)
@@ -162,8 +161,10 @@ class GenerateText:
 
             probs = softmax_split(logits[:, -1] / temperature) # torch.softma 将 logits 转换为概率分布。
             next_token = sample_top_p(probs, top_p) # next_token 形状为 [batch_size, 1]
-            next_token = next_token.reshape(-1) # 调整为一维, shape is batch_size
+            input_ids = next_token
 
+            next_token = next_token.reshape(-1) # 调整为一维, shape is batch_size
+            
             # 仅替换生成部分的token
             mask = ~input_text_mask[:, cur_pos]
             next_token = torch.where(mask, next_token, tokens[:, cur_pos])
