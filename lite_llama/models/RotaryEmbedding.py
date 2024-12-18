@@ -133,6 +133,7 @@ class LlamaRotaryEmbedding(nn.Module):
             self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
+        # 从一个全局定义的字典ROPE_INIT_FUNCTIONS中，根据rope_type选择初始化函数
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device, **self.rope_kwargs)
@@ -141,6 +142,7 @@ class LlamaRotaryEmbedding(nn.Module):
 
     def _dynamic_frequency_update(self, position_ids, device):
         """
+        用于动态更新频率参数 inv_freq, 支持序列长度超过缓存长度时的扩展或重置。
         dynamic RoPE layers should recompute `inv_freq` in the following situations:
         1 - growing beyond the cached sequence length (allow scaling)
         2 - the current sequence length is in the original scale (avoid losing precision with small sequences)
@@ -162,19 +164,27 @@ class LlamaRotaryEmbedding(nn.Module):
         if "dynamic" in self.rope_type:
             self._dynamic_frequency_update(position_ids, device=x.device)
 
-        # Core RoPE block
+        """
+        inv_freq_expanded: [batch_size, dim/2, 1]
+        position_ids: [batch_size, seq_length]，将其形状扩展为[batch_size, 1, seq_length]再进行浮点化
+        position_ids_expanded: [batch_size, 1, seq_length]
+        矩阵相乘后得到: [batch_size, dim/2, seq_length]
+        再transpose(1, 2)后得到[batch_size, seq_length, dim/2]
+        """
         inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
         position_ids_expanded = position_ids[:, None, :].float()
         # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
         device_type = x.device.type
         device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):
+            # freqs：频率与位置的内积，结果形状为 (batch_size, seq_len, dim//2)
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            # emb 形状: [batch_size, seq_length, dim]
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos()
             sin = emb.sin()
 
-        # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
+        # 对cos和sin进行attention_scaling缩放（用于高级的RoPE类型，如yarn）
         cos = cos * self.attention_scaling
         sin = sin * self.attention_scaling
 
@@ -246,6 +256,7 @@ class Qwen2RotaryEmbedding(nn.Module):
 
     @torch.no_grad()
     def forward(self, x, position_ids):
+        batch_size, seq_len, hidden_size = x.shape
         if "dynamic" in self.rope_type:
             self._dynamic_frequency_update(position_ids, device=x.device)
 
@@ -265,18 +276,46 @@ class Qwen2RotaryEmbedding(nn.Module):
         cos = cos * self.attention_scaling
         sin = sin * self.attention_scaling
 
+        # cos = cos.view(batch_size * seq_len, -1)
+        # sin = sin.view(batch_size * seq_len, -1)
+
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
-    
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """同一组的 kv cache 复制多份"""
-    batch_size, seq_len, num_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        # (B, Seq_Len, num_kv_heads, 1, Head_Dim)
-        x[:, :, :, None, :]
-        # (B, Seq_Len, num_kv_heads, N_Rep, Head_Dim)
-        .expand(batch_size, seq_len, num_kv_heads, n_rep, head_dim)
-        # (B, Seq_Len, num_kv_heads * N_Rep, Head_Dim)
-        .reshape(batch_size, seq_len, num_kv_heads * n_rep, head_dim)
-    )
+
+if __name__ == "__main__":
+    import torch
+    import torch.nn as nn
+
+    # 假设有相应的初始化函数和config，本文仅作示例，不做实际调用
+    # 这里使用假的ROPE_INIT_FUNCTIONS和config
+    class DummyConfig:
+        def __init__(self, max_position_embeddings=2048, rope_scaling=None):
+            self.max_position_embeddings = max_position_embeddings
+            self.rope_scaling = rope_scaling
+
+    def dummy_rope_init_fn(config, device, **kwargs):
+        # 简单返回一个inv_freq和1.0的attention_scaling作为示例
+        # inv_freq 大小与 head_dim 有关: head_dim 为 8, 那么 inv_freq 维度应该为 head_dim/2=4
+        # 通常inv_freq是频率的倒数，这里随便用一个递增序列模拟
+        head_dim = kwargs.get("head_dim", 8)
+        inv_freq = torch.tensor([1.0/(10000**(i/(head_dim/2))) for i in range(head_dim//2)], device=device)
+        attention_scaling = 1.0
+        return inv_freq, attention_scaling
+
+    ROPE_INIT_FUNCTIONS = {
+        "default": dummy_rope_init_fn,
+    }
+
+    # 初始化类实例
+    model = LlamaRotaryEmbedding(dim = 8, rope_type="default", config=DummyConfig())
+
+    # 构造输入
+    x = torch.randn(2, 1, 8)  # [batch_size=2, seq_length=4, head_dim=8]
+    position_ids = torch.arange(1).unsqueeze(0).repeat(2, 1)  # [[0,1,2,3],[0,1,2,3]]
+
+    # 前向计算
+    cos, sin = model(x, position_ids)
+
+    print("cos shape:", cos.shape) # [2,4,8]
+    print("sin shape:", sin.shape) # [2,4,8]
+    print("cos:", cos)
+    print("sin:", sin)

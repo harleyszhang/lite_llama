@@ -108,7 +108,7 @@ class Qwen2Attention(nn.Module):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
-
+        
         xq = F.linear(x, self.q_proj_weight, bias=self.q_proj_bias)
         xkv = F.linear(x, self.kv_proj_weight, bias=self.kv_proj_bias)
         xk, xv = torch.split(xkv, self.num_kv_heads * self.head_dim, dim=-1)
@@ -120,7 +120,7 @@ class Qwen2Attention(nn.Module):
         xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
 
         cos, sin = position_embeddings
-        xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
+        xq, xk = rope_forward(xq, xk, cos, sin)
 
         return xq, xk, xv
     

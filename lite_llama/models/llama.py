@@ -43,7 +43,7 @@ class FusedAttention(nn.Module):
         xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
 
         cos, sin = position_embeddings
-        xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
+        xq, xk = rope_forward(xq, xk, cos, sin)
 
         combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)  
         combined_kv_reshaped = combined_kv.view(-1, self.num_kv_heads*2, self.head_dim)
@@ -79,7 +79,7 @@ class FusedAttention(nn.Module):
         xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         
         cos, sin = position_embeddings
-        xq, xk, _, _ = rope_forward(xq, xk, cos, sin)
+        xq, xk = rope_forward(xq, xk, cos, sin)
 
         # 3. 完成形状变换, 并更新 kv_buffer, 即类似 torch.concat[past_kv_values, kv_values]
         xq = xq.view(batch_size, self.num_heads_q, self.head_dim)

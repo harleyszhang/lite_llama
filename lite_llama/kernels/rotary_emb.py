@@ -160,7 +160,7 @@ def torch_rotary_emb(x, cos, sin):
     # cos, sin 的形状为 (seq_len, d//2)
     half_dim = cos.shape[-1]
     x0 = x[:, :, :half_dim]
-    x1 = x[:, :, half_dim:2*half_dim]
+    x1 = x[:, :, half_dim: 2*half_dim]
 
     cos = cos.view(seq_len, 1, half_dim)
     sin = sin.view(seq_len, 1, half_dim)

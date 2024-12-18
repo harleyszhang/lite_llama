@@ -22,7 +22,6 @@ def _triton_rope(
     pad_n_kh: tl.constexpr,
     pad_hd: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-    BACKWARD_PASS: tl.constexpr = False,
 ):
     # q size: (bsz, seq_len, num_q_heads, head_dim)
     # q stride: (seq_len * num_q_heads * head_dim, num_q_heads * head_dim, head_dim, 1)
@@ -92,33 +91,19 @@ def _triton_rope(
         sin_row.dtype
     )
 
-    if not BACKWARD_PASS:
-        # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
-        new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
-        tl.store(q_ptr + first_half_q_offsets, new_q_tile_1, mask=first_q_mask)
-        new_q_tile_2 = q_tile_2 * cos_row + q_tile_1 * sin_row
-        tl.store(q_ptr + second_half_q_offsets, new_q_tile_2, mask=second_q_mask)
+    # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
+    new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
+    tl.store(q_ptr + first_half_q_offsets, new_q_tile_1, mask=first_q_mask)
+    new_q_tile_2 = q_tile_2 * cos_row + q_tile_1 * sin_row
+    tl.store(q_ptr + second_half_q_offsets, new_q_tile_2, mask=second_q_mask)
 
-        new_k_tile_1 = k_tile_1 * cos_row - k_tile_2 * sin_row
-        tl.store(k_ptr + first_half_k_offsets, new_k_tile_1, mask=first_k_mask)
-        new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
-        tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
-    else:
-        # with some math, we can get:
-        # dy = [dx1, dx2] * [cos, cos] + [-dx2, dx1] * [-sin, -sin]
-        new_q_tile_1 = q_tile_1 * cos_row + q_tile_2 * sin_row
-        tl.store(q_ptr + first_half_q_offsets, new_q_tile_1, mask=first_q_mask)
-        new_q_tile_2 = q_tile_2 * cos_row - q_tile_1 * sin_row
-        tl.store(q_ptr + second_half_q_offsets, new_q_tile_2, mask=second_q_mask)
-
-        new_k_tile_1 = k_tile_1 * cos_row + k_tile_2 * sin_row
-        tl.store(k_ptr + first_half_k_offsets, new_k_tile_1, mask=first_k_mask)
-        new_k_tile_2 = k_tile_2 * cos_row - k_tile_1 * sin_row
-        tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
-
+    new_k_tile_1 = k_tile_1 * cos_row - k_tile_2 * sin_row
+    tl.store(k_ptr + first_half_k_offsets, new_k_tile_1, mask=first_k_mask)
+    new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
+    tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
+    
 
 def rope_forward(q, k, cos, sin):
-
     # transpose it back to the physical shape because Triton looks at the physical storage
     # note: q and k are incontiguous before the transformation and will become contiguous after transpose
     # q = q.transpose(1, 2)
@@ -157,87 +142,176 @@ def rope_forward(q, k, cos, sin):
         pad_n_kv_head,
         pad_hd,
         BLOCK_SIZE=BLOCK_SIZE,
-        BACKWARD_PASS=False,
     )
-    return q, k, cos, sin
+    return q, k
+
+@triton.jit
+def _triton_rope_emb(
+    q_ptr,
+    q_row_stride,
+    k_ptr,
+    k_row_stride,
+    cos,
+    cos_b_stride,
+    cos_s_stride,
+    sin,
+    sin_b_stride,
+    sin_s_stride,
+    sl,
+    bs: tl.constexpr,
+    n_qh: tl.constexpr,
+    n_kh: tl.constexpr,
+    hd: tl.constexpr,
+    pad_n_qh: tl.constexpr,
+    pad_n_kh: tl.constexpr,
+    pad_hd: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    batch_id = pid // sl
+    cos_row_idx = pid % sl
+
+    # 定位到 q, k 行起点
+    q_ptr += pid * q_row_stride
+    k_ptr += pid * k_row_stride
+
+    # 定位到 cos, sin 对应 batch_id 的 cos_row_idx 行
+    cos_ptr = cos + batch_id * cos_b_stride + cos_row_idx * cos_s_stride
+    sin_ptr = sin + batch_id * sin_b_stride + cos_row_idx * sin_s_stride
+
+    cos_offsets = tl.arange(0, pad_hd // 2)
+    cos_mask = cos_offsets < hd // 2
+    cos_row = tl.load(cos_ptr + cos_offsets, mask=cos_mask, other=0)
+    sin_row = tl.load(sin_ptr + cos_offsets, mask=cos_mask, other=0)
+
+    # 计算 head 和 dim 偏移
+    first_half_q_offsets = (
+        tl.arange(0, pad_n_qh)[:, None] * hd + tl.arange(0, pad_hd // 2)[None, :]
+    )
+    first_half_k_offsets = (
+        tl.arange(0, pad_n_kh)[:, None] * hd + tl.arange(0, pad_hd // 2)[None, :]
+    )
+
+    first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (
+        tl.arange(0, pad_hd // 2)[None, :] < hd // 2
+    )
+    first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (
+        tl.arange(0, pad_hd // 2)[None, :] < hd // 2
+    )
+
+    q_tile_1 = tl.load(q_ptr + first_half_q_offsets, mask=first_q_mask, other=0).to(sin_row.dtype)
+    k_tile_1 = tl.load(k_ptr + first_half_k_offsets, mask=first_k_mask, other=0).to(sin_row.dtype)
+
+    second_half_q_offsets = first_half_q_offsets + (hd // 2)
+    second_half_k_offsets = first_half_k_offsets + (hd // 2)
+    second_q_mask = first_q_mask
+    second_k_mask = first_k_mask
+
+    q_tile_2 = tl.load(q_ptr + second_half_q_offsets, mask=second_q_mask, other=0).to(sin_row.dtype)
+    k_tile_2 = tl.load(k_ptr + second_half_k_offsets, mask=second_k_mask, other=0).to(sin_row.dtype)
+
+    new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
+    tl.store(q_ptr + first_half_q_offsets, new_q_tile_1, mask=first_q_mask)
+    new_q_tile_2 = q_tile_2 * cos_row + q_tile_1 * sin_row
+    tl.store(q_ptr + second_half_q_offsets, new_q_tile_2, mask=second_q_mask)
+
+    new_k_tile_1 = k_tile_1 * cos_row - k_tile_2 * sin_row
+    tl.store(k_ptr + first_half_k_offsets, new_k_tile_1, mask=first_k_mask)
+    new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
+    tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
 
 
-def rope_backward(dq, dk, cos, sin):
-    dq = dq.transpose(1, 2)
-    dk = dk.transpose(1, 2)
+def rope_emb_forward(q, k, cos, sin, batch_size, seq_len):
+    """
+    q: (batch_size * seq_len, n_q_heads, head_dim)
+    k: (batch_size * seq_len, n_k_heads, head_dim)
+    cos, sin: (batch_size, seq_len, head_dim)
+    """
+    N, n_qh, hd = q.shape
+    _, n_kh, _ = k.shape
+    assert N == batch_size * seq_len
 
-    batch_size, seq_len, n_q_head, head_dim = dq.shape
-    n_kv_head = dk.shape[2]
-    pad_hd = triton.next_power_of_2(head_dim)
-    pad_n_q_head = triton.next_power_of_2(n_q_head)
-    pad_n_kv_head = triton.next_power_of_2(n_kv_head)
-    BLOCK_SIZE = max(pad_n_q_head, pad_n_kv_head)
+    pad_hd = triton.next_power_of_2(hd)
+    pad_n_qh = triton.next_power_of_2(n_qh)
+    pad_n_kh = triton.next_power_of_2(n_kh)
+    BLOCK_SIZE = max(pad_n_qh, pad_n_kh)
 
-    n_row = batch_size * seq_len
+    q = q.contiguous()
+    k = k.contiguous()
+    cos = cos.contiguous()
+    sin = sin.contiguous()
 
-    # ensure dq and dk are contiguous
-    dq = dq.contiguous()
-    dk = dk.contiguous()
-
-    # backward is similar to forward except swapping few ops
-    _triton_rope[(n_row,)](
-        dq,
-        dq.stride(1),
-        dk,
-        dk.stride(1),
+    _triton_rope_emb[(N,)](
+        q,
+        q.stride(0),
+        k,
+        k.stride(0),
         cos,
-        cos.stride(-2),
+        cos.stride(0),
+        cos.stride(1),
         sin,
-        sin.stride(-2),
+        sin.stride(0),
+        sin.stride(1),
         seq_len,
         batch_size,
-        n_q_head,
-        n_kv_head,
-        head_dim,
-        pad_n_q_head,
-        pad_n_kv_head,
+        n_qh,
+        n_kh,
+        hd,
+        pad_n_qh,
+        pad_n_kh,
         pad_hd,
         BLOCK_SIZE=BLOCK_SIZE,
-        BACKWARD_PASS=True,
     )
-    return dq.transpose(1, 2), dk.transpose(1, 2)
+    return q, k
 
+def torch_rotary_emb(x, cos, sin):
+    seq_len, h, d = x.shape
+    # cos, sin 的形状为 (seq_len, d//2)
+    half_dim = cos.shape[-1]
+    x0 = x[:, :, :half_dim]
+    x1 = x[:, :, half_dim: 2*half_dim]
 
-class LigerRopeFunction(torch.autograd.Function):
-    """
-    Triton implementation of the Rotary Positional Embedding (RoPE) operation. Please note that
-    this implements the HuggingFace Llama & Mistral version, whose rotation matrix is slightly different
-    than the original RoPE paper.
+    cos = cos.view(seq_len, 1, half_dim)
+    sin = sin.view(seq_len, 1, half_dim)
 
-    Please find the corresponding HuggingFace implementation here:
-    https://github.com/huggingface/transformers/blob/v4.40.2/src/transformers/models/llama/modeling_llama.py#L184
+    o0 = x0 * cos - x1 * sin
+    o1 = x0 * sin + x1 * cos
 
-    For more details about the rotation matrix used here, please refer to:
-    https://discuss.huggingface.co/t/is-llama-rotary-embedding-implementation-correct/44509/2
-    """
+    if 2 * half_dim < d:
+        out = torch.cat([o0, o1, x[:, :, 2*half_dim:]], dim=-1)
+    else:
+        out = torch.cat([o0, o1], dim=-1)
 
-    @staticmethod
-    def forward(ctx, q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
-        """
-        q size: (bsz, n_q_head, seq_len, head_dim)
-        k size: (bsz, n_kv_head, seq_len, head_dim)
-        cos size: (1, seq_len, head_dim)
-        sin size: (1, seq_len, head_dim)
-        """
-        q, k, cos, sin = rope_forward(q, k, cos, sin)
-        ctx.save_for_backward(cos, sin)
-        return q, k
+    return out
 
-    def backward(ctx, dq, dk):
-        """
-        dq size: (bsz, n_q_head, seq_len, head_dim)
-        dk size: (bsz, n_kv_head, seq_len, head_dim)
-        cos size: (1, seq_len, head_dim)
-        sin size: (1, seq_len, head_dim)
-        """
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    batch_size = 248
+    seq_len = 100
+    head_dim = 64
+    batch_tokens = batch_size * seq_len
+    x_shape = (batch_tokens, 32, 64)  # (seq_len, num_heads, head_dim)
+    dtype = torch.float16
+    q = torch.randn(x_shape, dtype=dtype, device='cuda')
+    k = torch.clone(q)
 
-        cos, sin = ctx.saved_tensors
-        dq, dk = rope_backward(dq, dk, cos, sin)
-        return dq, dk, None, None, None, None
+    triton_q = q.view(batch_size, seq_len, 32, 64)
+    triton_k = k.view(batch_size, seq_len, 32, 64)
 
-apply_rotary_pos_emb = LigerRopeFunction.apply
+    # 生成 cos 和 sin，与 head_dim 对应，这里 head_dim=64，因此 cos, sin=(seq_len, head_dim//2)=(128,32)
+    cos_shape = (batch_tokens, 32)  
+    y = torch.randn(cos_shape, dtype=dtype, device='cuda')
+    cos = y.cos()
+    sin = y.sin()
+    
+    triton_cos = cos.view(seq_len, 1, head_dim)
+    triton_sin = sin.view(seq_len, 1, head_dim)
+
+    output_torch = torch_rotary_emb(q, cos, sin)
+    q_out, k_out, _, _ = rope_forward(triton_q, triton_k, triton_cos, triton_cos)
+    triton_q_out = q_out.view(-1, 32, 64)
+    print(f"output_torch shape {output_torch.shape}, triton_q_out shape {triton_q_out.shape}")
+    
+    print(f'The maximum difference between torch and triton is {torch.max(torch.abs(output_torch - triton_q_out))}')
+    print('torch:', triton.testing.do_bench(lambda: torch_rotary_emb(q, cos, sin)))
+    print('triton:', triton.testing.do_bench(lambda: rope_forward(triton_q, triton_k, cos, sin)))

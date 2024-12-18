@@ -106,8 +106,22 @@ def compute_theta(dim: int, base: float = 10000.0, device: torch.device = torch.
 
 def precompute_freqs_cis(dim: int, seq_len: int, base: float = 10000.0, device: torch.device = torch.device('cuda')):
     theta = compute_theta(dim, base, device) # theta 角度值序列，向量, 大小为 dim // 2
-    m = torch.arange(seq_len, device=device) # # token 位置值序列，向量，大小为 seq_len
+    m = torch.arange(seq_len, device=device) # token 位置值序列，向量，大小为 seq_len
     m_theta = torch.outer(m, theta) # 所有 token 位置的所有 Theta 值范围, 矩阵，尺寸为 [seq_len, dim // 2]
     freqs_cis = torch.polar(torch.ones_like(m_theta), m_theta) # e^{i*m*\theta}，本质上是旋转矩阵
 
     return freqs_cis
+
+def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """同一组的 kv cache 复制多份"""
+    batch_size, seq_len, num_kv_heads, head_dim = x.shape
+    if n_rep == 1:
+        return x
+    return (
+        # (B, Seq_Len, num_kv_heads, 1, Head_Dim)
+        x[:, :, :, None, :]
+        # (B, Seq_Len, num_kv_heads, N_Rep, Head_Dim)
+        .expand(batch_size, seq_len, num_kv_heads, n_rep, head_dim)
+        # (B, Seq_Len, num_kv_heads * N_Rep, Head_Dim)
+        .reshape(batch_size, seq_len, num_kv_heads * n_rep, head_dim)
+    )

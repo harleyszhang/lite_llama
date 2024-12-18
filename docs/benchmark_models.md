@@ -87,6 +87,30 @@ lite_llama per token latency: 1.405308 ms/token
 Transformers per token latency: 4.526747 ms/token
 ```
 
+### Qwen2.5-3B-Instruct 模型性能测试对比
+
+`batch_size = 4` 时的提示词
+
+```bash
+    prompts: List[str] = [
+        "How to learn cnn, please introduce resnet architecture and give code.",
+        "How to learn cuda programming, give me some code example.",
+        "How to learn rust, give me some code examples.",
+        "How to learn java, give me some code example.",
+    ]
+```
+
+`max_gen_len = 256` 时，benchmark 性能测试运行结果:
+
+```bash
+lite_llama inference time: 5.5739 s
+Transformers inference time: 7.6803 s
+lite_llama throughput: 182.28 tokens/s
+Transformers throughput: 133.33 tokens/s
+lite_llama per token latency: 5.486118 ms/token
+Transformers per token latency: 7.500309 ms/token
+```
+
 ## Llama-3.2-1B 模型性能测试对比
 
 ### 推理结果历史记录
