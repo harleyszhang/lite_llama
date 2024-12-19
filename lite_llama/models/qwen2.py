@@ -189,23 +189,28 @@ class Qwen2DecoderLayer(nn.Module):
         self.mlp = FusedMLP(config)
 
     def forward(self, 
-        x: torch.Tensor, 
+        hidden_states: torch.Tensor, 
         atten_info,
         layer_index: int,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         qk_scale = None,
+        residual: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # Normalization BEFORE the attention block. # (B, Seq_Len, Hidden_Size) 
-        hidden_states = rmsnorm_fwd(x, self.input_layernorm_weight.data, eps=self.rmsnorm_eps)
+        
+        if residual is None:
+            residual = hidden_states
+            hidden_states = skip_rmsnorm(hidden_states, None, self.input_layernorm_weight.data, self.rmsnorm_eps)
+        else:
+            hidden_states, residual = skip_rmsnorm(hidden_states, residual, self.input_layernorm_weight.data, self.rmsnorm_eps)
         
         # 调用 attention 模块
-        attn_output = self.self_attn(hidden_states, atten_info, layer_index, position_embeddings, qk_scale)
+        hidden_states = self.self_attn(hidden_states, atten_info, layer_index, position_embeddings, qk_scale)
         
-        h = x + attn_output  # 残差连接
-        hidden_states = rmsnorm_fwd(h, self.post_attention_layernorm_weight.data, eps=self.rmsnorm_eps)
-        out = h + self.mlp.forward(hidden_states) # 调用 Feed Forward 模块并做残差连接
+        # 调用 mlp 模块
+        hidden_states, residual = skip_rmsnorm(hidden_states, residual, self.post_attention_layernorm_weight.data, self.rmsnorm_eps)
+        hidden_states = self.mlp.forward(hidden_states) # 调用 Feed Forward 模块并做残差连接
         
-        return out
+        return hidden_states, residual
 
 class Qwen2Model(nn.Module):
     def __init__(self, config: Qwen2Config):
@@ -243,6 +248,7 @@ class Qwen2Model(nn.Module):
     ):
         # self.hidden_states = []
         batch_size, seq_len = input_ids.shape
+        residual = None
 
         if inputs_embeds is not None:
             h = inputs_embeds
@@ -264,13 +270,10 @@ class Qwen2Model(nn.Module):
         # Consecutively apply all the encoder layers
         for i, layer in enumerate(self.layers):            
             # self.hidden_states.append(h)
-            h = layer(h, atten_info, i, position_embeddings, qk_scale)  # h.shape [batch_size, seq_len, hidden_dim]
+            h, residual = layer(h, atten_info, i, position_embeddings, qk_scale, residual)  # h.shape [batch_size, seq_len, hidden_dim]
 
-        h = rmsnorm_fwd(h, self.norm_weight, eps=self.rmsnorm_eps)
-        # self.hidden_states.append(h)
-        
+        h, _ = skip_rmsnorm(h, residual, self.norm_weight.data, self.rmsnorm_eps)        
         output = F.linear(h, self.lm_head_weight.data)
-
         return output
     
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:

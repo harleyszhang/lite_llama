@@ -126,6 +126,7 @@ class LlamaDecoderLayer(nn.Module):
         self.num_heads = config.num_heads
         self.hidden_size = config.hidden_size
         self.head_dim = config.head_dim if config.head_dim is not None else config.hidden_size // config.num_heads
+        self.rmsnorm_eps = config.rms_norm_eps
 
         self.attention_norm_weight = nn.Parameter(torch.ones(self.hidden_size,), requires_grad=False)
         self.ffn_norm_weight = nn.Parameter(torch.ones(self.hidden_size,), requires_grad=False)
@@ -134,30 +135,34 @@ class LlamaDecoderLayer(nn.Module):
         self.mlp = FusedMLP(config)
 
     def forward(self, 
-        x: torch.Tensor, 
+        hidden_states: torch.Tensor, 
         atten_info,
         layer_index: int,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         qk_scale = None,
+        residual: Optional[torch.Tensor] = None
     ):
         # Normalization before the attention block.
-        _, seq_len, _ = x.shape
-        hidden_states = rmsnorm_fwd(x, self.attention_norm_weight.data, eps=self.config.rms_norm_eps)
+        _, seq_len, _ = hidden_states.shape
+        
+        if residual is None:
+            residual = hidden_states
+            hidden_states = skip_rmsnorm(hidden_states, None, self.attention_norm_weight.data, self.rmsnorm_eps)
+        else:
+            hidden_states, residual = skip_rmsnorm(hidden_states, residual, self.attention_norm_weight.data, self.rmsnorm_eps)
 
         if seq_len > 1:
-            attn_output = self.self_attn.context_forward(
+            hidden_states = self.self_attn.context_forward(
                 hidden_states, atten_info, layer_index, position_embeddings, qk_scale
             )
         else:
-            attn_output = self.self_attn.token_forward(
+            hidden_states = self.self_attn.token_forward(
                 hidden_states, atten_info, layer_index, position_embeddings, qk_scale
             )
         
-        h = x + attn_output
-        hidden_states = rmsnorm_fwd(h, self.ffn_norm_weight.data, eps=self.config.rms_norm_eps)
-        out = h + self.mlp.forward(hidden_states)
-
-        return out
+        hidden_states, residual = skip_rmsnorm(hidden_states, residual, self.ffn_norm_weight.data, self.rmsnorm_eps)
+        hidden_states = self.mlp.forward(hidden_states)
+        return hidden_states, residual
         
 
 class LlamaModel(nn.Module):
@@ -169,6 +174,7 @@ class LlamaModel(nn.Module):
         self.num_layers = config.num_layers
         self.head_dim = config.head_dim if config.head_dim is not None else config.hidden_size // config.num_heads
         self.qk_scale = 1.0 / (self.head_dim ** 0.5)
+        self.rmsnorm_eps = config.rms_norm_eps
 
         # self.hidden_states = []
 
@@ -190,7 +196,8 @@ class LlamaModel(nn.Module):
     ):
         # self.hidden_states = []
         batch_size, seq_len = input_ids.shape
-        
+        residual = None
+
         if inputs_embeds is not None: # To support Multi-model Model
             h = inputs_embeds
         else:
@@ -210,9 +217,9 @@ class LlamaModel(nn.Module):
         
         for i, layer in enumerate(self.layers): # Consecutively apply all the encoder layers
             # self.hidden_states.append(h)
-            h = layer(h, atten_info, i, position_embeddings, qk_scale)  # h.shape [batch_size, seq_len, hidden_dim]
+            h, residual = layer(h, atten_info, i, position_embeddings, qk_scale, residual)  # h.shape [batch_size, seq_len, hidden_dim]
 
-        h = rmsnorm_fwd(h, self.norm_weight.data, eps=self.config.rms_norm_eps)
+        h, _ = skip_rmsnorm(h, residual, self.norm_weight.data, self.rmsnorm_eps)
         # self.hidden_states.append(h)
         output = self.lm_head(h)
 

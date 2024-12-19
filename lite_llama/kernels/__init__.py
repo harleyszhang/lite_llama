@@ -1,5 +1,6 @@
 from .rmsnorm import rmsnorm
 from .rmsnorm_layer import rmsnorm_fwd
+from .skip_rmsnorm import skip_rmsnorm
 from .layernorm import layernorm
 from .activations import (gelu, relu, leaky_relu, tanh)
 from .activation_layers import ACT2FN

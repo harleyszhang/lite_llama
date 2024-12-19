@@ -264,7 +264,7 @@ def main():
     # ]
 
     hf_model_name = "/gemini/code/llm_weights/Qwen/Qwen2.5-3B-Instruct"
-    custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-3B-hf"  # 根据实际情况修改
+    custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Qwen2.5-3B-Instruct"  # 根据实际情况修改
 
     compare_inference_speed(
         prompts=prompts,
