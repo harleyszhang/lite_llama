@@ -227,7 +227,7 @@ def main():
         "How to learn cnn, please introduce resnet architecture and give code.",
         "How to learn cuda programming, give me some code example.",
         "How to learn rust, give me some code examples.",
-        "How to learn java, give me some code example.",
+        "How to learn c++, give me some code examples.",
     ]
 
     # prompts: List[str] = [
