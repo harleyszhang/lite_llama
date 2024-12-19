@@ -32,8 +32,7 @@ class Attention(nn.Module):
         combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)
         combined_kv_reshaped = combined_kv.view(-1, self.num_kv_heads*2, self.head_dim)
         # 更新 kv_buffer, atten_info.kv_buffer[layer_index]
-        updtae_kv_buffer(combined_kv_reshaped, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
-        # atten_info.kv_buffer[layer_index][atten_info.cur_select_index] = combined_kv_reshaped
+        update_kv_buffer(combined_kv_reshaped, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
 
         # 2. sel-attention. flashattention 计算: softmax(qk^t) * v
         xq = xq.transpose(1, 2)
@@ -58,11 +57,11 @@ class Attention(nn.Module):
 
         # 1. 先获取 kv 缓冲向量再更新 kv 向量
         xq = xq.view(batch_size, num_heads_q, self.head_dim)
-        combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)
+        combined_kv = torch.cat([xk, xv], dim=-2) # (B, L, 2*num_kv_heads, head_dim)
         reshaped_kv = combined_kv.view(-1, 2 * self.num_kv_heads, self.head_dim)
         
         # 更新 kv_buffer, atten_info.kv_buffer[layer_index]
-        updtae_kv_buffer(reshaped_kv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
+        update_kv_buffer(reshaped_kv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
 
         # 2. flashattention 计算: softmax(qk^t) * v
         output = flash_decoding(
@@ -109,13 +108,11 @@ class Qwen2Attention(nn.Module):
     ) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
         
-        xq = F.linear(x, self.q_proj_weight, bias=self.q_proj_bias)
-        xkv = F.linear(x, self.kv_proj_weight, bias=self.kv_proj_bias)
+        xq = F.linear(x, self.q_proj_weight.data, bias=self.q_proj_bias.data)
+        xkv = F.linear(x, self.kv_proj_weight.data, bias=self.kv_proj_bias.data)
         xk, xv = torch.split(xkv, self.num_kv_heads * self.head_dim, dim=-1)
 
-        # (B, 1, H_Q * Head_Dim) -> (B, 1, H_Q, Head_Dim), 
         xq = xq.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        # (B, 1, H_KV * Head_Dim) -> (B, 1, H_KV, Head_Dim)
         xk = xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
 
@@ -156,7 +153,7 @@ class Qwen2Attention(nn.Module):
             #     raise ValueError(f"NaNs detected in token_forward output at layer {layer_index}")    
 
         # 进行张量矩阵乘法, 需要对原始的 o_proj_weight 权重进行转置, attn_output shape is [batch_size, seq_len, hidden_size]
-        output = F.linear(attn_output, self.o_proj_weight)
+        output = F.linear(attn_output, self.o_proj_weight.data)
         return output
     
 class FusedMLP(nn.Module):
@@ -200,13 +197,9 @@ class Qwen2DecoderLayer(nn.Module):
     ) -> torch.Tensor:
         # Normalization BEFORE the attention block. # (B, Seq_Len, Hidden_Size) 
         hidden_states = rmsnorm_fwd(x, self.input_layernorm_weight.data, eps=self.rmsnorm_eps)
-        # if torch.isnan(hidden_states).any(): # 检查 NaNs
-        #     raise ValueError(f"NaNs detected in post input layernorm output at layer {layer_index}") 
         
         # 调用 attention 模块
         attn_output = self.self_attn(hidden_states, atten_info, layer_index, position_embeddings, qk_scale)
-        # if torch.isnan(attn_output).any(): # 检查 NaNs
-        #     raise ValueError(f"NaNs detected in attn_output output at layer {layer_index}")    
         
         h = x + attn_output  # 残差连接
         hidden_states = rmsnorm_fwd(h, self.post_attention_layernorm_weight.data, eps=self.rmsnorm_eps)
@@ -249,22 +242,23 @@ class Qwen2Model(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ):
         # self.hidden_states = []
-        _, seq_len = input_ids.shape
+        batch_size, seq_len = input_ids.shape
 
         if inputs_embeds is not None:
             h = inputs_embeds
         else:
             h = self.get_input_embeddings(input_ids)
 
+        if position_ids is None:
+            cache_position = torch.arange(start_pos, start_pos + seq_len, device=h.device)
+            position_ids = cache_position.unsqueeze(0)
+
         if seq_len > 1:
             qk_scale = self.qk_scale * 1.4426950408889634
         else:
             qk_scale = self.qk_scale
+            position_ids = position_ids.repeat(batch_size, 1)
 
-        if position_ids is None:
-            cache_position = torch.arange(start_pos, start_pos + seq_len, device=h.device)
-            position_ids = cache_position.unsqueeze(0)
-        
         position_embeddings = self.rotary_emb(h, position_ids)
        
         # Consecutively apply all the encoder layers
@@ -275,7 +269,7 @@ class Qwen2Model(nn.Module):
         h = rmsnorm_fwd(h, self.norm_weight, eps=self.rmsnorm_eps)
         # self.hidden_states.append(h)
         
-        output = F.linear(h, self.lm_head_weight)
+        output = F.linear(h, self.lm_head_weight.data)
 
         return output
     

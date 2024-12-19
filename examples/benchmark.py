@@ -164,14 +164,14 @@ def compare_inference_speed(
     # 1. lite-llama inference
     lite_llama_generator = load_lite_llama_generator(lite_llama_ckpt_dir, max_seq_len, max_gpu_num_blocks = 40960, device=device)
     lite_llama_results, lite_llama_time, lite_llama_tokens = lite_llama_inference(
-        lite_llama_generator, prompts, temperature, top_p, max_gen_len, device=device
+        lite_llama_generator, update_prompts, temperature, top_p, max_gen_len, device=device
     )
     del lite_llama_generator
     torch.cuda.empty_cache() # 使用完成后释放 lite_llama_generator 占用的显存
 
     # 2. transformers inference
     hf_results, hf_time, hf_tokens, prompts_tokens, hf_pt_latency = transformers_inference(
-        hf_model_name, prompts, temperature, top_p, max_gen_len if max_gen_len else 64, device=device
+        hf_model_name, update_prompts, temperature, top_p, max_gen_len if max_gen_len else 64, device=device
     )
 
     lite_llama_pt_latency = lite_llama_time / (lite_llama_tokens)

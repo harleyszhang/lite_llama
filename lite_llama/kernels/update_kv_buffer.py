@@ -5,7 +5,7 @@ import triton.language as tl
 
 
 @triton.jit
-def _fwd_kernel_updtae_kv(
+def _fwd_kernel_update_kv(
     KV_Values, Select_Index,
     KV_Buffer,
     stride_k_bs, stride_k_h, stride_k_d,
@@ -29,7 +29,7 @@ def _fwd_kernel_updtae_kv(
 
 
 @torch.no_grad()
-def updtae_kv_buffer(KV_Values, Select_Index, KV_Buffer):
+def update_kv_buffer(KV_Values, Select_Index, KV_Buffer):
     """
     参数：
         - Select_Index: prefill 阶段 batch_size * seq_len, decode 阶段 batch_size。
@@ -47,7 +47,7 @@ def updtae_kv_buffer(KV_Values, Select_Index, KV_Buffer):
     grid = (seq_len,)
     num_warps = 1
 
-    _fwd_kernel_updtae_kv[grid](
+    _fwd_kernel_update_kv[grid](
         KV_Values, Select_Index, KV_Buffer,
         KV_Values.stride(0), KV_Values.stride(1), KV_Values.stride(2),
         KV_Buffer.stride(0), KV_Buffer.stride(1), KV_Buffer.stride(2),
