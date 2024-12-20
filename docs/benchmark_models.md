@@ -111,6 +111,36 @@ lite_llama per token latency: 5.486118 ms/token
 Transformers per token latency: 7.500309 ms/token
 ```
 
+`batch_size = 12` 时的提示词
+
+```bash
+prompts: List[str] = [
+    "I believe the meaning of life is to find happiness in the simple things. but how to achieve the meaning of life?",
+    "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
+    "Can you introduce the History of the American Civil War. ",
+    "who is the first president of the United States and what's his life story?",
+    "How to learn c++, give me some code example.",
+    "How to learn python, give me some code examples.",
+    "How to learn llm, please introduce transformer architecture ",
+    "How to learn cnn, please introduce resnet architecture and give code ",
+    "How to learn cuda programming, give me some code example.",
+    "How to learn rust, give me some code examples.",
+    "How to learn java, give me some code example.",
+    "How to learn linux c, give me some code examples.",
+]
+```
+
+`max_gen_len = 1900` 时，benchmark 性能测试运行结果:
+
+```bash
+lite_llama inference time: 11.2037 s
+Transformers inference time: 14.8672 s
+lite_llama throughput: 585.52 tokens/s
+Transformers throughput: 399.74 tokens/s
+lite_llama per token latency: 1.707888 ms/token
+Transformers per token latency: 2.501640 ms/token
+```
+
 ## Llama-3.2-1B 模型性能测试对比
 
 ### 推理结果历史记录

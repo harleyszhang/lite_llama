@@ -145,11 +145,7 @@ class LlamaDecoderLayer(nn.Module):
         # Normalization before the attention block.
         _, seq_len, _ = hidden_states.shape
         
-        if residual is None:
-            residual = hidden_states
-            hidden_states = skip_rmsnorm(hidden_states, None, self.attention_norm_weight.data, self.rmsnorm_eps)
-        else:
-            hidden_states, residual = skip_rmsnorm(hidden_states, residual, self.attention_norm_weight.data, self.rmsnorm_eps)
+        hidden_states, residual = skip_rmsnorm(hidden_states, residual, self.attention_norm_weight.data, self.rmsnorm_eps)
 
         if seq_len > 1:
             hidden_states = self.self_attn.context_forward(
