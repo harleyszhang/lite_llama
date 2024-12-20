@@ -196,8 +196,8 @@ class Qwen2DecoderLayer(nn.Module):
         qk_scale = None,
         residual: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states, residual = skip_rmsnorm(hidden_states, residual, self.attention_norm_weight.data, self.rmsnorm_eps)
-                
+        hidden_states, residual = skip_rmsnorm(hidden_states, residual, self.input_layernorm_weight.data, self.rmsnorm_eps)
+
         # 调用 attention 模块
         hidden_states = self.self_attn(hidden_states, atten_info, layer_index, position_embeddings, qk_scale)
         

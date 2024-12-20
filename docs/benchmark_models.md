@@ -79,12 +79,12 @@ prompts: List[str] = [
 `max_gen_len = 1900` 时，benchmark 性能测试运行结果:
 
 ```bash
-lite_llama inference time: 31.5618 s
-Transformers inference time: 55.1494 s
-lite_llama throughput: 711.59 tokens/s
-Transformers throughput: 220.91 tokens/s
-lite_llama per token latency: 1.405308 ms/token
-Transformers per token latency: 4.526747 ms/token
+lite_llama inference time: 31.3463 s
+Transformers inference time: 69.1433 s
+lite_llama throughput: 730.45 tokens/s
+Transformers throughput: 183.95 tokens/s
+lite_llama per token latency: 1.369015 ms/token
+Transformers per token latency: 5.436221 ms/token
 ```
 
 ### Qwen2.5-3B-Instruct 模型性能测试对比
@@ -133,12 +133,56 @@ prompts: List[str] = [
 `max_gen_len = 1900` 时，benchmark 性能测试运行结果:
 
 ```bash
-lite_llama inference time: 11.2037 s
-Transformers inference time: 14.8672 s
-lite_llama throughput: 585.52 tokens/s
-Transformers throughput: 399.74 tokens/s
-lite_llama per token latency: 1.707888 ms/token
-Transformers per token latency: 2.501640 ms/token
+lite_llama inference time: 26.8804 s
+Transformers inference time: 63.2376 s
+lite_llama throughput: 581.20 tokens/s
+Transformers throughput: 172.19 tokens/s
+lite_llama per token latency: 1.720564 ms/token
+Transformers per token latency: 5.807474 ms/token
+```
+
+`batch_size = 16` 时的提示词
+```bash
+prompts: List[str] = [
+    "I believe the meaning of life is to find happiness in the simple things. but how to achieve the meaning of life?",
+    "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
+    "Can you introduce the History of the American Civil War. ",
+    "who is the first president of the United States and what's his life story?",
+    "How to learn c++, give me some code example.",
+    "How to learn python, give me some code examples.",
+    "How to learn llm, please introduce transformer architecture ",
+    "How to learn cnn, please introduce resnet architecture and give code ",
+    "How to learn cuda programming, give me some code example.",
+    "How to learn rust, give me some code examples.",
+    "How to learn java, give me some code example.",
+    "How to learn linux c, give me some code examples.",
+    "A Complete Introduction to the History of the American Civil War",
+    "Python is a good programming language, how tolearn it?",
+    "Please introduce llama model architecture and give implement cuda code."
+    "Please introduce Qwen2.5 model structure and give cuda implement code."
+]
+```
+
+`max_gen_len = 512` 时，benchmark 性能测试运行结果:
+
+```bash
+lite_llama inference time: 11.3434 s
+Transformers inference time: 14.9981 s
+lite_llama throughput: 724.38 tokens/s
+Transformers throughput: 504.73 tokens/s
+lite_llama per token latency: 1.380484 ms/token
+Transformers per token latency: 1.981256 ms/token
+```
+
+`max_gen_len = 1900` 时，benchmark 性能测试运行结果:
+
+```bash
+lite_llama inference time: 36.7032 s
+Transformers inference time: 65.1678 s
+lite_llama throughput: 695.66 tokens/s
+Transformers throughput: 210.15 tokens/s
+lite_llama per token latency: 1.437482 ms/token
+Transformers per token latency: 4.758514 ms/token
 ```
 
 ## Llama-3.2-1B 模型性能测试对比
