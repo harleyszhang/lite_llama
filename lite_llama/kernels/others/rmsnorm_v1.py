@@ -1,7 +1,7 @@
 # modified from https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
 import triton,torch, os
 import triton.language as tl 
-from .utils import calculate_settings
+from ..utils import calculate_settings
 
 @triton.jit
 def _rmsnorm_kernel_fwd(

@@ -101,7 +101,6 @@ def _triton_rope(
     tl.store(k_ptr + first_half_k_offsets, new_k_tile_1, mask=first_k_mask)
     new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
     tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
-    
 
 def rope_forward(q, k, cos, sin):
     # transpose it back to the physical shape because Triton looks at the physical storage
@@ -219,7 +218,6 @@ def _triton_rope_emb(
     tl.store(k_ptr + first_half_k_offsets, new_k_tile_1, mask=first_k_mask)
     new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
     tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
-
 
 def rope_emb_forward(q, k, cos, sin, batch_size, seq_len):
     """

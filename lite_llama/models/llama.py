@@ -32,30 +32,44 @@ class FusedAttention(nn.Module):
         qk_scale = None,
     ):         
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
+        x = x.view(-1, self.hidden_size)
 
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
-        xq = self.q_proj(x).view(batch_size, seq_len, self.num_q_heads, self.head_dim)
-        xk = F.linear(x, self.kv_proj_weight[0 :self.num_kv_heads * self.head_dim, :])
-        xv = F.linear(x, self.kv_proj_weight[self.num_kv_heads * self.head_dim:, :])
+        xq = self.q_proj(x)
+        xkv = F.linear(x, self.kv_proj_weight.data) # (B, L, 2 * num_kv_heads * head_dim)
 
         # 2. 应用旋转位置编码到 Q 和 K, 将 xk, xv 合并, 并写入缓存
-        xk = xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-        xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        xk, xv = torch.split(xkv, self.num_kv_heads * self.head_dim, dim=-1)
+        xq = xq.view(-1, self.num_q_heads, self.head_dim)
+        xk = xk.view(-1, self.num_kv_heads, self.head_dim)
+        xv = xv.view(-1, self.num_kv_heads, self.head_dim)
 
         cos, sin = position_embeddings
-        xq, xk = rope_forward(xq, xk, cos, sin)
+        xq, xk = rope_emb_forward(xq, xk, cos, sin, batch_size, seq_len)
+        # xq, xk = rope_forward(xq, xk, cos, sin)
 
-        combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)  
-        reshaped_combined_kv = combined_kv.view(-1, self.num_kv_heads*2, self.head_dim)
-        update_kv_buffer(reshaped_combined_kv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
+        combined_kv = torch.cat([xk, xv], dim=-2) # (B, L, 2*num_kv_heads, head_dim)  
+        # combined_kv = combined_kv.view(-1, self.num_kv_heads*2, self.head_dim)
+        update_kv_buffer(combined_kv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
 
         # 3. sel-attention. flashattention 计算: softmax(qk^t) * v
-        xq = xq.transpose(1, 2) # (batch_size, seq_len, self.num_kv_heads, self.head_dim) -> (batch_size, self.num_kv_heads, seq_len, self.head_dim)
-        keys = xk.transpose(1, 2)
-        values = xv.transpose(1, 2)
-        output = flash_attention_v2(xq, keys, values, qk_scale)
-        output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1))
+        # xq = xq.transpose(1, 2) # (batch_size, seq_len, self.num_kv_heads, self.head_dim) -> (batch_size, self.num_kv_heads, seq_len, self.head_dim)
+        # keys = xk.transpose(1, 2)
+        # values = xv.transpose(1, 2)
+        # output = flash_attention_v2(xq, keys, values, qk_scale)
+        # output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1))
+        output = flash_attention_v1_no_pad(
+            xq, 
+            atten_info.kv_buffer[layer_index][:, : self.num_kv_heads, :], 
+            atten_info.kv_buffer[layer_index][:, self.num_kv_heads:, :], 
+            atten_info.start_index, 
+            atten_info.b_seq_len, 
+            atten_info.max_actual_seq_len,
+            qk_scale,
+        ) # ouput shape is [batchs, num_heads, head_dim]
         
+        output = output.view(batch_size * seq_len, self.hidden_size)
+        output = output.view(batch_size, seq_len, self.hidden_size)
         # 4. attention 输出做线性变换
         output = self.o_proj(output)
         return output
@@ -84,7 +98,7 @@ class FusedAttention(nn.Module):
         xq, xk = rope_emb_forward(xq, xk, cos, sin, batch_size, seq_len)
 
         # 3. 完成形状变换, 并更新 kv_buffer, 即类似 torch.concat[past_kv_values, kv_values]
-        combined_kv = torch.cat([xk, xv], dim=-2) # (B, L, 2*num_kv_heads, head_dim)
+        combined_kv = torch.cat([xk, xv], dim=-2) # (BS, 2*num_kv_heads, head_dim)
         # 更新 kv_buffer, atten_info.kv_buffer[layer_index]
         update_kv_buffer(combined_kv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
         
@@ -200,8 +214,8 @@ class LlamaModel(nn.Module):
             h = self.get_input_embeddings(input_ids)
         
         if position_ids is None:
-            cache_position = torch.arange(start_pos, start_pos + seq_len, device=input_ids.device)
-            position_ids = cache_position.unsqueeze(0)
+            cache_position = torch.arange(start_pos, start_pos + seq_len, device=input_ids.device) # 形状: [seq_length]
+            position_ids = cache_position.unsqueeze(0) # 形状: [1, seq_length]
 
         if seq_len > 1:
             qk_scale = self.qk_scale * 1.4426950408889634
@@ -209,6 +223,7 @@ class LlamaModel(nn.Module):
             qk_scale = self.qk_scale
             position_ids = position_ids.repeat(batch_size, 1)
         
+        # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(h, position_ids)
         
         for i, layer in enumerate(self.layers): # Consecutively apply all the encoder layers

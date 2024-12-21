@@ -138,7 +138,6 @@ class GenerateText:
         
         # 初始化当前已选择的批次项索引
         self.model_executor.atten_info.cur_select_index = select_index.unfold(0, max_prompt_len, total_len).reshape(-1)
-    
         """
         start_index:        tensor([  0, 270, 540, 810], device='cuda:0', dtype=torch.int32)
         b_seq_len:          tensor([14, 12, 11, 11], device='cuda:0')
@@ -159,12 +158,15 @@ class GenerateText:
           
             self.model_executor.atten_info.b_seq_len += 1
             self.model_executor.atten_info.max_actual_seq_len += 1
+            
+            print(f"logits.shape: {logits.shape}")
+            print("logits: ", logits)
 
             probs = softmax_split(logits[:, -1] / temperature) # torch.softma 将 logits 转换为概率分布。
             next_token = sample_top_p(probs, top_p) # next_token 形状为 [batch_size, 1]
             next_token = next_token.reshape(-1) # 调整为一维, shape is batch_size
             
-            # 仅替换生成部分的token
+            # 仅替换生成部分的 token
             mask = ~input_text_mask[:, cur_pos]
             next_token = torch.where(mask, next_token, tokens[:, cur_pos])
             tokens[:, cur_pos] = next_token

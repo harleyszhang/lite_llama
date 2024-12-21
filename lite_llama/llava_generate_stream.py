@@ -163,22 +163,21 @@ class LlavaGeneratorStream:
         assert max_prompt_len <= self.max_seq_len
         total_seq_len = min(self.max_seq_len, max_gen_len + max_prompt_len)
         total_seq_number_tokens = bsz * total_seq_len
-
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
         self.model_executor.atten_info.max_actual_seq_len = max_prompt_len
         
-        # 预分配tokens张量
+        # 预分配 tokens 张量
         tokens = torch.full((bsz, total_seq_len), pad_id, dtype=torch.long, device="cuda")
+        # 生成一个布尔张量，它的值为 True 的位置表示输入序列的实际内容（即非填充部分）, 形状为 (batch_size, total_seq_len)
+        input_text_mask = tokens != pad_id
+        eos_reached = torch.tensor([False] * bsz, device=self.device)
+        last_yielded_pos = [len(prompt_tokens[i]) if not echo else 0 for i in range(bsz)] # 初始化每个样本已输出的位置
 
         # 填充提示词到 tokens 张量
         for seq_id, token_ids in enumerate(prompt_tokens):
             # NOTE: torch.long 等同于 torch.int64
             tokens[seq_id, : len(token_ids)] = torch.tensor(token_ids, dtype=torch.long, device=self.device)
         
-        # 生成一个布尔张量，它的值为 True 的位置表示输入序列的实际内容（即非填充部分）, 形状为 (batch_size, total_seq_len)
-        input_text_mask = tokens != pad_id
-        eos_reached = torch.tensor([False] * bsz, device=self.device)
-
         # 计算输入图像待分配空间
         img_batch_size, channels, height, widht = image_tensors.shape
         image_size = self.model_executor.model_config.vision_config.image_size
@@ -187,7 +186,6 @@ class LlavaGeneratorStream:
         images_indexs = (number_patchs * number_patchs - 1) 
         total_len = total_seq_len + images_indexs
         total_need_size = total_seq_number_tokens + images_indexs * img_batch_size
-        
         print(f"total_need_size: {total_need_size}, pathch_size: {pathch_size}, number_patchs: {number_patchs}, images_indexs: {images_indexs}")
 
         # 一次性分配 bsz * total_seq_len + (number_patchs * number_patchs - 1) * img_batch_size 个索引
@@ -197,24 +195,17 @@ class LlavaGeneratorStream:
         # 初始化每个批次项的序列长度
         actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=self.device)
         self.model_executor.atten_info.b_seq_len = actual_prompt_lens
-        # print("self.model_executor.atten_info.b_seq_len ", self.model_executor.atten_info.b_seq_len)  
-
         # 初始化起始索引张量
-        self.model_executor.atten_info.start_index = select_index[::total_len].to(torch.int32)
-        # print("start_index: ", self.model_executor.atten_info.start_index)
-        
+        self.model_executor.atten_info.start_index = select_index[::total_len]
         # 初始化当前已选择的批次项索引
         self.model_executor.atten_info.cur_select_index = select_index.unfold(0, max_prompt_len + images_indexs, total_len).reshape(-1)
-        # print("Prefill stage cur_select_index: ", self.model_executor.atten_info.cur_select_index)
-
-        prev_pos = 0
-        last_yielded_pos = [len(prompt_tokens[i]) if not echo else 0 for i in range(bsz)] # 初始化每个样本已输出的位置
 
         if min_prompt_len == total_len: # 如果 prompt 已经达到最大长度，无需生成
             logits, _ = self.model.forward(tokens, prev_pos, image_tensors)
 
         start_pos = 0
-        for cur_pos in range(min_prompt_len, total_len):
+        prev_pos = 0
+        for cur_pos in range(max_prompt_len, total_len):
             input_ids = tokens[:, prev_pos: cur_pos]
             batch_size, _ = input_ids.shape
 
@@ -224,11 +215,11 @@ class LlavaGeneratorStream:
                 start_pos += len(self.model_executor.atten_info.cur_select_index)
             else:
                 start_pos += batch_size
-                self.model_executor.atten_info.max_actual_seq_len += 1
-                self.model_executor.atten_info.b_seq_len += 1
-            
+                
             self.model_executor.atten_info.cur_select_index = (self.model_executor.atten_info.start_index 
                                                                + self.model_executor.atten_info.b_seq_len)
+            self.model_executor.atten_info.max_actual_seq_len += 1
+            self.model_executor.atten_info.b_seq_len += 1
             
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
