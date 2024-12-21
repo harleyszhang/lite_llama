@@ -1,11 +1,9 @@
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 # https://github.com/ELS-RD/kernl/blob/main/src/kernl/implementations/attention.py#L438
 
-import torch,math
+import torch
 import triton
 import triton.language as tl
-from torch.cuda.amp import custom_fwd
-from typing import List, Optional, Union
 
 # TESLA = "Tesla" in torch.cuda.get_device_name(0)
 
@@ -17,55 +15,50 @@ def _attn_fwd_inner(
 	offs_m,
 	qk_scale, 
 	n_size, # kv seq_len
-	causal_mask, 
 	BLOCK_M_SIZE: tl.constexpr, BLOCK_N_SIZE: tl.constexpr,
     fp8_v: tl.constexpr
 ):
-	n_range_offs = tl.arange(0, BLOCK_N_SIZE) # head_dim 维度偏移
+    n_range_offs = tl.arange(0, BLOCK_N_SIZE) # head_dim 维度偏移
 
-	# 在 SRAM 上完成计算
-	for block_n_start_idx in range(0, n_size, BLOCK_N_SIZE):
-		block_n_start_idx = tl.multiple_of(block_n_start_idx, BLOCK_N_SIZE)
-		block_n_offs = block_n_start_idx + n_range_offs
+    # 在 SRAM 上完成计算
+    for block_n_start_idx in range(0, n_size, BLOCK_N_SIZE):
+        block_n_start_idx = tl.multiple_of(block_n_start_idx, BLOCK_N_SIZE)
+        block_n_offs = block_n_start_idx + n_range_offs
         
-		k_mask = block_n_offs[:, None] < n_size
-		k = tl.load(k_ptrs + block_n_start_idx * k_seq_stride, mask=k_mask, other=0.0)
+        k_mask = block_n_offs[:, None] < n_size
+        k = tl.load(k_ptrs + block_n_start_idx * k_seq_stride, mask=k_mask, other=0.0)
 
-		# qk = tl.zeros((BLOCK_M_SIZE, BLOCK_N_SIZE), dtype=tl.float32)
-		qk = tl.dot(q, tl.trans(k))
+        # qk = tl.zeros((BLOCK_M_SIZE, BLOCK_N_SIZE), dtype=tl.float32)
+        qk = tl.dot(q, tl.trans(k))
 
-		# 应用因果遮罩
-		if causal_mask:
-			offs_k = block_n_offs
-			# casual 模型的 causal mask 下三角矩阵
-			mask = offs_m[:, None] >= offs_k[None, :]
-			qk = qk * qk_scale + tl.where(mask, 0, -1.0e8)
-			# qk = tl.where(mask, qk * qk_scale, -1.0e8)
-			m_ij = tl.maximum(m_i, tl.max(qk, 1)) # 求 qk 的最大值
-			qk -= m_ij[:, None] # 更新为安全的 qk
-		else:
-			m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
-			qk = qk * qk_scale - m_ij[:, None]
+        # 应用因果遮罩
+        offs_k = block_n_offs
+        # casual 模型的 causal mask 下三角矩阵
+        mask = offs_m[:, None] >= offs_k[None, :]
+        qk = qk * qk_scale + tl.where(mask, 0, -1.0e8)
+        # qk = tl.where(mask, qk * qk_scale, -1.0e8)
+        m_ij = tl.maximum(m_i, tl.max(qk, 1)) # 求 qk 的最大值
+        qk -= m_ij[:, None] # 更新为安全的 qk
+        
+        p = tl.math.exp2(qk)
+        d_ij = tl.sum(p, 1) # 1d vector
 
-		p = tl.math.exp2(qk)
-		d_ij = tl.sum(p, 1) # 1d vector
+        # -- 更新归一化项 d_new
+        alpha = tl.math.exp2(m_i - m_ij)
+        d_i = d_i * alpha + d_ij
 
-		# -- 更新归一化项 d_new
-		alpha = tl.math.exp2(m_i - m_ij)
-		d_i = d_i * alpha + d_ij
+        # -- 更新 attention 输出累加器 --
+        acc = acc * alpha[:, None]
 
-		# -- 更新 attention 输出累加器 --
-		acc = acc * alpha[:, None]
+        # compute O = PV
+        v = tl.load(v_ptrs + block_n_start_idx * v_seq_stride, mask=k_mask, other=0.0)
+        p = p.to(v.dtype)
+        # acc += tl.dot(p, v)
+        acc = tl.dot(p, v, acc)
+        # update the normalizer (l and d) for next iteration
+        m_i = m_ij
 
-		# compute O = PV
-		v = tl.load(v_ptrs + block_n_start_idx * v_seq_stride, mask=k_mask, other=0.0)
-		p = p.to(v.dtype)
-		# acc += tl.dot(p, v)
-		acc = tl.dot(p, v, acc)
-		# update the normalizer (l and d) for next iteration
-		m_i = m_ij
-
-	return acc, d_i
+    return acc, d_i
 
 @triton.jit
 def flash_attention_v2_kernel(
@@ -102,7 +95,6 @@ def flash_attention_v2_kernel(
     BLOCK_M_SIZE: tl.constexpr, # BLOCK size of m_size dimension，即 Q 矩阵行数分成了m_size // BLOCK_M_SIZE 块，块大小是 BLOCK_M_SIZE
     BLOCK_N_SIZE: tl.constexpr, # n_size dimension
     qk_scale,
-    causal_mask
     ):
     """
     flashattention2 内核实现
@@ -162,7 +154,6 @@ def flash_attention_v2_kernel(
                                 offs_m,
                                 qk_scale, 
                                 n_size, # kv seq_len
-                                causal_mask,
                                 BLOCK_M_SIZE, BLOCK_N_SIZE,
                                 v_ptr.dtype.element_ty == tl.float8e5)
 
@@ -196,10 +187,8 @@ def flash_attention_v2(
 
     # sequence length of q, also be rows of Q matrix
     bs, n_heads, m_size, head_dim = q.size()
-    causal_mask = True
 
     n_size = k.shape[2]
-    # qk_scale *= 1.4426950408889634 # 1/log(2)
     
     grid = lambda meta: (triton.cdiv(m_size, BLOCK_SIZE), bs*n_heads, 1) # 二维 grid
 
@@ -220,6 +209,5 @@ def flash_attention_v2(
         BLOCK_SIZE,  # BLOCK_M_SIZE
         BLOCK_SIZE,  # BLOCK_N_SIZE
         qk_scale,
-        causal_mask
     )
     return output
