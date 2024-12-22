@@ -1,12 +1,12 @@
 import torch, triton, math, os, sys
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
-from lite_llama.kernels.fused_linear import fused_linear
-from lite_llama.kernels.rmsnorm import rmsnorm
+from lite_llama.lite_llama.kernels.others.fused_linear import fused_linear
+from lite_llama.lite_llama.kernels.others.rmsnorm_v1 import rmsnorm
 from lite_llama.kernels.rmsnorm_layer import rmsnorm_fwd
-from lite_llama.kernels.layernorm import layernorm
-from lite_llama.kernels.rope import rope as rope_triton
-from lite_llama.kernels.rope_layer import apply_rotary_pos_emb
+from lite_llama.lite_llama.kernels.others.layernorm import layernorm
+from lite_llama.lite_llama.kernels.others.rope_orig import rope as rope_triton
+from lite_llama.lite_llama.kernels.rope_emb import apply_rotary_pos_emb
 from lite_llama.kernels.softmax_split import softmax_split
 
 from fused_mlp_silu import mlp_silu, torch_mlp_silu, triton_torch_mlp_silu, FusedMLP

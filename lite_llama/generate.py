@@ -159,8 +159,8 @@ class GenerateText:
             self.model_executor.atten_info.b_seq_len += 1
             self.model_executor.atten_info.max_actual_seq_len += 1
             
-            print(f"logits.shape: {logits.shape}")
-            print("logits: ", logits)
+            # print(f"logits.shape: {logits.shape}")
+            # print("logits: ", logits)
 
             probs = softmax_split(logits[:, -1] / temperature) # torch.softma 将 logits 转换为概率分布。
             next_token = sample_top_p(probs, top_p) # next_token 形状为 [batch_size, 1]

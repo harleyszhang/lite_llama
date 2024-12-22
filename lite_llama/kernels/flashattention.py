@@ -235,7 +235,7 @@ def test_prefill_stage():
     batch_size = 2
     num_heads = 4
     seq_length = 32
-    head_dim = 64
+    head_dim = 32
     BLOCK_M = 32
     BLOCK_N = 32
 

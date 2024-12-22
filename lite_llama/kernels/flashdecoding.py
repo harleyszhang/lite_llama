@@ -132,10 +132,10 @@ def _flash_decoding_stage1_kernel(
 
 @torch.no_grad()
 def flash_decode_stage1(
-    q, k, v,         # Q: [batchs, num_heads, head_dim], K, V: [batchs * seq_len, num_heads, head_dim]
+    q, k, v,         		# Q: [batchs, num_heads, head_dim], K, V: [batchs * seq_len, num_heads, head_dim]
     qk_scale, 
 	b_start_loc, b_seq_len, 
-	max_actual_seq_len,  # 最大的实际序列长度
+	max_actual_seq_len,     # 最大的实际序列长度
     mid_o, mid_o_logexpsum, # Mid_O: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE), head_dim], Mid_O_LogExpSum: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE)]
     PARTITION_SIZE,
 ):

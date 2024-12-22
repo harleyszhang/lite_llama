@@ -4,12 +4,12 @@ from transformers.activations import ACT2FN
 import pytest, sys, os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 
-from lite_llama.kernels.fused_linear import fused_linear
-from lite_llama.kernels.rmsnorm import rmsnorm
-from lite_llama.kernels.layernorm import layernorm
+from lite_llama.lite_llama.kernels.others.fused_linear import fused_linear
+from lite_llama.lite_llama.kernels.others.rmsnorm_v1 import rmsnorm
+from lite_llama.lite_llama.kernels.others.layernorm import layernorm
 from lite_llama.kernels.softmax import naive_softmax, softmax_fwd
 from lite_llama.kernels.flashattention import flash_attention_v1
-from lite_llama.kernels.rope import rope
+from lite_llama.lite_llama.kernels.others.rope_orig import rope
 from typing import Callable, Dict, Tuple, Union
 from lite_llama.tests.test_torch_rope import RotaryPositionEmbedding, apply_rotary_pos_emb
 

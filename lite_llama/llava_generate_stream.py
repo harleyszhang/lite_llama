@@ -164,7 +164,7 @@ class LlavaGeneratorStream:
         total_seq_len = min(self.max_seq_len, max_gen_len + max_prompt_len)
         total_seq_number_tokens = bsz * total_seq_len
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
-        self.model_executor.atten_info.max_actual_seq_len = max_prompt_len
+        
         
         # 预分配 tokens 张量
         tokens = torch.full((bsz, total_seq_len), pad_id, dtype=torch.long, device="cuda")
@@ -176,7 +176,7 @@ class LlavaGeneratorStream:
         # 填充提示词到 tokens 张量
         for seq_id, token_ids in enumerate(prompt_tokens):
             # NOTE: torch.long 等同于 torch.int64
-            tokens[seq_id, : len(token_ids)] = torch.tensor(token_ids, dtype=torch.long, device=self.device)
+            tokens[seq_id, : len(token_ids)] = token_ids.clone().detach().to(dtype=torch.long, device="cuda")
         
         # 计算输入图像待分配空间
         img_batch_size, channels, height, widht = image_tensors.shape
@@ -186,15 +186,16 @@ class LlavaGeneratorStream:
         images_indexs = (number_patchs * number_patchs - 1) 
         total_len = total_seq_len + images_indexs
         total_need_size = total_seq_number_tokens + images_indexs * img_batch_size
-        print(f"total_need_size: {total_need_size}, pathch_size: {pathch_size}, number_patchs: {number_patchs}, images_indexs: {images_indexs}")
+        print(f"total_need_size: {total_need_size}, max_prompt_len: {max_prompt_len}, pathch_size: {pathch_size}, number_patchs: {number_patchs}, images_indexs: {images_indexs}")
 
         # 一次性分配 bsz * total_seq_len + (number_patchs * number_patchs - 1) * img_batch_size 个索引
+        self.model_executor.atten_info.max_actual_seq_len = max_prompt_len + images_indexs
         self.model_executor.atten_info.select_index = self.model_executor.kv_mem_manager.alloc_kvcache_index(total_need_size)
         select_index = self.model_executor.atten_info.select_index
 
         # 初始化每个批次项的序列长度
         actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=self.device)
-        self.model_executor.atten_info.b_seq_len = actual_prompt_lens
+        self.model_executor.atten_info.b_seq_len = actual_prompt_lens + images_indexs
         # 初始化起始索引张量
         self.model_executor.atten_info.start_index = select_index[::total_len]
         # 初始化当前已选择的批次项索引
@@ -205,14 +206,17 @@ class LlavaGeneratorStream:
 
         start_pos = 0
         prev_pos = 0
-        for cur_pos in range(max_prompt_len, total_len):
+        for cur_pos in range(min_prompt_len, total_len):
             input_ids = tokens[:, prev_pos: cur_pos]
             batch_size, _ = input_ids.shape
 
             logits = self.model_executor.forward(input_ids, start_pos, image_tensors)
             
             if start_pos == 0:
-                start_pos += len(self.model_executor.atten_info.cur_select_index)
+                start_pos += (max_prompt_len + images_indexs)
+                # start_pos += len(self.model_executor.atten_info.cur_select_index)
+                # print("After prefill start_pos is,",  len(self.model_executor.atten_info.cur_select_index))
+                # print("After prefill start_pos is,",  max_prompt_len + images_indexs)
             else:
                 start_pos += batch_size
                 

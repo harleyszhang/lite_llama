@@ -17,7 +17,7 @@ def flash_attention_v1_kernel(
     stride_k_bs, stride_k_heads, stride_k_dim,  # K 的 strides
     stride_v_bs, stride_v_heads, stride_v_dim,  # V 的 strides
     stride_o_bs, stride_o_heads, stride_o_dim,
-
+    HEAD_DIM, 
     BLOCK_DHEAD_SIZE: tl.constexpr, # head_dim dimension
     BLOCK_M_SIZE: tl.constexpr, # BLOCK size of m_size dimension，即 Q 矩阵行数分成了m_size // BLOCK_M_SIZE 块，块大小是 BLOCK_M_SIZE
     BLOCK_N_SIZE: tl.constexpr, # n_size dimension    
@@ -25,18 +25,18 @@ def flash_attention_v1_kernel(
     """
     flashattentionv1 内核实现, 支持 nopad 计算, 输入为 3 维张量
     """
-    cur_batch_idx = tl.program_id(0)
-    cur_head_idx = tl.program_id(1)
-    block_m_idx = tl.program_id(2)
-
+    block_m_idx = tl.program_id(0)
+    cur_bh = tl.program_id(1)
+    cur_batch_idx = cur_bh // HEAD_DIM
+    cur_head_idx = cur_bh % HEAD_DIM
+    
     cur_kv_head_idx = cur_head_idx // num_kv_groups
 
     # 计算当前批次的序列长度和请求序列的起始位置
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch_idx)
     cur_batch_start_loc = tl.load(B_Start_Loc + cur_batch_idx)
-    
-    # 计算当前 block 的起始和结束索引
-    block_start_loc = block_m_idx * BLOCK_M_SIZE
+
+    block_start_loc = block_m_idx * BLOCK_M_SIZE # 计算当前 block 的起始和结束索引
 
     offs_n = tl.arange(0, BLOCK_N_SIZE) # head_dim 维度偏移
     offs_d = tl.arange(0, BLOCK_DHEAD_SIZE)
@@ -63,7 +63,10 @@ def flash_attention_v1_kernel(
     acc = tl.zeros((BLOCK_M_SIZE, BLOCK_DHEAD_SIZE), dtype=tl.float32)
         
     block_mask = tl.where(block_start_loc < cur_batch_seq_len, 1, 0)
-    for start_n in range(0, block_mask * (block_m_idx + 1) * BLOCK_M_SIZE, BLOCK_N_SIZE):
+    block_end_loc = tl.minimum(block_start_loc + BLOCK_M_SIZE, cur_batch_seq_len)
+    for start_n in range(0, block_mask * block_end_loc, BLOCK_N_SIZE):
+    # for start_n in range(0, block_mask * (block_m_idx + 1) * BLOCK_M_SIZE, BLOCK_N_SIZE):
+
         start_n = tl.multiple_of(start_n, BLOCK_N_SIZE)
         # block_n_offs = start_n + offs_n
         # k_mask = block_n_offs[None, :] < cur_batch_seq_len
@@ -97,6 +100,8 @@ def flash_attention_v1_kernel(
         
         # acc scaling
         sigma = d_i / d_new * alpha
+        # sigma = tl.where(offs_m >= start_n, sigma, 1.0)
+
         acc = acc * sigma[:, None]
         
         # compute O = PV # update acc
@@ -106,7 +111,7 @@ def flash_attention_v1_kernel(
             other=0.0,
         )
 
-        p = p.to(Q.dtype.element_ty)
+        p = p.to(v.dtype)
 
         acc += tl.dot(p, v)
 
@@ -143,11 +148,12 @@ def flash_attention_v1_no_pad(
     """
     BLOCK_SIZE = 32 # For Ampere Architecture, 3090ti
     output = torch.empty_like(q)
-    batch_size = b_seq_len.shape[0]
+    batchs = b_seq_len.shape[0]
     n_heads, HEAD_DIM = q.shape[1], q.shape[2]
 
     num_kv_groups = q.shape[1] // k.shape[1] # num_q_heads // num_k_heads
-    grid = (batch_size, n_heads, triton.cdiv(max_seq_len, BLOCK_SIZE))  # batch, head,
+    grid = lambda meta: (triton.cdiv(max_input_len, meta["BLOCK_M_SIZE"]), batchs * n_heads, 1)
+    # grid = (batchs, n_heads, triton.cdiv(max_seq_len + BLOCK_SIZE - 1, BLOCK_SIZE))  # batch, head,
     num_warps = 2 if HEAD_DIM <= 64 else 4
 
     flash_attention_v1_kernel[grid](
@@ -165,7 +171,7 @@ def flash_attention_v1_no_pad(
         *k.stride(),  # (batch * n_size, heads, head_dim)
         *v.stride(),  # (batch * n_size, heads, head_dim)
         *output.stride(),  # (batch * m_size, heads, n_size)
-        
+        HEAD_DIM, 
         BLOCK_DHEAD_SIZE=HEAD_DIM, 
         BLOCK_M_SIZE=BLOCK_SIZE,
         BLOCK_N_SIZE=BLOCK_SIZE,
@@ -233,10 +239,10 @@ if __name__ == "__main__":
     # compute attention
     sm_scale = 1 / math.sqrt(head_dim)
     triton_output = flash_attention_v1_no_pad(q, k, v, b_start_loc, b_seq_len, max_input_len, sm_scale)
-    torch_output = torch_attention(q, k, v, b_start_loc, b_seq_len, sdpa=False)
+    torch_output = torch_attention(q, k, v, b_start_loc, b_seq_len, sdpa=True)
     print("triton_output", triton_output)
     print("torch_output", torch_output)
     print(f'The maximum difference between torch and triton is {torch.max(torch.abs(torch_output - triton_output))}')
     # benchmark
-    print("torch:", triton.testing.do_bench(lambda: torch_attention(q, k, v, b_start_loc, b_seq_len, sdpa=False)))
+    print("torch:", triton.testing.do_bench(lambda: torch_attention(q, k, v, b_start_loc, b_seq_len, sdpa=True)))
     print("triton:", triton.testing.do_bench(lambda: flash_attention_v1_no_pad(q, k, v, b_start_loc, b_seq_len, max_input_len, sm_scale)))

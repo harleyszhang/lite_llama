@@ -4,7 +4,7 @@ The llama model inference lite framework by triton.
 
 ## 特性
 
-- 相比 transformers, llama3 1B 和 3B 模型加速比最高达 3.4x 倍。
+- 相比 transformers, llama3 1B 和 3B 模型加速比最高达 4x 倍。
 - 支持最新的 `llama3`、`Qwen2.5`、`Llava1.5` 模型推理，支持 `top-p` 采样, 支持流式输出。
 - 支持 GQA、cuda graph 优化（有限制）。
 - 支持 `flashattention1`、`flashattention2`、 `flashdecoding`。

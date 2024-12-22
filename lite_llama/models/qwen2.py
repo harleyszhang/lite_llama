@@ -9,12 +9,12 @@ from ..kernels import *
 
 
 class Attention(nn.Module):
-    def __init__(self, num_q_heads: int, num_kv_heads: int, head_dim: int):
+    def __init__(self, num_heads_q: int, num_kv_heads: int, head_dim: int):
         super().__init__()
-        self.num_q_heads = num_q_heads
+        self.num_heads_q = num_heads_q
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
-        self.hidden_size = num_q_heads * head_dim
+        self.hidden_size = num_heads_q * head_dim
         
     def context_forward(
         self,
@@ -26,7 +26,7 @@ class Attention(nn.Module):
         qk_scale = None,
     ) -> torch.Tensor:
         xq = xq.to(torch.float16)
-        batch_size, seq_len, _, _ = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
+        batch_size, seq_len, num_heads_q, head_dim = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
         
         # 1. 获取 prefill 阶段的 cur_select_index, 并更新 kv cache 张量
         combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)
@@ -35,24 +35,13 @@ class Attention(nn.Module):
         update_kv_buffer(combined_kv_reshaped, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
 
         # 2. sel-attention. flashattention 计算: softmax(qk^t) * v
-        xq = xq.view(-1, self.num_q_heads, self.head_dim)
-        output = flash_attention_v1_no_pad(
-            xq, 
-            combined_kv_reshaped[:, : self.num_kv_heads, :], 
-            combined_kv_reshaped[:, self.num_kv_heads:, :], 
-            atten_info.start_index, 
-            atten_info.b_seq_len, 
-            atten_info.max_actual_seq_len,
-            qk_scale,
-        ) # ouput shape is [batchs, num_heads, head_dim]
-
-        output = output.view(batch_size * seq_len, self.hidden_size)
-        output = output.view(batch_size, seq_len, self.hidden_size)
-        # xq = xq.transpose(1, 2)
-        # keys = xk.transpose(1, 2)
-        # values = xv.transpose(1, 2)
-        # output = flash_attention_v2(xq, keys, values, qk_scale)
-        # output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_size))
+        xq = xq.transpose(1, 2)
+        keys = xk.transpose(1, 2)
+        values = xv.transpose(1, 2)
+        output = flash_attention_v2(xq, keys, values, qk_scale)
+        
+        output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_size))
+        
         return output
 
     def token_forward(self, 
@@ -64,10 +53,10 @@ class Attention(nn.Module):
         qk_scale = None, # 计算 attention 分数缩放的系数
     ) -> torch.Tensor:
         xq = xq.to(torch.float16)
-        batch_size, seq_len, num_q_heads, _ = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
+        batch_size, seq_len, num_heads_q, _ = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
 
         # 1. 先获取 kv 缓冲向量再更新 kv 向量
-        xq = xq.view(batch_size, num_q_heads, self.head_dim)
+        xq = xq.view(batch_size, num_heads_q, self.head_dim)
         combined_kv = torch.cat([xk, xv], dim=-2) # (B, L, 2*num_kv_heads, head_dim)
         reshaped_kv = combined_kv.view(-1, 2 * self.num_kv_heads, self.head_dim)
         
@@ -269,7 +258,7 @@ class Qwen2Model(nn.Module):
             qk_scale = self.qk_scale * 1.4426950408889634
         else:
             qk_scale = self.qk_scale
-            # position_ids = position_ids.repeat(batch_size, 1)
+            position_ids = position_ids.repeat(batch_size, 1)
 
         position_embeddings = self.rotary_emb(h, position_ids)
        

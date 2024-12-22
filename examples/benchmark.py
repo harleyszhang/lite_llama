@@ -195,10 +195,10 @@ def compare_inference_speed(
     if print_result:
         for i, (prompt, litellama_res, hf_res) in enumerate(zip(prompts, lite_llama_results, hf_results)):
             # print(f"\n[Prompt {i}]:\n{prompt}")
-            if i // 4 == 0: # 省略部分打印
-                print("\n[lite_llama]: {}".format(litellama_res))
-                print("\n[Transformers]: {}".format(hf_res['generation']))
-                print("\n" + "="*40 + "\n")
+            # if i // 2 == 0: # 省略部分打印
+            print("\n[lite_llama]: {}".format(litellama_res))
+            print("\n[Transformers]: {}".format(hf_res['generation']))
+            print("\n" + "="*40 + "\n")
 
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -222,17 +222,17 @@ def main():
     #     "Please introduce Qwen2.5 model structure and give cuda implement code."
     # ]
 
-    prompts: List[str] = [
-        "How to learn cnn, please introduce resnet architecture and give code ",
-        "How to learn cuda programming, give me some code example.",
-    ]
-
     # prompts: List[str] = [
-    #     "How to learn cnn, please introduce resnet architecture and give code.",
+    #     "How to learn cnn, please introduce resnet architecture and give code ",
     #     "How to learn cuda programming, give me some code example.",
-    #     "How to learn rust, give me some code examples.",
-    #     "How to learn c++, give me some code examples.",
     # ]
+
+    prompts: List[str] = [
+        "How to learn cnn, please introduce resnet architecture and give code.",
+        "How to learn cuda programming, give me some code example.",
+        "How to learn rust, give me some code examples.",
+        "How to learn c++, give me some code examples.",
+    ]
 
     # prompts: List[str] = [
     #     "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.",
@@ -275,10 +275,10 @@ def main():
         temperature=0.7,
         top_p=0.8,
         max_seq_len=4096,
-        max_gen_len=2000,
+        max_gen_len=256,
         lite_llama_ckpt_dir=custom_checkpoints_dir,
         hf_model_name=hf_model_name,
-        print_result=False,
+        print_result=True,
         device=device
     )
 
