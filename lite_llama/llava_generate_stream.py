@@ -84,6 +84,7 @@ class LlavaGeneratorStream:
         self.checkpoints_dir = checkpoints_dir
         self.compiled_model = compiled_model
         self.max_seq_len = max_seq_len
+        self.device = device
 
         self.model_executor = ModelExecutor.build(
             checkpoints_dir = checkpoints_dir,
@@ -94,7 +95,6 @@ class LlavaGeneratorStream:
             device = device
         )
         self.tokenizer = self.load_tokenizer(tokenizer_path)
-        self.device = device
 
     def load_tokenizer(self, pretrained_model_name_or_path):
         model_name = get_model_name_from_path(pretrained_model_name_or_path)
@@ -158,16 +158,16 @@ class LlavaGeneratorStream:
             该方法在生成循环中，每生成一个新 token, 就立即输出对应的文本和概率(如果需要）。
         """
         bsz = len(prompt_tokens)
-        min_prompt_len = min(len(t) for t in prompt_tokens)
+        # min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
         assert max_prompt_len <= self.max_seq_len
         total_seq_len = min(self.max_seq_len, max_gen_len + max_prompt_len)
         total_seq_number_tokens = bsz * total_seq_len
+        actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=self.device)  
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
         
-        
         # 预分配 tokens 张量
-        tokens = torch.full((bsz, total_seq_len), pad_id, dtype=torch.long, device="cuda")
+        tokens = torch.full((bsz, total_seq_len), pad_id, dtype=torch.long, device=self.device)
         # 生成一个布尔张量，它的值为 True 的位置表示输入序列的实际内容（即非填充部分）, 形状为 (batch_size, total_seq_len)
         input_text_mask = tokens != pad_id
         eos_reached = torch.tensor([False] * bsz, device=self.device)
@@ -176,55 +176,27 @@ class LlavaGeneratorStream:
         # 填充提示词到 tokens 张量
         for seq_id, token_ids in enumerate(prompt_tokens):
             # NOTE: torch.long 等同于 torch.int64
-            tokens[seq_id, : len(token_ids)] = token_ids.clone().detach().to(dtype=torch.long, device="cuda")
+            tokens[seq_id, : len(token_ids)] = token_ids.clone().detach().to(dtype=torch.long, device=self.device)
         
         # 计算输入图像待分配空间
-        img_batch_size, channels, height, widht = image_tensors.shape
-        image_size = self.model_executor.model_config.vision_config.image_size
-        pathch_size = self.model_executor.model_config.vision_config.patch_size
-        number_patchs = image_size // pathch_size
-        images_indexs = (number_patchs * number_patchs - 1) 
-        total_len = total_seq_len + images_indexs
-        total_need_size = total_seq_number_tokens + images_indexs * img_batch_size
-        print(f"total_need_size: {total_need_size}, max_prompt_len: {max_prompt_len}, pathch_size: {pathch_size}, number_patchs: {number_patchs}, images_indexs: {images_indexs}")
-
-        # 一次性分配 bsz * total_seq_len + (number_patchs * number_patchs - 1) * img_batch_size 个索引
-        self.model_executor.atten_info.max_actual_seq_len = max_prompt_len + images_indexs
-        self.model_executor.atten_info.select_index = self.model_executor.kv_mem_manager.alloc_kvcache_index(total_need_size)
-        select_index = self.model_executor.atten_info.select_index
-
-        # 初始化每个批次项的序列长度
-        actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=self.device)
-        self.model_executor.atten_info.b_seq_len = actual_prompt_lens + images_indexs
-        # 初始化起始索引张量
-        self.model_executor.atten_info.start_index = select_index[::total_len]
-        # 初始化当前已选择的批次项索引
-        self.model_executor.atten_info.cur_select_index = select_index.unfold(0, max_prompt_len + images_indexs, total_len).reshape(-1)
-
-        if min_prompt_len == total_len: # 如果 prompt 已经达到最大长度，无需生成
-            logits, _ = self.model.forward(tokens, prev_pos, image_tensors)
+        img_batch_size, _, _, _ = image_tensors.shape
+        select_indexs, num_patch_indexs = self.model_executor.prefill_alloc_kv_cache(total_seq_number_tokens, total_seq_len, 
+                                                                                     max_prompt_len, actual_prompt_lens, img_batch_size)
 
         start_pos = 0
         prev_pos = 0
-        for cur_pos in range(min_prompt_len, total_len):
+        for cur_pos in range(max_prompt_len, total_seq_len):
             input_ids = tokens[:, prev_pos: cur_pos]
             batch_size, _ = input_ids.shape
 
             logits = self.model_executor.forward(input_ids, start_pos, image_tensors)
-            
+            self.model_executor.decode_alloc_kv_cache()
+
             if start_pos == 0:
-                start_pos += (max_prompt_len + images_indexs)
-                # start_pos += len(self.model_executor.atten_info.cur_select_index)
-                # print("After prefill start_pos is,",  len(self.model_executor.atten_info.cur_select_index))
-                # print("After prefill start_pos is,",  max_prompt_len + images_indexs)
+                start_pos += (max_prompt_len + num_patch_indexs)
             else:
                 start_pos += batch_size
                 
-            self.model_executor.atten_info.cur_select_index = (self.model_executor.atten_info.start_index 
-                                                               + self.model_executor.atten_info.b_seq_len)
-            self.model_executor.atten_info.max_actual_seq_len += 1
-            self.model_executor.atten_info.b_seq_len += 1
-            
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p)
@@ -260,7 +232,7 @@ class LlavaGeneratorStream:
                 break
         
         # 减少 kv cache 内存管理器的引用计数
-        self.model_executor.kv_mem_manager.release_ref(select_index)
+        self.model_executor.kv_mem_manager.release_ref(select_indexs)
 
     def text_completion_stream(
         self,

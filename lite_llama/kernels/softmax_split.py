@@ -56,7 +56,7 @@ def softmax_kernel(out_ptr, in_ptr, logz_ptr, M, N, TILE_N: tl.constexpr):
 def softmax_split(x):
     M, N = x.shape
 
-    num_sms = torch.cuda.get_device_properties(x.device).multi_processor_count
+    # num_sms = torch.cuda.get_device_properties(x.device).multi_processor_count
 
     TILE_N = min(4096, triton.next_power_of_2(N))
     num_tiles_n = triton.cdiv(N, TILE_N)

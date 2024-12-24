@@ -62,6 +62,7 @@ class GenerateText:
     ):
         self.checkpoints_dir = checkpoints_dir
         self.compiled_model = compiled_model
+        self.device = device
 
         self.model_executor = ModelExecutor.build(
             checkpoints_dir = checkpoints_dir,
@@ -73,7 +74,6 @@ class GenerateText:
         )
         self.model_config = self.model_executor.model_config
         self.tokenizer = self.load_tokenizer(tokenizer_path)
-        self.device = device
     
     def load_tokenizer(self, pretrained_model_name_or_path):
         model_name = get_model_name_from_path(pretrained_model_name_or_path)
@@ -103,6 +103,7 @@ class GenerateText:
         max_prompt_len = max(len(t) for t in prompt_tokens)
         assert max_prompt_len <= self.model_config.max_seq_len
         total_len = min(self.model_config.max_seq_len, max_gen_len + max_prompt_len)
+        actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=device)
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
         total_number_tokens = bsz * total_len
         self.model_executor.atten_info.max_actual_seq_len = max_prompt_len
@@ -118,41 +119,12 @@ class GenerateText:
         # 生成一个布尔张量，它的值为 True 的位置表示输入序列的实际内容（即非填充部分）, 形状为 (batch_size, total_len)
         input_text_mask = tokens != pad_id
         eos_reached = torch.zeros(bsz, dtype=torch.bool, device=device)
-
-        # 一次性分配 bsz * total_len 个索引
-        self.model_executor.atten_info.select_index = self.model_executor.kv_mem_manager.alloc_kvcache_index(total_number_tokens)
-        select_index = self.model_executor.atten_info.select_index
-
-        # 初始化每个批次项的序列长度
-        actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=device)
-        self.model_executor.atten_info.b_seq_len = actual_prompt_lens
-        # print("self.model_executor.atten_info.b_seq_len ", self.model_executor.atten_info.b_seq_len)  
-
-        # 初始化起始索引张量
-        self.model_executor.atten_info.start_index = select_index[::total_len].to(torch.int32)
-        # print("start_index: ", self.model_executor.atten_info.start_index)
-        
-        # 初始化当前已选择的批次项索引
-        self.model_executor.atten_info.cur_select_index = select_index.unfold(0, max_prompt_len, total_len).reshape(-1)
-        # print("Prefill stage cur_select_index: ", self.model_executor.atten_info.cur_select_index)
-
         token_logprobs = torch.zeros((bsz, total_len), dtype=torch.float, device=device) if logprobs else None
-        if min_prompt_len == total_len and logprobs:
-            # 若无生成空间，直接计算已存在 tokens 的对数似然（可选）
-            logits = self.model_executor.forward(tokens, 0)
-            token_logprobs.copy_(
-                -F.cross_entropy(
-                    input=logits.transpose(1, 2),
-                    target=tokens,
-                    reduction="none",
-                    ignore_index=pad_id,
-                )
-            )
 
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
-
+        select_indexs, _ = self.model_executor.prefill_alloc_kv_cache(total_number_tokens, total_len, max_prompt_len, actual_prompt_lens)
         token_count = 0
         prev_pos = 0 # 初始化上一次生成的位置
         # 为减少循环中的判断逻辑，这里将range起点由min_prompt_len改成max_prompt_len
@@ -163,14 +135,8 @@ class GenerateText:
             # 取出新加入模型的 token (一般为单步输入)
             input_ids = tokens[:, cur_pos - 1: cur_pos] if cur_pos > 0 else tokens[:, :1]
             logits = self.model_executor.forward(input_ids, prev_pos)
-            
-            if prev_pos > 0:
-                self.model_executor.atten_info.max_actual_seq_len += 1
-                self.model_executor.atten_info.b_seq_len += 1
-            
-            self.model_executor.atten_info.cur_select_index = (self.model_executor.atten_info.start_index 
-                                                               + self.model_executor.atten_info.b_seq_len)
-            
+            self.model_executor.decode_alloc_kv_cache()
+
             # 对最后一个位置进行 softmax
             step_logits = logits[:, -1, :]
             if temperature > 0:
@@ -220,7 +186,7 @@ class GenerateText:
         )
 
         # 减少 kv cache 内存管理器的引用计数
-        self.model_executor.kv_mem_manager.release_ref(select_index)
+        self.model_executor.kv_mem_manager.release_ref(select_indexs)
 
         return out_tokens, out_logprobs
 

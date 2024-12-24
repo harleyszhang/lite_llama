@@ -247,6 +247,15 @@ class KVCacheMemoryManager:
     def _free_buffers(self):
         self.gpu_kv_buffer = None
     
+    # 释放指定的kv cache 内存块索引
+    @torch.no_grad()
+    def free(self, free_index):
+        free_index = free_index.long()
+        self.release_ref(free_index)
+        if self.can_use_mem_size == len(self.mem_state):
+            logger.debug(f"freed all gpu mem size {self.can_use_mem_size}")
+        return
+    
     # 释放所有内存
     @torch.no_grad()
     def free_all(self,):

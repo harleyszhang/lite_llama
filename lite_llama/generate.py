@@ -61,6 +61,7 @@ class GenerateText:
     ):
         self.checkpoints_dir = checkpoints_dir
         self.compiled_model = compiled_model
+        self.device = device
 
         self.model_executor = ModelExecutor.build(
             checkpoints_dir = checkpoints_dir,
@@ -91,7 +92,6 @@ class GenerateText:
         temperature: float = 0.6,
         top_p: float = 0.9,
         echo: bool = False,
-        device = "cuda"
     ) -> Tuple[List[List[int]], Optional[List[List[float]]]]:
         """
         基于提供的提示词 (prompts) 使用语言生成模型生成文本序列。
@@ -111,57 +111,27 @@ class GenerateText:
         total_len = min(self.model_config.max_seq_len, max_gen_len + max_prompt_len)
         total_number_tokens = bsz * total_len
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
-        self.model_executor.atten_info.max_actual_seq_len = max_prompt_len
-
+        # 初始化每个批次项的序列长度
+        actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=self.device)  
         # 预分配 tokens 张量
-        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device = device)
-        
+        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device = self.device)
+
         # 填充提示词到 tokens 张量
         for seq_id, token_ids in enumerate(prompt_tokens):
-            tokens[seq_id, : len(token_ids)] = torch.tensor(token_ids, dtype=torch.long, device = device)
+            tokens[seq_id, : len(token_ids)] = torch.tensor(token_ids, dtype=torch.long, device = self.device)
         
         # 生成一个布尔张量，它的值为 True 的位置表示输入序列的实际内容（即非填充部分）, 形状为 (batch_size, total_len)
         input_text_mask = tokens != pad_id
-        eos_reached = torch.zeros(bsz, dtype=torch.bool, device=device)
+        eos_reached = torch.zeros(bsz, dtype=torch.bool, device=self.device)
+        
+        select_indexs, _ = self.model_executor.prefill_alloc_kv_cache(total_number_tokens, total_len, max_prompt_len, actual_prompt_lens)
         prev_pos = 0 # 初始化上一次生成的位置
-
-        # 一次性分配 bsz * total_len 个索引, 270 * 4
-        self.model_executor.atten_info.select_index = self.model_executor.kv_mem_manager.alloc_kvcache_index(total_number_tokens)
-        select_index = self.model_executor.atten_info.select_index
-
-        # 初始化每个批次项的序列长度
-        actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=device)
-        self.model_executor.atten_info.b_seq_len = actual_prompt_lens
-        
-        # 初始化起始索引张量
-        self.model_executor.atten_info.start_index = select_index[::total_len].to(torch.int32)
-        
-        # 初始化当前已选择的批次项索引
-        self.model_executor.atten_info.cur_select_index = select_index.unfold(0, max_prompt_len, total_len).reshape(-1)
-        """
-        start_index:        tensor([  0, 270, 540, 810], device='cuda:0', dtype=torch.int32)
-        b_seq_len:          tensor([14, 12, 11, 11], device='cuda:0')
-        Prefill Stage, cur_select_index: tensor([  0,   1,   2,   3,   4,   5,   6,   7,   8,   9,  10,  11,  12,  13,
-                                    270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283,
-                                    540, 541, 542, 543, 544, 545, 546, 547, 548, 549, 550, 551, 552, 553,
-                                    810, 811, 812, 813, 814, 815, 816, 817, 818, 819, 820, 821, 822, 823
-                                ], device='cuda:0')
-        Decode Stage, 0 step, cur_select_index: tensor([ 14, 282, 551, 821], device='cuda:0'), cur_b_seq_len: tensor([15, 13, 12, 12], device='cuda:0')
-        Decode Stage, 1 step, cur_select_index: tensor([ 15, 283, 552, 822], device='cuda:0'), cur_b_seq_len: tensor([16, 14, 13, 13], device='cuda:0')
-        """
-        
         for cur_pos in range(max_prompt_len, total_len):
             input_ids = tokens[:, prev_pos: cur_pos] # 当前输入 token ids, decode 阶段 input_ids shape is [4, 1] 
+  
             logits = self.model_executor.forward(input_ids, prev_pos) # 模型执行器的前向推理, logits shape is [batch_size, shape, vocab_size]
-            self.model_executor.atten_info.cur_select_index = (self.model_executor.atten_info.start_index 
-                                                               + self.model_executor.atten_info.b_seq_len)
-          
-            self.model_executor.atten_info.b_seq_len += 1
-            self.model_executor.atten_info.max_actual_seq_len += 1
+            self.model_executor.decode_alloc_kv_cache()
             
-            # print(f"logits.shape: {logits.shape}")
-            # print("logits: ", logits)
-
             probs = softmax_split(logits[:, -1] / temperature) # torch.softma 将 logits 转换为概率分布。
             next_token = sample_top_p(probs, top_p) # next_token 形状为 [batch_size, 1]
             next_token = next_token.reshape(-1) # 调整为一维, shape is batch_size
@@ -179,7 +149,7 @@ class GenerateText:
                 break
         
         # out_tokens = self.process_output_tokens(tokens, prompt_tokens, max_gen_len, echo, self.tokenizer.eos_token_id)
-        self.model_executor.kv_mem_manager.release_ref(select_index) # 减少 kv cache 内存管理器的引用计数
+        self.model_executor.kv_mem_manager.release_ref(select_indexs) # 减少 kv cache 内存管理器的引用计数
 
         return tokens
     
@@ -190,7 +160,6 @@ class GenerateText:
         top_p: float = 0.9,
         max_gen_len: Optional[int] = None,
         echo: bool = False,
-        device = "cuda",
     ) -> List[CompletionPrediction]:
         """
         Perform text completion for a list of prompts using the language generation model.
@@ -202,7 +171,6 @@ class GenerateText:
             temperature = temperature,
             top_p = top_p,
             echo = echo,
-            device = device,
         )
 
         generated_texts = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
@@ -229,10 +197,9 @@ class GenerateText:
             # 截取从起始位置到最大生成长度的 tokens
             generated_toks = seq_tokens[start_idx:end_idx]
             # 检查是否存在结束符，若存在则截断到结束符之前
-            
-            # if eos_token_id in generated_toks:
-            #     eos_idx = generated_toks.index(eos_token_id)
-            #     generated_toks = generated_toks[:eos_idx]
+            if eos_token_id in generated_toks:
+                eos_idx = generated_toks.index(eos_token_id)
+                generated_toks = generated_toks[:eos_idx]
 
             out_tokens.append(generated_toks)
 

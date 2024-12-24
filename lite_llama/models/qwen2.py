@@ -26,7 +26,7 @@ class Attention(nn.Module):
         qk_scale = None,
     ) -> torch.Tensor:
         xq = xq.to(torch.float16)
-        batch_size, seq_len, num_heads_q, head_dim = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
+        batch_size, seq_len, _, _ = xq.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
         
         # 1. 获取 prefill 阶段的 cur_select_index, 并更新 kv cache 张量
         combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)

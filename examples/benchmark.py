@@ -58,7 +58,6 @@ def lite_llama_inference(
         temperature=temperature,
         top_p=top_p,
         max_gen_len=5,
-        device=device,
     )
 
     start_time = time.time()
@@ -67,7 +66,6 @@ def lite_llama_inference(
         temperature=temperature,
         top_p=top_p,
         max_gen_len=max_gen_len,
-        device=device,
     )
     end_time = time.time()
 
@@ -267,8 +265,8 @@ def main():
     #     "Roosevelt was the 26th president of the United States,",
     # ]
 
-    hf_model_name = "/gemini/code/llm_weights/Qwen/Qwen2.5-3B-Instruct"
-    custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Qwen2.5-3B-Instruct"  # 根据实际情况修改
+    hf_model_name = "/gemini/code/llm_weights/Llama-3.2-3B-hf"
+    custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-3B-hf"  # 根据实际情况修改
 
     compare_inference_speed(
         prompts=prompts,

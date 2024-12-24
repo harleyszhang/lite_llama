@@ -150,7 +150,6 @@ class ModelExecutor:
             from ..models.llava import LlavaLlama
             model = LlavaLlama(model_config)
         else:
-            logger.error(f"不支持的模型类型: {model_type}")
             raise ValueError(f"Unsupported model type: {model_type}")
 
         logger.info(f" 模型已初始化并移动到设备 '{device}'。")
@@ -259,8 +258,72 @@ class ModelExecutor:
 
         return  max_gpu_num_blocks, kv_mem_manager
 
-    def _dynamic_alloc_kv_cache(self, input_ids):
+    def prefill_alloc_kv_cache(self, 
+        total_seq_number_tokens, total_seq_len, max_prompt_len, actual_prompt_lens, image_batch_size = None,
+    ):
+        """
+        start_index:        tensor([  0, 270, 540, 810], device='cuda:0', dtype=torch.int32)
+        b_seq_len:          tensor([14, 12, 11, 11], device='cuda:0')
+        Prefill Stage, cur_select_index: tensor([  0,   1,   2,   3,   4,   5,   6,   7,   8,   9,  10,  11,  12,  13,
+                                    270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283,
+                                    540, 541, 542, 543, 544, 545, 546, 547, 548, 549, 550, 551, 552, 553,
+                                    810, 811, 812, 813, 814, 815, 816, 817, 818, 819, 820, 821, 822, 823
+                                ], device='cuda:0')
+        Decode Stage, 0 step, cur_select_index: tensor([ 14, 282, 551, 821], device='cuda:0'), cur_b_seq_len: tensor([15, 13, 12, 12], device='cuda:0')
+        Decode Stage, 1 step, cur_select_index: tensor([ 15, 283, 552, 822], device='cuda:0'), cur_b_seq_len: tensor([16, 14, 13, 13], device='cuda:0')
+        """
+        num_patch_indexs = None
+        if image_batch_size is not None:
+            image_size = self.model_config.vision_config.image_size
+            pathch_size = self.model_config.vision_config.patch_size
+            number_patchs = image_size // pathch_size
+            num_patch_indexs = (number_patchs * number_patchs - 1)
+            total_seq_number_tokens += num_patch_indexs * image_batch_size
+            total_seq_len += num_patch_indexs
+            max_prompt_len += num_patch_indexs
+            actual_prompt_lens += num_patch_indexs
+        
+        # 一次性分配 bsz * seq_len + (number_patchs * number_patchs - 1) * img_batch_size 个索引
+        self.atten_info.select_index = self.kv_mem_manager.alloc_kvcache_index(total_seq_number_tokens)
+        # 初始化起始索引张量
+        self.atten_info.start_index = self.atten_info.select_index[::total_seq_len] # 初始化起始索引张量
+        # 初始化当前已选择的批次项索引
+        self.atten_info.cur_select_index = self.atten_info.select_index.unfold(0, max_prompt_len, total_seq_len).reshape(-1)
+        # 初始化每个批次项的实际提示词长度
+        self.atten_info.b_seq_len = actual_prompt_lens # 张量, 形状 [batch_size, ]
+        # 初始化批次请求的当前最大序列上下文长度(对应 kv cache 长度)
+        self.atten_info.max_actual_seq_len = max_prompt_len # int 类型
+        
+        # print(f"self.atten_info.select_index: {self.atten_info.select_index},\n \
+        #     self.atten_info.start_index: { self.atten_info.start_index},\n \
+        #     self.atten_info.cur_select_index: { self.atten_info.cur_select_index},\n \
+        #     self.atten_info.max_actual_seq_len: {self.atten_info.max_actual_seq_len},\n \
+        #     b_seq_len: { self.atten_info.b_seq_len}, ")
+        
+        return self.atten_info.select_index, num_patch_indexs
+    
+    def decode_alloc_kv_cache(self, ):
+        self.atten_info.cur_select_index = (self.atten_info.start_index 
+                                            + self.atten_info.b_seq_len)
+        
+        self.atten_info.b_seq_len += 1
+        self.atten_info.max_actual_seq_len += 1
+    
+    def forward(self, input_ids, prev_pos, image_tensor=None):            
+        if self.model_type == "llava":
+            logits = self.model.forward(input_ids, prev_pos, self.atten_info, image_tensor)
+        else:
+            logits = self.model.forward(input_ids, prev_pos, self.atten_info)
+        
+        return logits
+    
+    def _dynamic_alloc_kv_cache(self, max_prompt_len, input_ids):
         """早先版本, 支持动态分配 kv cache 空间索引, 可大幅度提升 gpu 内存利用率"""
+        self.atten_info.max_actual_seq_len = max_prompt_len
+        
+        select_index = self.model_executor.atten_info.select_index
+
+
         batch_size, seq_len = input_ids.shape # 静态批处理, batch 中每个请求的 seq_len 都相等
         if seq_len > 1:
             # 一次性分配最大所需 kv cache. seq0: [token0, token1, token2, token3,], seq1: [token0, token1, token2, token3,]
@@ -288,11 +351,3 @@ class ModelExecutor:
             self.atten_info.decode_index = decode_index
             select_index = torch.cat([self.atten_info.select_index, self.atten_info.decode_index])
             self.atten_info.select_index = select_index
-    
-    def forward(self, input_ids, prev_pos, image_tensor=None):            
-        if self.model_type == "llava":
-            logits = self.model.forward(input_ids, prev_pos, self.atten_info, image_tensor)
-        else:
-            logits = self.model.forward(input_ids, prev_pos, self.atten_info)            
-        
-        return logits
