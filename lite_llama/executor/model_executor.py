@@ -285,10 +285,11 @@ class ModelExecutor:
         
         # 一次性分配 bsz * seq_len + (number_patchs * number_patchs - 1) * img_batch_size 个索引
         self.atten_info.select_index = self.kv_mem_manager.alloc_kvcache_index(total_seq_number_tokens)
+        select_index = self.atten_info.select_index
         # 初始化起始索引张量
-        self.atten_info.start_index = self.atten_info.select_index[::total_seq_len] # 初始化起始索引张量
+        self.atten_info.start_index = select_index[::total_seq_len].to(torch.int32) # 初始化起始索引张量
         # 初始化当前已选择的批次项索引
-        self.atten_info.cur_select_index = self.atten_info.select_index.unfold(0, max_prompt_len, total_seq_len).reshape(-1)
+        self.atten_info.cur_select_index = select_index.unfold(0, max_prompt_len, total_seq_len).reshape(-1)
         # 初始化每个批次项的实际提示词长度
         self.atten_info.b_seq_len = actual_prompt_lens # 张量, 形状 [batch_size, ]
         # 初始化批次请求的当前最大序列上下文长度(对应 kv cache 长度)
@@ -308,6 +309,7 @@ class ModelExecutor:
         
         self.atten_info.b_seq_len += 1
         self.atten_info.max_actual_seq_len += 1
+        print(f"cur_select_index: { self.atten_info.cur_select_index}, b_seq_len: { self.atten_info.b_seq_len}, ")
     
     def forward(self, input_ids, prev_pos, image_tensor=None):            
         if self.model_type == "llava":
