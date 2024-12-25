@@ -283,7 +283,7 @@ class LlavaConfig:
     vocab_size: int
     image_seq_length: int = 576
     max_batch_size: int = 64
-    max_seq_len: int = 2048
+    max_seq_len: int = 10240
     device: str = "cuda"
     
     @staticmethod

@@ -160,7 +160,7 @@ def compare_inference_speed(
         update_prompts.append(model_prompter.model_input)
 
     # 1. lite-llama inference
-    lite_llama_generator = load_lite_llama_generator(lite_llama_ckpt_dir, max_seq_len, max_gpu_num_blocks = 40960, device=device)
+    lite_llama_generator = load_lite_llama_generator(lite_llama_ckpt_dir, max_seq_len, max_gpu_num_blocks = None, device=device)
     lite_llama_results, lite_llama_time, lite_llama_tokens = lite_llama_inference(
         lite_llama_generator, update_prompts, temperature, top_p, max_gen_len, device=device
     )
@@ -193,10 +193,10 @@ def compare_inference_speed(
     if print_result:
         for i, (prompt, litellama_res, hf_res) in enumerate(zip(prompts, lite_llama_results, hf_results)):
             # print(f"\n[Prompt {i}]:\n{prompt}")
-            # if i // 2 == 0: # 省略部分打印
-            print("\n[lite_llama]: {}".format(litellama_res))
-            print("\n[Transformers]: {}".format(hf_res['generation']))
-            print("\n" + "="*40 + "\n")
+            if i // 4 == 0: # 省略部分打印
+                print("\n[lite_llama]: {}".format(litellama_res))
+                print("\n[Transformers]: {}".format(hf_res['generation']))
+                print("\n" + "="*40 + "\n")
 
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -269,12 +269,13 @@ def main():
     # custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-3B-hf"  # 根据实际情况修改
     hf_model_name = "/gemini/code/llm_weights/Qwen/Qwen2.5-3B-Instruct"
     custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Qwen2.5-3B-Instruct"
+    
     compare_inference_speed(
         prompts=prompts,
         temperature=0.7,
         top_p=0.8,
         max_seq_len=4096,
-        max_gen_len=256,
+        max_gen_len=2048,
         lite_llama_ckpt_dir=custom_checkpoints_dir,
         hf_model_name=hf_model_name,
         print_result=True,

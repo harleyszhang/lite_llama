@@ -213,11 +213,17 @@ class KVCacheMemoryManager:
     def alloc_kvcache_index(self, need_size):
         alloc_mem = self.alloc_contiguous_kvcache(need_size)
         if alloc_mem is not None:
-            select_index, start_index, _ = alloc_mem
+            select_index, start_index, end_index = alloc_mem
+            kv_cache = None
         else:
-            select_index, start_index, _  = self.alloc_kvcache(need_size)
+            select_index = self.alloc_kvcache(need_size)
+            kv_cache = torch.empty(
+                (need_size, self.num_kv_heads, self.head_dim),
+                dtype=self.dtype,
+                device=self.device,
+            )
         
-        return select_index
+        return select_index.to(torch.int32), kv_cache
     
     # 增加引用计数
     @torch.no_grad()

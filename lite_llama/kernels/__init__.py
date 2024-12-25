@@ -14,6 +14,7 @@ from .swiglu import (SiLUMulFunction, swiglu_forward)
 from .rope_emb import (rope_forward, rope_emb_forward)
 from .softmax_split import softmax_split
 from .update_kv_buffer import update_kv_buffer
+from .update_kv_index import update_kv_index
 
 from .others.rmsnorm_v1 import rmsnorm
 from .others.fused_linear import (fused_linear)

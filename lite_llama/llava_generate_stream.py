@@ -158,7 +158,7 @@ class LlavaGeneratorStream:
             该方法在生成循环中，每生成一个新 token, 就立即输出对应的文本和概率(如果需要）。
         """
         bsz = len(prompt_tokens)
-        # min_prompt_len = min(len(t) for t in prompt_tokens)
+        min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
         assert max_prompt_len <= self.max_seq_len
         total_seq_len = min(self.max_seq_len, max_gen_len + max_prompt_len)
@@ -180,22 +180,21 @@ class LlavaGeneratorStream:
         
         # 计算输入图像待分配空间
         img_batch_size, _, _, _ = image_tensors.shape
-        select_indexs, num_patch_indexs = self.model_executor.prefill_alloc_kv_cache(total_seq_number_tokens, total_seq_len, 
-                                                                                     max_prompt_len, actual_prompt_lens, img_batch_size)
-
+        b_req_idx = torch.arange(bsz, device = self.device)
+        prefill_select_index, num_patch_indexs = self.model_executor.prefill_alloc_kv_cache(max_prompt_len, actual_prompt_lens, b_req_idx, img_batch_size)
+        
         start_pos = 0
         prev_pos = 0
+
         for cur_pos in range(max_prompt_len, total_seq_len):
             input_ids = tokens[:, prev_pos: cur_pos]
-            batch_size, _ = input_ids.shape
-
             logits = self.model_executor.forward(input_ids, start_pos, image_tensors)
-            self.model_executor.decode_alloc_kv_cache()
+            all_select_indexs = self.model_executor.decode_alloc_kv_cache(bsz)
 
             if start_pos == 0:
-                start_pos += (max_prompt_len + num_patch_indexs)
+                start_pos += len(prefill_select_index)
             else:
-                start_pos += batch_size
+                start_pos += bsz
                 
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
@@ -232,7 +231,7 @@ class LlavaGeneratorStream:
                 break
         
         # 减少 kv cache 内存管理器的引用计数
-        self.model_executor.kv_mem_manager.release_ref(select_indexs)
+        self.model_executor.kv_mem_manager.release_ref(all_select_indexs)
 
     def text_completion_stream(
         self,

@@ -6,6 +6,7 @@ from transformers import LlavaConfig
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 
 from .mem_manager import ComputeMaxAvailableBlocks, KVCacheMemoryManager
+from .req_tokens_table import ReqTokensTable
 
 from .cuda_graph import ModelRunner
 from .executor_struct import AttentionInfo
@@ -13,7 +14,7 @@ from ..models.model_config import LlamaConfig, Qwen2Config
 from .weight_convert import convert_llama_torch_to_litellama, \
                             convert_llavallama_hf_to_litellama, \
                             convert_qwen2_hf_to_litellama
-
+from ..kernels import update_kv_index
 
 logger = logging.getLogger(__name__)
 
@@ -182,15 +183,18 @@ class ModelExecutor:
 
     def __init__(self, model_config, model, max_gpu_num_blocks=None, compiled_model=False, device="cuda"):
         self.model_config = model_config
-
+        self.device = device
         if isinstance(model_config, LlavaConfig):
             self.llm_config = LlamaConfig.from_dict(model_config.text_config.to_dict())
+            print(f"self.llm_config.max_seq_len: {self.llm_config.max_seq_len}")
         else:
             self.llm_config = model_config
-
+        
+        self.max_seq_len = self.llm_config.max_seq_len
         self.model_type = model_config.model_type
         self.model = model
-
+        self.all_select_index = None
+        
         self.compiled_model = False
         self.model_runner = None
         
@@ -200,12 +204,16 @@ class ModelExecutor:
             max_gpu_num_blocks, self.max_gpu_num_tokens = self._get_max_avaliable_tokens(gpu_memory_utilization=0.9, block_size=1)
             self.kv_mem_manager = self._init_mem_manager(max_gpu_num_blocks, block_size=1)
         
+        self.max_request_num = max_gpu_num_blocks // self.max_seq_len
         if compiled_model:
             self.apply_cuda_graph() # 调用 cuda graph 优化
 
-        self.gpu_kv_buffer = self.kv_mem_manager.gpu_kv_buffer
+        self.req_tokens_table = ReqTokensTable(self.max_request_num, self.max_seq_len)
         self.atten_info = AttentionInfo() # 创建 AttentionInfo 实例
+
+        self.gpu_kv_buffer = self.kv_mem_manager.gpu_kv_buffer
         self.atten_info.kv_buffer = self.kv_mem_manager.gpu_kv_buffer
+        self.atten_info.b_req_indexs = self.req_tokens_table.b_req_indexs
 
     def _get_max_avaliable_tokens(self, gpu_memory_utilization=0.9, block_size=1):
         avaliable_blocks = ComputeMaxAvailableBlocks(
@@ -256,10 +264,10 @@ class ModelExecutor:
         )
         self.model_runner.capture_decode_graph()
 
-        return  max_gpu_num_blocks, kv_mem_manager
+        return max_gpu_num_blocks, kv_mem_manager
 
     def prefill_alloc_kv_cache(self, 
-        total_seq_number_tokens, total_seq_len, max_prompt_len, actual_prompt_lens, image_batch_size = None,
+        max_prompt_len, actual_prompt_lens, b_req_idx, image_batch_size = None,
     ):
         """
         start_index:        tensor([  0, 270, 540, 810], device='cuda:0', dtype=torch.int32)
@@ -273,43 +281,55 @@ class ModelExecutor:
         Decode Stage, 1 step, cur_select_index: tensor([ 15, 283, 552, 822], device='cuda:0'), cur_b_seq_len: tensor([16, 14, 13, 13], device='cuda:0')
         """
         num_patch_indexs = None
+        batch_size = len(actual_prompt_lens)
+        self.atten_info.b_req_idx = b_req_idx
+
         if image_batch_size is not None:
             image_size = self.model_config.vision_config.image_size
             pathch_size = self.model_config.vision_config.patch_size
             number_patchs = image_size // pathch_size
             num_patch_indexs = (number_patchs * number_patchs - 1)
-            total_seq_number_tokens += num_patch_indexs * image_batch_size
-            total_seq_len += num_patch_indexs
             max_prompt_len += num_patch_indexs
             actual_prompt_lens += num_patch_indexs
+
+            print(f"num_patch_indexs: {num_patch_indexs}")
         
+        context_num_tokens = max_prompt_len * batch_size
         # 一次性分配 bsz * seq_len + (number_patchs * number_patchs - 1) * img_batch_size 个索引
-        self.atten_info.select_index = self.kv_mem_manager.alloc_kvcache_index(total_seq_number_tokens)
-        select_index = self.atten_info.select_index
+        self.atten_info.cur_select_index, kv_cache = self.kv_mem_manager.alloc_kvcache_index(context_num_tokens)        
+        self.atten_info.kv_cache = kv_cache
         # 初始化起始索引张量
-        self.atten_info.start_index = select_index[::total_seq_len].to(torch.int32) # 初始化起始索引张量
         # 初始化当前已选择的批次项索引
-        self.atten_info.cur_select_index = select_index.unfold(0, max_prompt_len, total_seq_len).reshape(-1)
+        self.atten_info.b_req_indexs[:batch_size, :max_prompt_len] = self.atten_info.cur_select_index.view(batch_size, max_prompt_len)
         # 初始化每个批次项的实际提示词长度
         self.atten_info.b_seq_len = actual_prompt_lens # 张量, 形状 [batch_size, ]
         # 初始化批次请求的当前最大序列上下文长度(对应 kv cache 长度)
         self.atten_info.max_actual_seq_len = max_prompt_len # int 类型
         
-        # print(f"self.atten_info.select_index: {self.atten_info.select_index},\n \
+        # print(f"context_num_tokens: {context_num_tokens}, max_prompt_len:{max_prompt_len}, \n \
+        #     self.atten_info.cur_select_index: {self.atten_info.cur_select_index},\n \
         #     self.atten_info.start_index: { self.atten_info.start_index},\n \
-        #     self.atten_info.cur_select_index: { self.atten_info.cur_select_index},\n \
         #     self.atten_info.max_actual_seq_len: {self.atten_info.max_actual_seq_len},\n \
         #     b_seq_len: { self.atten_info.b_seq_len}, ")
         
-        return self.atten_info.select_index, num_patch_indexs
+        # print(f"self.atten_info.b_req_indexs: { self.atten_info.b_req_indexs}")
+        self.all_select_index = self.atten_info.cur_select_index
+
+        return self.all_select_index, num_patch_indexs
     
-    def decode_alloc_kv_cache(self, ):
-        self.atten_info.cur_select_index = (self.atten_info.start_index 
-                                            + self.atten_info.b_seq_len)
+    def decode_alloc_kv_cache(self, batch_size):
+        self.atten_info.cur_select_index, kv_cache = self.kv_mem_manager.alloc_kvcache_index(batch_size)
+        self.atten_info.kv_cache = kv_cache
+        all_select_index = torch.concat([self.all_select_index, self.atten_info.cur_select_index])
+        self.all_select_index = all_select_index
         
+        update_kv_index(self.atten_info.b_req_indexs, self.atten_info.b_req_idx, 
+                        self.atten_info.b_seq_len, self.atten_info.cur_select_index)
+
         self.atten_info.b_seq_len += 1
         self.atten_info.max_actual_seq_len += 1
-        print(f"cur_select_index: { self.atten_info.cur_select_index}, b_seq_len: { self.atten_info.b_seq_len}, ")
+        
+        return self.all_select_index
     
     def forward(self, input_ids, prev_pos, image_tensor=None):            
         if self.model_type == "llava":
@@ -318,38 +338,3 @@ class ModelExecutor:
             logits = self.model.forward(input_ids, prev_pos, self.atten_info)
         
         return logits
-    
-    def _dynamic_alloc_kv_cache(self, max_prompt_len, input_ids):
-        """早先版本, 支持动态分配 kv cache 空间索引, 可大幅度提升 gpu 内存利用率"""
-        self.atten_info.max_actual_seq_len = max_prompt_len
-        
-        select_index = self.model_executor.atten_info.select_index
-
-
-        batch_size, seq_len = input_ids.shape # 静态批处理, batch 中每个请求的 seq_len 都相等
-        if seq_len > 1:
-            # 一次性分配最大所需 kv cache. seq0: [token0, token1, token2, token3,], seq1: [token0, token1, token2, token3,]
-            need_size = batch_size * (seq_len)
-            
-            if self.model_type == "llava":
-                image_size = self.model_config.vision_config.image_size
-                pathch_size = self.model_config.vision_config.patch_size
-                number_patchs = image_size // pathch_size
-                need_size += number_patchs * number_patchs - 1
-            alloc_mem = self.kv_mem_manager.alloc_contiguous_kvcache(need_size)
-            
-            if alloc_mem is not None:
-                select_index, _, _ = alloc_mem
-            else:
-                select_index = self.kv_mem_manager.alloc_kvcache(need_size)
-            self.atten_info.select_index = select_index
-
-        else:
-            alloc_mem = self.kv_mem_manager.alloc_contiguous_kvcache(batch_size)
-            if alloc_mem is not None:
-                decode_index = alloc_mem[0]
-            else:
-                decode_index = self.kv_mem_manager.alloc_kvcache(batch_size)
-            self.atten_info.decode_index = decode_index
-            select_index = torch.cat([self.atten_info.select_index, self.atten_info.decode_index])
-            self.atten_info.select_index = select_index

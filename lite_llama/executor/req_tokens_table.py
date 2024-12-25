@@ -8,14 +8,15 @@ class ReqTokensTable:
     
     TokenTable 将一系列 kv tokens 映射到一组token 表中, 每个 token 表代表请求序列分配的 kv cache 内存空间。
     """
-    def __init__(self, max_request_num, max_seq_len, mem_manager, device="cuda"):
+    def __init__(self, max_request_num, max_seq_len, device="cuda"):
         self.max_can_use_req_size = max_request_num
         self.can_use_req_size = max_request_num
         self.max_seq_len = max_seq_len
-        self.req_state = torch.zeros([max_request_num,], dtype=torch.int32, device=device)
-        # 一个整数张量，存储所有请求的令牌索引。
-        self.req_to_token_indexs = torch.zeros((max_request_num, max_seq_len), dtype=torch.int32, device=device)
-        self.mem_manager = mem_manager
+        self.req_state = torch.zeros((max_request_num), dtype=torch.int32, device=device)
+        # 一个二维张量，形状为 [num_requests, max_seq_len]，用于存储每个请求的 Token 索引。
+        # 每行表示一个请求，每列表示该请求在特定序列位置上的 Token 索引。
+        self.b_req_indexs = torch.zeros((max_request_num, max_seq_len), dtype=torch.int32, device=device)
+        # self.mem_manager = mem_manager
 
     # 分配批次请求需要的内存空间
     def alloc_req(self, request_num):

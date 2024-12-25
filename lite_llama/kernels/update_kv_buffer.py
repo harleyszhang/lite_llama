@@ -69,12 +69,12 @@ def test1():
     dest_loc = torch.arange(0, B * Seq_Len, dtype=torch.int32, device="cuda")
 
     for _ in range(10): # Warm up
-        updtae_kv_buffer(src, dest_loc, dest)
+        update_kv_buffer(src, dest_loc, dest)
     torch.cuda.synchronize()
 
     t1 = time.time()
     for _ in range(num_of_times):
-        updtae_kv_buffer(src, dest_loc, dest)
+        update_kv_buffer(src, dest_loc, dest)
     torch.cuda.synchronize()
     t2 = time.time()
 

@@ -112,7 +112,7 @@ class GenerateText:
         total_number_tokens = bsz * total_len
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
         # 初始化每个批次项的序列长度
-        actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=self.device)  
+        actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.int32, device=self.device)  
         # 预分配 tokens 张量
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device = self.device)
 
@@ -123,14 +123,15 @@ class GenerateText:
         # 生成一个布尔张量，它的值为 True 的位置表示输入序列的实际内容（即非填充部分）, 形状为 (batch_size, total_len)
         input_text_mask = tokens != pad_id
         eos_reached = torch.zeros(bsz, dtype=torch.bool, device=self.device)
+        b_req_idx = torch.arange(bsz, device = self.device)
+        _, _ = self.model_executor.prefill_alloc_kv_cache(max_prompt_len, actual_prompt_lens, b_req_idx)
         
-        select_indexs, _ = self.model_executor.prefill_alloc_kv_cache(total_number_tokens, total_len, max_prompt_len, actual_prompt_lens)
         prev_pos = 0 # 初始化上一次生成的位置
         for cur_pos in range(max_prompt_len, total_len):
             input_ids = tokens[:, prev_pos: cur_pos] # 当前输入 token ids, decode 阶段 input_ids shape is [4, 1] 
   
             logits = self.model_executor.forward(input_ids, prev_pos) # 模型执行器的前向推理, logits shape is [batch_size, shape, vocab_size]
-            self.model_executor.decode_alloc_kv_cache()
+            all_select_indexs = self.model_executor.decode_alloc_kv_cache(bsz)
             
             probs = softmax_split(logits[:, -1] / temperature) # torch.softma 将 logits 转换为概率分布。
             next_token = sample_top_p(probs, top_p) # next_token 形状为 [batch_size, 1]
@@ -149,7 +150,7 @@ class GenerateText:
                 break
         
         # out_tokens = self.process_output_tokens(tokens, prompt_tokens, max_gen_len, echo, self.tokenizer.eos_token_id)
-        self.model_executor.kv_mem_manager.release_ref(select_indexs) # 减少 kv cache 内存管理器的引用计数
+        self.model_executor.kv_mem_manager.release_ref(all_select_indexs) # 减少 kv cache 内存管理器的引用计数
 
         return tokens
     
