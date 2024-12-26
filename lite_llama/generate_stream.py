@@ -118,7 +118,6 @@ class GenerateStreamText:
         max_prompt_len = max(len(t) for t in prompt_tokens)
         assert max_prompt_len <= self.model_config.max_seq_len
         total_len = min(self.model_config.max_seq_len, max_gen_len + max_prompt_len)
-        total_number_tokens = bsz * total_len
         actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=device)  
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
         

@@ -225,12 +225,12 @@ def main():
     #     "How to learn cuda programming, give me some code example.",
     # ]
 
-    prompts: List[str] = [
-        "How to learn cnn, please introduce resnet architecture and give code.",
-        "How to learn cuda programming, give me some code example.",
-        "How to learn rust, give me some code examples.",
-        "How to learn c++, give me some code examples.",
-    ]
+    # prompts: List[str] = [
+    #     "How to learn cnn, please introduce resnet architecture and give code.",
+    #     "How to learn cuda programming, give me some code example.",
+    #     "How to learn rust, give me some code examples.",
+    #     "How to learn c++, give me some code examples.",
+    # ]
 
     # prompts: List[str] = [
     #     "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.",

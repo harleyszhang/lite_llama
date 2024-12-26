@@ -99,13 +99,11 @@ class GenerateText:
         基于提供的提示词 (prompts) 使用语言生成模型生成文本序列。
         """
         bsz = len(prompt_tokens)
-        min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
         assert max_prompt_len <= self.model_config.max_seq_len
         total_len = min(self.model_config.max_seq_len, max_gen_len + max_prompt_len)
         actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=device)
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
-        total_number_tokens = bsz * total_len
         self.model_executor.atten_info.max_actual_seq_len = max_prompt_len
 
         # 预分配tokens张量

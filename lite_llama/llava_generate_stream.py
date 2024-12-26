@@ -158,11 +158,10 @@ class LlavaGeneratorStream:
             该方法在生成循环中，每生成一个新 token, 就立即输出对应的文本和概率(如果需要）。
         """
         bsz = len(prompt_tokens)
-        min_prompt_len = min(len(t) for t in prompt_tokens)
+        # min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
         assert max_prompt_len <= self.max_seq_len
         total_seq_len = min(self.max_seq_len, max_gen_len + max_prompt_len)
-        total_seq_number_tokens = bsz * total_seq_len
         actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=self.device)  
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
         

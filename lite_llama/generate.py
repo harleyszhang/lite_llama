@@ -109,7 +109,6 @@ class GenerateText:
         # min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
         total_len = min(self.model_config.max_seq_len, max_gen_len + max_prompt_len)
-        total_number_tokens = bsz * total_len
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
         # 初始化每个批次项的序列长度
         actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.int32, device=self.device)  
