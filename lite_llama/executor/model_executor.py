@@ -265,6 +265,20 @@ class ModelExecutor:
         self.model_runner.capture_decode_graph()
 
         return max_gpu_num_blocks, kv_mem_manager
+    
+    def init_req_to_token_indexes(self,
+        req_to_token_indexs, b_req_idx, b_seq_len, alloc_mem_index
+    ):
+        start_index = 0
+        b_seq_len_numpy = b_seq_len.cpu().numpy()
+        b_req_idx_numpy = b_req_idx.cpu().numpy()
+        for i in range(len(b_seq_len)):
+            cur_seq_len = b_seq_len_numpy[i]
+            req_to_token_indexs[b_req_idx_numpy[i], :cur_seq_len] = alloc_mem_index[
+                start_index : start_index + cur_seq_len
+            ]
+            start_index += cur_seq_len
+        return
 
     def prefill_alloc_kv_cache(self, 
         max_prompt_len, actual_prompt_lens, b_req_idx, image_batch_size = None,
@@ -297,15 +311,18 @@ class ModelExecutor:
         # 一次性分配 bsz * seq_len + (number_patchs * number_patchs - 1) * img_batch_size 个索引
         self.atten_info.cur_select_index, kv_cache = self.kv_mem_manager.alloc_kvcache_index(context_num_tokens)        
         self.atten_info.kv_cache = kv_cache
-        # 初始化起始索引张量
-        self.atten_info.b_start_loc = self.atten_info.cur_select_index[::max_prompt_len].to(torch.int32) # 初始化起始索引张量
-        # 初始化当前已选择的批次项索引
-        self.atten_info.b_req_indexs[:batch_size, :max_prompt_len] = self.atten_info.cur_select_index.view(batch_size, max_prompt_len)
         # 初始化每个批次项的实际提示词长度
         self.atten_info.b_seq_len = actual_prompt_lens # 张量, 形状 [batch_size, ]
         # 初始化批次请求的当前最大序列上下文长度(对应 kv cache 长度)
         self.atten_info.max_actual_seq_len = max_prompt_len # int 类型
+
+        self.init_req_to_token_indexes(self.atten_info.b_req_indexs, self.atten_info.b_req_idx, 
+                                        self.atten_info.b_seq_len, self.atten_info.cur_select_index)
         
+        # self.atten_info.b_start_loc = self.atten_info.cur_select_index[::max_prompt_len].to(torch.int32) # 初始化起始索引张量
+        # 初始化当前已选择的批次项索引
+        # self.atten_info.b_req_indexs[:batch_size, :max_prompt_len] = self.atten_info.cur_select_index.view(batch_size, max_prompt_len)
+
         # print(f"context_num_tokens: {context_num_tokens}, max_prompt_len:{max_prompt_len}, \n \
         #     self.atten_info.cur_select_index: {self.atten_info.cur_select_index},\n \
         #     self.atten_info.start_index: { self.atten_info.start_index},\n \

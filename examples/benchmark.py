@@ -160,7 +160,7 @@ def compare_inference_speed(
         update_prompts.append(model_prompter.model_input)
 
     # 1. lite-llama inference
-    lite_llama_generator = load_lite_llama_generator(lite_llama_ckpt_dir, max_seq_len, max_gpu_num_blocks = None, device=device)
+    lite_llama_generator = load_lite_llama_generator(lite_llama_ckpt_dir, max_seq_len, max_gpu_num_blocks = 40960, device=device)
     lite_llama_results, lite_llama_time, lite_llama_tokens = lite_llama_inference(
         lite_llama_generator, update_prompts, temperature, top_p, max_gen_len, device=device
     )
@@ -193,7 +193,7 @@ def compare_inference_speed(
     if print_result:
         for i, (prompt, litellama_res, hf_res) in enumerate(zip(prompts, lite_llama_results, hf_results)):
             # print(f"\n[Prompt {i}]:\n{prompt}")
-            if i // 4 == 0: # 省略部分打印
+            if i == 0: # 省略部分打印
                 print("\n[lite_llama]: {}".format(litellama_res))
                 print("\n[Transformers]: {}".format(hf_res['generation']))
                 print("\n" + "="*40 + "\n")
@@ -201,24 +201,24 @@ def compare_inference_speed(
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    # prompts: List[str] = [
-    #     "I believe the meaning of life is to find happiness in the simple things. but how to achieve the meaning of life?",
-    #     "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
-    #     "Can you introduce the History of the American Civil War. ",
-    #     "who is the first president of the United States and what's his life story?",
-    #     "How to learn c++, give me some code example.",
-    #     "How to learn python, give me some code examples.",
-    #     "How to learn llm, please introduce transformer architecture ",
-    #     "How to learn cnn, please introduce resnet architecture and give code ",
-    #     "How to learn cuda programming, give me some code example.",
-    #     "How to learn rust, give me some code examples.",
-    #     "How to learn java, give me some code example.",
-    #     "How to learn linux c, give me some code examples.",
-    #     "A Complete Introduction to the History of the American Civil War",
-    #     "Python is a good programming language, how tolearn it?",
-    #     "Please introduce llama model architecture and give implement cuda code."
-    #     "Please introduce Qwen2.5 model structure and give cuda implement code."
-    # ]
+    prompts: List[str] = [
+        "I believe the meaning of life is to find happiness in the simple things. but how to achieve the meaning of life?",
+        "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
+        "Can you introduce the History of the American Civil War. ",
+        "who is the first president of the United States and what's his life story?",
+        "How to learn c++, give me some code example.",
+        "How to learn python, give me some code examples.",
+        "How to learn llm, please introduce transformer architecture ",
+        "How to learn cnn, please introduce resnet architecture and give code ",
+        "How to learn cuda programming, give me some code example.",
+        "How to learn rust, give me some code examples.",
+        "How to learn java, give me some code example.",
+        "How to learn linux c, give me some code examples.",
+        "A Complete Introduction to the History of the American Civil War",
+        "Python is a good programming language, how tolearn it?",
+        "Please introduce llama model architecture and give implement cuda code."
+        "Please introduce Qwen2.5 model structure and give cuda implement code."
+    ]
 
     # prompts: List[str] = [
     #     "How to learn cnn, please introduce resnet architecture and give code ",
@@ -265,17 +265,17 @@ def main():
     #     "Roosevelt was the 26th president of the United States,",
     # ]
 
-    # hf_model_name = "/gemini/code/llm_weights/Llama-3.2-3B-hf"
-    # custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-3B-hf"  # 根据实际情况修改
-    hf_model_name = "/gemini/code/Qwen/Qwen2.5-1.5B-Instruct"
-    custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct"
+    hf_model_name = "/gemini/code/llm_weights/Qwen/Qwen2.5-3B-Instruct"
+    custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Qwen2.5-3B-Instruct"  # 根据实际情况修改
+    # hf_model_name = "/gemini/code/Qwen/Qwen2.5-1.5B-Instruct"
+    # custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct"
     
     compare_inference_speed(
         prompts=prompts,
         temperature=0.7,
         top_p=0.8,
-        max_seq_len=4096,
-        max_gen_len=2048,
+        max_seq_len=2048,
+        max_gen_len=1900,
         lite_llama_ckpt_dir=custom_checkpoints_dir,
         hf_model_name=hf_model_name,
         print_result=True,

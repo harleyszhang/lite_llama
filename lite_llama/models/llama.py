@@ -47,20 +47,19 @@ class FusedAttention(nn.Module):
 
         cos, sin = position_embeddings
         xq, xk = rope_emb_forward(xq, xk, cos, sin, batch_size, seq_len)
-
         combined_kv = torch.cat([xk, xv], dim=-2) # (B*L, 2*num_kv_heads, head_dim)  
         update_kv_buffer(combined_kv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
 
         # 3. sel-attention. flashattention 计算: softmax(qk^t) * v
         output = flash_attention2_no_pad(
             xq, xk, xv,
-            atten_info.b_start_loc, 
+            qk_scale,
+            atten_info.b_req_indexs, 
             atten_info.b_seq_len, 
             seq_len,
-            qk_scale,
         )
-  
-        output = output.view(batch_size*seq_len, self.hidden_size)
+
+        # output = output.view(batch_size*seq_len, self.hidden_size)
         output = output.view(batch_size, seq_len, self.hidden_size)
         # 4. attention 输出做线性变换
         output = self.o_proj(output)
@@ -208,14 +207,14 @@ class LlamaModel(nn.Module):
         if position_ids is None:
             cache_position = torch.arange(start_pos, start_pos + seq_len, device=input_ids.device)
             position_ids = cache_position.unsqueeze(0)
+            position_ids = position_ids.repeat(batch_size, 1)
 
         if seq_len > 1:
             qk_scale = self.qk_scale * 1.4426950408889634
         else:
             qk_scale = self.qk_scale
-            position_ids = position_ids.repeat(batch_size, 1)
         
-        position_embeddings = self.rotary_emb(h, position_ids)
+        position_embeddings = self.rotary_emb(h, position_ids) # cos shape is [1, seq_len, head_dim] -> decode: [batch_size, seq_len, head_dim]
         
         for i, layer in enumerate(self.layers): # Consecutively apply all the encoder layers
             # self.hidden_states.append(h)

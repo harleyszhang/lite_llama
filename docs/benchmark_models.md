@@ -3,33 +3,47 @@
 
 ### Llama-3.2-1B 模型性能测试对比
 
-趋动云 `B1.small` 等同于 `3090` 的 `1/4` 之一卡的硬件测试环境。运行性能测试对比 `python benchmark.py`，lite_llama 的运行速度最高是 transformers 的 `2.6x` 倍。
+趋动云 `B1.small` 等同于 `3090` 的 `1/4` 之一卡的硬件测试环境。运行性能测试对比 `python benchmark.py`，lite_llama 的运行速度最高是 transformers 的 `4x` 倍。
 
-batch_size = 2 的提示词：
+batch_size = 16 的提示词：
 
 ```bash
 prompts: List[str] = [
+    "I believe the meaning of life is to find happiness in the simple things. but how to achieve the meaning of life?",
+    "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
+    "Can you introduce the History of the American Civil War. ",
+    "who is the first president of the United States and what's his life story?",
+    "How to learn c++, give me some code example.",
+    "How to learn python, give me some code examples.",
+    "How to learn llm, please introduce transformer architecture ",
     "How to learn cnn, please introduce resnet architecture and give code ",
     "How to learn cuda programming, give me some code example.",
+    "How to learn rust, give me some code examples.",
+    "How to learn java, give me some code example.",
+    "How to learn linux c, give me some code examples.",
+    "A Complete Introduction to the History of the American Civil War",
+    "Python is a good programming language, how tolearn it?",
+    "Please introduce llama model architecture and give implement cuda code."
+    "Please introduce Qwen2.5 model structure and give cuda implement code."
 ]
 ```
 
 `max_gen_len = 1900` 时，benchmark 性能测试运行结果:
 
 ```bash
-lite_llama inference time: 8.8116 s
-Transformers inference time: 16.1942 s
-lite_llama throughput: 481.50 tokens/s
-Transformers throughput: 186.28 tokens/s
-lite_llama per token latency: 2.07 ms/token
-Transformers per token latency: 5.37 ms/token
+lite_llama inference time: 67.8760 s
+Transformers inference time: 131.8708 s
+lite_llama throughput: 411.04 tokens/s
+Transformers throughput: 104.70 tokens/s
+lite_llama per token latency: 2.432831 ms/token
+Transformers per token latency: 9.551007 ms/token
 ```
 
 ### Llama-3.2-3B 模型性能测试对比
 
 /gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct
 
-趋动云 `B1.big` 等同于 `3090` 卡的硬件测试环境。运行性能测试对比 `python benchmark.py`，lite_llama 的运行速度最高是 transformers 的 `3.4x` 倍。
+趋动云 `B1.big` 等同于 `3090` 卡的硬件测试环境。运行性能测试对比 `python benchmark.py`，lite_llama 的运行速度最高是 transformers 的 `4x` 倍。
 
 batch_size = 8 的提示词：
 

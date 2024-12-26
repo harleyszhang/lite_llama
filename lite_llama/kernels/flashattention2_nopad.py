@@ -10,8 +10,9 @@ from torch.cuda.amp import custom_fwd
 @triton.jit
 def flash_attention2_nopad_kernel(
     Q, K, V, O,
-    B_Start_Loc, B_Seqlen, 
+    B_Req_indexs, B_Seqlen, 
     sm_scale, heads, num_kv_groups,       # group of kv heads
+    stride_req_to_tokens_b,
     stride_q_bs, stride_q_heads, stride_q_dim,  # Q 的 strides
     stride_k_bs, stride_k_heads, stride_k_dim,  # K 的 strides
     stride_v_bs, stride_v_heads, stride_v_dim,  # V 的 strides
@@ -31,7 +32,8 @@ def flash_attention2_nopad_kernel(
 
     # 计算当前批次的序列长度和请求序列的起始位置
     cur_seq_len = tl.load(B_Seqlen + cur_batch_idx)
-    cur_seq_start_loc = tl.load(B_Start_Loc + cur_batch_idx)
+    cur_seq_start_loc = tl.load(B_Req_indexs + cur_batch_idx * stride_req_to_tokens_b)
+    # cur_seq_start_loc = tl.load(B_Start_Loc + cur_batch_idx)
 
     block_start_loc = block_m_idx * BLOCK_M_SIZE # 计算当前 block 的起始和结束索引
 
@@ -63,6 +65,7 @@ def flash_attention2_nopad_kernel(
 
     # 每次循环按 BLOCK_N_SIZE 来处理 K, V 的列（即 key/value 的序列维度）。
     for start_n in range(0, block_mask * block_end_loc, BLOCK_N_SIZE):
+        start_n = tl.multiple_of(start_n, BLOCK_N_SIZE)
         # 计算 qk^t
         k = tl.load(
             k_ptrs + (cur_seq_start_loc + start_n) * stride_k_bs,
@@ -70,14 +73,14 @@ def flash_attention2_nopad_kernel(
         )
 
         qk = tl.dot(q, k)
-        qk *= sm_scale
         
         # 应用因果遮罩, 下三角矩阵 causal mask 
         casual_mask = offs_m[:, None] >= (start_n + offs_n[None, :])
-        qk = tl.where(casual_mask, qk, -1.0e8)
+        qk = tl.where(casual_mask, qk*sm_scale, -1.0e8)
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1)) # 求 qk 的最大值
-        p = tl.math.exp2(qk - m_ij[:, None])  # qk - m_ij[:, None]更新为安全的 qk 分子项
+        qk -= m_ij[:, None]
+        p = tl.math.exp2(qk)  # qk - m_ij[:, None]更新为安全的 qk 分子项
         d_ij = tl.sum(p, 1) # 1d vector
 
         # -- 更新归一化项 d_new
@@ -114,10 +117,10 @@ def flash_attention2_no_pad(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    b_start_loc, 
+    sm_scale,
+    b_req_indexs, 
     b_seq_len, 
     max_seq_len,
-    sm_scale,
     ):
     """Compute Flash-attention, can't support fp32 input
     参数:
@@ -125,7 +128,7 @@ def flash_attention2_no_pad(
         k: Key tensor,  shape: [bs*n_size, n_heads, head_dim]. 
         v: Value tensor, shape is consistent with k. 
     """
-    BLOCK_SIZE = 32 # For Ampere Architecture, 3090ti
+    BLOCK_SIZE = 64 # For Ampere Architecture, 3090ti
     output = torch.empty_like(q)
     batchs = b_seq_len.shape[0]
     n_heads, HEAD_DIM = q.shape[1], q.shape[2]
@@ -133,17 +136,18 @@ def flash_attention2_no_pad(
     num_kv_groups = q.shape[1] // k.shape[1] # num_q_heads // num_k_heads
     grid = (triton.cdiv(max_seq_len, BLOCK_SIZE), batchs * n_heads, 1)
     num_warps = 2 if HEAD_DIM <= 64 else 4
-
+    num_stages = 1
     flash_attention2_nopad_kernel[grid](
         q,
         k,
         v, 
         output,
-        b_start_loc,
+        b_req_indexs,
         b_seq_len,
         sm_scale,
         n_heads, 
         num_kv_groups,  
+        b_req_indexs.stride(0),
         q.stride(0), q.stride(1), q.stride(2),
         k.stride(0), k.stride(1), k.stride(2),
         v.stride(0), v.stride(1), v.stride(2),
@@ -152,6 +156,7 @@ def flash_attention2_no_pad(
         BLOCK_M_SIZE=BLOCK_SIZE,
         BLOCK_N_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
+        num_stages=num_stages,
     )
     return output
 
@@ -176,7 +181,7 @@ def torch_context_attention_fwd2(q, k, v, o, b_start_loc, b_seq_len):
         cur_v = cur_v.transpose(0, 1)
         dk = cur_q.shape[-1]
 
-        p = torch.matmul(cur_q, cur_k.transpose(-2, -1)) / torch.sqrt(torch.tensor(dk, dtype=torch.float32)) * 1.4426950408889634
+        p = torch.matmul(cur_q, cur_k.transpose(-2, -1)) / torch.sqrt(torch.tensor(dk, dtype=torch.float32))
 
         q_index = torch.arange(cur_q.shape[1]).unsqueeze(-1).to(p.device)
         k_index = torch.arange(cur_k.shape[1]).unsqueeze(0).to(p.device)
@@ -184,23 +189,20 @@ def torch_context_attention_fwd2(q, k, v, o, b_start_loc, b_seq_len):
         mask = mask.unsqueeze(0).expand(cur_q.shape[0], -1, -1)
 
         p = p.masked_fill(mask == 0, float("-inf"))
-
         s = F.softmax(p, dim=-1)
-
         o[start_loc : start_loc + seq_len, :, :] = torch.matmul(s, cur_v).transpose(0, 1)
 
-
-def test2():
+def test():
     import torch
     import numpy as np
 
-    Z, H, N_CTX, D_HEAD = 16, 16, 1024, 128
+    Z, H, N_CTX, D_HEAD = 4, 16, 1024, 128
     sm_scale = 1.0 / (D_HEAD ** 0.5) * 1.4426950408889634
 
     dtype = torch.float16
     q = torch.empty((Z * N_CTX, H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.1, std=0.2)
-    k = torch.empty((Z * N_CTX, H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.4, std=0.2)
-    v = torch.empty((Z * N_CTX, H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.3, std=0.2)
+    k = torch.empty((Z * N_CTX, H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.4, std=0.3)
+    v = torch.empty((Z * N_CTX, H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.3, std=0.4)
     torch_o = torch.empty((Z * N_CTX , H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.3, std=0.2)
     
     max_input_len = N_CTX
@@ -218,20 +220,21 @@ def test2():
     torch.cuda.synchronize()
     a = time.time()
     
-    triton_o = flash_attention2_no_pad(q, k, v, b_start_loc, b_seq_len, max_input_len, sm_scale)
+    triton_o = flash_attention2_no_pad(q, k, v, sm_scale, b_start_loc, b_seq_len, max_input_len)
     print(triton_o)
     # torch.cuda.synchronize()
     b = time.time()
     # print(o.shape, torch_out.shape)
     print((b - a))
-
+    if torch.isnan(triton_o).any(): # 检查 NaNs
+        print(f"NaNs detected in context_forward output at layer") 
     print("max ", torch.max(torch.abs(torch_o - triton_o)))
     print("mean ", torch.mean(torch.abs(torch_o - triton_o)))
-    assert torch.allclose(torch_o, triton_o, atol=1e-1, rtol=0)
+    assert torch.allclose(torch_o, triton_o, atol=1e-2, rtol=0)
 
 
 if __name__ == "__main__":
-    test2()
+    test()
 
 # def naive_flash_decoding_reference(q, k_cache, v_cache, qk_scale, b_start_loc, b_seq_len):
 #     """
