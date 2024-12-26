@@ -291,7 +291,6 @@ class ModelExecutor:
             num_patch_indexs = (number_patchs * number_patchs - 1)
             max_prompt_len += num_patch_indexs
             actual_prompt_lens += num_patch_indexs
-
             print(f"num_patch_indexs: {num_patch_indexs}")
         
         context_num_tokens = max_prompt_len * batch_size
@@ -299,6 +298,7 @@ class ModelExecutor:
         self.atten_info.cur_select_index, kv_cache = self.kv_mem_manager.alloc_kvcache_index(context_num_tokens)        
         self.atten_info.kv_cache = kv_cache
         # 初始化起始索引张量
+        self.atten_info.b_start_loc = self.atten_info.cur_select_index[::max_prompt_len].to(torch.int32) # 初始化起始索引张量
         # 初始化当前已选择的批次项索引
         self.atten_info.b_req_indexs[:batch_size, :max_prompt_len] = self.atten_info.cur_select_index.view(batch_size, max_prompt_len)
         # 初始化每个批次项的实际提示词长度

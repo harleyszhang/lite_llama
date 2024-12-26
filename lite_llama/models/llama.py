@@ -32,31 +32,36 @@ class FusedAttention(nn.Module):
         qk_scale = None,
     ):         
         batch_size, seq_len, _ = x.shape  # prefill: (B, Seq_Len, Dim); decode: (B, 1, Dim)
-
+        x = x.view(-1, self.hidden_size)
+        
         # 1. 计算 Q K V 并且 reshape 它们尺寸, 方便后续做 self-attention
-        xq = self.q_proj(x).view(batch_size, seq_len, self.num_q_heads, self.head_dim)
+        xq = self.q_proj(x)
         k_proj_weight, v_proj_weight = torch.split(self.kv_proj_weight, self.num_kv_heads * self.head_dim, dim=0)
         xk = F.linear(x, k_proj_weight)
         xv = F.linear(x, v_proj_weight)
 
         # 2. 应用旋转位置编码到 Q 和 K, 将 xk, xv 合并, 并写入缓存
-        xk = xk.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-        xv = xv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        xq = xq.view(-1, self.num_q_heads, self.head_dim)
+        xk = xk.view(-1, self.num_kv_heads, self.head_dim)
+        xv = xv.view(-1, self.num_kv_heads, self.head_dim)
 
         cos, sin = position_embeddings
-        xq, xk = rope_forward(xq, xk, cos, sin)
+        xq, xk = rope_emb_forward(xq, xk, cos, sin, batch_size, seq_len)
 
-        combined_kv = torch.cat([xk, xv], dim=2) # (B, L, 2*num_kv_heads, head_dim)  
-        reshaped_combined_kv = combined_kv.view(-1, self.num_kv_heads*2, self.head_dim)
-        update_kv_buffer(reshaped_combined_kv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
+        combined_kv = torch.cat([xk, xv], dim=-2) # (B*L, 2*num_kv_heads, head_dim)  
+        update_kv_buffer(combined_kv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
 
         # 3. sel-attention. flashattention 计算: softmax(qk^t) * v
-        xq = xq.transpose(1, 2) # (batch_size, seq_len, self.num_kv_heads, self.head_dim) -> (batch_size, self.num_kv_heads, seq_len, self.head_dim)
-        keys = xk.transpose(1, 2)
-        values = xv.transpose(1, 2)
-        output = flash_attention_v2(xq, keys, values, qk_scale)
-        output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1))
-        
+        output = flash_attention2_no_pad(
+            xq, xk, xv,
+            atten_info.b_start_loc, 
+            atten_info.b_seq_len, 
+            seq_len,
+            qk_scale,
+        )
+  
+        output = output.view(batch_size*seq_len, self.hidden_size)
+        output = output.view(batch_size, seq_len, self.hidden_size)
         # 4. attention 输出做线性变换
         output = self.o_proj(output)
         return output

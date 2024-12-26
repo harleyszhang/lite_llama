@@ -4,7 +4,7 @@ from .activations import (gelu, relu, leaky_relu, tanh)
 from .activation_layers import ACT2FN
 
 from .flashattention import flash_attention_v1
-from .flashattention_nopad import flash_attention_v1_no_pad
+from .flashattention2_nopad import flash_attention2_no_pad
 from .flashattentionv2 import flash_attention_v2
 from .flashdecoding import flash_decoding
 from .others.context_flashattention_nopad import context_attention_fwd_no_prompt_cache
