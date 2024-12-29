@@ -1,6 +1,6 @@
 # lite_llama
 
-The llama model inference lite framework by triton.
+A light llama-like llm inference framework based on the triton kernel.
 
 ## 特性
 
@@ -79,9 +79,20 @@ python cli.py # 已经下载好模型并放在指定目录的基础上运行
 
 ![cli](./images/generate_stream.png)
 
-`cli——llava.py` 程序运行成功后，终端显示界面如下所示，在终端中输入你图片和提示词，然后回车即可。
+`cli_llava.py` 程序运行成功后，终端显示界面如下所示，在终端中输入你图片和提示词，然后回车即可。
 
 ![llava 模型流式输出](./images/llava_output2.gif)
+
+性能测试，改好自己的模型权重路径后，直接运行 `lite_llama/examples/benchmark.py` 文件，会输出 lite_llama 和 transformers 库的 latency 和吞吐量性能对比，第一次运行结果不太准确，建议以第二次结果为准。如 Llama-3.2-3B 模型 在 `prompt_len = 25`、`batch_size = 12` 和 `max_gen_len = 1900` 时，benchmark 性能测试运行结果:
+
+```bash
+lite_llama inference time: 31.3463 s
+Transformers inference time: 69.1433 s
+lite_llama throughput: 730.45 tokens/s
+Transformers throughput: 183.95 tokens/s
+lite_llama per token latency: 1.369015 ms/token
+Transformers per token latency: 5.436221 ms/token
+```
 
 ## 性能优化
 
@@ -148,10 +159,12 @@ INFO:lite_llama.generate:Decode stage tokens per second : 217.84 tokens/s
 
 7，一个常见且简单的优化, kv 线性层融合。
 
-8，重构并优化 `MHA` 模块，优化 `token_attention` 内核支持 `Nopad attention`：
+8，一个常用的优化，算子融合：残差连接的 skip 操作和 `rmsnorm` 算子融合，形成新的 `skip_rmsnorm` 算子。
+
+9，重构并优化 `MHA` 模块，优化 `context_attention` 和 `token_attention` 内核支持 `Nopad attention` 和 `kv cache` 动态分配和管理：
 
 - token_attention 支持直接传入 kv_cache 索引和序列实际长度 seq_len, 减少了 kv cache 在 `MHA` 模块中的 `concat` 和 `view` 操作，并实现了 `Nopad` token_attention。
-- 将每次 decode 过程分配对应 kv cache 索引，改为在模型推理之前一次性分配连续的 `(max(promptes_len) + max_gen_len) * batch_size` 个 tokens 的 kv cache 空间。
+- 将每次 prefill/decode 过程动态分配实际 prompts 长度的 kv cache 索引个数，而不是在模型推理之前一次性分配连续的 `(max(promptes_len) + max_gen_len) * batch_size` 个 tokens 的 kv cache 空间。
 
 ## TODO
 

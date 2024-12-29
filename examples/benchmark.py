@@ -52,7 +52,7 @@ def lite_llama_inference(
     """
 
     # 预热步骤：使用一个简短的假输入，让模型进行一次简单推理，以加载缓存/编译优化等
-    warm_up_prompt = ["Hello World"]
+    warm_up_prompt = ["Hello World"] * 4
     _ = generator.text_completion(
         warm_up_prompt,
         temperature=temperature,
