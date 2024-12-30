@@ -213,7 +213,7 @@ class ModelExecutor:
 
         self.gpu_kv_buffer = self.kv_mem_manager.gpu_kv_buffer
         self.atten_info.kv_buffer = self.kv_mem_manager.gpu_kv_buffer
-        self.atten_info.b_req_indexs = self.req_tokens_table.b_req_indexs
+        self.atten_info.b_req_tokens_table = self.req_tokens_table.b_req_tokens_table
 
     def _get_max_avaliable_tokens(self, gpu_memory_utilization=0.9, block_size=1):
         avaliable_blocks = ComputeMaxAvailableBlocks(
@@ -316,12 +316,12 @@ class ModelExecutor:
         # 初始化批次请求的当前最大序列上下文长度(对应 kv cache 长度)
         self.atten_info.max_actual_seq_len = max_prompt_len # int 类型
 
-        self.init_req_to_token_indexes(self.atten_info.b_req_indexs, self.atten_info.b_req_idx, 
+        self.init_req_to_token_indexes(self.atten_info.b_req_tokens_table, self.atten_info.b_req_idx, 
                                         self.atten_info.b_seq_len, self.atten_info.cur_select_index)
         
         # self.atten_info.b_start_loc = self.atten_info.cur_select_index[::max_prompt_len].to(torch.int32) # 初始化起始索引张量
         # 初始化当前已选择的批次项索引
-        # self.atten_info.b_req_indexs[:batch_size, :max_prompt_len] = self.atten_info.cur_select_index.view(batch_size, max_prompt_len)
+        # self.atten_info.b_req_tokens_table[:batch_size, :max_prompt_len] = self.atten_info.cur_select_index.view(batch_size, max_prompt_len)
 
         # print(f"context_num_tokens: {context_num_tokens}, max_prompt_len:{max_prompt_len}, \n \
         #     self.atten_info.cur_select_index: {self.atten_info.cur_select_index},\n \
@@ -329,7 +329,7 @@ class ModelExecutor:
         #     self.atten_info.max_actual_seq_len: {self.atten_info.max_actual_seq_len},\n \
         #     b_seq_len: { self.atten_info.b_seq_len}, ")
         
-        # print(f"self.atten_info.b_req_indexs: { self.atten_info.b_req_indexs}")
+        # print(f"self.atten_info.b_req_tokens_table: { self.atten_info.b_req_tokens_table}")
         self.all_select_index = self.atten_info.cur_select_index
 
         return self.all_select_index, num_patch_indexs
@@ -340,7 +340,7 @@ class ModelExecutor:
         all_select_index = torch.concat([self.all_select_index, self.atten_info.cur_select_index])
         self.all_select_index = all_select_index
         
-        update_kv_index(self.atten_info.b_req_indexs, self.atten_info.b_req_idx, 
+        update_kv_index(self.atten_info.b_req_tokens_table, self.atten_info.b_req_idx, 
                         self.atten_info.b_seq_len, self.atten_info.cur_select_index)
 
         self.atten_info.b_seq_len += 1

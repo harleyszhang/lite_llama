@@ -10,7 +10,7 @@ from torch.cuda.amp import custom_fwd
 @triton.jit
 def flash_attention2_nopad_kernel(
     Q, K, V, O,
-    B_Req_indexs, B_Seqlen, 
+    b_req_tokens_table, B_Seqlen, 
     sm_scale, heads, num_kv_groups,       # group of kv heads
     stride_req_to_tokens_b,
     stride_q_bs, stride_q_heads, stride_q_dim,  # Q 的 strides
@@ -32,7 +32,7 @@ def flash_attention2_nopad_kernel(
 
     # 计算当前批次的序列长度和请求序列的起始位置
     cur_seq_len = tl.load(B_Seqlen + cur_batch_idx)
-    cur_seq_start_loc = tl.load(B_Req_indexs + cur_batch_idx * stride_req_to_tokens_b)
+    cur_seq_start_loc = tl.load(b_req_tokens_table + cur_batch_idx * stride_req_to_tokens_b)
     # cur_seq_start_loc = tl.load(B_Start_Loc + cur_batch_idx)
 
     block_start_loc = block_m_idx * BLOCK_M_SIZE # 计算当前 block 的起始和结束索引
@@ -118,7 +118,7 @@ def flash_attention2_no_pad(
     k: torch.Tensor,
     v: torch.Tensor,
     sm_scale,
-    b_req_indexs, 
+    b_req_tokens_table, 
     b_seq_len, 
     max_seq_len,
     ):
@@ -142,12 +142,12 @@ def flash_attention2_no_pad(
         k,
         v, 
         output,
-        b_req_indexs,
+        b_req_tokens_table,
         b_seq_len,
         sm_scale,
         n_heads, 
         num_kv_groups,  
-        b_req_indexs.stride(0),
+        b_req_tokens_table.stride(0),
         q.stride(0), q.stride(1), q.stride(2),
         k.stride(0), k.stride(1), k.stride(2),
         v.stride(0), v.stride(1), v.stride(2),
@@ -303,14 +303,14 @@ if __name__ == "__main__":
 #     q = torch.randn((batch_size, num_heads, head_dim), device=device, dtype=torch.float32)
 
 #     # K, V cache shape: [max_seq_len * batch_size, num_heads, head_dim]
-#     # 此处简单起见，假设 b_req_indexs 依次排布，不做复杂的 paged_layout
+#     # 此处简单起见，假设 b_req_tokens_table 依次排布，不做复杂的 paged_layout
 #     total_tokens = max_seq_len * batch_size
 #     k_cache = torch.randn((total_tokens, num_heads, head_dim), device=device, dtype=torch.float32)
 #     v_cache = torch.randn((total_tokens, num_heads, head_dim), device=device, dtype=torch.float32)
 
-#     # 对于每个 batch，设置它的 k/v 起始位置(b_req_indexs) 和 已用长度(b_seq_len)
+#     # 对于每个 batch，设置它的 k/v 起始位置(b_req_tokens_table) 和 已用长度(b_seq_len)
 #     # 这里假设第 b 个 batch 的起始位置为 b*max_seq_len, 实际可随机或者更灵活的分配
-#     # b_req_indexs = torch.arange(batch_size * max_seq_len, device=device).view(batch_size, max_seq_len)
+#     # b_req_tokens_table = torch.arange(batch_size * max_seq_len, device=device).view(batch_size, max_seq_len)
 #     b_start_loc = torch.arange(batch_size, device='cuda', dtype=torch.int32) * max_seq_len
 #     # 每个 batch 当前已经用了多少长度(小于等于 max_seq_len)，可随机生成
 #     b_seq_len = torch.randint(1, max_seq_len+1, (batch_size,), device=device, dtype=torch.long)
@@ -357,7 +357,7 @@ if __name__ == "__main__":
 #                 q = torch.randn((bs, num_heads, d), device=device, dtype=torch.float32)
 #                 k_cache = torch.randn((total_tokens, num_heads, d), device=device, dtype=torch.float32)
 #                 v_cache = torch.randn((total_tokens, num_heads, d), device=device, dtype=torch.float32)
-#                 # b_req_indexs = torch.arange(bs * seq_len, device=device).view(bs, seq_len)
+#                 # b_req_tokens_table = torch.arange(bs * seq_len, device=device).view(bs, seq_len)
 #                 b_start_loc = torch.arange(bs, device='cuda', dtype=torch.int32) * seq_len
 #                 b_seq_len = torch.full((bs,), seq_len, device=device, dtype=torch.long)  # 全部用满
 
@@ -371,7 +371,7 @@ if __name__ == "__main__":
 #                 for _ in range(rep):
 #                     torch.cuda.synchronize()
 #                     start = time.time()
-#                     _ = flash_attention2_no_pad(q, k_cache, v_cache, qk_scale, b_req_indexs, b_seq_len, seq_len)
+#                     _ = flash_attention2_no_pad(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len, seq_len)
 #                     torch.cuda.synchronize()
 #                     end = time.time()
 #                     triton_times.append(end - start)
@@ -381,7 +381,7 @@ if __name__ == "__main__":
 #                 for _ in range(rep):
 #                     torch.cuda.synchronize()
 #                     start = time.time()
-#                     _ = naive_flash_decoding_reference(q, k_cache, v_cache, qk_scale, b_req_indexs, b_seq_len)
+#                     _ = naive_flash_decoding_reference(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len)
 #                     torch.cuda.synchronize()
 #                     end = time.time()
 #                     naive_times.append(end - start)

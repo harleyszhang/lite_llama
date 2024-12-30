@@ -22,7 +22,7 @@ def detect_nan(input_tensor):
 @triton.jit
 def _flash_decoding_stage1_kernel(
     Q, K, V, qk_scale,
-    B_Req_indexs, B_Seqlen, 
+    b_req_tokens_table, B_Seqlen, 
 	num_kv_groups, # group of kv heads
     Mid_O, Mid_O_LogExpSum,
 	stride_req_to_tokens_b, stride_req_to_tokens_s,
@@ -44,7 +44,7 @@ def _flash_decoding_stage1_kernel(
 
     # 计算当前批次的起始位置
     cur_batch_seq_len = tl.load(B_Seqlen + batch_pid)
-    cur_req_start_loc = tl.load(B_Req_indexs + stride_req_to_tokens_b * batch_pid)
+    cur_req_start_loc = tl.load(b_req_tokens_table + stride_req_to_tokens_b * batch_pid)
 
     # 计算当前分区的起始和结束索引
     cur_batch_partition_start_index = seq_block_pid * BLOCK_SEQ
@@ -78,7 +78,7 @@ def _flash_decoding_stage1_kernel(
     for start_n in range(0, num_blocks, 1):
         # k 位置索引计算
         offs_n_new = offs_n + start_n * BLOCK_N  # [BLOCK_N]
-        k_loc = tl.load(B_Req_indexs + stride_req_to_tokens_b * batch_pid + offs_n_new, mask=offs_n_new < cur_batch_partition_end_index, other=0.0)
+        k_loc = tl.load(b_req_tokens_table + stride_req_to_tokens_b * batch_pid + offs_n_new, mask=offs_n_new < cur_batch_partition_end_index, other=0.0)
         k_ptrs = k_loc[:, None] * k_bs_stride + k_offs
         
         k_mask = offs_n_new < cur_batch_partition_end_index  # [BLOCK_N]
@@ -134,7 +134,7 @@ def _flash_decoding_stage1_kernel(
 def flash_decode_stage1(
     q, k, v,         		# Q: [batchs, num_heads, head_dim], K, V: [batchs * seq_len, num_heads, head_dim]
     qk_scale, 
-    b_req_indexs,
+    b_req_tokens_table,
 	b_seq_len, 
 	max_actual_seq_len,     # 最大的实际序列长度
     mid_o, mid_o_logexpsum, # Mid_O: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE), head_dim], Mid_O_LogExpSum: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE)]
@@ -153,11 +153,11 @@ def flash_decode_stage1(
 
 	_flash_decoding_stage1_kernel[grid](
 		q, k, v, qk_scale,
-	   	b_req_indexs,
+	   	b_req_tokens_table,
         b_seq_len, 
 		num_kv_groups,   # kv 组数量
 		mid_o, mid_o_logexpsum,
-		*b_req_indexs.stride(),
+		*b_req_tokens_table.stride(),
 		*q.stride(),
 		*k.stride(),
 		*v.stride(),
@@ -261,7 +261,7 @@ def flash_decoding(
     q, 			 # q 查询向量，形状为 [bsz, num_head, head_dim]
     k_cache, v_cache, 	     # 键/值向量缓存，形状为 [max_tokens, kv_num_head, head_dim]
     qk_scale,
-    b_req_indexs, b_seq_len, # start locations and sequence lengths for kv cache in a batch
+    b_req_tokens_table, b_seq_len, # start locations and sequence lengths for kv cache in a batch
     max_actual_seq_len
 ):
 	# q.view(-1, num_heads, head_dim)
@@ -278,7 +278,7 @@ def flash_decoding(
 	mid_o_logexpsum = torch.empty((batchs, num_heads, max_num_partitions), dtype=torch.float32, device=q.device)
 
 	# decode stage 1: attention in partitions
-	flash_decode_stage1(q, k_cache, v_cache, qk_scale, b_req_indexs, b_seq_len, max_actual_seq_len, mid_o, mid_o_logexpsum, PARTITION_SIZE)
+	flash_decode_stage1(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len, max_actual_seq_len, mid_o, mid_o_logexpsum, PARTITION_SIZE)
 	
 	# decode stage 2: reduction among partitions
 	atten_output = torch.empty_like(q)
@@ -288,12 +288,12 @@ def flash_decoding(
 	return atten_output
 
 
-def naive_flash_decoding_reference(q, k_cache, v_cache, qk_scale, b_req_indexs, b_seq_len):
+def naive_flash_decoding_reference(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len):
     """
     参考实现：与 `flash_decoding` 在功能上对应，可用于数值正确性对比。
     - q: [bs, num_heads, head_dim]
     - k_cache, v_cache: [total_tokens, num_heads, head_dim]
-    - b_req_indexs: [bs], 每个 batch 对应在 k_cache/v_cache 的起始位置
+    - b_req_tokens_table: [bs], 每个 batch 对应在 k_cache/v_cache 的起始位置
     - b_seq_len: [bs], 每个 batch 当前已用序列长度
     """
     device = q.device
@@ -303,7 +303,7 @@ def naive_flash_decoding_reference(q, k_cache, v_cache, qk_scale, b_req_indexs, 
     output = torch.zeros_like(q)
 
     for b in range(batch_size):
-        start_loc = b_req_indexs[b][0] # batch b 的 K/V 起始位置
+        start_loc = b_req_tokens_table[b][0] # batch b 的 K/V 起始位置
         seq_len = b_seq_len[b].item()
 
         # 取出 [seq_len, num_heads, head_dim]
@@ -355,14 +355,14 @@ def test_flash_decoding_correctness():
     q = torch.randn((batch_size, num_heads, head_dim), device=device, dtype=torch.float32)
 
     # K, V cache shape: [max_seq_len * batch_size, num_heads, head_dim]
-    # 此处简单起见，假设 b_req_indexs 依次排布，不做复杂的 paged_layout
+    # 此处简单起见，假设 b_req_tokens_table 依次排布，不做复杂的 paged_layout
     total_tokens = max_seq_len * batch_size
     k_cache = torch.randn((total_tokens, num_heads, head_dim), device=device, dtype=torch.float32)
     v_cache = torch.randn((total_tokens, num_heads, head_dim), device=device, dtype=torch.float32)
 
-    # 对于每个 batch，设置它的 k/v 起始位置(b_req_indexs) 和 已用长度(b_seq_len)
+    # 对于每个 batch，设置它的 k/v 起始位置(b_req_tokens_table) 和 已用长度(b_seq_len)
     # 这里假设第 b 个 batch 的起始位置为 b*max_seq_len, 实际可随机或者更灵活的分配
-    b_req_indexs = torch.arange(batch_size * max_seq_len, device=device).view(batch_size, max_seq_len)
+    b_req_tokens_table = torch.arange(batch_size * max_seq_len, device=device).view(batch_size, max_seq_len)
     # 每个 batch 当前已经用了多少长度(小于等于 max_seq_len)，可随机生成
     b_seq_len = torch.randint(1, max_seq_len+1, (batch_size,), device=device, dtype=torch.long)
 
@@ -370,10 +370,10 @@ def test_flash_decoding_correctness():
     qk_scale = 1.0 / (head_dim ** 0.5)
 
     # ========== Triton Flash Decoding ========== #
-    triton_output = flash_decoding(q, k_cache, v_cache, qk_scale, b_req_indexs, b_seq_len, max_seq_len)
+    triton_output = flash_decoding(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len, max_seq_len)
 
     # ========== Naive 参考实现 ========== #
-    naive_output = naive_flash_decoding_reference(q, k_cache, v_cache, qk_scale, b_req_indexs, b_seq_len)
+    naive_output = naive_flash_decoding_reference(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len)
 
     # ========== 结果比对 ========== #
     max_abs_diff = (triton_output - naive_output).abs().max().item()
@@ -408,21 +408,21 @@ def benchmark_flash_decoding(
                 q = torch.randn((bs, num_heads, d), device=device, dtype=torch.float32)
                 k_cache = torch.randn((total_tokens, num_heads, d), device=device, dtype=torch.float32)
                 v_cache = torch.randn((total_tokens, num_heads, d), device=device, dtype=torch.float32)
-                b_req_indexs = torch.arange(bs * seq_len, device=device).view(bs, seq_len)
+                b_req_tokens_table = torch.arange(bs * seq_len, device=device).view(bs, seq_len)
         
                 b_seq_len = torch.full((bs,), seq_len, device=device, dtype=torch.long)  # 全部用满
 
                 # 预热 (warmup)
                 for _ in range(warmup):
-                    _ = flash_decoding(q, k_cache, v_cache, qk_scale, b_req_indexs, b_seq_len, seq_len)
-                    _ = naive_flash_decoding_reference(q, k_cache, v_cache, qk_scale, b_req_indexs, b_seq_len)
+                    _ = flash_decoding(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len, seq_len)
+                    _ = naive_flash_decoding_reference(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len)
 
                 # 统计 Triton 时间
                 triton_times = []
                 for _ in range(rep):
                     torch.cuda.synchronize()
                     start = time.time()
-                    _ = flash_decoding(q, k_cache, v_cache, qk_scale, b_req_indexs, b_seq_len, seq_len)
+                    _ = flash_decoding(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len, seq_len)
                     torch.cuda.synchronize()
                     end = time.time()
                     triton_times.append(end - start)
@@ -432,7 +432,7 @@ def benchmark_flash_decoding(
                 for _ in range(rep):
                     torch.cuda.synchronize()
                     start = time.time()
-                    _ = naive_flash_decoding_reference(q, k_cache, v_cache, qk_scale, b_req_indexs, b_seq_len)
+                    _ = naive_flash_decoding_reference(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len)
                     torch.cuda.synchronize()
                     end = time.time()
                     naive_times.append(end - start)

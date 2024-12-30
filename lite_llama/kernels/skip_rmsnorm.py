@@ -6,9 +6,6 @@ import torch
 import triton
 import triton.language as tl
 
-import torch
-import triton
-import triton.language as tl
 
 @triton.jit
 def skip_rms_norm_kernel_no_view(

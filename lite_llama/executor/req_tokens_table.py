@@ -15,7 +15,7 @@ class ReqTokensTable:
         self.req_state = torch.zeros((max_request_num), dtype=torch.int32, device=device)
         # 一个二维张量，形状为 [num_requests, max_seq_len]，用于存储每个请求的 Token 索引。
         # 每行表示一个请求，每列表示该请求在特定序列位置上的 Token 索引。
-        self.b_req_indexs = torch.zeros((max_request_num, max_seq_len), dtype=torch.int32, device=device)
+        self.b_req_tokens_table = torch.zeros((max_request_num, max_seq_len), dtype=torch.int32, device=device)
         # self.mem_manager = mem_manager
 
     # 分配批次请求需要的内存空间

@@ -178,6 +178,9 @@ def compare_inference_speed(
     print("lite_llama inference time: {:.4f} s".format(lite_llama_time))
     print("Transformers inference time: {:.4f} s".format(hf_time))
 
+    print("lite_llama inference output tokens number: {:.4f} s".format(lite_llama_tokens))
+    print("Transformers inference output tokens number: {:.4f} s".format(hf_tokens))
+
     # 吞吐量计算
     lite_llama_throughput = (lite_llama_tokens) / lite_llama_time if lite_llama_time > 0 else float('inf')
     print(f"lite_llama throughput: {lite_llama_throughput:.2f} tokens/s")

@@ -34,7 +34,7 @@ class Attention(nn.Module):
         output = flash_attention2_no_pad(
             xq, xk, xv,
             qk_scale,
-            atten_info.b_req_indexs, 
+            atten_info.b_req_tokens_table, 
             atten_info.b_seq_len, 
             atten_info.max_actual_seq_len,
         )
@@ -59,7 +59,7 @@ class Attention(nn.Module):
             atten_info.kv_buffer[layer_index][:, : self.num_kv_heads, :], 
             atten_info.kv_buffer[layer_index][:, self.num_kv_heads:, :], 
             qk_scale,
-            atten_info.b_req_indexs, 
+            atten_info.b_req_tokens_table, 
             atten_info.b_seq_len, 
             atten_info.max_actual_seq_len
         ) # shape is [batch_size*seq_len, num_heads, head_dim]

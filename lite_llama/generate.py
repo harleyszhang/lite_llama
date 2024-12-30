@@ -131,7 +131,9 @@ class GenerateText:
   
             logits = self.model_executor.forward(input_ids, prev_pos) # 模型执行器的前向推理, logits shape is [batch_size, shape, vocab_size]
             all_select_indexs = self.model_executor.decode_alloc_kv_cache(bsz)
-            
+            if not torch.all(torch.isfinite(logits)):
+                print("logits contain NaN or Inf")
+                
             probs = softmax_split(logits[:, -1] / temperature) # torch.softma 将 logits 转换为概率分布。
             next_token = sample_top_p(probs, top_p) # next_token 形状为 [batch_size, 1]
             next_token = next_token.reshape(-1) # 调整为一维, shape is batch_size

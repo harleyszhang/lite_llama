@@ -3,7 +3,7 @@ import torch, triton, math, os, sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from lite_llama.lite_llama.kernels.others.fused_linear import fused_linear
 from lite_llama.lite_llama.kernels.others.rmsnorm_v1 import rmsnorm
-from lite_llama.kernels.rmsnorm_layer import rmsnorm_fwd
+from lite_llama.lite_llama.kernels.others.rmsnorm_layer import rmsnorm_fwd
 from lite_llama.lite_llama.kernels.others.layernorm import layernorm
 from lite_llama.lite_llama.kernels.others.rope_orig import rope as rope_triton
 from lite_llama.lite_llama.kernels.rope_emb import apply_rotary_pos_emb

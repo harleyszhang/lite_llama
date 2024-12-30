@@ -8,7 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .utils import (
+from ..utils import (
     calculate_settings,
     compare_version,
 )
