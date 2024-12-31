@@ -210,12 +210,14 @@ Transformers per token latency: 1.981256 ms/token
 `max_gen_len = 1900` 时，benchmark 性能测试运行结果:
 
 ```bash
-lite_llama inference time: 36.7032 s
-Transformers inference time: 65.1678 s
-lite_llama throughput: 695.66 tokens/s
-Transformers throughput: 210.15 tokens/s
-lite_llama per token latency: 1.437482 ms/token
-Transformers per token latency: 4.758514 ms/token
+lite_llama inference time: 38.4323 s
+Transformers inference time: 70.3268 s
+lite_llama inference output tokens number: 28276
+Transformers inference output tokens number: 15164
+lite_llama throughput: 735.73 tokens/s
+Transformers throughput: 215.62 tokens/s
+lite_llama per token latency: 1.359186 ms/token
+Transformers per token latency: 4.637745 ms/token
 ```
 
 ## Llama-3.2-1B 模型性能测试对比

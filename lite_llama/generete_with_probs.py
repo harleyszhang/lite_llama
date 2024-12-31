@@ -123,8 +123,10 @@ class GenerateText:
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
         b_req_idx = torch.arange(bsz, device = self.device)
-        _, _ = self.model_executor.prefill_alloc_kv_cache(max_prompt_len, actual_prompt_lens, b_req_idx)
-        
+        all_select_index_list = []
+        prefill_select_index, _ = self.model_executor.prefill_alloc_kv_cache(max_prompt_len, actual_prompt_lens, b_req_idx)
+        all_select_index_list.append(prefill_select_index)
+
         token_count = 0
         prev_pos = 0 # 初始化上一次生成的位置
         # 为减少循环中的判断逻辑，这里将range起点由min_prompt_len改成max_prompt_len
@@ -135,7 +137,8 @@ class GenerateText:
             # 取出新加入模型的 token (一般为单步输入)
             input_ids = tokens[:, cur_pos - 1: cur_pos] if cur_pos > 0 else tokens[:, :1]
             logits = self.model_executor.forward(input_ids, prev_pos)
-            all_select_indexs = self.model_executor.decode_alloc_kv_cache(bsz)
+            decode_select_index = self.model_executor.decode_alloc_kv_cache(bsz)
+            all_select_index_list.append(decode_select_index)
 
             # 对最后一个位置进行 softmax
             step_logits = logits[:, -1, :]
@@ -186,6 +189,7 @@ class GenerateText:
         )
 
         # 减少 kv cache 内存管理器的引用计数
+        all_select_indexs = torch.concat(all_select_index_list)
         self.model_executor.kv_mem_manager.release_ref(all_select_indexs)
 
         return out_tokens, out_logprobs

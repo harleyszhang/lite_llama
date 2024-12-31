@@ -111,7 +111,8 @@ def transformers_inference(
         "max_new_tokens": max_gen_len,
         "top_p": top_p,
         "temperature": temperature,
-        "do_sample": True
+        "do_sample": True,
+        "eos_token_id": None   # 避免过早终止
     }
 
     # 一次性进行批量推理
@@ -169,7 +170,7 @@ def compare_inference_speed(
 
     # 2. transformers inference
     hf_results, hf_time, hf_tokens, prompts_tokens, hf_pt_latency = transformers_inference(
-        hf_model_name, update_prompts, temperature, top_p, max_gen_len if max_gen_len else 64, device=device
+        hf_model_name, update_prompts, temperature, top_p, max_gen_len, device=device
     )
 
     lite_llama_pt_latency = lite_llama_time / (lite_llama_tokens)
@@ -178,8 +179,8 @@ def compare_inference_speed(
     print("lite_llama inference time: {:.4f} s".format(lite_llama_time))
     print("Transformers inference time: {:.4f} s".format(hf_time))
 
-    print("lite_llama inference output tokens number: {:.4f} s".format(lite_llama_tokens))
-    print("Transformers inference output tokens number: {:.4f} s".format(hf_tokens))
+    print("lite_llama inference output tokens number: {:2d}".format(lite_llama_tokens))
+    print("Transformers inference output tokens number: {:2d}".format(hf_tokens))
 
     # 吞吐量计算
     lite_llama_throughput = (lite_llama_tokens) / lite_llama_time if lite_llama_time > 0 else float('inf')
@@ -268,8 +269,8 @@ def main():
     #     "Roosevelt was the 26th president of the United States,",
     # ]
 
-    hf_model_name = "/gemini/code/llm_weights/Qwen/Qwen2.5-3B-Instruct"
-    custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Qwen2.5-3B-Instruct"  # 根据实际情况修改
+    hf_model_name = "/gemini/code/llm_weights/Llama-3.2-3B-hf"
+    custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-3B-hf"  # 根据实际情况修改
     # hf_model_name = "/gemini/code/Qwen/Qwen2.5-1.5B-Instruct"
     # custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct"
     

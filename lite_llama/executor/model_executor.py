@@ -335,18 +335,16 @@ class ModelExecutor:
         return self.all_select_index, num_patch_indexs
     
     def decode_alloc_kv_cache(self, batch_size):
+        # decode cur_select_index number is batch_size
         self.atten_info.cur_select_index, kv_cache = self.kv_mem_manager.alloc_kvcache_index(batch_size)
-        self.atten_info.kv_cache = kv_cache
-        all_select_index = torch.concat([self.all_select_index, self.atten_info.cur_select_index])
-        self.all_select_index = all_select_index
-        
+        self.atten_info.kv_cache = kv_cache        
         update_kv_index(self.atten_info.b_req_tokens_table, self.atten_info.b_req_idx, 
                         self.atten_info.b_seq_len, self.atten_info.cur_select_index)
 
         self.atten_info.b_seq_len += 1
         self.atten_info.max_actual_seq_len += 1
         
-        return self.all_select_index
+        return self.atten_info.cur_select_index
     
     def forward(self, input_ids, prev_pos, image_tensor=None):            
         if self.model_type == "llava":

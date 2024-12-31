@@ -77,7 +77,7 @@ class GenerateText:
     
     def load_tokenizer(self, pretrained_model_name_or_path):
         model_name = get_model_name_from_path(pretrained_model_name_or_path)
-         # 根据模型名称决定是否使用 fast tokenizer
+        # 根据模型名称决定是否使用 fast tokenizer
         use_fast = True
         if 'llava' in model_name.lower():
             use_fast = False
@@ -109,10 +109,14 @@ class GenerateText:
         # min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
         total_len = min(self.model_config.max_seq_len, max_gen_len + max_prompt_len)
-        pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+        pad_id = (
+            self.tokenizer.pad_token_id
+            if self.tokenizer.pad_token_id is not None
+            else self.tokenizer.eos_token_id
+        )
         # 初始化每个批次项的序列长度
         actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.int32, device=self.device)  
-        # 预分配 tokens 张量
+        # 预分配 tokens 张量 # 整个 batch 的 tokens buffer: [bsz, total_len] 
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device = self.device)
 
         # 填充提示词到 tokens 张量
@@ -121,40 +125,39 @@ class GenerateText:
         
         # 生成一个布尔张量，它的值为 True 的位置表示输入序列的实际内容（即非填充部分）, 形状为 (batch_size, total_len)
         input_text_mask = tokens != pad_id
-        eos_reached = torch.zeros(bsz, dtype=torch.bool, device=self.device)
         b_req_idx = torch.arange(bsz, device = self.device)
-        _, _ = self.model_executor.prefill_alloc_kv_cache(max_prompt_len, actual_prompt_lens, b_req_idx)
-        
-        prev_pos = 0 # 初始化上一次生成的位置
-        for cur_pos in range(max_prompt_len, total_len):
-            input_ids = tokens[:, prev_pos: cur_pos] # 当前输入 token ids, decode 阶段 input_ids shape is [4, 1] 
-  
-            logits = self.model_executor.forward(input_ids, prev_pos) # 模型执行器的前向推理, logits shape is [batch_size, shape, vocab_size]
-            all_select_indexs = self.model_executor.decode_alloc_kv_cache(bsz)
-            if not torch.all(torch.isfinite(logits)):
-                print("logits contain NaN or Inf")
-                
-            probs = softmax_split(logits[:, -1] / temperature) # torch.softma 将 logits 转换为概率分布。
-            next_token = sample_top_p(probs, top_p) # next_token 形状为 [batch_size, 1]
-            next_token = next_token.reshape(-1) # 调整为一维, shape is batch_size
-            
-            # 仅替换生成部分的 token
-            mask = ~input_text_mask[:, cur_pos]
-            next_token = torch.where(mask, next_token, tokens[:, cur_pos])
-            tokens[:, cur_pos] = next_token
-            
-            # 更新结束标志
-            eos_reached |= (mask & (next_token == self.tokenizer.eos_token_id))
-            prev_pos = cur_pos
+        eos_reached = torch.zeros((bsz,), dtype=torch.bool, device=tokens.device)
 
-            if eos_reached.all(): # 如果所有样本均到达结束 token，停止生成
+        all_select_index_list = [] # 预先分配 prefill 阶段的 KV 缓存索引
+        prefill_select_index, _ = self.model_executor.prefill_alloc_kv_cache(max_prompt_len, actual_prompt_lens, b_req_idx)
+        all_select_index_list.append(prefill_select_index)
+
+        prev_pos = 0
+        input_ids = tokens[:, : max_prompt_len]  # [batch_size, seq_len]
+        for cur_pos in range(max_prompt_len, total_len):       
+            logits = self.model_executor.forward(input_ids, prev_pos)  # [batch_size, seq_len, vocab_size]
+            decode_select_index = self.model_executor.decode_alloc_kv_cache(bsz)
+            all_select_index_list.append(decode_select_index)
+            
+            last_logits = logits[:, -1, :]  # [batch_size, vocab_size]
+            probs = torch.softmax(last_logits / temperature, dim=-1)  # [batch_size, vocab_size]
+            next_token = sample_top_p(probs, top_p)  # [batch_size]
+            input_ids = next_token   # [batch_size, 1]
+            mask = ~input_text_mask[:, cur_pos]  # [batch_size]
+            tokens[:, cur_pos] = torch.where(mask, next_token.reshape(-1) , tokens[:, cur_pos])
+            
+            eos_reached = eos_reached | (mask & (next_token == self.tokenizer.eos_token_id))
+            prev_pos = cur_pos
+            
+            if eos_reached.all():
                 break
         
         # out_tokens = self.process_output_tokens(tokens, prompt_tokens, max_gen_len, echo, self.tokenizer.eos_token_id)
+        all_select_indexs = torch.concat(all_select_index_list)
         self.model_executor.kv_mem_manager.release_ref(all_select_indexs) # 减少 kv cache 内存管理器的引用计数
 
         return tokens
-    
+
     def text_completion(
         self,
         prompts: List[str],

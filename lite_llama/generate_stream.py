@@ -133,12 +133,15 @@ class GenerateStreamText:
             tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
         
         b_req_idx = torch.arange(bsz, device = self.device)
-        _, _ = self.model_executor.prefill_alloc_kv_cache(max_prompt_len, actual_prompt_lens, b_req_idx)
+        all_select_index_list = []
+        prefill_select_index, _ = self.model_executor.prefill_alloc_kv_cache(max_prompt_len, actual_prompt_lens, b_req_idx)
+        all_select_index_list.append(prefill_select_index)
 
         for cur_pos in range(max_prompt_len, total_len):
             input_ids = tokens[:, prev_pos: cur_pos]
             logits = self.model_executor.forward(input_ids, prev_pos)
-            all_select_indexs = self.model_executor.decode_alloc_kv_cache(bsz)
+            decode_select_index = self.model_executor.decode_alloc_kv_cache(bsz)
+            all_select_index_list.append(decode_select_index)
             
             if temperature > 0:
                 # NOTE: logits[:, -1] 表示选择的是最后一个位置（seq_len 维度的最后一项）对应的 logits。
@@ -185,6 +188,7 @@ class GenerateStreamText:
                 break
         
         # 减少 kv cache 内存管理器的引用计数
+        all_select_indexs = torch.concat(all_select_index_list)
         self.model_executor.kv_mem_manager.release_ref(all_select_indexs)
 
     def text_completion_stream(

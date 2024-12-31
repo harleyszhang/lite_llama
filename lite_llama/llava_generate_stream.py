@@ -180,7 +180,9 @@ class LlavaGeneratorStream:
         # 计算输入图像待分配空间
         img_batch_size, _, _, _ = image_tensors.shape
         b_req_idx = torch.arange(bsz, device = self.device)
-        prefill_select_index, num_patch_indexs = self.model_executor.prefill_alloc_kv_cache(max_prompt_len, actual_prompt_lens, b_req_idx, img_batch_size)
+        all_select_index_list = []
+        prefill_select_index, _ = self.model_executor.prefill_alloc_kv_cache(max_prompt_len, actual_prompt_lens, b_req_idx)
+        all_select_index_list.append(prefill_select_index)
         
         start_pos = 0
         prev_pos = 0
@@ -188,13 +190,15 @@ class LlavaGeneratorStream:
         for cur_pos in range(max_prompt_len, total_seq_len):
             input_ids = tokens[:, prev_pos: cur_pos]
             logits = self.model_executor.forward(input_ids, start_pos, image_tensors)
-            all_select_indexs = self.model_executor.decode_alloc_kv_cache(bsz)
 
             if start_pos == 0:
                 start_pos += len(prefill_select_index)
             else:
                 start_pos += bsz
-                
+            
+            decode_select_index = self.model_executor.decode_alloc_kv_cache(bsz)
+            all_select_index_list.append(decode_select_index)
+
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p)
@@ -230,6 +234,7 @@ class LlavaGeneratorStream:
                 break
         
         # 减少 kv cache 内存管理器的引用计数
+        all_select_indexs = torch.concat(all_select_index_list)
         self.model_executor.kv_mem_manager.release_ref(all_select_indexs)
 
     def text_completion_stream(
