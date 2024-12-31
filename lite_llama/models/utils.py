@@ -13,6 +13,14 @@ NestedTensors = Union[List["NestedTensors"], List[torch.Tensor], torch.Tensor]
 Uses a list instead of a tensor if the dimensions of each element do not match.
 """
 
+def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Create a weak reference to a tensor.
+    The new tensor will share the same data as the original tensor,
+    but will not keep the original tensor alive.
+    """
+    return torch.ops._C.weak_ref_tensor(tensor)
+
 def _flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
     """
     递归地将嵌套的张量结构 (NestedTensors) 在最后一个维度之外的所有维度展平, 并将它们连接成一个单一的二维张量。

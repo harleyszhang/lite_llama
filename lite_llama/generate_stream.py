@@ -137,9 +137,17 @@ class GenerateStreamText:
         prefill_select_index, _ = self.model_executor.prefill_alloc_kv_cache(max_prompt_len, actual_prompt_lens, b_req_idx)
         all_select_index_list.append(prefill_select_index)
 
+        input_ids = tokens[:, : max_prompt_len]  # [batch_size, seq_len]
         for cur_pos in range(max_prompt_len, total_len):
             input_ids = tokens[:, prev_pos: cur_pos]
-            logits = self.model_executor.forward(input_ids, prev_pos)
+            batch_size, seq_len = input_ids.shape
+            position_ids = (
+                torch.arange(prev_pos, prev_pos + seq_len, device=input_ids.device)
+                .unsqueeze(0)            # shape: [1, seq_len]
+                .expand(batch_size, -1)  # shape: [batch_size, seq_len], 不分配额外内存
+            )
+
+            logits = self.model_executor.forward(input_ids, position_ids)
             decode_select_index = self.model_executor.decode_alloc_kv_cache(bsz)
             all_select_index_list.append(decode_select_index)
             
@@ -152,13 +160,13 @@ class GenerateStreamText:
             else:
                 next_token = torch.argmax(logits[:, -1], dim=-1)
 
-            next_token = next_token.reshape(-1)  # shape is (batch_size,)
+            input_ids = next_token   # [batch_size, 1]
 
             # 仅在需要生成的情况下替换 token
             # NOTE: input_text_mask[:, cur_pos]：获取掩码中当前列的布尔值，表示每个序列在当前位置是否为实际输入词元。
             # NOTE: tokens[:, cur_pos]：获取 tokens 中当前列的值。next_token：包含当前生成的词元 ID。
-            next_token = torch.where(input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token)
-            tokens[:, cur_pos] = next_token
+            mask = ~input_text_mask[:, cur_pos]  # [batch_size]
+            tokens[:, cur_pos] = torch.where(mask, next_token.reshape(-1) , tokens[:, cur_pos])
 
             # eos_reached 是一个布尔张量，记录每个序列是否到达了终止状态, 形状为 [batch_size, 1]。
             # NOTE: ～input_text_mask[:, cur_pos] 标记当前生成位置是否是模型生成的部分（非输入部分）。True 表示当前列是待生成的部分。False 表示当前列是输入部分。

@@ -228,8 +228,9 @@ class Qwen2Model(nn.Module):
         # self.hidden_states = []
 
     def forward(
-        self, input_ids: torch.Tensor, start_pos, atten_info,
-        position_ids: torch.Tensor = None,
+        self, input_ids: torch.Tensor, 
+        position_ids: torch.Tensor, 
+        atten_info,
         inputs_embeds: Optional[torch.Tensor] = None,
     ):
         # self.hidden_states = []
@@ -240,11 +241,6 @@ class Qwen2Model(nn.Module):
             h = inputs_embeds
         else:
             h = self.get_input_embeddings(input_ids)
-
-        if position_ids is None:
-            cache_position = torch.arange(start_pos, start_pos + seq_len, device=h.device)
-            position_ids = cache_position.unsqueeze(0)
-            position_ids = position_ids.repeat(batch_size, 1)
 
         if seq_len > 1:
             qk_scale = self.qk_scale * 1.4426950408889634

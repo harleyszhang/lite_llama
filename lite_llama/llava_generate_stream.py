@@ -181,21 +181,23 @@ class LlavaGeneratorStream:
         img_batch_size, _, _, _ = image_tensors.shape
         b_req_idx = torch.arange(bsz, device = self.device)
         all_select_index_list = []
-        prefill_select_index, _ = self.model_executor.prefill_alloc_kv_cache(max_prompt_len, actual_prompt_lens, b_req_idx)
+        prefill_select_index, _ = self.model_executor.prefill_alloc_kv_cache(max_prompt_len, actual_prompt_lens, b_req_idx, img_batch_size)
         all_select_index_list.append(prefill_select_index)
         
-        start_pos = 0
-        prev_pos = 0
-
+        position_ids = None
+        start_pos = len(prefill_select_index)
+        input_ids = tokens[:, : max_prompt_len]  # [batch_size, seq_len]
         for cur_pos in range(max_prompt_len, total_seq_len):
-            input_ids = tokens[:, prev_pos: cur_pos]
-            logits = self.model_executor.forward(input_ids, start_pos, image_tensors)
-
-            if start_pos == 0:
-                start_pos += len(prefill_select_index)
-            else:
-                start_pos += bsz
+            batch_size, _ = input_ids.shape
+            logits = self.model_executor.forward(input_ids, position_ids, image_tensors)
             
+            start_pos += bsz
+            position_ids = (
+                torch.arange(start_pos, start_pos + 1, device=input_ids.device)
+                .unsqueeze(0)            # shape: [1, seq_len]
+                .expand(batch_size, -1)  # shape: [batch_size, seq_len], 不分配额外内存
+            )
+
             decode_select_index = self.model_executor.decode_alloc_kv_cache(bsz)
             all_select_index_list.append(decode_select_index)
 
@@ -205,14 +207,11 @@ class LlavaGeneratorStream:
             else:
                 next_token = torch.argmax(logits[:, -1], dim=-1)
 
-            next_token = next_token.reshape(-1)  # shape is (batch_size,)
-
-            # 仅在需要生成的情况下替换 token
-            next_token = torch.where(input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token)
-            tokens[:, cur_pos] = next_token
+            input_ids = next_token   # [batch_size, 1]
+            mask = ~input_text_mask[:, cur_pos]  # [batch_size]
+            tokens[:, cur_pos] = torch.where(mask, next_token.reshape(-1) , tokens[:, cur_pos])
 
             eos_reached |= (~input_text_mask[:, cur_pos]) & (next_token == self.tokenizer.eos_token_id)
-            prev_pos = cur_pos
             
             # 为整个批次收集输出
             batch_outputs = []

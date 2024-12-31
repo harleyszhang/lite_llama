@@ -6,7 +6,7 @@ from transformers import LlavaConfig
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 
 from .mem_manager import ComputeMaxAvailableBlocks, KVCacheMemoryManager
-from .req_tokens_table import ReqTokensTable
+from .req_tokens_manager import ReqTokensManager
 
 from .cuda_graph import ModelRunner
 from .executor_struct import AttentionInfo
@@ -192,28 +192,26 @@ class ModelExecutor:
         
         self.max_seq_len = self.llm_config.max_seq_len
         self.model_type = model_config.model_type
-        self.model = model
-        self.all_select_index = None
-        
-        self.compiled_model = False
+        self.model = model        
         self.model_runner = None
-        
+        self.compiled_model = True
+
         if max_gpu_num_blocks:
             self.kv_mem_manager = self._init_mem_manager(max_gpu_num_blocks)
+            self.max_gpu_num_tokens = max_gpu_num_blocks
         else:
             max_gpu_num_blocks, self.max_gpu_num_tokens = self._get_max_avaliable_tokens(gpu_memory_utilization=0.9, block_size=1)
             self.kv_mem_manager = self._init_mem_manager(max_gpu_num_blocks, block_size=1)
         
         self.max_request_num = max_gpu_num_blocks // self.max_seq_len
+
+        self.req_tokens_manager = ReqTokensManager(self.max_request_num, self.max_seq_len)
+        self.atten_info = AttentionInfo() # 创建 AttentionInfo 实例
+        self.atten_info.kv_buffer = self.kv_mem_manager.gpu_kv_buffer
+        self.atten_info.b_req_tokens_table = self.req_tokens_manager.b_req_tokens_table
+
         if compiled_model:
             self.apply_cuda_graph() # 调用 cuda graph 优化
-
-        self.req_tokens_table = ReqTokensTable(self.max_request_num, self.max_seq_len)
-        self.atten_info = AttentionInfo() # 创建 AttentionInfo 实例
-
-        self.gpu_kv_buffer = self.kv_mem_manager.gpu_kv_buffer
-        self.atten_info.kv_buffer = self.kv_mem_manager.gpu_kv_buffer
-        self.atten_info.b_req_tokens_table = self.req_tokens_table.b_req_tokens_table
 
     def _get_max_avaliable_tokens(self, gpu_memory_utilization=0.9, block_size=1):
         avaliable_blocks = ComputeMaxAvailableBlocks(
@@ -246,42 +244,37 @@ class ModelExecutor:
     def apply_cuda_graph(self, ):
         """应用 cuda graph 优化
         参数:
-            - input_ids: 输入 tokens id 列表, shape: (batch_size, seq_len)
+            - input_ids: 输入 tokens id 列表, shape: (batch_size, 1)
             - prev_pos: 当前处于第几轮迭代循环, 生成第几个 token
         """
-        # TODO: 修复支持多模态模型配置问题的错误
-        max_gpu_num_blocks, _ = self._get_max_avaliable_tokens(gpu_memory_utilization=0.9, block_size=1)
-        
-        kv_mem_manager = self._init_mem_manager(
-            max_gpu_num_blocks, block_size=1, 
-            dtype=torch.float16,  device="cuda"
-        )
         self.model_runner = ModelRunner(
             self.model, 
             self.llm_config, 
-            max_gpu_num_blocks, 
-            kv_mem_manager
+            self.max_gpu_num_tokens, 
+            self.kv_mem_manager,
+            self.req_tokens_manager
         )
         self.model_runner.capture_decode_graph()
-
-        return max_gpu_num_blocks, kv_mem_manager
     
-    def init_req_to_token_indexes(self,
-        req_to_token_indexs, b_req_idx, b_seq_len, alloc_mem_index
+    def init_req_to_tokens_table(self,
+        b_req_tokens_table, b_req_idx, b_seq_len, alloc_mem_index
     ):
+        """
+        初始化 prefill 阶段已分配的批次请求项的 kv cache 所用 tokens 索引
+        """
         start_index = 0
         b_seq_len_numpy = b_seq_len.cpu().numpy()
         b_req_idx_numpy = b_req_idx.cpu().numpy()
         for i in range(len(b_seq_len)):
             cur_seq_len = b_seq_len_numpy[i]
-            req_to_token_indexs[b_req_idx_numpy[i], :cur_seq_len] = alloc_mem_index[
+            b_req_tokens_table[b_req_idx_numpy[i], :cur_seq_len] = alloc_mem_index[
                 start_index : start_index + cur_seq_len
             ]
             start_index += cur_seq_len
         return
 
     def prefill_alloc_kv_cache(self, 
-        max_prompt_len, actual_prompt_lens, b_req_idx, image_batch_size = None,
+        max_prompt_len, actual_prompt_lens, b_req_idx, image_batch_size = None, debug_mode=False,
     ):
         """
         start_index:        tensor([  0, 270, 540, 810], device='cuda:0', dtype=torch.int32)
@@ -309,47 +302,45 @@ class ModelExecutor:
         
         context_num_tokens = max_prompt_len * batch_size
         # 一次性分配 bsz * seq_len + (number_patchs * number_patchs - 1) * img_batch_size 个索引
-        self.atten_info.cur_select_index, kv_cache = self.kv_mem_manager.alloc_kvcache_index(context_num_tokens)        
-        self.atten_info.kv_cache = kv_cache
+        self.atten_info.cur_select_index, _ = self.kv_mem_manager.alloc_kvcache_index(context_num_tokens)        
         # 初始化每个批次项的实际提示词长度
-        self.atten_info.b_seq_len = actual_prompt_lens # 张量, 形状 [batch_size, ]
+        self.atten_info.b_seq_len = actual_prompt_lens  # 张量, 形状 [batch_size, 1]
         # 初始化批次请求的当前最大序列上下文长度(对应 kv cache 长度)
         self.atten_info.max_actual_seq_len = max_prompt_len # int 类型
 
-        self.init_req_to_token_indexes(self.atten_info.b_req_tokens_table, self.atten_info.b_req_idx, 
+        self.init_req_to_tokens_table(self.atten_info.b_req_tokens_table, self.atten_info.b_req_idx, 
                                         self.atten_info.b_seq_len, self.atten_info.cur_select_index)
-        
-        # self.atten_info.b_start_loc = self.atten_info.cur_select_index[::max_prompt_len].to(torch.int32) # 初始化起始索引张量
-        # 初始化当前已选择的批次项索引
-        # self.atten_info.b_req_tokens_table[:batch_size, :max_prompt_len] = self.atten_info.cur_select_index.view(batch_size, max_prompt_len)
 
-        # print(f"context_num_tokens: {context_num_tokens}, max_prompt_len:{max_prompt_len}, \n \
-        #     self.atten_info.cur_select_index: {self.atten_info.cur_select_index},\n \
-        #     self.atten_info.start_index: { self.atten_info.start_index},\n \
-        #     self.atten_info.max_actual_seq_len: {self.atten_info.max_actual_seq_len},\n \
-        #     b_seq_len: { self.atten_info.b_seq_len}, ")
+        if debug_mode:
+            print(f"context_num_tokens: {context_num_tokens}, max_prompt_len:{max_prompt_len}, \n \
+                    self.atten_info.cur_select_index: {self.atten_info.cur_select_index},\n \
+                    self.atten_info.start_index: { self.atten_info.start_index},\n \
+                    self.atten_info.max_actual_seq_len: {self.atten_info.max_actual_seq_len},\n \
+                    b_seq_len: { self.atten_info.b_seq_len}, "
+                )
         
-        # print(f"self.atten_info.b_req_tokens_table: { self.atten_info.b_req_tokens_table}")
-        self.all_select_index = self.atten_info.cur_select_index
-
-        return self.all_select_index, num_patch_indexs
+        return self.atten_info.cur_select_index, num_patch_indexs
     
     def decode_alloc_kv_cache(self, batch_size):
-        # decode cur_select_index number is batch_size
-        self.atten_info.cur_select_index, kv_cache = self.kv_mem_manager.alloc_kvcache_index(batch_size)
-        self.atten_info.kv_cache = kv_cache        
+        # TODO: torch.empty 创建的 kv_cache 应用
+        self.atten_info.cur_select_index, _ = self.kv_mem_manager.alloc_kvcache_index(batch_size)
         update_kv_index(self.atten_info.b_req_tokens_table, self.atten_info.b_req_idx, 
                         self.atten_info.b_seq_len, self.atten_info.cur_select_index)
 
         self.atten_info.b_seq_len += 1
         self.atten_info.max_actual_seq_len += 1
         
-        return self.atten_info.cur_select_index
+        return self.atten_info.cur_select_index # shape [batch_size,]
     
-    def forward(self, input_ids, prev_pos, image_tensor=None):            
-        if self.model_type == "llava":
-            logits = self.model.forward(input_ids, prev_pos, self.atten_info, image_tensor)
-        else:
-            logits = self.model.forward(input_ids, prev_pos, self.atten_info)
-        
+    def forward(self, input_ids, position_ids, image_tensor=None):        
+        if input_ids.shape[-1] > 1:         
+            if self.model_type == "llava":
+                logits = self.model.forward(input_ids, position_ids, self.atten_info, image_tensor)
+            else:
+                logits = self.model.forward(input_ids, position_ids, self.atten_info)
+        elif self.compiled_model:
+            logits = self.model_runner.decode(input_ids, position_ids, self.atten_info)
+        elif not self.compiled_model:
+            logits = self.model.forward(input_ids, position_ids, self.atten_info)
+            
         return logits

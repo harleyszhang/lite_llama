@@ -270,7 +270,7 @@ def main():
     # ]
 
     hf_model_name = "/gemini/code/llm_weights/Llama-3.2-3B-hf"
-    custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-3B-hf"  # 根据实际情况修改
+    custom_checkpoints_dir = "/gemini/code/my_weight/Llama-3.2-3B-hf"  # 根据实际情况修改
     # hf_model_name = "/gemini/code/Qwen/Qwen2.5-1.5B-Instruct"
     # custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct"
     

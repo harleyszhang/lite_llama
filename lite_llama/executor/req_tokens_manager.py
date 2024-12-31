@@ -3,12 +3,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-class ReqTokensTable:
+class ReqTokensManager:
     """管理请求序列的 kv 内存 tokens 的类。
     
     TokenTable 将一系列 kv tokens 映射到一组token 表中, 每个 token 表代表请求序列分配的 kv cache 内存空间。
     """
-    def __init__(self, max_request_num, max_seq_len, device="cuda"):
+    def __init__(self, max_request_num, max_seq_len, mem_manager=None, device="cuda"):
         self.max_can_use_req_size = max_request_num
         self.can_use_req_size = max_request_num
         self.max_seq_len = max_seq_len
@@ -35,7 +35,7 @@ class ReqTokensTable:
         self.req_state[free_token_index] = 0 # 对应批次请求的索引重新置为 0
         if self.can_use_req_size == len(self.req_state):
             logger.debug(f"freed all request size {self.can_use_req_size}")
-        self.mem_manager.free(free_token_index)
+        # self.mem_manager.free(free_token_index)
 
     # 仅释放指定请求的索引
     def free_req(self, free_req_index):
@@ -54,11 +54,11 @@ class ReqTokensTable:
 import unittest
 import torch
 
-class TestReqTokensTable(unittest.TestCase):
+class TestReqTokensManager(unittest.TestCase):
     def setUp(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.mem_manager_mock = unittest.mock.MagicMock()
-        self.table = ReqTokensTable(max_request_num=10, max_seq_len=5, mem_manager=self.mem_manager_mock, device=self.device)
+        self.table = ReqTokensManager(max_request_num=10, max_seq_len=5, mem_manager=self.mem_manager_mock, device=self.device)
 
     def test_alloc_req(self):
         indices = self.table.alloc_req(3)

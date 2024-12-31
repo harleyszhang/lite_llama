@@ -69,6 +69,7 @@ class GenerateText:
             max_gpu_num_blocks = max_gpu_num_blocks,
             load_model = load_model,
             triton_weight = triton_weight,
+            compiled_model=compiled_model,
             device = device
         )
         self.model_config = self.model_executor.model_config
@@ -134,8 +135,15 @@ class GenerateText:
 
         prev_pos = 0
         input_ids = tokens[:, : max_prompt_len]  # [batch_size, seq_len]
-        for cur_pos in range(max_prompt_len, total_len):       
-            logits = self.model_executor.forward(input_ids, prev_pos)  # [batch_size, seq_len, vocab_size]
+        for cur_pos in range(max_prompt_len, total_len):
+            batch_size, seq_len = input_ids.shape
+            position_ids = (
+                torch.arange(prev_pos, prev_pos + seq_len, device=input_ids.device)
+                .unsqueeze(0)            # shape: [1, seq_len]
+                .expand(batch_size, -1)  # shape: [batch_size, seq_len], 不分配额外内存
+            )
+
+            logits = self.model_executor.forward(input_ids, position_ids)  # [batch_size, seq_len, vocab_size]
             decode_select_index = self.model_executor.decode_alloc_kv_cache(bsz)
             all_select_index_list.append(decode_select_index)
             
@@ -143,6 +151,7 @@ class GenerateText:
             probs = torch.softmax(last_logits / temperature, dim=-1)  # [batch_size, vocab_size]
             next_token = sample_top_p(probs, top_p)  # [batch_size]
             input_ids = next_token   # [batch_size, 1]
+            
             mask = ~input_text_mask[:, cur_pos]  # [batch_size]
             tokens[:, cur_pos] = torch.where(mask, next_token.reshape(-1) , tokens[:, cur_pos])
             

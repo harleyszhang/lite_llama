@@ -11,10 +11,8 @@ class ModelRunnerConfig:
 
 @dataclass
 class AttentionInfo:
-    select_index = torch.tensor([])
+    # kv_cache = None # prefill 阶段的 context kv cache
     kv_buffer = List[torch.tensor([])]
-    kv_cache = None # prefill 阶段的 context kv cache
-    decode_index = torch.tensor([])
-    start_index = torch.tensor([])
     cur_select_index = torch.empty((0,),dtype=torch.int32)
-    req_to_token_indexs = None
+    b_req_tokens_table = None
+    b_req_idx = None

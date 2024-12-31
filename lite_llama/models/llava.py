@@ -108,9 +108,10 @@ class LlavaLlama(nn.Module):
     
     def forward(
         self, 
-        input_ids, start_pos, atten_info, 
+        input_ids: torch.Tensor, 
+        position_ids: torch.Tensor,  
+        atten_info, 
         image_tensor: Optional[torch.FloatTensor] = None,
-        position_ids: torch.Tensor = None,
     ):
         input_ids = input_ids.to(self.device) # 将 input_ids 移动到设备
         if position_ids is not None: # 如果提供了 position_ids，将其移动到设备
@@ -123,7 +124,7 @@ class LlavaLlama(nn.Module):
             inputs_embeds = None
        
         hidden_states = self.language_model(input_ids = input_ids,
-                                            start_pos = start_pos,
+                                            position_ids = position_ids,
                                             atten_info = atten_info,
                                             position_ids = position_ids,
                                             inputs_embeds = inputs_embeds
