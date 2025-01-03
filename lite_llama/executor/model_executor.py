@@ -210,7 +210,7 @@ class ModelExecutor:
         self.atten_info.kv_buffer = self.kv_mem_manager.gpu_kv_buffer
         self.atten_info.b_req_tokens_table = self.req_tokens_manager.b_req_tokens_table
 
-        if compiled_model:
+        if False:
             self.apply_cuda_graph() # 调用 cuda graph 优化
 
     def _get_max_avaliable_tokens(self, gpu_memory_utilization=0.9, block_size=1):
