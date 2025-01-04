@@ -274,17 +274,20 @@ def main():
     # hf_model_name = "/gemini/code/Qwen/Qwen2.5-1.5B-Instruct"
     # custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct"
     
-    compare_inference_speed(
-        prompts=prompts,
-        temperature=0.7,
-        top_p=0.8,
-        max_seq_len=2048,
-        max_gen_len=1900,
-        lite_llama_ckpt_dir=custom_checkpoints_dir,
-        hf_model_name=hf_model_name,
-        print_result=True,
-        device=device
-    )
+    max_batch_size = len(prompts)
+    for i in range(0, max_batch_size + 1, 4):
+        prompts = prompts[: i]
+        compare_inference_speed(
+            prompts=prompts,
+            temperature=0.7,
+            top_p=0.8,
+            max_seq_len=2048,
+            max_gen_len=1900,
+            lite_llama_ckpt_dir=custom_checkpoints_dir,
+            hf_model_name=hf_model_name,
+            print_result=True,
+            device=device
+        )
 
 if __name__ == "__main__":
     main()

@@ -4,9 +4,9 @@ A light llama-like llm inference framework based on the triton kernel.
 
 ## 特性
 
-- 相比 transformers, llama3 1B 和 3B 模型加速比最高达 4x 倍。
+- 相比 transformers, llama3 1B 和 3B 模型加速比最高达 `4x` 倍。
 - 支持最新的 `llama3`、`Qwen2.5`、`Llava1.5` 模型推理，支持 `top-p` 采样, 支持流式输出。
-- 支持 GQA、cuda graph 优化（有限制）。
+- 支持 GQA、~~cuda graph 优化（有限制）~~。
 - 支持 `flashattention1`、`flashattention2`、 `flashdecoding`(支持 `NopadAttention`)。
 - 支持 kv cache 的高效动态管理（`auto tokenattnetion`）。
 - 支持算子融合，如：逐元素相乘 `*` 和 `silu` 的融合, k v 线性层融合, `skip` 和 `rmsnorm` 融合。
@@ -58,6 +58,36 @@ llama3.2-1.5B-Instruct 模型流式输出结果测试：
     <td align="center"><img src="./images/llava_output1.gif" width="100%" alt="llava_output"></td>
   </tr>
 </table>
+
+## benchmark 性能测试
+
+### Llama-3.2-1B 模型性能测试对比
+
+趋动云 `B1.small` 等同于 `3090` 的 `1/4` 之一卡的硬件测试环境。运行性能测试对比 `python benchmark.py`，lite_llama 的运行速度最高是 transformers 的 `4x` 倍。batch_size = 16 的提示词，`max_gen_len = 1900` 时，benchmark 性能测试结果:
+
+```bash
+lite_llama inference time: 67.8760 s
+Transformers inference time: 131.8708 s
+lite_llama throughput: 411.04 tokens/s
+Transformers throughput: 104.70 tokens/s
+lite_llama per token latency: 2.432831 ms/token
+Transformers per token latency: 9.551007 ms/token
+```
+
+### Llama-3.2-3B 模型性能测试对比
+
+趋动云 `B1.big` 等同于 `3090` 卡的硬件测试环境。运行性能测试对比 `python benchmark.py`，lite_llama 的运行速度最高是 transformers 的 `4x` 倍。`max_gen_len = 1900` 时，benchmark 性能测试结果:
+
+```bash
+lite_llama inference time: 31.3463 s
+Transformers inference time: 69.1433 s
+lite_llama throughput: 730.45 tokens/s
+Transformers throughput: 183.95 tokens/s
+lite_llama per token latency: 1.369015 ms/token
+Transformers per token latency: 5.436221 ms/token
+```
+
+更多性能测试结果参考文档 [benchmark_models](./docs/benchmark_models.md)（更多模型性能测试结果有待更新）。
 
 ## 如何使用
 
