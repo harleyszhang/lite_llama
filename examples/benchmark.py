@@ -269,13 +269,13 @@ def main():
     #     "Roosevelt was the 26th president of the United States,",
     # ]
 
-    hf_model_name = "/gemini/code/llm_weights/Llama-3.2-3B-hf"
-    custom_checkpoints_dir = "/gemini/code/my_weight/Llama-3.2-3B-hf"  # 根据实际情况修改
+    hf_model_name = "/gemini/code/Llama-3.2-1B-Instruct"
+    custom_checkpoints_dir = "/gemini/code/my_weight/Llama-3.2-1B-Instruct"  # 根据实际情况修改
     # hf_model_name = "/gemini/code/Qwen/Qwen2.5-1.5B-Instruct"
     # custom_checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct"
     
     max_batch_size = len(prompts)
-    for i in range(0, max_batch_size + 1, 4):
+    for i in range(4, max_batch_size + 1, 4):
         prompts = prompts[: i]
         compare_inference_speed(
             prompts=prompts,

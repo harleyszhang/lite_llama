@@ -194,8 +194,7 @@ class ModelExecutor:
         self.model_type = model_config.model_type
         self.model = model        
         self.model_runner = None
-        self.compiled_model = True
-
+        
         if max_gpu_num_blocks:
             self.kv_mem_manager = self._init_mem_manager(max_gpu_num_blocks)
             self.max_gpu_num_tokens = max_gpu_num_blocks
@@ -210,7 +209,9 @@ class ModelExecutor:
         self.atten_info.kv_buffer = self.kv_mem_manager.gpu_kv_buffer
         self.atten_info.b_req_tokens_table = self.req_tokens_manager.b_req_tokens_table
 
-        if False:
+        # TODO apply_cuda_graph 新代码有 bug，已经删去，后续等待修复
+        self.compiled_model = False
+        if self.compiled_model :
             self.apply_cuda_graph() # 调用 cuda graph 优化
 
     def _get_max_avaliable_tokens(self, gpu_memory_utilization=0.9, block_size=1):
