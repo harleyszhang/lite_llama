@@ -128,26 +128,32 @@ class GenerateText:
         all_select_index_list.append(prefill_select_index)
 
         token_count = 0
-        prev_pos = 0 # 初始化上一次生成的位置
         # 为减少循环中的判断逻辑，这里将range起点由min_prompt_len改成max_prompt_len
         # 因为在[min_prompt_len, max_prompt_len)区间，有的样本已经完成输入填充，有的刚好开始生成
         # 实际上可以统一从 max_prompt_len 开始生成，因为在 (min_prompt_len, max_prompt_len) 的位置上，有的样本还属于prompt部分
         # 这样减少复杂判断逻辑
+        prev_pos = 0
+        input_ids = tokens[:, : max_prompt_len]
         for cur_pos in range(max_prompt_len, total_len):
-            # 取出新加入模型的 token (一般为单步输入)
-            input_ids = tokens[:, cur_pos - 1: cur_pos] if cur_pos > 0 else tokens[:, :1]
-            logits = self.model_executor.forward(input_ids, prev_pos)
+            batch_size, seq_len = input_ids.shape
+            position_ids = (
+                torch.arange(prev_pos, prev_pos + seq_len, device=input_ids.device)
+                .unsqueeze(0)            # shape: [1, seq_len]
+                .repeat(batch_size, 1)   # shape: [batch_size, seq_len], 不分配额外内存
+            )  
+            logits = self.model_executor.forward(input_ids, position_ids)
             decode_select_index = self.model_executor.decode_alloc_kv_cache(bsz)
             all_select_index_list.append(decode_select_index)
 
             # 对最后一个位置进行 softmax
-            step_logits = logits[:, -1, :]
+            last_logits = logits[:, -1, :]
             if temperature > 0:
-                probs = F.softmax(step_logits / temperature, dim=-1)
+                probs = F.softmax(last_logits / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p).reshape(-1)
             else:
-                next_token = torch.argmax(step_logits, dim=-1)
-
+                next_token = torch.argmax(last_logits, dim=-1)
+            input_ids = next_token   # [batch_size, 1]
+            
             # 对仍在生成过程（非输入部分）的位置写入next_token
             # 对尚在prompt部分的位置保持原值不变
             to_generate = ~input_text_mask[:, cur_pos]
@@ -161,7 +167,7 @@ class GenerateText:
                 # 获取实际的token目标值
                 target = tokens[:, cur_pos]
                 # 使用 log_softmax 代替 cross_entropy，可以只提取相应token的logprob
-                log_probs = F.log_softmax(step_logits, dim=-1)
+                log_probs = F.log_softmax(last_logits, dim=-1)
                 step_logprobs = torch.gather(log_probs, 1, target.unsqueeze(1)).squeeze(1)
 
                 # 将计算结果写入相应位置

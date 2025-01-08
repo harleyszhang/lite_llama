@@ -189,13 +189,13 @@ class LlavaGeneratorStream:
         input_ids = tokens[:, : max_prompt_len]  # [batch_size, seq_len]
         for cur_pos in range(max_prompt_len, total_seq_len):
             batch_size, _ = input_ids.shape
-            logits = self.model_executor.forward(input_ids, position_ids, image_tensors)
+            logits = self.model_executor.forward(input_ids, position_ids, image_tensors) # step 0: position_ids 由 llava 模型类给出
             
             start_pos += bsz
             position_ids = (
                 torch.arange(start_pos, start_pos + 1, device=input_ids.device)
                 .unsqueeze(0)            # shape: [1, seq_len]
-                .expand(batch_size, -1)  # shape: [batch_size, seq_len], 不分配额外内存
+                .repeat(batch_size, 1)  # shape: [batch_size, seq_len], 不分配额外内存
             )
 
             decode_select_index = self.model_executor.decode_alloc_kv_cache(bsz)
@@ -211,8 +211,8 @@ class LlavaGeneratorStream:
             mask = ~input_text_mask[:, cur_pos]  # [batch_size]
             tokens[:, cur_pos] = torch.where(mask, next_token.reshape(-1) , tokens[:, cur_pos])
 
-            eos_reached |= (~input_text_mask[:, cur_pos]) & (next_token == self.tokenizer.eos_token_id)
-            
+            eos_reached = eos_reached | (mask & (next_token == self.tokenizer.eos_token_id))
+
             # 为整个批次收集输出
             batch_outputs = []
             for i in range(bsz):
@@ -250,8 +250,8 @@ class LlavaGeneratorStream:
         if max_gen_len is None:
             max_gen_len = self.max_seq_len - 1
 
-        prompt_tokens = [tokenizer_image_token(x, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").cuda() for x in prompts] # torch.Size([1, 22])
-        image_tensors = self.encode_images(image_items).cuda() # image_tensors shape is torch.Size([1, 3, 336, 336])
+        prompt_tokens = [tokenizer_image_token(x, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt") for x in prompts] # torch.Size([1, 22])
+        image_tensors = self.encode_images(image_items) # image_tensors shape is torch.Size([1, 3, 336, 336])
         # print(f"prompt 0 shape: {prompt_tokens[0].shape}, image_tensors shape: {image_tensors.shape}")
 
         stream = self.generate_stream(

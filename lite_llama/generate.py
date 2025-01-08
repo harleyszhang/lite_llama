@@ -140,7 +140,7 @@ class GenerateText:
             position_ids = (
                 torch.arange(prev_pos, prev_pos + seq_len, device=input_ids.device)
                 .unsqueeze(0)            # shape: [1, seq_len]
-                .expand(batch_size, -1)  # shape: [batch_size, seq_len], 不分配额外内存
+                .repeat(batch_size, 1)   # shape: [batch_size, seq_len], 不分配额外内存
             )
 
             logits = self.model_executor.forward(input_ids, position_ids)  # [batch_size, seq_len, vocab_size]

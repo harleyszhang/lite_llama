@@ -211,7 +211,7 @@ class ModelExecutor:
 
         # TODO apply_cuda_graph 新代码有 bug，已经删去，后续等待修复
         self.compiled_model = False
-        if self.compiled_model :
+        if self.compiled_model:
             self.apply_cuda_graph() # 调用 cuda graph 优化
 
     def _get_max_avaliable_tokens(self, gpu_memory_utilization=0.9, block_size=1):
@@ -323,7 +323,7 @@ class ModelExecutor:
         return self.atten_info.cur_select_index, num_patch_indexs
     
     def decode_alloc_kv_cache(self, batch_size):
-        # TODO: torch.empty 创建的 kv_cache 应用
+        # TODO: torch.empty 创建的临时张量, 保存分配的非连续 kv_cache 索引空间
         self.atten_info.cur_select_index, _ = self.kv_mem_manager.alloc_kvcache_index(batch_size)
         update_kv_index(self.atten_info.b_req_tokens_table, self.atten_info.b_req_idx, 
                         self.atten_info.b_seq_len, self.atten_info.cur_select_index)
@@ -334,14 +334,8 @@ class ModelExecutor:
         return self.atten_info.cur_select_index # shape [batch_size,]
     
     def forward(self, input_ids, position_ids, image_tensor=None):        
-        if input_ids.shape[-1] > 1:         
-            if self.model_type == "llava":
-                logits = self.model.forward(input_ids, position_ids, self.atten_info, image_tensor)
-            else:
-                logits = self.model.forward(input_ids, position_ids, self.atten_info)
-        elif self.compiled_model:
-            logits = self.model_runner.decode(input_ids, position_ids, self.atten_info)
-        elif not self.compiled_model:
+        if self.model_type == "llava":
+            logits = self.model.forward(input_ids, position_ids, self.atten_info, image_tensor)
+        else:
             logits = self.model.forward(input_ids, position_ids, self.atten_info)
-            
         return logits

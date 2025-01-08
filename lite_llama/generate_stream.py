@@ -144,7 +144,7 @@ class GenerateStreamText:
             position_ids = (
                 torch.arange(prev_pos, prev_pos + seq_len, device=input_ids.device)
                 .unsqueeze(0)            # shape: [1, seq_len]
-                .expand(batch_size, -1)  # shape: [batch_size, seq_len], 不分配额外内存
+                .repeat(batch_size, 1)  # shape: [batch_size, seq_len], 不分配额外内存
             )
 
             logits = self.model_executor.forward(input_ids, position_ids)
@@ -167,14 +167,15 @@ class GenerateStreamText:
             # NOTE: tokens[:, cur_pos]：获取 tokens 中当前列的值。next_token：包含当前生成的词元 ID。
             mask = ~input_text_mask[:, cur_pos]  # [batch_size]
             tokens[:, cur_pos] = torch.where(mask, next_token.reshape(-1) , tokens[:, cur_pos])
-
+            
+            eos_reached = eos_reached | (mask & (next_token == self.tokenizer.eos_token_id))
+            prev_pos = cur_pos
+            
             # eos_reached 是一个布尔张量，记录每个序列是否到达了终止状态, 形状为 [batch_size, 1]。
             # NOTE: ～input_text_mask[:, cur_pos] 标记当前生成位置是否是模型生成的部分（非输入部分）。True 表示当前列是待生成的部分。False 表示当前列是输入部分。
             # NOTE: next_token == self.tokenizer.eos_token_id 表示检测当前生成的 next_token 是否等于 eos_token_id，即模型生成了终止标记。
             # NOTE: & 表示按位与操作，确保当前位置是非输入部分且生成了终止标记。
             # NOTE: 使用 |= 按位或更新，表示如果某个序列已经到达 eos_token_id，则保持 True 状态，不会被后续重置为 False。
-            eos_reached |= (~input_text_mask[:, cur_pos]) & (next_token == self.tokenizer.eos_token_id)
-            prev_pos = cur_pos
             
             # 为整个批次收集输出
             batch_outputs = []

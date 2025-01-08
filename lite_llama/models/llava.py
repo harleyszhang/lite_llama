@@ -117,7 +117,7 @@ class LlavaLlama(nn.Module):
         if position_ids is not None: # 如果提供了 position_ids，将其移动到设备
             position_ids = position_ids.to(self.device)
             
-        if input_ids.shape[1] != 1:
+        if input_ids.shape[1] != 1: # 判断是不是首次 token 输出
             vision_embeddings = self.vision_encode(image_tensor) #  torch.Size([1, 3, 336, 336]) --> torch.Size([1, 576, 4096])
             inputs_embeds, position_ids = self.get_multi_modal_input_embeddings(input_ids, vision_embeddings)
         else: # 进入 decode 阶段, 无需再做视觉编码
@@ -126,7 +126,6 @@ class LlavaLlama(nn.Module):
         hidden_states = self.language_model(input_ids = input_ids,
                                             position_ids = position_ids,
                                             atten_info = atten_info,
-                                            position_ids = position_ids,
                                             inputs_embeds = inputs_embeds
                                             )
         

@@ -6,7 +6,7 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
 
 # checkpoints_dir = '/gemini/code/lite_llama/my_weight/Qwen2.5-3B-Instruct' # 改成自己的存放模型路径
-checkpoints_dir = "/gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct"
+checkpoints_dir = "/gemini/code/my_weight/Llama-3.2-1B-Instruct"
 
 def main(
     temperature: float = 0.6,
