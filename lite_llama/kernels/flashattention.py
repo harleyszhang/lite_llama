@@ -40,6 +40,7 @@ def flash_attention_v1_kernel(
     n_heads,      # number of heads
     m_size,
     n_size,       # sequence length of k, also be rows of K matrix
+
     BLOCK_DHEAD_SIZE: tl.constexpr, # head_dim dimension
     BLOCK_M_SIZE: tl.constexpr, # BLOCK size of m_size dimension，即 Q 矩阵行数分成了m_size // BLOCK_M_SIZE 块，块大小是 BLOCK_M_SIZE
     BLOCK_N_SIZE: tl.constexpr, # n_size dimension
@@ -171,13 +172,13 @@ def flash_attention_v1(
         ), f"All tensors must have the same dtype: {q.dtype}, {k.dtype}, {v.dtype}, {output.dtype}"
     
     # sequence length of q, also be rows of Q matrix
-    bs, n_heads, m_size, head_dim = q.size()
+    bs, n_heads, m_size, HEAD_DIM = q.size()
     causal_mask = False
     if m_size > 1:
         causal_mask: bool = True
         
     n_size = k.shape[2]
-    sm_scale = 1 / math.sqrt(head_dim)
+    sm_scale = 1 / math.sqrt(HEAD_DIM)
     # BLOCK_M_SIZE = 128
     grid = lambda meta: (triton.cdiv(m_size, meta["BLOCK_M_SIZE"]), bs*n_heads, 1) # 二维 grid
 
@@ -190,11 +191,13 @@ def flash_attention_v1(
         *k.stride(),  # (batch, heads, n_size, head_dim)
         *v.stride(),  # (batch, heads, n_size, head_dim)
         *output.stride(),  # (batch, heads, m_size, n_size)
+
+        num_kv_groups,
         n_heads,
         m_size,
         n_size,
-        head_dim,
-        num_kv_groups,
+        
+        HEAD_DIM,
         32,  # BLOCK_M_SIZE
         32,  # BLOCK_N_SIZE
         sm_scale,
