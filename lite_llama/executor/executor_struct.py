@@ -15,4 +15,5 @@ class AttentionInfo:
     kv_buffer = List[torch.tensor([])]
     cur_select_index = torch.empty((0,),dtype=torch.int32)
     b_req_tokens_table = None
+    b_start_loc = None
     b_req_idx = None

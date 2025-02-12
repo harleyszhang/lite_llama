@@ -34,7 +34,7 @@ class Attention(nn.Module):
         output = flash_attention2_no_pad(
             xq, xk, xv,
             qk_scale,
-            atten_info.b_req_tokens_table, 
+            atten_info.b_start_loc, # 批次中每个请求的开始索引位置
             atten_info.b_seq_len, 
             atten_info.max_actual_seq_len,
         )

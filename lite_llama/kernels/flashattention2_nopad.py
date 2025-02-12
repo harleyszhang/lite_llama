@@ -10,9 +10,8 @@ from torch.cuda.amp import custom_fwd
 @triton.jit
 def flash_attention2_nopad_kernel(
     Q, K, V, O,
-    b_req_tokens_table, B_Seqlen, 
+    B_Start_Loc, B_Seqlen, 
     sm_scale, heads, num_kv_groups,       # group of kv heads
-    stride_req_to_tokens_b,
     stride_q_bs, stride_q_heads, stride_q_dim,  # Q 的 strides
     stride_k_bs, stride_k_heads, stride_k_dim,  # K 的 strides
     stride_v_bs, stride_v_heads, stride_v_dim,  # V 的 strides
@@ -32,8 +31,8 @@ def flash_attention2_nopad_kernel(
 
     # 计算当前批次的序列长度和请求序列的起始位置
     cur_seq_len = tl.load(B_Seqlen + cur_batch_idx)
-    cur_seq_start_loc = tl.load(b_req_tokens_table + cur_batch_idx * stride_req_to_tokens_b)
-    # cur_seq_start_loc = tl.load(B_Start_Loc + cur_batch_idx)
+    # cur_seq_start_loc = tl.load(b_req_tokens_table + cur_batch_idx * stride_req_to_tokens_b)
+    cur_seq_start_loc = tl.load(B_Start_Loc + cur_batch_idx)
 
     block_start_loc = block_m_idx * BLOCK_M_SIZE # 计算当前 block 的起始和结束索引
 
@@ -118,7 +117,7 @@ def flash_attention2_no_pad(
     k: torch.Tensor,
     v: torch.Tensor,
     sm_scale,
-    b_req_tokens_table, 
+    b_start_loc, 
     b_seq_len, 
     max_seq_len,
     ):
@@ -142,12 +141,11 @@ def flash_attention2_no_pad(
         k,
         v, 
         output,
-        b_req_tokens_table,
+        b_start_loc,
         b_seq_len,
         sm_scale,
         n_heads, 
-        num_kv_groups,  
-        b_req_tokens_table.stride(0),
+        num_kv_groups,
         q.stride(0), q.stride(1), q.stride(2),
         k.stride(0), k.stride(1), k.stride(2),
         v.stride(0), v.stride(1), v.stride(2),

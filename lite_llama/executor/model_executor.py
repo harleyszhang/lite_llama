@@ -263,16 +263,20 @@ class ModelExecutor:
         """
         初始化 prefill 阶段已分配的批次请求项的 kv cache 所用 tokens 索引
         """
+        # TODO: 性能等待优化
         start_index = 0
+        batch_size = len(b_seq_len)
         b_seq_len_numpy = b_seq_len.cpu().numpy()
         b_req_idx_numpy = b_req_idx.cpu().numpy()
-        for i in range(len(b_seq_len)):
+        b_start_loc = torch.zeros((batch_size,), dtype=torch.int32, device=self.device)
+        for i in range(batch_size):
+            if i > 0:
+                b_start_loc[i] = start_index
             cur_seq_len = b_seq_len_numpy[i]
-            b_req_tokens_table[b_req_idx_numpy[i], :cur_seq_len] = alloc_mem_index[
-                start_index : start_index + cur_seq_len
-            ]
+            b_req_tokens_table[b_req_idx_numpy[i], :cur_seq_len] = alloc_mem_index[start_index : start_index + cur_seq_len]
             start_index += cur_seq_len
-        return
+
+        return b_start_loc
 
     def prefill_alloc_kv_cache(self, 
         max_prompt_len, actual_prompt_lens, b_req_idx, image_batch_size = None, debug_mode=False,
@@ -309,15 +313,17 @@ class ModelExecutor:
         # 初始化批次请求的当前最大序列上下文长度(对应 kv cache 长度)
         self.atten_info.max_actual_seq_len = max_prompt_len # int 类型
 
-        self.init_req_to_tokens_table(self.atten_info.b_req_tokens_table, self.atten_info.b_req_idx, 
-                                        self.atten_info.b_seq_len, self.atten_info.cur_select_index)
+        self.atten_info.b_start_loc = self.init_req_to_tokens_table(
+            self.atten_info.b_req_tokens_table, self.atten_info.b_req_idx, 
+            self.atten_info.b_seq_len, self.atten_info.cur_select_index
+        )
 
         if debug_mode:
             print(f"context_num_tokens: {context_num_tokens}, max_prompt_len:{max_prompt_len}, \n \
                     self.atten_info.cur_select_index: {self.atten_info.cur_select_index},\n \
-                    self.atten_info.start_index: { self.atten_info.start_index},\n \
                     self.atten_info.max_actual_seq_len: {self.atten_info.max_actual_seq_len},\n \
-                    b_seq_len: { self.atten_info.b_seq_len}, "
+                    self.atten_info.b_seq_len: { self.atten_info.b_seq_len}, \n \
+                    self.atten_info.b_start_loc: { self.atten_info.b_start_loc}, "
                 )
         
         return self.atten_info.cur_select_index, num_patch_indexs

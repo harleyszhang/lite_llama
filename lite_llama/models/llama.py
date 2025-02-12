@@ -54,7 +54,7 @@ class FusedAttention(nn.Module):
         output = flash_attention2_no_pad(
             xq, xk, xv,
             qk_scale,
-            atten_info.b_req_tokens_table, 
+            atten_info.b_start_loc, 
             atten_info.b_seq_len, 
             seq_len,
         )
