@@ -91,7 +91,7 @@ Transformers per token latency: 5.436221 ms/token
 
 ## 如何使用
 
-推荐 cuda 版本 12.0 及以上。~~下载 [llama3.2-1B-Instruct 模型](https://pan.quark.cn/s/6eef1f2921e0)并放到指定 `cli.py` 文件的指定 `checkpoints_dir` 目录~~。`cli.py` 运行前，需要先运行 `python lite_llama/tests/test_weight_convert.py` 将 hf 模型权重转换为 `lite_llama` 权重格式。
+推荐 cuda 版本 12.0 及以上。下载 [llama3.2-1B-Instruct 模型](https://pan.quark.cn/s/f476119babb3)并放到指定 `cli.py` 文件的指定 `checkpoints_dir` 目录。`cli.py` 运行前，需要先运行 `python lite_llama/tests/test_weight_convert.py` 将 hf 模型权重转换为 `lite_llama` 权重格式。
 
 ```bash
 apt update
