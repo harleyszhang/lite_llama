@@ -102,7 +102,7 @@ class FusedAttention(nn.Module):
             atten_info.b_req_tokens_table, 
             atten_info.b_seq_len, 
             atten_info.max_actual_seq_len
-        ) # ouput shape is [batchs, num_heads, head_dim]
+        ) # ouput shape is [batchs, num_heads, head_dim]; batchs = batch_size(seq_len = 1)
         
         output = output.view(batch_size, seq_len, self.hidden_size)
         output = self.o_proj(output)

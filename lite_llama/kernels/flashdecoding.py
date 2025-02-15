@@ -287,233 +287,162 @@ def flash_decoding(
 
 	return atten_output
 
-
-def naive_flash_decoding_reference(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len):
+# --------------------------------------
+# 标准 Attention Decode 实现（纯 PyTorch版）
+# --------------------------------------
+def standard_attention_decode(q, k, v, qk_scale, b_seq_len):
     """
-    参考实现：与 `flash_decoding` 在功能上对应，可用于数值正确性对比。
-    - q: [bs, num_heads, head_dim]
-    - k_cache, v_cache: [total_tokens, num_heads, head_dim]
-    - b_req_tokens_table: [bs], 每个 batch 对应在 k_cache/v_cache 的起始位置
-    - b_seq_len: [bs], 每个 batch 当前已用序列长度
-    """
-    device = q.device
-    batch_size, num_heads, head_dim = q.shape
+    优化后的标准 Attention Decode 实现（纯 PyTorch版），完全向量化。
     
-    # 最终输出: [bs, num_heads, head_dim]
-    output = torch.zeros_like(q)
-
-    for b in range(batch_size):
-        start_loc = b_req_tokens_table[b][0] # batch b 的 K/V 起始位置
-        seq_len = b_seq_len[b].item()
-
-        # 取出 [seq_len, num_heads, head_dim]
-        k_this = k_cache[start_loc : start_loc + seq_len]  # shape: [seq_len, num_heads, head_dim]
-        v_this = v_cache[start_loc : start_loc + seq_len]  # shape: [seq_len, num_heads, head_dim]
-
-        # q[b, ...]: shape [num_heads, head_dim]
-        q_b = q[b]  # [num_heads, head_dim]
-
-        # 计算注意力
-        # Q K^T => [num_heads, head_dim] x [seq_len, num_heads, head_dim] => 先调换 K 维度 => ...
-        # 这里为了演示，把 num_heads 这维也计算在 for 里了，或可直接 reshape 到 [num_heads, head_dim].
-        # 参考： scores = (q_b * qk_scale) @ k_this.transpose(-1, -2)，此处需注意 batch 维和 heads 维对齐
-
-        # 先把 q_b 改成 [num_heads, 1, head_dim], k_this => [seq_len, num_heads, head_dim]
-        # => scores shape: [num_heads, seq_len]
-        scores = torch.empty((num_heads, seq_len), device=device)
-        for h in range(num_heads):
-            # q_b[h, :].shape => [head_dim]
-            # k_this[:, h, :].shape => [seq_len, head_dim]
-            qk = torch.matmul(q_b[h] * qk_scale, k_this[:, h].transpose(0, 1))  # [seq_len]
-            scores[h] = qk
-
-        # softmax => [num_heads, seq_len]
-        attn_probs = torch.softmax(scores, dim=-1)
-
-        # out => [num_heads, head_dim]
-        out_b = torch.zeros((num_heads, head_dim), device=device)
-        for h in range(num_heads):
-            # v_this[:, h, :] => [seq_len, head_dim]
-            out_b[h] = torch.matmul(attn_probs[h], v_this[:, h, :])  # [head_dim]
-
-        output[b] = out_b
-
+    参数:
+      q: [batch, num_heads, head_dim]
+      k: [max_tokens, num_heads, head_dim]  （注意：这里假设所有样本使用相同 kv cache）
+      v: [max_tokens, num_heads, head_dim]
+      qk_scale: 缩放系数，通常为 1/sqrt(head_dim)
+      b_seq_len: [batch] 每个样本有效 token 数（<= max_tokens）
+      
+    返回:
+      output: [batch, num_heads, head_dim]
+    """
+    batch, num_heads, head_dim = q.shape
+    # 取所有样本的最大有效序列长度
+    L = int(b_seq_len.max().item())
+    
+    # 构造 mask: [batch, L]，mask[i,j]=True 表示 j < b_seq_len[i]
+    device = q.device
+    idxs = torch.arange(L, device=device).unsqueeze(0).expand(batch, L)
+    mask = idxs < b_seq_len.unsqueeze(1)
+    
+    # 截取 k, v 前 L 个元素，然后扩展到 batch 维度（假设所有样本共享同一个 kv cache）
+    k = k[:L].unsqueeze(0).expand(batch, -1, -1, -1)  # [batch, L, num_heads, head_dim]
+    v = v[:L].unsqueeze(0).expand(batch, -1, -1, -1)
+    # 调整维度: 使得 k, v 形状为 [batch, num_heads, L, head_dim]
+    k = k.permute(0, 2, 1, 3)
+    v = v.permute(0, 2, 1, 3)
+    
+    # q: [batch, num_heads, head_dim] 扩展维度为 [batch, num_heads, 1, head_dim]
+    q_exp = q.unsqueeze(2)
+    # 计算注意力得分: [batch, num_heads, L]
+    scores = torch.matmul(q_exp, k.transpose(-2, -1)).squeeze(2) * qk_scale
+    # 对无效位置用 -inf 填充
+    scores = scores.masked_fill(~mask.unsqueeze(1), float('-inf'))
+    # 计算 softmax 得到注意力权重: [batch, num_heads, L]
+    attn = torch.softmax(scores, dim=-1)
+    # 计算输出：注意力权重与 v 相乘，得到 [batch, num_heads, head_dim]
+    output = torch.matmul(attn.unsqueeze(2), v).squeeze(2)
     return output
 
-def test_flash_decoding_correctness():
-    torch.manual_seed(0)
-    device = "cuda"
-
-    # ========== 测试维度配置 ========== #
-    batch_size = 4
-    num_heads = 8
-    head_dim = 32
-    max_seq_len = 128  # k_cache, v_cache 最大序列长度
-
-    # ========== 构造输入张量 ========== #
-    # Q shape: [batch_size, num_heads, head_dim], decode阶段 Q 只有 seq=1
-    q = torch.randn((batch_size, num_heads, head_dim), device=device, dtype=torch.float32)
-
-    # K, V cache shape: [max_seq_len * batch_size, num_heads, head_dim]
-    # 此处简单起见，假设 b_req_tokens_table 依次排布，不做复杂的 paged_layout
-    total_tokens = max_seq_len * batch_size
-    k_cache = torch.randn((total_tokens, num_heads, head_dim), device=device, dtype=torch.float32)
-    v_cache = torch.randn((total_tokens, num_heads, head_dim), device=device, dtype=torch.float32)
-
-    # 对于每个 batch，设置它的 k/v 起始位置(b_req_tokens_table) 和 已用长度(b_seq_len)
-    # 这里假设第 b 个 batch 的起始位置为 b*max_seq_len, 实际可随机或者更灵活的分配
-    b_req_tokens_table = torch.arange(batch_size * max_seq_len, device=device).view(batch_size, max_seq_len)
-    # 每个 batch 当前已经用了多少长度(小于等于 max_seq_len)，可随机生成
-    b_seq_len = torch.randint(1, max_seq_len+1, (batch_size,), device=device, dtype=torch.long)
-
-    # 缩放因子
-    qk_scale = 1.0 / (head_dim ** 0.5)
-
-    # ========== Triton Flash Decoding ========== #
-    triton_output = flash_decoding(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len, max_seq_len)
-
-    # ========== Naive 参考实现 ========== #
-    naive_output = naive_flash_decoding_reference(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len)
-
-    # ========== 结果比对 ========== #
-    max_abs_diff = (triton_output - naive_output).abs().max().item()
-    print(f"[Unit Test] Max abs diff = {max_abs_diff:.6f}")
-
-    # 设置一个容忍度，通常闪电注意力与 Naive 在 float32 下的结果不会相差太大
-    assert max_abs_diff < 1e-3, f"Difference too large: {max_abs_diff}"
-    print("[Unit Test] flash_decoding correctness check passed!\n")
-
-def benchmark_flash_decoding(
-    batch_sizes = [1, 4, 8],
-    head_dims   = [32, 64],
-    seq_lengths = [128, 256, 512],
-    num_heads   = 8,
-    warmup      = 3,
-    rep         = 10
-):
-    import time
-    import numpy as np
-    device = "cuda"
-    qk_scale = 1.0 / (64 ** 0.5)  # 只示例一个 scale，可根据 dim 不同动态调整
-
-    results = []  # 用于存储性能结果，后续可视化
-
-    for bs in batch_sizes:
-        for d in head_dims:
-            for seq_len in seq_lengths:
-                # total_tokens = bs * seq_len (简化做法)
-                total_tokens = bs * seq_len
-
-                # 随机构造数据
-                q = torch.randn((bs, num_heads, d), device=device, dtype=torch.float32)
-                k_cache = torch.randn((total_tokens, num_heads, d), device=device, dtype=torch.float32)
-                v_cache = torch.randn((total_tokens, num_heads, d), device=device, dtype=torch.float32)
-                b_req_tokens_table = torch.arange(bs * seq_len, device=device).view(bs, seq_len)
-        
-                b_seq_len = torch.full((bs,), seq_len, device=device, dtype=torch.long)  # 全部用满
-
-                # 预热 (warmup)
-                for _ in range(warmup):
-                    _ = flash_decoding(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len, seq_len)
-                    _ = naive_flash_decoding_reference(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len)
-
-                # 统计 Triton 时间
-                triton_times = []
-                for _ in range(rep):
-                    torch.cuda.synchronize()
-                    start = time.time()
-                    _ = flash_decoding(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len, seq_len)
-                    torch.cuda.synchronize()
-                    end = time.time()
-                    triton_times.append(end - start)
-
-                # 统计 Naive 时间
-                naive_times = []
-                for _ in range(rep):
-                    torch.cuda.synchronize()
-                    start = time.time()
-                    _ = naive_flash_decoding_reference(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len)
-                    torch.cuda.synchronize()
-                    end = time.time()
-                    naive_times.append(end - start)
-
-                triton_mean = np.mean(triton_times)
-                naive_mean = np.mean(naive_times)
-                speedup = naive_mean / triton_mean if triton_mean > 0 else 1.0
-
-                results.append({
-                    "batch_size": bs,
-                    "head_dim": d,
-                    "num_heads": num_heads,
-                    "seq_len": seq_len,
-                    "triton_mean_time": triton_mean,
-                    "naive_mean_time": naive_mean,
-                    "speedup": speedup
-                })
-
-                print(f"bs={bs}, head_dim={d}, seq_len={seq_len} => "
-                      f"Triton: {triton_mean:.6f}s, Naive: {naive_mean:.6f}s, Speedup: {speedup:.2f}")
-    
-    return results
-
-def plot_benchmark_results(results, fix_bs=None, fix_dim=None):
+# ----------------------------------
+# 性能对比及曲线绘制函数封装（含 Warm up）
+# ----------------------------------
+def plot_performance_comparison(token_sizes, warmup_iterations=10, test_iterations=50):
     """
-    示例：若需要固定 batch_size 和 head_dim，观察随 seq_len 变化的时间 / speedup。
-    可根据实际需求定制更丰富的可视化。
+    对不同 token size 下的 Flash Decoding 与标准 Attention 的性能进行测试，
+    并绘制性能对比曲线。
+    
+    参数:
+      token_sizes: list[int]，不同的 kv cache 长度
+      warmup_iterations: int, 预热迭代次数
+      test_iterations: int, 正式测试迭代次数
     """
     import matplotlib.pyplot as plt
-    # 过滤出满足 fix_bs 和 fix_dim 的记录
-    filtered = [r for r in results 
-                if (fix_bs is None or r["batch_size"] == fix_bs) 
-                and (fix_dim is None or r["head_dim"] == fix_dim)]
-    
-    if not filtered:
-        print("No matched results to plot!")
-        return
-    
-    # 按照 seq_len 排序
-    filtered.sort(key=lambda x: x["seq_len"])
+    device = torch.device('cuda')
+    batch = 4
+    num_heads = 32
+    head_dim = 64
+    qk_scale = 1.0 / (head_dim ** 0.5)
+    q = torch.randn(batch, num_heads, head_dim, device=device)
 
-    seq_lens = [f["seq_len"] for f in filtered]
-    triton_time = [f["triton_mean_time"] for f in filtered]
-    naive_time = [f["naive_mean_time"] for f in filtered]
-    speedup = [f["speedup"] for f in filtered]
+    flash_times = []
+    standard_times = []
 
-    fig, ax1 = plt.subplots(figsize=(8, 5))
-    ax2 = ax1.twinx()
+    for tokens in token_sizes:
+        print(f"\n测试 token size: {tokens}")
+        k_cache = torch.randn(tokens, num_heads, head_dim, device=device)
+        v_cache = torch.randn(tokens, num_heads, head_dim, device=device)
+        b_req_tokens_table = torch.arange(0, tokens, device=device, dtype=torch.int32).repeat(batch, 1)
+        b_seq_len = torch.full((batch,), tokens, device=device, dtype=torch.int32)
+        max_actual_seq_len = tokens
 
-    # Plot time
-    ax1.plot(seq_lens, triton_time, 'o--', label="Triton Time", color='blue')
-    ax1.plot(seq_lens, naive_time, 's--', label="Naive Time", color='red')
-    ax1.set_xlabel("Sequence Length")
-    ax1.set_ylabel("Time (s)")
-    ax1.set_title(f"Flash Decoding Benchmark (bs={fix_bs}, dim={fix_dim})")
+        # Warm up Flash Decoding 内核
+        for _ in range(warmup_iterations):
+            _ = flash_decoding(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len, max_actual_seq_len)
+        # 测试 Flash Decoding
+        torch.cuda.synchronize()
+        flash_start = torch.cuda.Event(enable_timing=True)
+        flash_end = torch.cuda.Event(enable_timing=True)
+        flash_start.record()
+        for _ in range(test_iterations):
+            _ = flash_decoding(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len, max_actual_seq_len)
+        flash_end.record()
+        torch.cuda.synchronize()
+        flash_avg = flash_start.elapsed_time(flash_end) / test_iterations
+        flash_times.append(flash_avg)
+        print(f"Flash Decoding 平均时间: {flash_avg:.3f} ms")
 
-    # Plot speedup
-    ax2.plot(seq_lens, speedup, 'd-', label="Speedup", color='green')
-    ax2.set_ylabel("Speedup (Naive / Triton)")
+        # Warm up 标准 Attention
+        for _ in range(warmup_iterations):
+            _ = standard_attention_decode(q, k_cache, v_cache, qk_scale, b_seq_len)
+        # 测试标准 Attention
+        torch.cuda.synchronize()
+        std_start = torch.cuda.Event(enable_timing=True)
+        std_end = torch.cuda.Event(enable_timing=True)
+        std_start.record()
+        for _ in range(test_iterations):
+            _ = standard_attention_decode(q, k_cache, v_cache, qk_scale, b_seq_len)
+        std_end.record()
+        torch.cuda.synchronize()
+        std_avg = std_start.elapsed_time(std_end) / test_iterations
+        standard_times.append(std_avg)
+        print(f"Standard Attention 平均时间: {std_avg:.3f} ms")
 
-    # legends
-    lines_1, labels_1 = ax1.get_legend_handles_labels()
-    lines_2, labels_2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left')
-
+    # 绘制性能对比曲线
+    plt.figure(figsize=(8, 6))
+    plt.plot(token_sizes, flash_times, marker='o', label='Flash Decoding')
+    plt.plot(token_sizes, standard_times, marker='o', label='Standard Attention')
+    plt.xlabel('Token Size (kv cache length)')
+    plt.ylabel('Average Time (ms)')
+    plt.title('Performance Comparison: Flash Decoding vs Standard Attention')
+    plt.legend()
+    plt.grid(True)
     plt.savefig("./flashdecoding_benchamrk.png")
+
+# -------------------------------
+# 验证输出和调用性能对比函数
+# -------------------------------
+def main():
+    torch.manual_seed(0)
+    device = torch.device('cuda')
     
-if __name__ == "__main__":
-    # 1. 单元测试
-    test_flash_decoding_correctness()
+    # 测试参数
+    batch = 4
+    num_heads = 8
+    head_dim = 64
+    max_tokens = 2048
+    qk_scale = 1.0 / (head_dim ** 0.5)
 
-    # 2. 基准测试
-    results = benchmark_flash_decoding(
-        batch_sizes = [1, 4],   # 可根据实际需要增减
-        head_dims   = [32, 64],
-        seq_lengths = [128, 256],
-        num_heads   = 8,
-        warmup      = 2,
-        rep         = 5
-    )
+    # 构造测试数据：固定 q，k_cache, v_cache, b_req_tokens_table, b_seq_len
+    q = torch.randn(batch, num_heads, head_dim, device=device)
+    k_cache = torch.randn(max_tokens, num_heads, head_dim, device=device)
+    v_cache = torch.randn(max_tokens, num_heads, head_dim, device=device)
+    b_req_tokens_table = torch.arange(0, max_tokens, device=device, dtype=torch.int32).repeat(batch, 1)
+    b_seq_len = torch.full((batch,), max_tokens, device=device, dtype=torch.int32)
+    
+    # 单次验证 flash_decoding 输出形状及数值（与标准 Attention 接近）
+    flash_out = flash_decoding(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len, max_tokens)
+    standard_out = standard_attention_decode(q, k_cache, v_cache, qk_scale, b_seq_len)
+    print("Flash Decoding output shape:", flash_out.shape)
+    print("Standard Attention output shape:", standard_out.shape)
+    if torch.allclose(flash_out, standard_out, atol=1e-3, rtol=1e-3):
+        print("验证通过: Flash Decoding 输出与标准 Attention 接近。")
+    else:
+        diff = (flash_out - standard_out).abs().max().item()
+        print(f"验证失败：最大误差为 {diff:.4f}")
+    
+    # 封装的性能对比曲线函数
+    token_numbers = [64, 128, 256, 512, 1024, max_tokens]
+    plot_performance_comparison(token_numbers, warmup_iterations=10, test_iterations=50)
 
-    # 3. 可视化
-    # 例：固定 batch_size=4, head_dim=32
-    plot_benchmark_results(results, fix_bs=4, fix_dim=32)
+
+if __name__ == '__main__':
+    main()
