@@ -2,22 +2,6 @@ import triton, torch
 import triton.language as tl
 from torch.cuda.amp import custom_fwd
 
-@triton.jit
-def detect_nan_kernel(input_ptr, output_ptr, N, BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < N
-    x = tl.load(input_ptr + offsets, mask=mask, other=0.0)
-    is_nan = x!=x # NaN != NaN
-    tl.store(output_ptr + offsets, is_nan, mask=mask)
-
-def detect_nan(input_tensor):
-    N = input_tensor.numel()
-    BLOCK_SIZE = 1024
-    grid = (triton.cdiv(N, BLOCK_SIZE),)
-    output = torch.zeros_like(input_tensor, dtype=torch.int32)
-    detect_nan_kernel[grid](input_tensor, output, N, BLOCK_SIZE)
-    return output
 
 @triton.jit
 def _flash_decoding_stage1_kernel(
@@ -290,47 +274,29 @@ def flash_decoding(
 # --------------------------------------
 # 标准 Attention Decode 实现（纯 PyTorch版）
 # --------------------------------------
-def standard_attention_decode(q, k, v, qk_scale, b_seq_len):
-    """
-    优化后的标准 Attention Decode 实现（纯 PyTorch版），完全向量化。
-    
-    参数:
-      q: [batch, num_heads, head_dim]
-      k: [max_tokens, num_heads, head_dim]  （注意：这里假设所有样本使用相同 kv cache）
-      v: [max_tokens, num_heads, head_dim]
-      qk_scale: 缩放系数，通常为 1/sqrt(head_dim)
-      b_seq_len: [batch] 每个样本有效 token 数（<= max_tokens）
-      
-    返回:
-      output: [batch, num_heads, head_dim]
-    """
-    batch, num_heads, head_dim = q.shape
-    # 取所有样本的最大有效序列长度
-    L = int(b_seq_len.max().item())
-    
-    # 构造 mask: [batch, L]，mask[i,j]=True 表示 j < b_seq_len[i]
-    device = q.device
-    idxs = torch.arange(L, device=device).unsqueeze(0).expand(batch, L)
-    mask = idxs < b_seq_len.unsqueeze(1)
-    
-    # 截取 k, v 前 L 个元素，然后扩展到 batch 维度（假设所有样本共享同一个 kv cache）
-    k = k.view(batch, L, num_heads, head_dim)  # [batch, L, num_heads, head_dim]
-    v = v.view(batch, L, num_heads, head_dim)
-    # 调整维度: 使得 k, v 形状为 [batch, num_heads, L, head_dim]
-    k = k.permute(0, 2, 1, 3)
-    v = v.permute(0, 2, 1, 3)
-    
-    # q: [batch, num_heads, head_dim] 扩展维度为 [batch, num_heads, 1, head_dim]
-    q_exp = q.unsqueeze(2)
-    # 计算注意力得分: [batch, num_heads, L]
-    scores = torch.matmul(q_exp, k.transpose(-2, -1)).squeeze(2) * qk_scale
-    # 对无效位置用 -inf 填充
-    scores = scores.masked_fill(~mask.unsqueeze(1), float('-inf'))
-    # 计算 softmax 得到注意力权重: [batch, num_heads, L]
-    attn = torch.softmax(scores, dim=-1)
-    # 计算输出：注意力权重与 v 相乘，得到 [batch, num_heads, head_dim]
-    output = torch.matmul(attn.unsqueeze(2), v).squeeze(2)
+def _naive_attention(q, k, v):
+    import math
+    head_dim = q.shape[-1]
+    q = q.transpose(0, 1)  #(nhead, 1, head_dim)
+    k = k.transpose(0, 1)  #(nhead, seqlen, head_dim)
+    v = v.transpose(0, 1)  #(nhead, seqlen, head_dim)
+    scores = torch.matmul(q, k.transpose(1, 2)) / math.sqrt(head_dim)
+    scores = torch.nn.functional.softmax(scores.float(), dim=-1).to(q.dtype)
+    output = torch.matmul(scores, v).transpose(0, 1).contiguous() #(1, nhead, head_dim)
     return output
+
+def torch_attention_with_kvcache(q, k_cache, v_cache, b_start_loc, b_seq_len):
+    out = torch.empty_like(q)
+    Z = q.shape[0]
+    for i in range(Z):
+        start = b_start_loc[i]
+        end = start + b_seq_len[i]
+        q_i = q[i:i+1]            #(1, nhead, head_dim)
+        k_i = k_cache[start:end]  #(seqlen, nhead, head_dim)
+        v_i = v_cache[start:end]  #(seqlen, nhead, head_dim)
+        o_i = _naive_attention(q_i, k_i, v_i)
+        out[i:i+1] = o_i
+    return out
 
 # ----------------------------------
 # 性能对比及曲线绘制函数封装（含 Warm up）
@@ -361,6 +327,7 @@ def plot_performance_comparison(token_sizes, warmup_iterations=10, test_iteratio
         k_cache = torch.randn(batch * tokens, num_heads, head_dim, device=device)
         v_cache = torch.randn(batch * tokens, num_heads, head_dim, device=device)
         b_req_tokens_table = torch.arange(0, tokens, device=device, dtype=torch.int32).repeat(batch, 1)
+        b_start_loc = torch.tensor([0, tokens, 2*tokens, 3*tokens], dtype=torch.int32, device="cuda") # batch = 4
         b_seq_len = torch.full((batch,), tokens, device=device, dtype=torch.int32)
         max_actual_seq_len = tokens
 
@@ -382,14 +349,14 @@ def plot_performance_comparison(token_sizes, warmup_iterations=10, test_iteratio
 
         # Warm up 标准 Attention
         for _ in range(warmup_iterations):
-            _ = standard_attention_decode(q, k_cache, v_cache, qk_scale, b_seq_len)
+            _ = torch_attention_with_kvcache(q, k_cache, v_cache, b_start_loc, b_seq_len)
         # 测试标准 Attention
         torch.cuda.synchronize()
         std_start = torch.cuda.Event(enable_timing=True)
         std_end = torch.cuda.Event(enable_timing=True)
         std_start.record()
         for _ in range(test_iterations):
-            _ = standard_attention_decode(q, k_cache, v_cache, qk_scale, b_seq_len)
+            _ = torch_attention_with_kvcache(q, k_cache, v_cache, b_start_loc, b_seq_len)
         std_end.record()
         torch.cuda.synchronize()
         std_avg = std_start.elapsed_time(std_end) / test_iterations
@@ -426,12 +393,14 @@ def main():
     q = torch.randn(batch * 1, num_heads, head_dim, device=device)
     k_cache = torch.randn(batch * max_tokens, num_heads, head_dim, device=device)
     v_cache = torch.randn(batch * max_tokens, num_heads, head_dim, device=device)
-    b_req_tokens_table = torch.arange(0, max_tokens, device=device, dtype=torch.int32).repeat(batch, 1)
+    # 构造每个请求的 kv tokens 分配的显存空间对应的显存块索引
+    b_req_tokens_table = torch.arange(0, max_tokens*batch, device=device, dtype=torch.int32).view(batch, max_tokens)
     b_seq_len = torch.full((batch,), max_tokens, device=device, dtype=torch.int32)
+    b_start_loc = torch.tensor([0, max_tokens, 2*max_tokens, 3*max_tokens], dtype=torch.int32, device="cuda") # batch = 4
     
     # 单次验证 flash_decoding 输出形状及数值（与标准 Attention 接近）
     flash_out = flash_decoding(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len, max_tokens)
-    standard_out = standard_attention_decode(q, k_cache, v_cache, qk_scale, b_seq_len)
+    standard_out = torch_attention_with_kvcache(q, k_cache, v_cache, b_start_loc, b_seq_len)
     print("Flash Decoding output shape:", flash_out.shape)
     print("Standard Attention output shape:", standard_out.shape)
     if torch.allclose(flash_out, standard_out, atol=1e-3, rtol=1e-3):
