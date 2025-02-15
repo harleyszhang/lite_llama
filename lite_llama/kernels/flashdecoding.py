@@ -314,8 +314,8 @@ def standard_attention_decode(q, k, v, qk_scale, b_seq_len):
     mask = idxs < b_seq_len.unsqueeze(1)
     
     # 截取 k, v 前 L 个元素，然后扩展到 batch 维度（假设所有样本共享同一个 kv cache）
-    k = k[:L].unsqueeze(0).expand(batch, -1, -1, -1)  # [batch, L, num_heads, head_dim]
-    v = v[:L].unsqueeze(0).expand(batch, -1, -1, -1)
+    k = k.view(batch, L, num_heads, head_dim)  # [batch, L, num_heads, head_dim]
+    v = v.view(batch, L, num_heads, head_dim)
     # 调整维度: 使得 k, v 形状为 [batch, num_heads, L, head_dim]
     k = k.permute(0, 2, 1, 3)
     v = v.permute(0, 2, 1, 3)
@@ -351,15 +351,15 @@ def plot_performance_comparison(token_sizes, warmup_iterations=10, test_iteratio
     num_heads = 32
     head_dim = 64
     qk_scale = 1.0 / (head_dim ** 0.5)
-    q = torch.randn(batch, num_heads, head_dim, device=device)
+    q = torch.randn(batch*1, num_heads, head_dim, device=device)
 
     flash_times = []
     standard_times = []
 
     for tokens in token_sizes:
         print(f"\n测试 token size: {tokens}")
-        k_cache = torch.randn(tokens, num_heads, head_dim, device=device)
-        v_cache = torch.randn(tokens, num_heads, head_dim, device=device)
+        k_cache = torch.randn(batch * tokens, num_heads, head_dim, device=device)
+        v_cache = torch.randn(batch * tokens, num_heads, head_dim, device=device)
         b_req_tokens_table = torch.arange(0, tokens, device=device, dtype=torch.int32).repeat(batch, 1)
         b_seq_len = torch.full((batch,), tokens, device=device, dtype=torch.int32)
         max_actual_seq_len = tokens
@@ -416,15 +416,16 @@ def main():
     
     # 测试参数
     batch = 4
-    num_heads = 8
+    num_heads = 32
     head_dim = 64
-    max_tokens = 2048
+    max_tokens = 2048 # 每个请求序列的最大 tokens 长度
     qk_scale = 1.0 / (head_dim ** 0.5)
 
     # 构造测试数据：固定 q，k_cache, v_cache, b_req_tokens_table, b_seq_len
-    q = torch.randn(batch, num_heads, head_dim, device=device)
-    k_cache = torch.randn(max_tokens, num_heads, head_dim, device=device)
-    v_cache = torch.randn(max_tokens, num_heads, head_dim, device=device)
+    # 输入张量 q/k/v 的形状为 [batch * seq_len, num_heads, head_dim], 形状是三维的，为了兼容 flash_decoding 内核
+    q = torch.randn(batch * 1, num_heads, head_dim, device=device)
+    k_cache = torch.randn(batch * max_tokens, num_heads, head_dim, device=device)
+    v_cache = torch.randn(batch * max_tokens, num_heads, head_dim, device=device)
     b_req_tokens_table = torch.arange(0, max_tokens, device=device, dtype=torch.int32).repeat(batch, 1)
     b_seq_len = torch.full((batch,), max_tokens, device=device, dtype=torch.int32)
     
