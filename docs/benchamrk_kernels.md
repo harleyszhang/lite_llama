@@ -37,6 +37,18 @@ flashattention benchmark test result:
 ![flashattention benchmark test](../images/benchamrk_result/fused-attention-batch8-head64-d64-fwd-causal=False.png)
 ![flashattention benchmark test](../images/benchamrk_result/fused-attention-batch4-head32-d64-fwd-causal=False.png)
 
+### flashattentionv2_no_pad
+
+flashattentionv2_no_pad benchmark test result:
+
+![flashattention benchmark test](../images/flashattention_nopad_benchamrk.png)
+
+### flashdecoding
+
+flashdecoding benchmark test result:
+
+![flashattention benchmark test](../images/flashdecoding_benchamrk.png)
+
 ## 二 内核单元测试结果
 
 ### triton 内核单元测试
