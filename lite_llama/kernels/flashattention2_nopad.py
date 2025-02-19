@@ -24,10 +24,10 @@ def keep_tma(conf):
     return True
 
 # key 参数列表(['B_Seqlen', 'HEAD_DIM'])的值会直接影响最佳配置的选择，因为不同的输入尺寸或问题规模可能需要不同的内核调度策略。
-@triton.autotune(
-    configs=list(filter(keep_tma, configs_tma)), 
-    key=['B_Seqlen', 'HEAD_DIM']
-)
+# @triton.autotune(
+#     configs=list(filter(keep_tma, configs_tma)), 
+#     key=['B_Seqlen', 'HEAD_DIM']
+# )
 @triton.jit
 def flash_attention2_nopad_kernel(
     Q, K, V, O,
@@ -177,10 +177,10 @@ def flash_attention2_no_pad(
         v.stride(0), v.stride(1), v.stride(2),
         output.stride(0), output.stride(1), output.stride(2),
         HEAD_DIM=HEAD_DIM,
-        # BLOCK_M_SIZE=BLOCK_SIZE, # 使用或者关闭 autotune 针对不同机器和上下文长度自动优化内核配置
-        # BLOCK_N_SIZE=BLOCK_SIZE,
-        # num_warps=num_warps,
-        # num_stages=num_stages,
+        BLOCK_M_SIZE=BLOCK_SIZE, # 使用或者关闭 autotune 针对不同机器和上下文长度自动优化内核配置
+        BLOCK_N_SIZE=BLOCK_SIZE,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return output
 

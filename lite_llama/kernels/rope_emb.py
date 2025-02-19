@@ -103,6 +103,9 @@ def _triton_rope(
     tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
 
 def rope_forward(q, k, cos, sin):
+    """
+    输入 q、k 参数是 4 维张量
+    """
     # transpose it back to the physical shape because Triton looks at the physical storage
     # note: q and k are incontiguous before the transformation and will become contiguous after transpose
     # q = q.transpose(1, 2)
@@ -225,14 +228,19 @@ def rope_emb_forward(q, k, cos, sin, batch_size, seq_len):
     k: (batch_size * seq_len, n_k_heads, head_dim)
     cos, sin: (batch_size, seq_len, head_dim)
     """
-    N, n_qh, hd = q.shape
+    N, n_qh, HEAD_DIM = q.shape
     _, n_kh, _ = k.shape
     assert N == batch_size * seq_len
 
-    pad_hd = triton.next_power_of_2(hd)
+    pad_hd = triton.next_power_of_2(HEAD_DIM)
     pad_n_qh = triton.next_power_of_2(n_qh)
     pad_n_kh = triton.next_power_of_2(n_kh)
     BLOCK_SIZE = max(pad_n_qh, pad_n_kh)
+
+    if HEAD_DIM >= 128:
+        num_warps = 8
+    else:
+        num_warps = 4
 
     q = q.contiguous()
     k = k.contiguous()
@@ -254,11 +262,13 @@ def rope_emb_forward(q, k, cos, sin, batch_size, seq_len):
         batch_size,
         n_qh,
         n_kh,
-        hd,
+        HEAD_DIM,
         pad_n_qh,
         pad_n_kh,
         pad_hd,
         BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=num_warps,
+        num_stages=1,
     )
     return q, k
 
@@ -283,6 +293,7 @@ def torch_rotary_emb(x, cos, sin):
     return out
 
 if __name__ == "__main__":
+    # 单元测试有 bug 等待修复
     torch.manual_seed(0)
     batch_size = 248
     seq_len = 100
