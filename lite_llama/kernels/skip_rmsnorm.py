@@ -5,7 +5,7 @@ modified from https://github.com/FlagOpen/FlagGems/blob/master/src/flag_gems/fus
 import torch
 import triton
 import triton.language as tl
-
+from .utils import calculate_settings
 
 @triton.jit
 def skip_rms_norm_kernel_no_view(
@@ -157,8 +157,8 @@ def skip_rmsnorm(X, residual, weight, eps=1e-5):
     orig_shape = X.shape
     X = X.view(-1, orig_shape[-1])
 
-    M, N = X.shape
-    BLOCK_SIZE = triton.next_power_of_2(N)
+    M, N = X.shape # n_rows, n_cols
+    BLOCK_SIZE, num_warps = calculate_settings(N)
     Y = torch.empty_like(X)
 
     if residual is not None:
@@ -166,19 +166,24 @@ def skip_rmsnorm(X, residual, weight, eps=1e-5):
         skip_rms_norm_kernel[M,](
             Y, X, residual, weight, 
             N, 1, N, 1, N, 1, N, 
-            eps, BLOCK_SIZE=BLOCK_SIZE
+            eps, 
+            BLOCK_SIZE=BLOCK_SIZE,
+            num_warps=num_warps,
         )
         return Y.view(orig_shape), residual.view(orig_shape)
     else:
         rms_norm_kernel[M,](
             Y, X, weight, 
             N, 1, N, 1, N, 
-            eps, BLOCK_SIZE=BLOCK_SIZE
+            eps, 
+            BLOCK_SIZE=BLOCK_SIZE,
+            num_warps=num_warps,
         )
         return Y.view(orig_shape), X.view(orig_shape)
 
 
 import pytest
+import time
 
 def python_rmsnorm(x, w, eps=1e-5):
     # x: (B, N)
@@ -215,7 +220,6 @@ def test_skip_rmsnorm(batch_size, N, hidden_size):
     assert torch.allclose(y_ref, y_triton, atol=1e-3, rtol=1e-3), "Skip RMSNorm results do not match"
     assert torch.allclose(py_residual, triton_residual, atol=1e-3, rtol=1e-3), "Skip RMSNorm residual results do not match"
 
-import time
 
 def benchmark_skip_rmsnorm(batch_size, N, iters=1000):
     x = torch.randn(batch_size, N, device='cuda', dtype=torch.float16)

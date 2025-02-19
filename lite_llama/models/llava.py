@@ -8,26 +8,25 @@ from safetensors import safe_open
 from transformers import AutoModel, LlavaConfig
 from .llama import LlamaModel
 from .model_config import LlamaConfig
-from ..kernels import ACT2FN
+from ..kernels import gelu
 from .utils import merge_input_ids_with_image_features, merge_multimodal_embeddings
 
 
 class LlavaMultiModalProjector(nn.Module):
     def __init__(self, vision_hidden_size: int, text_hidden_size: int,
-                 projector_hidden_act: str):
+                 projector_hidden_act: str="gelu"):
         super().__init__()
 
         self.linear_1 = nn.Linear(vision_hidden_size,
                                   text_hidden_size,
                                   bias=True)
-        self.act = ACT2FN[projector_hidden_act]
         self.linear_2 = nn.Linear(text_hidden_size,
                                   text_hidden_size,
                                   bias=True)
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.linear_1(image_features)
-        hidden_states = self.act(hidden_states)
+        hidden_states = gelu(hidden_states) # GELU 激活函数
         hidden_states = self.linear_2(hidden_states)
         return hidden_states
 

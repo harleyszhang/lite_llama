@@ -1,12 +1,33 @@
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 # https://github.com/ELS-RD/kernl/blob/main/src/kernl/implementations/attention.py#L438
+# https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html
 
 import torch,math
 import triton
 import triton.language as tl
 from torch.cuda.amp import custom_fwd
 
-# TODO: integrating rope with flash-attn
+
+configs_tma = [
+    triton.Config({'BLOCK_M_SIZE': BM, 'BLOCK_N_SIZE': BN}, num_stages=stages, num_warps=warps) \
+    for BM in [64, 128]\
+    for BN in [32, 64, 128]\
+    for warps in [4, 8, 16]\
+    for stages in [2, 3, 4, 6]\
+]
+
+def keep_tma(conf):
+    BLOCK_M_SIZE = conf.kwargs["BLOCK_M_SIZE"]
+    BLOCK_N_SIZE = conf.kwargs["BLOCK_N_SIZE"]
+    if (torch.cuda.get_device_capability()[0] == 9 and BLOCK_M_SIZE * BLOCK_N_SIZE < 128 * 128 and conf.num_warps == 8):
+        return False
+    return True
+
+# key 参数列表(['B_Seqlen', 'HEAD_DIM'])的值会直接影响最佳配置的选择，因为不同的输入尺寸或问题规模可能需要不同的内核调度策略。
+@triton.autotune(
+    configs=list(filter(keep_tma, configs_tma)), 
+    key=['B_Seqlen', 'HEAD_DIM']
+)
 @triton.jit
 def flash_attention2_nopad_kernel(
     Q, K, V, O,
@@ -16,7 +37,7 @@ def flash_attention2_nopad_kernel(
     stride_k_bs, stride_k_heads, stride_k_dim,  # K 的 strides
     stride_v_bs, stride_v_heads, stride_v_dim,  # V 的 strides
     stride_o_bs, stride_o_heads, stride_o_dim,
-    BLOCK_DHEAD_SIZE: tl.constexpr, # head_dim dimension
+    HEAD_DIM: tl.constexpr, # head_dim dimension
     BLOCK_M_SIZE: tl.constexpr, # BLOCK size of m_size dimension，即 Q 矩阵行数分成了m_size // BLOCK_M_SIZE 块，块大小是 BLOCK_M_SIZE
     BLOCK_N_SIZE: tl.constexpr, # n_size dimension    
 ):
@@ -37,7 +58,7 @@ def flash_attention2_nopad_kernel(
     block_start_loc = block_m_idx * BLOCK_M_SIZE # 计算当前 block 的起始和结束索引
 
     offs_n = tl.arange(0, BLOCK_N_SIZE) # head_dim 维度偏移
-    offs_d = tl.arange(0, BLOCK_DHEAD_SIZE)
+    offs_d = tl.arange(0, HEAD_DIM)
     offs_m = block_start_loc + tl.arange(0, BLOCK_M_SIZE)
 
     # Compute offsets for the first block on matrix Q K V Output
@@ -57,7 +78,7 @@ def flash_attention2_nopad_kernel(
     # 初始化用于计算 softmax 归一化项的 m 和 d, 意义见 online-softmax, 这里
     m_i = tl.zeros((BLOCK_M_SIZE,), dtype=tl.float32) - float("inf")
     d_i = tl.zeros((BLOCK_M_SIZE,), dtype=tl.float32)
-    acc = tl.zeros((BLOCK_M_SIZE, BLOCK_DHEAD_SIZE), dtype=tl.float32)
+    acc = tl.zeros((BLOCK_M_SIZE, HEAD_DIM), dtype=tl.float32)
         
     block_mask = tl.where(block_start_loc < cur_seq_len, 1, 0)
     block_end_loc = tl.minimum(block_start_loc + BLOCK_M_SIZE, cur_seq_len)
@@ -110,6 +131,9 @@ def flash_attention2_nopad_kernel(
     out_ptrs = O + off_o
     tl.store(out_ptrs, acc, mask=offs_m[:, None] < cur_seq_len)
 
+# --------------------------------------
+# Flashattention NoPad 实现（Triton 内核）
+# --------------------------------------
 @torch.no_grad()
 @custom_fwd(cast_inputs=torch.float16)
 def flash_attention2_no_pad(
@@ -127,15 +151,17 @@ def flash_attention2_no_pad(
         k: Key tensor,  shape: [bs*n_size, n_heads, head_dim]. 
         v: Value tensor, shape is consistent with k. 
     """
-    BLOCK_SIZE = 64 # For Ampere Architecture, 3090ti
     output = torch.empty_like(q)
     batchs = b_seq_len.shape[0]
     n_heads, HEAD_DIM = q.shape[1], q.shape[2]
 
+    BLOCK_SIZE = 64 # For Ampere Architecture, 3090ti, set 128
+    num_warps = 4 if HEAD_DIM <= 64 else 8
+    num_stages = 1
+
     num_kv_groups = q.shape[1] // k.shape[1] # num_q_heads // num_k_heads
     grid = (triton.cdiv(max_seq_len, BLOCK_SIZE), batchs * n_heads, 1)
-    num_warps = 2 if HEAD_DIM <= 64 else 4
-    num_stages = 1
+
     flash_attention2_nopad_kernel[grid](
         q,
         k,
@@ -150,16 +176,16 @@ def flash_attention2_no_pad(
         k.stride(0), k.stride(1), k.stride(2),
         v.stride(0), v.stride(1), v.stride(2),
         output.stride(0), output.stride(1), output.stride(2),
-        BLOCK_DHEAD_SIZE=HEAD_DIM,
-        BLOCK_M_SIZE=BLOCK_SIZE,
-        BLOCK_N_SIZE=BLOCK_SIZE,
-        num_warps=num_warps,
-        num_stages=num_stages,
+        HEAD_DIM=HEAD_DIM,
+        # BLOCK_M_SIZE=BLOCK_SIZE, # 使用或者关闭 autotune 针对不同机器和上下文长度自动优化内核配置
+        # BLOCK_N_SIZE=BLOCK_SIZE,
+        # num_warps=num_warps,
+        # num_stages=num_stages,
     )
     return output
 
 # --------------------------------------
-# 标准 Attention Decode 实现（纯 PyTorch版）
+# 标准 Attention Prefill 实现（纯 PyTorch版）
 # --------------------------------------
 def _naive_attention(q, k ,v):
     import math

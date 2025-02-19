@@ -150,7 +150,7 @@ def flash_decode_stage1(
 		BLOCK_SEQ = PARTITION_SIZE,
 		BLOCK_N = BLOCK_N_SIZE,
 		BLOCK_DMODEL = head_dim,
-		num_warps = 2,
+		num_warps = 1,
 		num_stages = 2,
 	)
 
@@ -223,7 +223,7 @@ def flash_decode_stage2(
 	b_seq_len,  	        # kv cache 在 seq_len 维度的长度向量
     PARTITION_SIZE
 ):	
-	batchs, num_heads, head_dim = mid_o.shape[0], mid_o.shape[1], mid_o.shape[-1]
+	batchs, num_heads, HEAD_DIM = mid_o.shape[0], mid_o.shape[1], mid_o.shape[-1]
 	grid = (batchs, num_heads)
 	
 	_flash_decoding_stage2_kernel[grid](
@@ -234,7 +234,7 @@ def flash_decode_stage2(
 		*mid_o_logexpsum.stride(),
 		*atten_output.stride(),
 		b_seq_len,   # TODO 支持 PagedAttention 和连续批处理
-		BLOCK_DMODEL = head_dim,
+		BLOCK_DMODEL = HEAD_DIM,
 		BLOCK_SEQ = PARTITION_SIZE, # type: ignore	
 		num_warps = 4,
 		num_stages = 2,
@@ -250,7 +250,7 @@ def flash_decoding(
 ):
 	# q.view(-1, num_heads, head_dim)
 	assert q.shape[-1] == k_cache.shape[-1] == v_cache.shape[-1]
-	PARTITION_SIZE = 128
+	PARTITION_SIZE = 128  # 3090ti 显卡以上可设置为 256
 	batchs, num_heads, head_dim = q.shape # decode 阶段 q 的 seq_len = 1, 
 
 	# 最大可用分区数量计算
@@ -262,7 +262,10 @@ def flash_decoding(
 	mid_o_logexpsum = torch.empty((batchs, num_heads, max_num_partitions), dtype=torch.float32, device=q.device)
 
 	# decode stage 1: attention in partitions
-	flash_decode_stage1(q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len, max_actual_seq_len, mid_o, mid_o_logexpsum, PARTITION_SIZE)
+	flash_decode_stage1(q, k_cache, v_cache, qk_scale, 
+                        b_req_tokens_table, b_seq_len, max_actual_seq_len, 
+                        mid_o, mid_o_logexpsum, PARTITION_SIZE
+                    )
 	
 	# decode stage 2: reduction among partitions
 	atten_output = torch.empty_like(q)
