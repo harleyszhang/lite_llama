@@ -1,15 +1,10 @@
 import os, sys, torch
-from transformers import LlavaForConditionalGeneration, AutoConfig, AutoModelForCausalLM, \
-                        LlavaNextConfig, LlavaNextForConditionalGeneration
-from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-
+from transformers import LlavaForConditionalGeneration, AutoConfig, AutoModelForCausalLM, LlavaConfig
 # 获取 lite_llama 目录的绝对路径并添加到 sys.path 中
-from lite_llama.executor.weight_convert import convert_llavallama_hf_to_litellama, convert_llama_hf_to_litellama, convert_qwen2_hf_to_litellama
-from lite_llama.models.llava import LlavaLlama
-from lite_llama.models.model_config import LlamaConfig
-from transformers import LlavaConfig
+from lite_llama.executor.weight_convert import convert_llavallama_hf_to_litellama, \
+                                        convert_llama_hf_to_litellama, convert_qwen2_hf_to_litellama
 
-checkpoints_dir = "/gemini/code/llm_weights/Qwen/Qwen2.5-3B-Instruct"
+checkpoints_dir = "/gemini/code/my_weight/Llama-3.2-1B-Instruct-hf"
 
 if "llava" in checkpoints_dir.lower():
     model = LlavaForConditionalGeneration.from_pretrained( # LlavaForConditionalGeneration
@@ -48,7 +43,12 @@ elif "llava" in checkpoints_dir.lower():
     convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, num_layers)
 else:
     print("Error! Unsupported model type!")
-    
+
+# from transformers import LlavaNextConfig, LlavaNextForConditionalGeneration
+# from accelerate import init_empty_weights, load_checkpoint_and_dispatch
+# from lite_llama.models.llava import LlavaLlama
+# from lite_llama.models.model_config import LlamaConfig
+
 # with init_empty_weights():
 #     llava_config = LlavaConfig.from_pretrained(checkpoints_dir)
 #     text_config = llava_config.text_config # TODO: 将 text_config 转换成 LlamaConfig 类型

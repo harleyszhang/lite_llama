@@ -150,7 +150,7 @@ def flash_decode_stage1(
 		BLOCK_SEQ = PARTITION_SIZE,
 		BLOCK_N = BLOCK_N_SIZE,
 		BLOCK_DMODEL = head_dim,
-		num_warps = 1,
+		num_warps = 1, 
 		num_stages = 2,
 	)
 
