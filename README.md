@@ -110,7 +110,7 @@ Transformers per token latency: 5.436221 ms/token
 ```bash
 apt update
 apt install imagemagick
-conda create --name lite_llama python >= 3.10
+conda create --name lite_llama python >= 3.12
 conda activate lite_llama
 git clone https://github.com/harleyszhang/lite_llama.git
 cd lite_llama/
