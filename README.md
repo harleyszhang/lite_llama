@@ -29,6 +29,20 @@ torch                          2.1.2
 triton                         2.1.0
 triton-nightly                 3.0.0.post20240716052845
 ```
+rocm 版本以及 torch、triton 版本：
+```bash
+# rocminfo | grep -i version
+ROCk module version 6.10.5 is loaded
+Runtime Version:         1.14
+Runtime Ext Version:     1.6
+# Python 3.11.8 包版本:
+# pip list | grep torch
+pytorch-triton-rocm 3.2.0
+torch               2.6.0+rocm6.2.4
+torchaudio          2.6.0+rocm6.2.4
+torchvision         0.21.0+rocm6.2.4
+
+```
 
 ## 回答准确性验证
 
@@ -104,6 +118,25 @@ pip install -r requirement.txt
 python test_weight_convert.py # 进行模型权重转换。
 python cli.py # 已经下载好模型并放在指定目录的基础上运行
 ```
+
+推荐 ROCm 版本 5.7 及以上。
+
+```bash
+pip install matplotlib  
+pip install pandas
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2.4
+
+apt update
+apt install imagemagick
+conda create --name lite_llama python >= 3.10
+conda activate lite_llama
+git clone https://github.com/harleyszhang/lite_llama.git
+cd lite_llama/
+pip install -r requirement.txt
+python test_weight_convert.py # 进行模型权重转换。
+python cli.py # 已经下载好模型并放在指定目录的基础上运行
+```
+
 
 `cli.py` 程序运行成功后，终端显示界面如下所示，在终端中输入你的问题即可。
 
