@@ -1,10 +1,6 @@
-# Multilanguage README Pattern
+# lite_llama
 [![en](https://img.shields.io/badge/lang-en-red.svg)](https://github.com/harleyszhang/lite_llama/blob/main/README.md)
 [![zh](https://img.shields.io/badge/lang-zh-yellow.svg)](https://github.com/harleyszhang/lite_llama/blob/main/README.zh.md)
-
-
-
-# lite_llama
 
 A light llama-like llm inference framework based on the triton kernel.
 
