@@ -16,7 +16,11 @@ A light llama-like llm inference framework based on the triton kernel.
 
 ## benchmark Performance Test
 
+<<<<<<< HEAD
 ### Llama-3.2-1B Model Performance Comparison Test 
+=======
+[趋动云 GPU 开发环境](https://talent-holding.alibaba.com/campus-position/59900002212)，cuda 版本以及 torch、triton 版本：
+>>>>>>> 90bc1b82f968c6106fe3e1c0195d6461c67c6b60
 
 Virtaicloud environment for the `B1.small` equivalent to `1/4` of `3090`. Running the performance test against `python benchmark.py`, lite_llama runs at up to `4x` times the speed of transformers. `batch_size = 16` for the prompter, and `max_gen_len = 1900` for the benchmark performance test results:
 
