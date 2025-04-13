@@ -60,7 +60,7 @@ Recommended cuda version 12.0 and above. Download [llama3.2-1B-Instruct Model](h
 
 Lite Llama requires the following dependencies:
 
-[virtaicloud GPU development environment ](https://platform.virtaicloud.com/gemini_web/auth/register?inviteCode=925075646a652bf5be29c77f25e5d5ed)：
+[virtaicloud GPU development environment ](https://talent-holding.alibaba.com/campus-position/59900002212)：
 
 For cuda torch, and triton version
 ```bash
