@@ -1,4 +1,4 @@
-import torch, json, time, logging
+import torch, json, time
 from pathlib import Path
 import torch.nn as nn
 
@@ -15,8 +15,10 @@ from .weight_convert import convert_llama_torch_to_litellama, \
                             convert_llavallama_hf_to_litellama, \
                             convert_qwen2_hf_to_litellama
 from ..kernels import update_kv_index
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-logger = logging.getLogger(__name__)
+from utils.logger import log
 
     
 def get_conversion_func(model_type: str):
@@ -85,7 +87,7 @@ class ModelExecutor:
         model.half()
         for param in model.parameters():
             assert param.dtype == torch.float16, "Model parameters are not in FP16"
-        logger.info("Converted model to half precision (FP16)")
+        log.info("Converted model to half precision (FP16)")
 
         return model
     
@@ -103,27 +105,27 @@ class ModelExecutor:
             checkpoints = sorted(Path(checkpoints_dir).glob("*.pth"))
             assert len(checkpoints) > 0, f"no checkpoint files found in {checkpoints_dir}"
             ckpt_path = str(checkpoints[0])
-            logger.debug(" type(ckpt_path) ", type(ckpt_path))
-            logger.info(f' Loading checkpoint "{ckpt_path}"')
+            log.debug(" type(ckpt_path) ", type(ckpt_path))
+            log.info(f' Loading checkpoint "{ckpt_path}"')
             # 使用 torch.load 加载权重文件。torch.load 可以根据需要将权重加载到指定的设备上
             state_dict = torch.load(ckpt_path, mmap=True, weights_only=True, map_location=device)
         else:
             conversion_func = get_conversion_func(model_config.model_type)
             if conversion_func is None:
-                logger.error(f" 不支持的模型类型: {model_config.model_type}")
+                log.error(f" Unsupported model type: {model_config.model_type}")
                 raise ValueError(f"Unsupported model type: {model_config.model_type}")
             state_dict = conversion_func(checkpoints_dir, hf_sd, model_config)
-            logger.info(f" 权重名称转换完成，耗时 {time.time() - start_time:.2f} 秒。")
+            log.info(f" Weight conversion completed. Time elapsed: {time.time() - start_time:.2f} sec")
             
         model.load_state_dict(state_dict, strict=True, assign=True) # 将加载的 state_dict 应用到模型实例中。
         model.eval()
-        logger.info(f" Loaded state dict in {time.time() - start_time:.2f}s")
+        log.info(f" Loaded state dict in {time.time() - start_time:.2f}s")
 
         # 将模型转换为半精度, 并验证转换
         model.half().to(device)
         for param in model.parameters():
             assert param.dtype == torch.float16, "Model parameters are not in FP16"
-        logger.info(" Converted model to half precision (FP16)")
+        log.info(" Converted model to half precision (FP16)")
         
         return model
     
@@ -140,7 +142,7 @@ class ModelExecutor:
             nn.Module: 初始化后的模型。
         """
         model_type = model_config.model_type.lower()
-        logger.info(f" 初始化模型类型 '{model_type}' 并移动到设备 '{device}'...")
+        log.info(f"Initializing model of type '{model_type}' and moving it to device '{device}'...")
         if model_type == "llama":
             from ..models.llama import LlamaModel
             model = LlamaModel(model_config)
@@ -153,7 +155,7 @@ class ModelExecutor:
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
 
-        logger.info(f" 模型已初始化并移动到设备 '{device}'。")
+        log.info(f" The model has been initialized and moved to the device. '{device}'。")
         return model
 
     @staticmethod
@@ -165,7 +167,7 @@ class ModelExecutor:
             with open(params_path, "r") as f:
                 params = json.load(f)
         except FileNotFoundError:
-            logger.error(f"配置文件 {params_path} 不存在，请检查路径是否正确。")
+            log.error(f"Configuration file '{params_path}' does not exist. Please check if the path is correct.")
             raise
 
         if params["model_type"]== "llama":
