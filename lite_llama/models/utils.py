@@ -272,7 +272,7 @@ def merge_input_ids_with_image_features(
     attention_mask = (input_ids != pad_token_id).long()
 
     # 检查每个样本的最后一个 token 是否为填充 token
-    left_padding = not torch.sum(input_ids[:, -1] == pad_token_id).bool().any() # True
+    left_padding = torch.all(input_ids[:, -1] != pad_token_id) # True
 
     # 创建图像占位符 token 的掩码，获取特殊图像 token 的位置
     """
@@ -505,3 +505,4 @@ def unit_test_merge_input_ids_with_image_features():
 
 if __name__ == "__main__":
     unit_test_merge_input_ids_with_image_features()
+
