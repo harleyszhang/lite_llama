@@ -61,7 +61,8 @@ def main(
     # Start resource tracking
     ram_before = process.memory_info().rss
 
-    vram_before = get_gpu_memory(detect_device())
+    gpu_type = detect_device()
+    vram_before = get_gpu_memory(gpu_type)
     # Init LLM generator
     start = time.perf_counter()
 

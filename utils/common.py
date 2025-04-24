@@ -19,7 +19,7 @@ def detect_device():
         return "nvidia"
     except:
         try:
-            subprocess.check_output(['rocminfo'], stderr=subprocess.DEVNULL)
+            subprocess.check_output(['rocm-smi'], stderr=subprocess.DEVNULL)
             return "amd"
         except:
             return "cpu"
@@ -36,13 +36,13 @@ def get_gpu_memory(gpu_type="amd", device_id="0"):
     try:
         if gpu_type == "amd":
             result = subprocess.run(
-                ["rocm-smi", "--showmeminfo", "vram", "-d", device_id],
+                ["rocm-smi", "--showmeminfo", "vram", device_id],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
             )
             for line in result.stdout.splitlines():
-                if "Total Used VRAM" in line:
+                if "VRAM Total Used Memory" in line:
                     used = line.split(":")[-1].strip().split()[0]
-                    return float(used) / 1024  # Convert MiB to GiB
+                    return float(used) / (10 ** 9) # Convert MiB to GiB
         elif gpu_type == "nvidia":
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,nounits,noheader", "-i", device_id],
@@ -52,7 +52,8 @@ def get_gpu_memory(gpu_type="amd", device_id="0"):
         elif gpu_type == "cpu":
             return None
     except Exception as e:
-        print(f"[Warning] Unable to fetch GPU memory: {e}")
+        from utils.logger import log
+        log.warning(f"Unable to fetch GPU memory: {e}")
         return None
 
 def count_tokens(texts: List[str], tokenizer) -> int:
