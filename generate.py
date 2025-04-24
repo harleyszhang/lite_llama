@@ -63,7 +63,7 @@ def main(
 
     vram_before = get_gpu_memory(detect_device())
     # Init LLM generator
-    start = time.time()
+    start = time.perf_counter()
 
     generator = GenerateStreamText(
         checkpoints_dir=checkpoint_path,
@@ -74,7 +74,6 @@ def main(
         compiled_model=compiled_model,
         triton_weight=triton_weight,
         device=device,
-        if_latency=True
     )
 
     model_prompter.insert_prompt(prompt)
@@ -86,22 +85,19 @@ def main(
         top_p=top_p,
         max_gen_len=max_gen_len,
     )
-    end = time.time()
+    end = time.perf_counter()
 
     completion = ''  # Initialize to generate the result
     # NOTE: After creating a generator, it can be iterated through a for loop
-    total_time = []
     text_msg = ""
     for batch_completions in stream:
         new_text = batch_completions[0]['generation'][len(completion):]
         completion = batch_completions[0]['generation']
-        total_time.append(batch_completions[0]['latency'][0])
         print(new_text, end='', flush=True)
         text_msg +=new_text
 
     print("\n\n==================================\n")
-    print(end - start, len(total_time), count_tokens(text_msg, generator.tokenizer))
-    print(f"Time for inference: {total_time:.2f} sec, {count_tokens(text_msg, generator.tokenizer)/(end - start):.2f} tokens/sec")
+    print(f"Time for inference: {(end - start):.2f} sec, {count_tokens(text_msg, generator.tokenizer)/(end - start):.2f} tokens/sec")
 
     # Report resource usage
     report_resource_usage(ram_before, vram_before, gpu_type)

@@ -1,13 +1,15 @@
 from typing import Optional
-import torch
+import torch, logging
 from typing import List, Optional, Tuple, TypedDict, Generator
 from .executor.model_executor import ModelExecutor
 from .utils.file_interface import get_model_name_from_path
 from .kernels.softmax_split import softmax_split
 
 from transformers import AutoTokenizer
-import time
-from utils.logger import log
+
+# 设置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class CompletionPrediction(TypedDict, total=False):
@@ -63,8 +65,6 @@ class GenerateStreamText:
                  triton_weight=True,
                  compiled_model=False,
                  device="cuda",
-                 if_latency=False,
-
                  ):
         self.checkpoints_dir = checkpoints_dir
 
@@ -80,7 +80,6 @@ class GenerateStreamText:
         self.tokenizer = self.load_tokenizer(tokenizer_path)
         self.model_config = self.model_executor.model_config
         self.device = device
-        self.if_latency = if_latency
 
     def load_tokenizer(self, pretrained_model_name_or_path):
         model_name = get_model_name_from_path(pretrained_model_name_or_path)
@@ -144,9 +143,9 @@ class GenerateStreamText:
         prefill_select_index, _ = self.model_executor.prefill_alloc_kv_cache(max_prompt_len, actual_prompt_lens,
                                                                              b_req_idx)
         all_select_index_list.append(prefill_select_index)
+
         input_ids = tokens[:, : max_prompt_len]  # [batch_size, seq_len]
         for cur_pos in range(max_prompt_len, total_len):
-            start_time = time.time()
             input_ids = tokens[:, prev_pos: cur_pos]
             batch_size, seq_len = input_ids.shape
             position_ids = (
@@ -186,30 +185,17 @@ class GenerateStreamText:
             # NOTE: 使用 |= 按位或更新，表示如果某个序列已经到达 eos_token_id，则保持 True 状态，不会被后续重置为 False。
 
             # 为整个批次收集输出
-            if not self.if_latency:
-                batch_outputs = []
-            else:
-                batch_outputs = {"text": list(), "latency": list()}
-
+            batch_outputs = []
             for i in range(bsz):
                 start = last_yielded_pos[i]
                 end = cur_pos + 1
                 if start < end:
                     token = tokens[i, start:end].tolist()
                     text = self.tokenizer.decode(token, skip_special_tokens=True)  # 解码时跳过特殊标记。
-                    if not self.if_latency:
-                        batch_outputs.append(text)
-                    else:
-                        batch_outputs["text"].append(text)
-                        batch_outputs["latency"].append(time.time() - start_time)
-
+                    batch_outputs.append(text)
                     last_yielded_pos[i] = end
                 else:
-                    if not self.if_latency:
-
-                        batch_outputs.append('')  # 如果没有新生成的内容，添加空字符串
-                    else:
-                        batch_outputs["text"].append('')
+                    batch_outputs.append('')  # 如果没有新生成的内容，添加空字符串
 
             # 将整个批次的输出一次性 yield
             yield batch_outputs
@@ -242,19 +228,9 @@ class GenerateStreamText:
             echo=echo,
         )
 
-        if not self.if_latency:
-            # 初始化每个样本的生成结果
-            completions = [{'generation': '', 'tokens': []} for _ in prompts]
-        else:
-            completions = [{'generation': '', 'tokens': [], 'latency': []} for _ in prompts]
+        # 初始化每个样本的生成结果
+        completions = [{'generation': '', 'tokens': []} for _ in prompts]
         for batch_outputs in stream:
-            if not self.if_latency:
-                for i, text in enumerate(batch_outputs):
-                    completions[i]['generation'] += text
-                    yield completions.copy()
-
-            else:
-                completions[0]['generation'] += batch_outputs['text'][0]
-                completions[0]['latency'] = batch_outputs['latency']
-
-                yield completions.copy()
+            for i, text in enumerate(batch_outputs):
+                completions[i]['generation'] += text
+            yield completions.copy()
