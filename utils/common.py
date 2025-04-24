@@ -65,9 +65,13 @@ def count_tokens(texts: List[str], tokenizer) -> int:
 
 def get_model_type(checkpoint_path: str) -> str | None:
     from utils.logger import log
-    model_type = ["llama", "falcon", "mpt", "qwen2"]
+    model_type = ["llama", "falcon", "mpt", "qwen2", "llava"]
+
+    config_content = read_json(os.path.join(checkpoint_path, "config.json"))
     for m in model_type:
-        if m in checkpoint_path.lower():
+        if m in config_content["model_type"].lower():
+            if m == "llava":
+                return "llama"
             return m
     log.error(f"No model type found: {checkpoint_path}")
     return None
