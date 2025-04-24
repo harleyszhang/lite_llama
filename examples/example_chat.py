@@ -123,7 +123,6 @@ def cli_generate(
 		temperature=temperature,
 		top_p=top_p,
 		max_gen_len=max_gen_len,
-        device = device,
 	)
 
 	for prompt, result in zip(prompts, results):

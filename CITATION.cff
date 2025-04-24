@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+message: "If you use this software, you can cite it as shown below."
+title: "Lite Llama"
+abstract: "A light llama-like llm inference framework based on the triton kernel."
+date-released: 2023-04-23
+authors:
+  - name: "The Litellama AI team"
+url: "https://github.com/harleyszhang/lite_llama.git"

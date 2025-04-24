@@ -105,27 +105,27 @@ class ModelExecutor:
             checkpoints = sorted(Path(checkpoints_dir).glob("*.pth"))
             assert len(checkpoints) > 0, f"no checkpoint files found in {checkpoints_dir}"
             ckpt_path = str(checkpoints[0])
-            log.debug(" type(ckpt_path) ", type(ckpt_path))
-            log.info(f' Loading checkpoint "{ckpt_path}"')
+            log.debug("Type(ckpt_path) ", type(ckpt_path))
+            log.info(f'Loading checkpoint "{ckpt_path}"')
             # 使用 torch.load 加载权重文件。torch.load 可以根据需要将权重加载到指定的设备上
             state_dict = torch.load(ckpt_path, mmap=True, weights_only=True, map_location=device)
         else:
             conversion_func = get_conversion_func(model_config.model_type)
             if conversion_func is None:
-                log.error(f" Unsupported model type: {model_config.model_type}")
+                log.error(f"Unsupported model type: {model_config.model_type}")
                 raise ValueError(f"Unsupported model type: {model_config.model_type}")
             state_dict = conversion_func(checkpoints_dir, hf_sd, model_config)
-            log.info(f" Weight conversion completed. Time elapsed: {time.time() - start_time:.2f} sec")
+            log.info(f"Weight conversion completed. Time elapsed: {time.time() - start_time:.2f} sec")
             
         model.load_state_dict(state_dict, strict=True, assign=True) # 将加载的 state_dict 应用到模型实例中。
         model.eval()
-        log.info(f" Loaded state dict in {time.time() - start_time:.2f}s")
+        log.info(f"Loaded state dict in {time.time() - start_time:.2f}s")
 
         # 将模型转换为半精度, 并验证转换
         model.half().to(device)
         for param in model.parameters():
             assert param.dtype == torch.float16, "Model parameters are not in FP16"
-        log.info(" Converted model to half precision (FP16)")
+        log.info("Converted model to half precision (FP16)")
         
         return model
     
@@ -155,7 +155,7 @@ class ModelExecutor:
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
 
-        log.info(f" The model has been initialized and moved to the device. '{device}'。")
+        log.info(f"The model has been initialized and moved to the device. '{device}'")
         return model
 
     @staticmethod
