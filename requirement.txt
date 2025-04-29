@@ -13,3 +13,4 @@ rich==13.7.1
 termvisage==0.2.0
 accelerate==1.6.0
 sentence-transformers==4.0.2
+jsonargparse==4.38.0

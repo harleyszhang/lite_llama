@@ -1,6 +1,6 @@
 from typing import Optional
 import torch
-import logging
+from utils.logger import log
 from typing import List, Literal, Optional, Tuple, TypedDict
 import torch.nn.functional as F 
 from transformers import AutoTokenizer
@@ -8,8 +8,6 @@ from transformers import AutoTokenizer
 from .executor.model_executor import ModelExecutor
 from .utils.file_interface import get_model_name_from_path
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 Role = Literal["system", "user", "assistant"]
 
@@ -187,8 +185,8 @@ class GenerateText:
 
         elapsed_time_sec = start_event.elapsed_time(end_event) / 1000.0
         tokens_per_second = token_count / elapsed_time_sec if elapsed_time_sec > 0 else float('inf')
-        logger.info(f"Batch inference time, no decode: {elapsed_time_sec * 1000:.4f} ms")
-        logger.info(f"Tokens per second, no decode: {tokens_per_second:.2f} tokens/s")
+        log.info(f"Batch inference time, no decode: {elapsed_time_sec * 1000:.4f} ms")
+        log.info(f"Tokens per second, no decode: {tokens_per_second:.2f} tokens/s")
 
         out_tokens, out_logprobs = self.process_output_tokens(
             tokens, prompt_tokens, max_gen_len, logprobs, echo, self.tokenizer.eos_token_id, token_logprobs

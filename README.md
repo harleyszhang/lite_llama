@@ -1,8 +1,18 @@
-# lite_llama
+<div align="center">
+
+# Litellama
+
+**A light llama-like llm inference framework based on the triton kernel.**
+
 [![en](https://img.shields.io/badge/lang-en-red.svg)](https://github.com/harleyszhang/lite_llama/blob/main/README.md)
 [![zh](https://img.shields.io/badge/lang-zh-yellow.svg)](https://github.com/harleyszhang/lite_llama/blob/main/README.zh.md)
+![PyPI - Python Version](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)
 
-A light llama-like llm inference framework based on the triton kernel.
+<pre>
+         ✅ Flash attention      ✅ Reduce GPU memory (fp16/32)    ✅ Beginner friendly
+</pre>
+
+</div>
 
 ## Features
 
@@ -13,37 +23,6 @@ A light llama-like llm inference framework based on the triton kernel.
 - Support efficient dynamic management of kv cache (`auto tokenattnetion`).
 - Support fusion of operators, e.g. fusion of `*` and `silu` for element-by-element multiplication, k v linear layer fusion, fusion of `skip` and `rmsnorm`.
 - Some custom operators such as `rmsnorm`, `rope`, `softmax`, `element-by-element-multiplication`, etc. are implemented using the efficient `triton` kernel.
-
-## benchmark Performance Test
-
-### Llama-3.2-1B Model Performance Comparison Test 
-
-Virtaicloud environment for the `B1.small` equivalent to `1/4` of `3090`. Running the performance test against `python benchmark.py`, lite_llama runs at up to `4x` times the speed of transformers. `batch_size = 16` for the prompter, and `max_gen_len = 1900` for the benchmark performance test results:
-
-```bash
-lite_llama inference time: 67.8760 s
-Transformers inference time: 131.8708 s
-lite_llama throughput: 411.04 tokens/s
-Transformers throughput: 104.70 tokens/s
-lite_llama per token latency: 2.432831 ms/token
-Transformers per token latency: 9.551007 ms/token
-```
-
-### Llama-3.2-3B Model Performance Comparison Test 
-
-Virtaicloud environment for the `B1.big` equivalent to `3090`. Running the performance test against `python benchmark.py`, lite_llama runs up to `4x` times faster than transformers. Benchmark performance results with `max_gen_len = 1900`:
-
-```bash
-lite_llama inference time: 31.3463 s
-Transformers inference time: 69.1433 s
-lite_llama throughput: 730.45 tokens/s
-Transformers throughput: 183.95 tokens/s
-lite_llama per token latency: 1.369015 ms/token
-Transformers per token latency: 5.436221 ms/token
-```
-
-For more performance test results refer to the documentation [benchmark_models](./docs/benchmark_models.md)(More model performance test results to be updated)
-
 
 
 ## Getting Started
@@ -56,7 +35,7 @@ Recommended cuda version 12.0 and above. Download [llama3.2-1B-Instruct Model](h
 
 Lite Llama requires the following dependencies:
 
-[virtaicloud GPU development environment ](https://talent-holding.alibaba.com/campus-position/59900002212)：
+[virtaicloud GPU development environment ](https://talent-holding.alibaba.com/campus-position/59900002212):
 
 For cuda torch, and triton version
 ```bash
@@ -72,7 +51,7 @@ torch                          2.1.2
 triton                         2.1.0
 triton-nightly                 3.0.0.post20240716052845
 ```
-For rocm,  torch, and triton version：
+For rocm,  torch, and triton version:
 ```bash
 # rocminfo | grep -i version
 ROCk module version 6.10.5 is loaded
@@ -92,13 +71,13 @@ torchvision         0.21.0+rocm6.2.4
 ```bash
 apt update
 apt install imagemagick
-conda create --name lite_llama python >= 3.12
+conda create --name lite_llama python >= 3.11
 conda activate lite_llama
 git clone https://github.com/harleyszhang/lite_llama.git
 cd lite_llama/
 pip install -r requirement.txt
 python test_weight_convert.py # model weight transformation
-python cli.py # Run on the basis that the model has been downloaded and placed in the specified directory
+python generate.py --prompt "What is large language model" --checkpoint_path /path/to/model/Llama-3.2-1B-Instruct/ # Run on the basis that the model has been downloaded and placed in the specified directory
 ```
 
 ROCm version 5.7 and above is recommended.
@@ -110,13 +89,13 @@ pip3 install torch torchvision torchaudio --index-url https://download.pytorch.o
 
 apt update
 apt install imagemagick
-conda create --name lite_llama python >= 3.10
+conda create --name lite_llama python >= 3.11
 conda activate lite_llama
 git clone https://github.com/harleyszhang/lite_llama.git
 cd lite_llama/
 pip install -r requirement.txt
 python test_weight_convert.py # model weight transformation
-python cli.py # Run on the basis that the model has been downloaded and placed in the specified directory
+python generate.py --prompt "What is large language model" --checkpoint_path /path/to/model/Llama-3.2-1B-Instruct/ # Run on the basis that the model has been downloaded and placed in the specified directory
 ```
 
 
@@ -124,7 +103,11 @@ python cli.py # Run on the basis that the model has been downloaded and placed i
 
 After `cli.py` runs successfully, the terminal displays the interface as shown below, and you can enter your question in the terminal.
 
-![cli](./images/generate_stream.png)
+![cli](./images/cli_stream.png)
+
+After `generate.py` runs successfully, the terminal displays the interface as shown below, and you can enter your question in the terminal.
+
+![generate](./images/generate_stream.png)
 
 After `cli_llava.py` runs successfully, the terminal displays the interface as shown below, enter your picture and prompt word in the terminal, and then enter.
 
@@ -155,7 +138,7 @@ Transformers per token latency: 5.436221 ms/token
 - [ ] Support for AWQ and SmoothQuant quantization.
 - [ ] Code refactoring and fix for cuda graph not working properly after optimization with AutoTokenAttention.
 
-Detailed information can be found in [performance optimization](./examples/performance_optimization.md)
+Detailed information can be found in [performance optimization](docs/performance_optimization.md)
 
 
 ## Acknowledgement
@@ -168,3 +151,17 @@ Detailed information can be found in [performance optimization](./examples/perfo
 - [openai-triton](https://triton-lang.org/main/getting-started/tutorials/)
 - [lightllm](https://github.com/ModelTC/lightllm)
 - [vllm](https://github.com/vllm-project/vllm)
+
+
+### Citation
+
+If you use Litellama in your research, please cite the following work:
+
+```bibtex
+@misc{litellama-2023,
+  author       = {Litellama AI team},
+  title        = {Litellama},
+  howpublished = {\url{https://github.com/harleyszhang/lite_llama}},
+  year         = {2023},
+}
+```
