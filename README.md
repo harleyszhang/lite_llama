@@ -24,20 +24,15 @@
 - Support fusion of operators, e.g. fusion of `*` and `silu` for element-by-element multiplication, k v linear layer fusion, fusion of `skip` and `rmsnorm`.
 - Some custom operators such as `rmsnorm`, `rope`, `softmax`, `element-by-element-multiplication`, etc. are implemented using the efficient `triton` kernel.
 
-
-## Getting Started
-
-Recommended cuda version 12.0 and above. Download [llama3.2-1B-Instruct Model](https://pan.quark.cn/s/f476119babb3) and place it in the specified `checkpoints_dir` directory. `python apply_weight_convert.py` needs to be run to convert the hf model weights to `lite_llama` weight format, before running `cli.py`.
-
 ## Setup and Installation
  
 ### Pre-requisites
+> If you don't have a physical server, you can try using [virtaicloud remote server](https://growthdata.virtaicloud.com/t/hK).
 
-Lite Llama requires the following dependencies:
+lite_llama framework requires the following dependencies:
 
-[virtaicloud GPU development environment ](https://talent-holding.alibaba.com/campus-position/59900002212):
+For cuda, torch, and triton version
 
-For cuda torch, and triton version
 ```bash
 # nvcc -V
 nvcc: NVIDIA (R) Cuda compiler driver
@@ -51,7 +46,7 @@ torch                          2.1.2
 triton                         2.1.0
 triton-nightly                 3.0.0.post20240716052845
 ```
-For rocm,  torch, and triton version:
+For rocm, torch, and triton version:
 ```bash
 # rocminfo | grep -i version
 ROCk module version 6.10.5 is loaded
@@ -66,7 +61,10 @@ torchvision         0.21.0+rocm6.2.4
 
 ```
 
-### Get the Code
+
+## Getting Started
+
+Recommended cuda version 12.0 and above. Download [llama3.2-1B-Instruct Model](https://pan.quark.cn/s/f476119babb3) and place it in the specified `checkpoints_dir` directory. `python apply_weight_convert.py` needs to be run to convert the hf model weights to `lite_llama` weight format, before running `cli.py`.
 
 ```bash
 apt update
