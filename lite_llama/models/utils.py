@@ -265,6 +265,7 @@ def merge_input_ids_with_image_features(
         final_embedding (torch.Tensor): 合并后的嵌入张量，形状为 (batch_size, max_embed_dim, embed_dim)
         position_ids (torch.Tensor): 位置 ID, 形状为 (batch_size, max_embed_dim)
     """
+    target_device = input_ids.device
     # 1, 基础 shape 信息提取
     num_images, num_image_patches, embed_dim = image_features.shape # torch.Size([1, 576, 4096])
     batch_size, sequence_length = input_ids.shape # torch.Size([1, 22])
