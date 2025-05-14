@@ -1,4 +1,4 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen2ForCausalLM, LlamaForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 from tqdm.auto import tqdm
 import json, sys, os
