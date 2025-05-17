@@ -1,15 +1,14 @@
-from typing import Optional, Dict
+from typing import Optional
 
-import torch,os
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from safetensors import safe_open
 
 from transformers import AutoModel, LlavaConfig
 from .llama import LlamaModel
 from .model_config import LlamaConfig
 from ..kernels import gelu
-from .utils import merge_input_ids_with_image_features, merge_multimodal_embeddings
+from .utils import merge_input_ids_with_image_features
 
 
 class LlavaMultiModalProjector(nn.Module):
@@ -26,7 +25,7 @@ class LlavaMultiModalProjector(nn.Module):
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.linear_1(image_features)
-        hidden_states = gelu(hidden_states) # GELU 激活函数
+        hidden_states = F.gelu(hidden_states) # GELU 激活函数
         hidden_states = self.linear_2(hidden_states)
         return hidden_states
 
