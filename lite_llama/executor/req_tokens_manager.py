@@ -1,7 +1,6 @@
 import torch
-import logging
+from utils.logger import log
 
-logger = logging.getLogger(__name__)
 
 class ReqTokensManager:
     """管理请求序列的 kv 内存 tokens 的类。
@@ -21,7 +20,7 @@ class ReqTokensManager:
     # 分配批次请求需要的内存空间
     def alloc_req(self, request_num):
         if request_num > self.can_use_req_size:
-            logger.error(f'Insufficient requested capacity, remaining {self.can_use_req_size}')
+            log.error(f'Insufficient requested capacity, remaining {self.can_use_req_size}')
             return None
 
         logical_select_index = torch.nonzero(self.req_state==0).reshape(-1)[:request_num]
@@ -34,13 +33,13 @@ class ReqTokensManager:
         self.can_use_req_size += len(free_req_index)
         self.req_state[free_token_index] = 0 # 对应批次请求的索引重新置为 0
         if self.can_use_req_size == len(self.req_state):
-            logger.debug(f"freed all request size {self.can_use_req_size}")
+            log.debug(f"freed all request size {self.can_use_req_size}")
         # self.mem_manager.free(free_token_index)
 
     # 仅释放指定请求的索引
     def free_req(self, free_req_index):
         if free_req_index < 0 or free_req_index >= self.req_state.size(0):
-            logger.error(f"Invalid free_req_index: {free_req_index}")
+            log.error(f"Invalid free_req_index: {free_req_index}")
             return
         self.can_use_req_size += 1
         self.req_state[free_req_index] = 0

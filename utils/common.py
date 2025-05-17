@@ -32,7 +32,7 @@ def getProjectPath():
     return os.path.abspath(os.path.join(script_path, ".."))
 
 
-def get_gpu_memory(gpu_type="amd", device_id="0"):
+def get_gpu_memory(gpu_type, device_id="0"):
     try:
         if gpu_type == "amd":
             result = subprocess.run(

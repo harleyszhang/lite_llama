@@ -1,10 +1,9 @@
 import torch, math
 import torch.nn as nn
 from typing import Optional, Tuple
-import logging
 from .model_config import LlamaConfig, Qwen2Config
+from utils.logger import log
 
-logger = logging.getLogger(__name__)
 
 def _compute_default_rope_parameters(
     config = None,
@@ -235,7 +234,7 @@ class Qwen2RotaryEmbedding(nn.Module):
         # TODO (joao): remove the `if` below, only used for BC
         self.rope_kwargs = {}
         if config is None:
-            logger.warning_once(
+            log.warning(
                 "`Qwen2RotaryEmbedding` can now be fully parameterized by passing the model config through the "
                 "`config` argument. All other arguments will be removed in v4.46"
             )
