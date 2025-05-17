@@ -25,7 +25,7 @@ class LlavaMultiModalProjector(nn.Module):
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.linear_1(image_features)
-        hidden_states = gelu(hidden_states) # GELU 激活函数
+        hidden_states = F.gelu(hidden_states) # GELU 激活函数
         hidden_states = self.linear_2(hidden_states)
         return hidden_states
 
