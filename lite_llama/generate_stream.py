@@ -1,5 +1,5 @@
 from typing import Optional
-import torch, logging
+import torch
 from typing import List, Optional, Tuple, TypedDict, Generator
 from .executor.model_executor import ModelExecutor
 from .utils.file_interface import get_model_name_from_path
@@ -7,9 +7,6 @@ from .kernels.softmax_split import softmax_split
 
 from transformers import AutoTokenizer
 
-# 设置日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 
 class CompletionPrediction(TypedDict, total=False):

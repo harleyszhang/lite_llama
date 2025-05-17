@@ -1,8 +1,8 @@
 import torch
-import logging, gc
+import gc
 from typing import List
 
-logger = logging.getLogger(__name__)
+from utils.logger import log
 
 def get_dtype_size(dtype: torch.dtype) -> int:
     """Get the size of the data type in bytes."""
@@ -109,7 +109,7 @@ class ComputeMaxAvailableBlocks:
         # 确保缓存块数量不为负数
         num_gpu_blocks = max(num_gpu_blocks, 0)
 
-        logger.info(
+        log.info(
                 " Memory profiling results: total_gpu_memory = %.2f GB \n"
                 "    initial_memory_usage = %.2f GB peak_torch_memory = %.2f GB \n"
                 "    memory_usage_post_profile = %.2f GB \n"
@@ -166,12 +166,12 @@ class KVCacheMemoryManager:
         self.gpu_kv_buffer = [
             torch.empty((max_num_tokens, 2 * num_kv_heads, head_dim), dtype=dtype, device=device) for _ in range(num_layers)
         ]
-        logger.debug(f"gpu_kv_buffer per layer shape: {self.gpu_kv_buffer[0].shape}")
+        log.debug(f"gpu_kv_buffer per layer shape: {self.gpu_kv_buffer[0].shape}")
     
     @torch.no_grad()
     def alloc_kvcache(self, need_size):
         if need_size > self.can_use_mem_size:
-            logger.warning(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
+            log.warning(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
             return None
         
         can_use_pos_index = torch.nonzero(self.kv_mem_use_state == 0).view(-1)
@@ -183,7 +183,7 @@ class KVCacheMemoryManager:
     @torch.no_grad()
     def alloc_contiguous_kvcache(self, need_size):
         if need_size > self.can_use_mem_size:
-            logger.warning(f"warn no enough contiguous cache need_size {need_size} left_size {self.can_use_mem_size}")
+            log.warning(f"warn no enough contiguous cache need_size {need_size} left_size {self.can_use_mem_size}")
             return None
 
         # 获取未使用的内存块索引
@@ -259,7 +259,7 @@ class KVCacheMemoryManager:
         free_index = free_index.long()
         self.release_ref(free_index)
         if self.can_use_mem_size == len(self.mem_state):
-            logger.debug(f"freed all gpu mem size {self.can_use_mem_size}")
+            log.debug(f"freed all gpu mem size {self.can_use_mem_size}")
         return
     
     # 释放所有内存

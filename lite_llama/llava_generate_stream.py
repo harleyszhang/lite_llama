@@ -1,5 +1,5 @@
 from typing import Optional
-import torch, logging, re
+import torch, re
 from PIL import Image
 
 from typing import List, Optional, Tuple, TypedDict, Generator, Union
@@ -9,9 +9,6 @@ from .utils.file_interface import get_model_name_from_path
 
 from transformers import AutoTokenizer, AutoProcessor
 
-# 设置日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 class CompletionPrediction(TypedDict, total=False):
     generation: str
