@@ -17,7 +17,7 @@ def build_new_weight_dir(checkpoints_dir:str, new_sd):
     json_files = glob.glob(os.path.join(checkpoints_dir, "*.json"))
     for file_path in json_files:
         shutil.copy(file_path, my_weight_dir) # 复制 hf 权重目录的所有 json 文件到新的目录
-        print(f"已复制: {file_path} -> {my_weight_dir}")
+        print(f"Copy: {file_path} -> {my_weight_dir}")
 
 def convert_qwen2_hf_to_litellama(
     checkpoints_dir: str, 
