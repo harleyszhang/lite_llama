@@ -84,13 +84,13 @@ def generate_llama(
     model_prompter.insert_prompt(prompt)
     prompts = [model_prompter.model_input]
     # Call the generation function and start the stream generation
+    start = time.perf_counter()
     stream = generator.text_completion_stream(
         prompts,
         temperature=temperature,
         top_p=top_p,
         max_gen_len=max_gen_len,
     )
-    end = time.perf_counter()
 
     completion = ''  # Initialize to generate the result
     # NOTE: After creating a generator, it can be iterated through a for loop
@@ -100,6 +100,7 @@ def generate_llama(
         completion = batch_completions[0]['generation']
         print(new_text, end='', flush=True)
         text_msg +=new_text
+    end = time.perf_counter()
 
     print("\n\n==================================\n")
     log.info(f"Time for inference: {(end - start):.2f} sec, {count_tokens(text_msg, generator.tokenizer)/(end - start):.2f} tokens/sec")
@@ -143,7 +144,6 @@ def generate_llava(
     ram_before = process.memory_info().rss
 
     vram_before = get_gpu_memory(gpu_type)
-    start = time.perf_counter()
 
     # Initializing the Multimodal Model Text Generator
     try:
@@ -164,7 +164,7 @@ def generate_llava(
     image_token = get_image_token()
     model_prompter.insert_prompt(image_token * image_num + prompt)
     prompts = [model_prompter.model_input]
-
+    start = time.perf_counter()
     try:
         stream = generator.text_completion_stream(
             prompts,
@@ -175,7 +175,6 @@ def generate_llava(
         )
     except Exception as e:
         log.error(f"Text Generation Failure: {e}")
-    end = time.perf_counter()
 
     completion = ''  # Initialization generates results
     text_msg = ""
@@ -185,6 +184,7 @@ def generate_llava(
         completion = batch_completions[0]['generation']
         print(f"\033[91m{next_text}\033[0m", end='', flush=True)  # 红色文本
         text_msg += next_text
+    end = time.perf_counter()
 
     print("\n\n==================================\n")
     log.info(f"Time for inference: {(end - start):.2f} sec, {count_tokens(text_msg, generator.tokenizer)/(end - start):.2f} tokens/sec")
