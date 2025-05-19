@@ -1,16 +1,24 @@
-from typing import List, Optional
+from typing import Optional
+import torch
+
 import sys, os, time
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 
-import torch
 from lite_llama.utils.prompt_templates import get_prompter
-
 from lite_llama.generate import GenerateText
 
 
-class LiteLlamaInference(object):
-
-    def __init__(self, temperature: float, top_p: float, max_seq_len: int, max_gen_len: Optional[int], lite_llama_ckpt_dir: str, device: str = "cuda"):
+class Inference(object):
+    def __init__(
+        self,
+        temperature: float,
+        top_p: float,
+        max_seq_len: int,
+        max_gen_len: Optional[int],
+        lite_llama_ckpt_dir: str,
+        device: str = "cuda",
+    ):
         self.temperature = temperature
         self.top_p = top_p
         self.max_seq_len = max_seq_len
@@ -18,9 +26,7 @@ class LiteLlamaInference(object):
         self.lite_llama_ckpt_dir = lite_llama_ckpt_dir
         self.device = device
 
-
-
-    def load_lite_llama_generator(self, max_gpu_num_blocks=None) -> GenerateText:
+    def load_generator(self, max_gpu_num_blocks=None) -> GenerateText:
         """
         Initializes the lite-llama generator
         """
@@ -36,7 +42,7 @@ class LiteLlamaInference(object):
         )
         return generator
 
-    def count_tokens(self, texts: List[str], tokenizer) -> int:
+    def count_tokens(self, texts: list[str], tokenizer) -> int:
         # Optimized segmentation statistics
         total_tokens = 0
         for t in texts:
@@ -44,7 +50,7 @@ class LiteLlamaInference(object):
             total_tokens += len(ids)
         return total_tokens
 
-    def lite_llama_inference(self, generator: GenerateText, prompts: List[str]):
+    def inference(self, generator: GenerateText, prompts: list[str]):
         """
         Inference is performed using lite-llama's GenerateText instance and returns the result with the time taken and the number of tokens output
         """
@@ -71,9 +77,7 @@ class LiteLlamaInference(object):
 
         return results, end_time - start_time, total_tokens
 
-
     def process(self, prompts):
-
         if "qwen2" in self.lite_llama_ckpt_dir.lower():
             model_type = "qwen2"
         elif "llama" in self.lite_llama_ckpt_dir.lower():
@@ -90,9 +94,10 @@ class LiteLlamaInference(object):
             update_prompts.append(model_prompter.model_input)
 
         # 1. lite-llama inference
-        lite_llama_generator = self.load_lite_llama_generator(max_gpu_num_blocks=40960)
-        lite_llama_results, lite_llama_time, lite_llama_tokens = self.lite_llama_inference(
-            lite_llama_generator, update_prompts)
+        lite_llama_generator = self.load_generator(max_gpu_num_blocks=40960)
+        lite_llama_results, lite_llama_time, lite_llama_tokens = self.inference(
+            lite_llama_generator, update_prompts
+        )
         del lite_llama_generator
         torch.cuda.empty_cache()  # Release the memory used by lite_llama_generator after use.
 

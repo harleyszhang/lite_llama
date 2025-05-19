@@ -1,18 +1,21 @@
 import random
-import sys, os, time
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
-
-from utils.common import *
-from typing import List, Optional, Any
-import string, re
+from typing import Optional, Any
+import string, re, json
 import torch
 from sentence_transformers import SentenceTransformer, util
 
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+def read_jsonl(jsonl_path):
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        data = [json.loads(line) for line in f]
+    return data
+
 class HotpotQA(object):
     r"""
-        for testing hotpot wget http://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json
+    for testing hotpot wget http://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json
     """
+
     def __init__(self, data_path, data_batch=None):
         self.data_type = "qa"
         self.data_path = data_path
@@ -21,8 +24,8 @@ class HotpotQA(object):
         self.data_batch = data_batch
 
     def extract_supporting_context(self, data: dict):
-        context_dict = dict(data['context'])
-        supporting_facts = data['supporting_facts']
+        context_dict = dict(data["context"])
+        supporting_facts = data["supporting_facts"]
 
         support_text = []
         for title, sent_idx in supporting_facts:
@@ -30,21 +33,21 @@ class HotpotQA(object):
                 sentences = context_dict[title]
                 if sent_idx < len(sentences):
                     support_text.append(sentences[sent_idx])
-        return '\n'.join(support_text)
+        return "\n".join(support_text)
 
     def build_prompt(self, data: dict) -> str:
         context = self.extract_supporting_context(data)
-        question = data['question']
+        question = data["question"]
         prompt = f"""
-    Context:
-    {context}
-    
-    Question:
-    {question}
-    
-    Answer:"""
+            Context:
+            {context}
+            
+            Question:
+            {question}
+            
+            Answer:
+        """
         return prompt
-
 
     def parse_data(self) -> tuple[Any, Any, list[Any]]:
         data = read_json(self.data_path)
@@ -52,7 +55,7 @@ class HotpotQA(object):
         for hotpot_index, hotpot_content in enumerate(data):
             data_index = hotpot_content["_id"]
             prompt = self.build_prompt(hotpot_content)
-            answer = hotpot_content['answer'].strip().lower()
+            answer = hotpot_content["answer"].strip().lower()
 
             test_data.append({data_index: {"prompt": prompt, "answer": answer}})
 
@@ -62,8 +65,9 @@ class HotpotQA(object):
         return unify_data(test_data, self.data_batch, "qa")
 
     def evaluate(self, predictions, ground_truth):
-
-        assert len(predictions) == len(ground_truth), "Prediction and Ground Truth list must be the same length."
+        assert len(predictions) == len(ground_truth), (
+            "Prediction and Ground Truth list must be the same length."
+        )
 
         total_em = 0.0
         total_f1 = 0.0
@@ -81,21 +85,23 @@ class HotpotQA(object):
             "EM": total_em / n,
             "F1 (penalized)": total_f1 / n,
             "Jaccard": total_jaccard / n,
-            "Embedding Sim": total_embed_sim / n
+            "Embedding Sim": total_embed_sim / n,
         }
 
-        print(f"The test result of lite_llama inference for {self.data_type} dataset: {scores}")
+        print(
+            f"The test result of lite_llama inference for {self.data_type} dataset: {scores}"
+        )
 
 
 class HellaSwag(object):
     r"""
-        for testing HellaSwag wget https://raw.githubusercontent.com/rowanz/hellaswag/refs/heads/master/data/hellaswag_val.jsonl
+    for testing HellaSwag wget https://raw.githubusercontent.com/rowanz/hellaswag/refs/heads/master/data/hellaswag_val.jsonl
     """
 
     def __init__(self, data_path, data_batch=None):
         self.data_path = data_path
         self.data_type = "mcq"
-        self.choices = ['A', 'B', 'C', 'D']
+        self.choices = ["A", "B", "C", "D"]
 
         # data_batch=none means testing all the data in the dataset
         self.data_batch = data_batch
@@ -108,16 +114,15 @@ class HellaSwag(object):
         return prompt
 
     def extract_choice(self, output_text):
-        for letter in ['A', 'B', 'C', 'D']:
+        for letter in ["A", "B", "C", "D"]:
             if letter in output_text:
-                return ['A', 'B', 'C', 'D'].index(letter)
+                return ["A", "B", "C", "D"].index(letter)
         return -1
 
     def convert_answer(self, answer) -> str:
         return self.choices[int(answer)]
 
     def parse_data(self) -> tuple[Any, Any, list[Any]]:
-
         data = read_jsonl(self.data_path)
         test_data = list()
         for index, content in enumerate(data):
@@ -131,15 +136,18 @@ class HellaSwag(object):
                 ("D", content["endings"][3]),
             ]
 
-            test_data.append({index: {"prompt": prompt, "answer": answer, "options": option}})
+            test_data.append(
+                {index: {"prompt": prompt, "answer": answer, "options": option}}
+            )
 
         if self.data_batch is None:
             self.data_batch = len(test_data)
         return unify_data(test_data, self.data_batch, self.data_type)
 
     def evaluate(self, predictions, ground_truth, options):
-
-        assert len(predictions) == len(ground_truth), "Prediction and Ground Truth list must be the same length."
+        assert len(predictions) == len(ground_truth), (
+            "Prediction and Ground Truth list must be the same length."
+        )
 
         total_em = 0.0
         total_f1 = 0.0
@@ -163,10 +171,12 @@ class HellaSwag(object):
             "EM": total_em / n,
             "F1 (penalized)": total_f1 / n,
             "Jaccard": total_jaccard / n,
-            "Embedding Sim": total_embed_sim / n
+            "Embedding Sim": total_embed_sim / n,
         }
 
-        print(f"The test result of lite_llama inference for {self.data_type} dataset: {scores}")
+        print(
+            f"The test result of lite_llama inference for {self.data_type} dataset: {scores}"
+        )
 
 
 def matched_pairs(list1, list2, n):
@@ -197,27 +207,26 @@ def unify_data(test_data, data_batch, data_type: Optional[str]):
     for index, data in enumerate(test_data):
         key = next(iter(data))
 
-        ground_truth.append(data[key]['answer'])
-        prompts.append(data[key]['prompt'])
+        ground_truth.append(data[key]["answer"])
+        prompts.append(data[key]["prompt"])
         if data_type == "mcq":
-            options.append(data[key]['options'])
+            options.append(data[key]["options"])
     ground_truth, prompts = matched_pairs(ground_truth, prompts, data_batch)
 
     return ground_truth, prompts, options
-
 
 
 def normalize_answer(s):
     """Lower text and remove punctuation, articles and extra whitespace."""
 
     def remove_articles(text):
-        return re.sub(r'\b(a|an|the)\b', ' ', text)
+        return re.sub(r"\b(a|an|the)\b", " ", text)
 
     def white_space_fix(text):
-        return ' '.join(text.split())
+        return " ".join(text.split())
 
     def remove_punc(text):
-        return text.translate(str.maketrans('', '', string.punctuation))
+        return text.translate(str.maketrans("", "", string.punctuation))
 
     def lower(text):
         return text.lower()
@@ -229,9 +238,11 @@ def normalize_answer(s):
         for i in range(1, len(words)):
             if words[i] != words[i - 1]:
                 result.append(words[i])
-        return ' '.join(result)
+        return " ".join(result)
 
-    return remove_consecutive_duplicates(white_space_fix(remove_articles(remove_punc(lower(s)))))
+    return remove_consecutive_duplicates(
+        white_space_fix(remove_articles(remove_punc(lower(s))))
+    )
 
 
 def exact_match(pred, gt):
@@ -256,7 +267,6 @@ def penalized_f1(prediction, ground_truth, max_len_ratio=3, penalty_factor=0.5):
     return f1
 
 
-
 def jaccard_similarity(prediction, ground_truth):
     pred_tokens = set(normalize_answer(prediction).split())
     gt_tokens = set(normalize_answer(ground_truth).split())
@@ -268,8 +278,11 @@ def jaccard_similarity(prediction, ground_truth):
     union = pred_tokens | gt_tokens
     return len(intersection) / len(union)
 
+
 def embedding_similarity(prediction, ground_truth):
-    embeddings = embedding_model.encode([prediction, ground_truth], convert_to_tensor=True)
+    embeddings = embedding_model.encode(
+        [prediction, ground_truth], convert_to_tensor=True
+    )
     sim_score = util.cos_sim(embeddings[0], embeddings[1])
     return sim_score.item()
 
@@ -284,17 +297,16 @@ def extract_final_choice(text: str) -> Any | None:
     # Priority: explicit natural language conclusion
     # Pattern 1: match "answer: a", "correct answer is: b", etc.
     patterns = [
-        r'answer\s*[:\-]?\s*([a-dA-D])\b',
-        r'option\s*([a-dA-D])\b',
-        r'\b([a-dA-D])\b\s+is\s+(correct|the answer)',
-        r'\b([a-dA-D])[\).]',
-        r'choice\s*[:\-]?\s*([a-dA-D])\b'
+        r"answer\s*[:\-]?\s*([a-dA-D])\b",
+        r"option\s*([a-dA-D])\b",
+        r"\b([a-dA-D])\b\s+is\s+(correct|the answer)",
+        r"\b([a-dA-D])[\).]",
+        r"choice\s*[:\-]?\s*([a-dA-D])\b",
     ]
     for pat in patterns:
         match = re.search(pat, text, re.IGNORECASE)
         if match:
             return match.group(1).upper()
-
 
     return None
 
@@ -314,10 +326,11 @@ def match_mc_option(prediction, options):
     # Compute cosine similarity
     cos_sims = util.cos_sim(pred_emb, option_embs)[0]  # shape: (4,)
     best_idx = int(torch.argmax(cos_sims).item())
-    return options[best_idx][0], cos_sims.tolist()  # Returns the matching option ID and all similarities
+    return options[best_idx][
+        0
+    ], cos_sims.tolist()  # Returns the matching option ID and all similarities
 
-if __name__ == '__main__':
 
-
+if __name__ == "__main__":
     hw = HellaSwag("/path_to/hellaswag_val.jsonl")
     hw.process()

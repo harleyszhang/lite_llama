@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 
+
 @triton.jit
 def _rotary_kernel(
     Q,
@@ -45,30 +46,49 @@ def _rotary_kernel(
         + dim_range1[None, None, :] * stride_qd
     )
 
-    off_dimcos_sin = cur_seq_range[:, None, None] * stride_cosbs + dim_range0[None, None, :] * stride_cosd
+    off_dimcos_sin = (
+        cur_seq_range[:, None, None] * stride_cosbs
+        + dim_range0[None, None, :] * stride_cosd
+    )
 
     q0 = tl.load(
         Q + off_q0,
-        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_Q),
+        mask=(cur_seq_range[:, None, None] < max_total_len)
+        & (cur_head_range[None, :, None] < HEAD_Q),
         other=0.0,
     )
     q1 = tl.load(
         Q + off_q1,
-        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_Q),
+        mask=(cur_seq_range[:, None, None] < max_total_len)
+        & (cur_head_range[None, :, None] < HEAD_Q),
         other=0.0,
     )
 
-    cos = tl.load(Cos + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
-    sin = tl.load(Sin + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
+    cos = tl.load(
+        Cos + off_dimcos_sin,
+        mask=cur_seq_range[:, None, None] < max_total_len,
+        other=0.0,
+    )
+    sin = tl.load(
+        Sin + off_dimcos_sin,
+        mask=cur_seq_range[:, None, None] < max_total_len,
+        other=0.0,
+    )
 
     out0 = q0 * cos - q1 * sin
     out1 = q0 * sin + q1 * cos
 
     tl.store(
-        Q + off_q0, out0, mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_Q)
+        Q + off_q0,
+        out0,
+        mask=(cur_seq_range[:, None, None] < max_total_len)
+        & (cur_head_range[None, :, None] < HEAD_Q),
     )
     tl.store(
-        Q + off_q1, out1, mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_Q)
+        Q + off_q1,
+        out1,
+        mask=(cur_seq_range[:, None, None] < max_total_len)
+        & (cur_head_range[None, :, None] < HEAD_Q),
     )
 
     off_k0 = (
@@ -82,20 +102,33 @@ def _rotary_kernel(
         + dim_range1[None, None, :] * stride_kd
     )
 
-    off_dimcos_sin = cur_seq_range[:, None, None] * stride_cosbs + dim_range0[None, None, :] * stride_cosd
+    off_dimcos_sin = (
+        cur_seq_range[:, None, None] * stride_cosbs
+        + dim_range0[None, None, :] * stride_cosd
+    )
 
     k0 = tl.load(
         K + off_k0,
-        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K),
+        mask=(cur_seq_range[:, None, None] < max_total_len)
+        & (cur_head_range[None, :, None] < HEAD_K),
         other=0.0,
     )
     k1 = tl.load(
         K + off_k1,
-        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K),
+        mask=(cur_seq_range[:, None, None] < max_total_len)
+        & (cur_head_range[None, :, None] < HEAD_K),
         other=0.0,
     )
-    cos = tl.load(Cos + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
-    sin = tl.load(Sin + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
+    cos = tl.load(
+        Cos + off_dimcos_sin,
+        mask=cur_seq_range[:, None, None] < max_total_len,
+        other=0.0,
+    )
+    sin = tl.load(
+        Sin + off_dimcos_sin,
+        mask=cur_seq_range[:, None, None] < max_total_len,
+        other=0.0,
+    )
 
     out_k0 = k0 * cos - k1 * sin
     out_k1 = k0 * sin + k1 * cos
@@ -103,23 +136,29 @@ def _rotary_kernel(
     tl.store(
         K + off_k0,
         out_k0,
-        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K),
+        mask=(cur_seq_range[:, None, None] < max_total_len)
+        & (cur_head_range[None, :, None] < HEAD_K),
     )
     tl.store(
         K + off_k1,
         out_k1,
-        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K),
+        mask=(cur_seq_range[:, None, None] < max_total_len)
+        & (cur_head_range[None, :, None] < HEAD_K),
     )
     return
 
 
 @torch.no_grad()
-def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.):
+def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.0):
     total_len = q.shape[0]
     head_num_q, head_num_k = q.shape[1], k.shape[1]
     head_dim = int(q.shape[2] * partial_rotary_factor)
-    assert q.shape[0] == cos.shape[0] and q.shape[0] == sin.shape[0], f"q shape {q.shape} cos shape {cos.shape}"
-    assert k.shape[0] == cos.shape[0] and k.shape[0] == sin.shape[0], f"k shape {k.shape} cos shape {cos.shape}"
+    assert q.shape[0] == cos.shape[0] and q.shape[0] == sin.shape[0], (
+        f"q shape {q.shape} cos shape {cos.shape}"
+    )
+    assert k.shape[0] == cos.shape[0] and k.shape[0] == sin.shape[0], (
+        f"k shape {k.shape} cos shape {cos.shape}"
+    )
 
     BLOCK_SEQ = 64
     BLOCK_HEAD = 4
@@ -155,12 +194,13 @@ def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.):
     )
     return q, k
 
+
 def torch_rotary_emb(x, cos, sin):
     seq_len, h, d = x.shape
     # cos, sin 的形状为 (seq_len, d//2)
     half_dim = cos.shape[-1]
     x0 = x[:, :, :half_dim]
-    x1 = x[:, :, half_dim: 2*half_dim]
+    x1 = x[:, :, half_dim : 2 * half_dim]
 
     cos = cos.view(seq_len, 1, half_dim)
     sin = sin.view(seq_len, 1, half_dim)
@@ -169,23 +209,24 @@ def torch_rotary_emb(x, cos, sin):
     o1 = x0 * sin + x1 * cos
 
     if 2 * half_dim < d:
-        out = torch.cat([o0, o1, x[:, :, 2*half_dim:]], dim=-1)
+        out = torch.cat([o0, o1, x[:, :, 2 * half_dim :]], dim=-1)
     else:
         out = torch.cat([o0, o1], dim=-1)
 
     return out
+
 
 if __name__ == "__main__":
     torch.manual_seed(0)
     batch_tokens = 24800
     x_shape = (batch_tokens, 32, 64)  # (seq_len, num_heads, head_dim)
     dtype = torch.float16
-    q = torch.randn(x_shape, dtype=dtype, device='cuda')
+    q = torch.randn(x_shape, dtype=dtype, device="cuda")
     k = torch.clone(q)
 
     # 生成 cos 和 sin，与 head_dim 对应，这里 head_dim=64，因此 cos, sin=(seq_len, head_dim//2)=(128,32)
-    cos_shape = (batch_tokens, 32)  
-    y = torch.randn(cos_shape, dtype=dtype, device='cuda')
+    cos_shape = (batch_tokens, 32)
+    y = torch.randn(cos_shape, dtype=dtype, device="cuda")
     cos = y.cos()
     sin = y.sin()
 
@@ -193,6 +234,8 @@ if __name__ == "__main__":
     q_out, k_out = rotary_emb_fwd(q, k, cos, sin)
     print(output_torch)
     print(q_out)
-    print(f'The maximum difference between torch and triton is {torch.max(torch.abs(output_torch - q_out))}')
-    print('torch:', triton.testing.do_bench(lambda: torch_rotary_emb(q, cos, sin)))
-    print('triton:', triton.testing.do_bench(lambda: torch_rotary_emb(q, cos, sin)))
+    print(
+        f"The maximum difference between torch and triton is {torch.max(torch.abs(output_torch - q_out))}"
+    )
+    print("torch:", triton.testing.do_bench(lambda: torch_rotary_emb(q, cos, sin)))
+    print("triton:", triton.testing.do_bench(lambda: torch_rotary_emb(q, cos, sin)))
