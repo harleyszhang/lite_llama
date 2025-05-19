@@ -2,7 +2,8 @@ import torch
 from transformers import LlamaForCausalLM, LlamaTokenizer, LlamaTokenizerFast
 from transformers import pipeline
 
-def load_llama_model(model_path: str, device: str = 'cuda'):
+
+def load_llama_model(model_path: str, device: str = "cuda"):
     """
     Load the LLaMA model and tokenizer.
 
@@ -19,12 +20,15 @@ def load_llama_model(model_path: str, device: str = 'cuda'):
     model = LlamaForCausalLM.from_pretrained(
         model_path,
         torch_dtype=torch.float16,  # Use float16 for faster inference if supported
-        low_cpu_mem_usage=True
+        low_cpu_mem_usage=True,
     )
     model.to(device)
     return model, tokenizer
 
-def generate_text(model, tokenizer, prompt: str, max_length: int = 50, device: str = 'cuda'):
+
+def generate_text(
+    model, tokenizer, prompt: str, max_length: int = 50, device: str = "cuda"
+):
     """
     Generate text using the LLaMA model.
 
@@ -43,15 +47,16 @@ def generate_text(model, tokenizer, prompt: str, max_length: int = 50, device: s
         outputs = model.generate(
             **inputs,
             max_length=max_length,
-            do_sample=True,       # Enable sampling to introduce randomness
-            temperature=0.7,      # Adjust temperature for creativity
-            top_p=0.9,            # Use top-p (nucleus) sampling
-            repetition_penalty=1.2  # Penalize repetitions
+            do_sample=True,  # Enable sampling to introduce randomness
+            temperature=0.7,  # Adjust temperature for creativity
+            top_p=0.9,  # Use top-p (nucleus) sampling
+            repetition_penalty=1.2,  # Penalize repetitions
         )
     generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return generated_text
 
-def pipline_text(model_id):    
+
+def pipline_text(model_id):
     pipe = pipeline(
         "text-generation",
         model=model_id,
@@ -59,7 +64,10 @@ def pipline_text(model_id):
         device_map="auto",
     )
     messages = [
-        {"role": "system", "content": "You are a pirate chatbot who always responds in pirate speak!"},
+        {
+            "role": "system",
+            "content": "You are a pirate chatbot who always responds in pirate speak!",
+        },
         {"role": "user", "content": "Who are you?"},
     ]
     outputs = pipe(
@@ -68,17 +76,20 @@ def pipline_text(model_id):
     )
     print(outputs[0]["generated_text"][-1])
 
+
 if __name__ == "__main__":
     # Specify the paths to your model and tokenizer directories
     model_path = "/gemini/code/Llama-3.2-1B-Instruct/"
 
     # Load the model and tokenizer
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     model, tokenizer = load_llama_model(model_path, device)
 
     # Test the model with a sample prompt
     prompt = "I believe the meaning of life is,"
-    generated_text = generate_text(model, tokenizer, prompt, max_length=100, device=device)
+    generated_text = generate_text(
+        model, tokenizer, prompt, max_length=100, device=device
+    )
 
     print("Prompt:")
     print(prompt)

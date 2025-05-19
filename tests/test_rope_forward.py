@@ -102,6 +102,7 @@ def _triton_rope(
     new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
     tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
 
+
 def rope_forward(q, k, cos, sin):
     """
     输入 q、k 参数是 4 维张量
@@ -110,7 +111,7 @@ def rope_forward(q, k, cos, sin):
     # note: q and k are incontiguous before the transformation and will become contiguous after transpose
     # q = q.transpose(1, 2)
     # k = k.transpose(1, 2)
-    
+
     batch_size, seq_len, n_q_head, head_dim = q.shape
     n_kv_head = k.shape[2]
     pad_hd = triton.next_power_of_2(head_dim)
@@ -147,12 +148,13 @@ def rope_forward(q, k, cos, sin):
     )
     return q, k
 
+
 def torch_rotary_emb(x, cos, sin):
     seq_len, h, d = x.shape
     # cos, sin 的形状为 (seq_len, d//2)
     half_dim = cos.shape[-1]
     x0 = x[:, :, :half_dim]
-    x1 = x[:, :, half_dim: 2*half_dim]
+    x1 = x[:, :, half_dim : 2 * half_dim]
 
     cos = cos.view(seq_len, 1, half_dim)
     sin = sin.view(seq_len, 1, half_dim)
@@ -161,11 +163,12 @@ def torch_rotary_emb(x, cos, sin):
     o1 = x0 * sin + x1 * cos
 
     if 2 * half_dim < d:
-        out = torch.cat([o0, o1, x[:, :, 2*half_dim:]], dim=-1)
+        out = torch.cat([o0, o1, x[:, :, 2 * half_dim :]], dim=-1)
     else:
         out = torch.cat([o0, o1], dim=-1)
 
     return out
+
 
 if __name__ == "__main__":
     # 单元测试有 bug 等待修复
@@ -176,26 +179,33 @@ if __name__ == "__main__":
     batch_tokens = batch_size * seq_len
     x_shape = (batch_tokens, 32, 64)  # (seq_len, num_heads, head_dim)
     dtype = torch.float16
-    q = torch.randn(x_shape, dtype=dtype, device='cuda')
+    q = torch.randn(x_shape, dtype=dtype, device="cuda")
     k = torch.clone(q)
 
     triton_q = q.view(batch_size, seq_len, 32, 64)
     triton_k = k.view(batch_size, seq_len, 32, 64)
 
     # 生成 cos 和 sin，与 head_dim 对应，这里 head_dim=64，因此 cos, sin=(seq_len, head_dim//2)=(128,32)
-    cos_shape = (batch_tokens, 32)  
-    y = torch.randn(cos_shape, dtype=dtype, device='cuda')
+    cos_shape = (batch_tokens, 32)
+    y = torch.randn(cos_shape, dtype=dtype, device="cuda")
     cos = y.cos()
     sin = y.sin()
-    
+
     triton_cos = cos.view(seq_len, 1, head_dim)
     triton_sin = sin.view(seq_len, 1, head_dim)
 
     output_torch = torch_rotary_emb(q, cos, sin)
     q_out, k_out, _, _ = rope_forward(triton_q, triton_k, triton_cos, triton_cos)
     triton_q_out = q_out.view(-1, 32, 64)
-    print(f"output_torch shape {output_torch.shape}, triton_q_out shape {triton_q_out.shape}")
-    
-    print(f'The maximum difference between torch and triton is {torch.max(torch.abs(output_torch - triton_q_out))}')
-    print('torch:', triton.testing.do_bench(lambda: torch_rotary_emb(q, cos, sin)))
-    print('triton:', triton.testing.do_bench(lambda: rope_forward(triton_q, triton_k, cos, sin)))
+    print(
+        f"output_torch shape {output_torch.shape}, triton_q_out shape {triton_q_out.shape}"
+    )
+
+    print(
+        f"The maximum difference between torch and triton is {torch.max(torch.abs(output_torch - triton_q_out))}"
+    )
+    print("torch:", triton.testing.do_bench(lambda: torch_rotary_emb(q, cos, sin)))
+    print(
+        "triton:",
+        triton.testing.do_bench(lambda: rope_forward(triton_q, triton_k, cos, sin)),
+    )

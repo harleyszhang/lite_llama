@@ -20,8 +20,10 @@ import requests
 import os
 import base64
 
+
 def load_image_from_base64(image):
     return Image.open(BytesIO(base64.b64decode(image)))
+
 
 def load_image(image_file):
     if image_file.startswith("http://") or image_file.startswith("https://"):
@@ -39,16 +41,21 @@ def load_images(image_files):
         out.append(image)
     return out
 
+
 def vis_images(image_files):
     if len(image_files) == 1:
         image = image_files[0]
-        os.system(f"termvisage --query-timeout 1 -H left --height 40 --oversize {image}") # --height 50：设置图片高度为 500 行。
+        os.system(
+            f"termvisage --query-timeout 1 -H left --height 40 --oversize {image}"
+        )  # --height 50：设置图片高度为 500 行。
 
-    else:        
+    else:
         # Concat images
         system_inst = "convert "
         inst_template1 = " \\( {image} -background none -resize x{height} \\) "
-        inst_template2 = " \\( {image} -background none -resize x{height} -splice 50x0 \\) "
+        inst_template2 = (
+            " \\( {image} -background none -resize x{height} -splice 50x0 \\) "
+        )
         count = 0
         for image in image_files:
             with Image.open(image) as img:
@@ -59,11 +66,12 @@ def vis_images(image_files):
             if count == 1:
                 system_inst += inst_template1.format(image=image, height=height)
             else:
-                system_inst += inst_template2.format(image=image,height=height)
+                system_inst += inst_template2.format(image=image, height=height)
         system_inst += " +append .vis.jpg"
         os.system(system_inst)
 
         os.system(f"termvisage --query-timeout 1 .vis.jpg -H left")
+
 
 def expand2square(pil_img, background_color):
     """
@@ -80,6 +88,7 @@ def expand2square(pil_img, background_color):
         result = Image.new(pil_img.mode, (height, height), background_color)
         result.paste(pil_img, ((height - width) // 2, 0))
         return result
+
 
 def process_images(images, image_processor, model_cfg):
     """

@@ -57,16 +57,24 @@ def _triton_rope_emb(
         tl.arange(0, pad_hd // 2)[None, :] < hd // 2
     )
 
-    q_tile_1 = tl.load(q_ptr + first_half_q_offsets, mask=first_q_mask, other=0).to(sin_row.dtype)
-    k_tile_1 = tl.load(k_ptr + first_half_k_offsets, mask=first_k_mask, other=0).to(sin_row.dtype)
+    q_tile_1 = tl.load(q_ptr + first_half_q_offsets, mask=first_q_mask, other=0).to(
+        sin_row.dtype
+    )
+    k_tile_1 = tl.load(k_ptr + first_half_k_offsets, mask=first_k_mask, other=0).to(
+        sin_row.dtype
+    )
 
     second_half_q_offsets = first_half_q_offsets + (hd // 2)
     second_half_k_offsets = first_half_k_offsets + (hd // 2)
     second_q_mask = first_q_mask
     second_k_mask = first_k_mask
 
-    q_tile_2 = tl.load(q_ptr + second_half_q_offsets, mask=second_q_mask, other=0).to(sin_row.dtype)
-    k_tile_2 = tl.load(k_ptr + second_half_k_offsets, mask=second_k_mask, other=0).to(sin_row.dtype)
+    q_tile_2 = tl.load(q_ptr + second_half_q_offsets, mask=second_q_mask, other=0).to(
+        sin_row.dtype
+    )
+    k_tile_2 = tl.load(k_ptr + second_half_k_offsets, mask=second_k_mask, other=0).to(
+        sin_row.dtype
+    )
 
     new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
     tl.store(q_ptr + first_half_q_offsets, new_q_tile_1, mask=first_q_mask)
@@ -77,6 +85,7 @@ def _triton_rope_emb(
     tl.store(k_ptr + first_half_k_offsets, new_k_tile_1, mask=first_k_mask)
     new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
     tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
+
 
 def rope_emb_forward(q, k, cos, sin, batch_size, seq_len):
     """
