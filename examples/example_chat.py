@@ -11,7 +11,7 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
 
 checkpoints_dir = (
-    "/homg/honggao/lite_llama/my_weight/Qwen2.5-3B"  # 改成自己的存放模型路径
+    "/path/lite_llama/my_weight/Qwen2.5-3B"  # 改成自己的存放模型路径
 )
 
 
