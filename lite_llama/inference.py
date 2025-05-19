@@ -1,12 +1,10 @@
 from typing import Optional
 import torch
 
-import sys, os, time
+import time
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
-
-from lite_llama.utils.prompt_templates import get_prompter
-from lite_llama.generate import GenerateText
+from .utils.prompt_templates import get_prompter
+from .generate import GenerateText
 
 
 class Inference(object):
@@ -52,10 +50,12 @@ class Inference(object):
 
     def inference(self, generator: GenerateText, prompts: list[str]):
         """
-        Inference is performed using lite-llama's GenerateText instance and returns the result with the time taken and the number of tokens output
+        Inference is performed using lite-llama's GenerateText instance and returns 
+        the result with the time taken and the number of tokens output
         """
 
-        # Warm-up step: use a short dummy input to allow the model to perform a simple inference to load caches/compile optimizations, etc.
+        # Warm-up step: use a short dummy input to allow the model to 
+        # perform a simple inference to load caches/compile optimizations, etc.
         warm_up_prompt = ["Hello World"] * 4
         _ = generator.text_completion(
             warm_up_prompt,

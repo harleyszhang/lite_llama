@@ -2,7 +2,7 @@ from typing import Optional
 import torch, logging, re
 from PIL import Image
 
-from typing import List, Optional, Tuple, TypedDict, Generator, Union
+from typing import Optional, TypedDict, Generator, Union
 from .executor.model_executor import ModelExecutor
 from .utils.constants import *
 from .utils.file_interface import get_model_name_from_path
@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 class CompletionPrediction(TypedDict, total=False):
     generation: str
-    tokens: List[str]  # not required
-    logprobs: List[float]  # not required
+    tokens: list[str]  # not required
+    logprobs: list[float]  # not required
 
 
 def tokenizer_image_token(
@@ -118,7 +118,7 @@ class LlavaGeneratorStream:
 
         return tokenizer
 
-    def encode_images(self, image_items: List[Union[str, Image.Image]]):
+    def encode_images(self, image_items: list[Union[str, Image.Image]]):
         processor = AutoProcessor.from_pretrained(self.checkpoints_dir)
         self.image_processor = processor.image_processor
         images = []
@@ -148,18 +148,18 @@ class LlavaGeneratorStream:
     @torch.inference_mode()
     def generate_stream(
         self,
-        prompt_tokens: List[List[int]],
+        prompt_tokens: list[list[int]],
         image_tensors: Optional[torch.FloatTensor] = None,
         max_gen_len: int = 2048,
         temperature: float = 0.6,
         top_p: float = 0.9,
         echo: bool = False,
-    ) -> Generator[Tuple[List[str], Optional[List[float]]], None, None]:
+    ) -> Generator[tuple[list[str], Optional[list[float]]], None, None]:
         """
         基于提供的 prompt_tokens, 使用语言生成模型逐个生成 token, 并在生成时立即输出。
 
         参数：
-            prompt_tokens (List[List[int]]): 已经进行分词的 prompt, 每个 prompt 是一个整数列表。
+            prompt_tokens (list[list[int]]): 已经进行分词的 prompt, 每个 prompt 是一个整数列表。
             max_gen_len (int): 生成的最大长度。
             temperature (float, optional): 控制采样随机性的温度值。默认为 0.6。
             top_p (float, optional): 用于 nucleus sampling 的概率阈值。默认为 0.9。
@@ -167,7 +167,7 @@ class LlavaGeneratorStream:
             echo (bool, optional): 是否在输出中包含 prompt_tokens。默认为 False。
 
         generator 输出：
-            Tuple[List[str], Optional[List[float]]]: 包含生成的文本和对应的对数概率(如果 logprobs 为 True)。
+            tuple[list[str], Optional[list[float]]]: 包含生成的文本和对应的对数概率(如果 logprobs 为 True)。
         说明：
             该方法在生成循环中，每生成一个新 token, 就立即输出对应的文本和概率(如果需要）。
         """
@@ -272,13 +272,13 @@ class LlavaGeneratorStream:
 
     def text_completion_stream(
         self,
-        prompts: List[str],
-        image_items: List[Union[str, Image.Image]],
+        prompts: list[str],
+        image_items: list[Union[str, Image.Image]],
         temperature: float = 0.6,
         top_p: float = 0.9,
         max_gen_len: Optional[int] = None,
         echo: bool = False,
-    ) -> Generator[List[CompletionPrediction], None, None]:
+    ) -> Generator[list[CompletionPrediction], None, None]:
         """每次迭代时，生成器返回一个包含多个 CompletionPrediction 字典的列表。"""
 
         if max_gen_len is None:
