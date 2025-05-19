@@ -10,18 +10,14 @@ from transformers import (
     pipeline,
 )
 
-checkpoints_dir='/gemini/code/Llama-3.2-1B-Instruct/original/'
+checkpoints_dir = "/gemini/code/Llama-3.2-1B-Instruct/original/"
 with open(Path(checkpoints_dir) / "params.json", "r") as f:
     params = json.loads(f.read())
 
 print("model params ", params)
 
 # 打印自定义 llama 模型结构
-ModelArgs = ModelArgs(
-            max_seq_len=2048,
-            max_batch_size=2,
-            device="cuda",
-            **params)
+ModelArgs = ModelArgs(max_seq_len=2048, max_batch_size=2, device="cuda", **params)
 
 model = Llama(ModelArgs)
 model.eval()
@@ -48,7 +44,10 @@ Llama(
 
 # torch.load 加载模型权重参数并打印 keys; print("llama-3.2-1b torch weights name ", state_dict.keys())
 print("\n AutoModelForCausalLM archetectue and shape")
-state_dict = torch.load('/gemini/code/Llama-3.2-1B-Instruct/original/consolidated.00.pth', map_location='cuda') # 加载模型权重文件
+state_dict = torch.load(
+    "/gemini/code/Llama-3.2-1B-Instruct/original/consolidated.00.pth",
+    map_location="cuda",
+)  # 加载模型权重文件
 for name, param in state_dict.items():
     print(name, param.shape)
 
@@ -57,7 +56,13 @@ for name, param in state_dict.items():
 #     print(name, module)
 
 # 打印 transformers 库 AutoModelForCausalLM 模型结构
-from transformers import AutoModelForCausalLM, AutoTokenizer,AutoModel,LlamaForCausalLM,AutoConfig
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    AutoModel,
+    LlamaForCausalLM,
+    AutoConfig,
+)
 
 model_checkpoint = "/gemini/code/Llama-3.2-1B-Instruct"
 model = LlamaForCausalLM.from_pretrained(

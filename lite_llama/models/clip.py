@@ -8,18 +8,21 @@ from ..kernels.activation_layers import ACT2FN
 from .model_config import CLIPVisionConfig
 from ..kernels import *
 
+
 def get_clip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
     assert image_size % patch_size == 0
     return image_size // patch_size
 
+
 def get_clip_num_patches(*, image_size: int, patch_size: int) -> int:
-    grid_length = get_clip_patch_grid_length(image_size=image_size,
-                                             patch_size=patch_size)
+    grid_length = get_clip_patch_grid_length(
+        image_size=image_size, patch_size=patch_size
+    )
     return grid_length * grid_length
+
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/clip/modeling_clip.py#L164 # noqa
 class CLIPVisionEmbeddings(nn.Module):
-
     def __init__(self, config: CLIPVisionConfig):
         super().__init__()
         self.config = config
@@ -37,19 +40,23 @@ class CLIPVisionEmbeddings(nn.Module):
             bias=False,
         )
 
-        self.num_patches = get_clip_num_patches(image_size=self.image_size,
-                                                patch_size=self.patch_size)
+        self.num_patches = get_clip_num_patches(
+            image_size=self.image_size, patch_size=self.patch_size
+        )
         self.num_positions = self.num_patches + 1
-        self.position_embedding = nn.Embedding(self.num_positions,
-                                               self.embed_dim)
-        self.register_buffer("position_ids",
-                             torch.arange(self.num_positions).expand((1, -1)),
-                             persistent=False)
+        self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
+        self.register_buffer(
+            "position_ids",
+            torch.arange(self.num_positions).expand((1, -1)),
+            persistent=False,
+        )
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         batch_size = pixel_values.shape[0]
         target_dtype = self.patch_embedding.weight.dtype
-        patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))  # shape = [*, width, grid, grid]
+        patch_embeds = self.patch_embedding(
+            pixel_values.to(dtype=target_dtype)
+        )  # shape = [*, width, grid, grid]
         patch_embeds = patch_embeds.flatten(2).transpose(1, 2)
 
         class_embeds = self.class_embedding.expand(batch_size, 1, -1)
@@ -57,7 +64,8 @@ class CLIPVisionEmbeddings(nn.Module):
         embeddings = embeddings + self.position_embedding(self.position_ids)
 
         return embeddings
-    
+
+
 class CLIPAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -81,7 +89,11 @@ class CLIPAttention(nn.Module):
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+        return (
+            tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
 
     def forward(
         self,
@@ -120,7 +132,10 @@ class CLIPAttention(nn.Module):
                     f"Attention mask should be of size {(bsz, 1, tgt_len, src_len)}, but is"
                     f" {causal_attention_mask.size()}"
                 )
-            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len) + causal_attention_mask
+            attn_weights = (
+                attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+                + causal_attention_mask
+            )
             attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
         if attention_mask is not None:
@@ -128,7 +143,10 @@ class CLIPAttention(nn.Module):
                 raise ValueError(
                     f"Attention mask should be of size {(bsz, 1, tgt_len, src_len)}, but is {attention_mask.size()}"
                 )
-            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len) + attention_mask
+            attn_weights = (
+                attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+                + attention_mask
+            )
             attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
         attn_weights = nn.functional.softmax(attn_weights, dim=-1)
@@ -138,12 +156,18 @@ class CLIPAttention(nn.Module):
             # make sure that attn_weights keeps its gradient.
             # In order to do so, attn_weights have to reshaped
             # twice and have to be reused in the following
-            attn_weights_reshaped = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-            attn_weights = attn_weights_reshaped.view(bsz * self.num_heads, tgt_len, src_len)
+            attn_weights_reshaped = attn_weights.view(
+                bsz, self.num_heads, tgt_len, src_len
+            )
+            attn_weights = attn_weights_reshaped.view(
+                bsz * self.num_heads, tgt_len, src_len
+            )
         else:
             attn_weights_reshaped = None
 
-        attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
+        attn_probs = nn.functional.dropout(
+            attn_weights, p=self.dropout, training=self.training
+        )
 
         attn_output = torch.bmm(attn_probs, value_states)
 
@@ -160,7 +184,8 @@ class CLIPAttention(nn.Module):
         attn_output = self.out_proj(attn_output)
 
         return attn_output, attn_weights_reshaped
-    
+
+
 class CLIPMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -174,7 +199,8 @@ class CLIPMLP(nn.Module):
         hidden_states = self.activation_fn(hidden_states)
         hidden_states = self.fc2(hidden_states)
         return hidden_states
-    
+
+
 class CLIPEncoderLayer(nn.Module):
     def __init__(self, config: CLIPVisionConfig):
         super().__init__()
@@ -201,8 +227,7 @@ class CLIPEncoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states, attn_weights = self.self_attn(
-        )
+        hidden_states, attn_weights = self.self_attn()
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -211,7 +236,8 @@ class CLIPEncoderLayer(nn.Module):
         hidden_states = residual + hidden_states
 
         return hidden_states
-    
+
+
 class CLIPEncoder(nn.Module):
     """
     Transformer encoder consisting of `config.num_hidden_layers` self
@@ -253,7 +279,8 @@ class CLIPEncoder(nn.Module):
         if return_all_hidden_states:
             return hidden_states_pool
         return hidden_states
-    
+
+
 def resolve_visual_encoder_outputs(
     encoder_outputs: Union[torch.Tensor, list[torch.Tensor]],
     feature_sample_layers: Optional[list[int]],
@@ -286,7 +313,8 @@ def resolve_visual_encoder_outputs(
     offset = max_possible_layers - len(encoder_outputs)
     hs_pool = [
         encoder_outputs[layer_idx]
-        if layer_idx >= 0 else encoder_outputs[layer_idx + offset]
+        if layer_idx >= 0
+        else encoder_outputs[layer_idx + offset]
         for layer_idx in feature_sample_layers
     ]
 
@@ -296,8 +324,8 @@ def resolve_visual_encoder_outputs(
         hs_pool[-1] = post_layer_norm(encoder_outputs)
     return torch.cat(hs_pool, dim=-1)
 
-class CLIPVisionTransformer(nn.Module):
 
+class CLIPVisionTransformer(nn.Module):
     def __init__(
         self,
         config: CLIPVisionConfig,
@@ -332,8 +360,7 @@ class CLIPVisionTransformer(nn.Module):
             require_post_norm = len(self.encoder.layers) == num_hidden_layers
 
         if require_post_norm:
-            self.post_layernorm = nn.LayerNorm(embed_dim,
-                                               eps=config.layer_norm_eps)
+            self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
         else:
             self.post_layernorm = None
 
@@ -342,7 +369,6 @@ class CLIPVisionTransformer(nn.Module):
         pixel_values: torch.Tensor,
         feature_sample_layers: Optional[list[int]] = None,
     ) -> torch.Tensor:
-
         hidden_states = self.embeddings(pixel_values)
         hidden_states = self.pre_layrnorm(hidden_states)
 
@@ -352,11 +378,15 @@ class CLIPVisionTransformer(nn.Module):
         # depending on if we have feature_sample_layers or not
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
-            return_all_hidden_states=return_all_hidden_states)
+            return_all_hidden_states=return_all_hidden_states,
+        )
 
         # Handle post-norm (if applicable) and stacks feature layers if needed
         encoder_outputs = resolve_visual_encoder_outputs(
-            encoder_outputs, feature_sample_layers, self.post_layernorm,
-            self.config.num_hidden_layers)
+            encoder_outputs,
+            feature_sample_layers,
+            self.post_layernorm,
+            self.config.num_hidden_layers,
+        )
 
         return encoder_outputs

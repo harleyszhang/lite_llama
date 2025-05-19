@@ -1,7 +1,12 @@
 from PIL import Image
-import requests,torch
-from transformers import AutoProcessor, LlavaForConditionalGeneration, LlavaConfig, \
-                        LlavaNextConfig, LlavaNextForConditionalGeneration
+import requests, torch
+from transformers import (
+    AutoProcessor,
+    LlavaForConditionalGeneration,
+    LlavaConfig,
+    LlavaNextConfig,
+    LlavaNextForConditionalGeneration,
+)
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 
 model_path = "/gemini/code/llm_weights/llava-hf/llava-1.5-7b-hf"
@@ -15,8 +20,8 @@ with init_empty_weights():
 model = load_checkpoint_and_dispatch(model, model_path, device_map="auto")
 
 # model = LlavaForConditionalGeneration.from_pretrained(
-#     model_path, 
-#     torch_dtype=torch.float16, 
+#     model_path,
+#     torch_dtype=torch.float16,
 #     low_cpu_mem_usage=True,
 # ).to("cuda")
 
@@ -32,7 +37,11 @@ inputs = {k: v.to("cuda") for k, v in inputs.items()}
 
 # Generate
 generate_ids = model.generate(**inputs, max_new_tokens=30)
-print(processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0])
+print(
+    processor.batch_decode(
+        generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+    )[0]
+)
 
 """
 USER: 
@@ -45,7 +54,7 @@ print("模型结构", model)
 print(f"模型总参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
 
 # 打印模型参数信息
-for name, param in list(model.named_parameters()): 
+for name, param in list(model.named_parameters()):
     print(name, param.shape)
 
 """

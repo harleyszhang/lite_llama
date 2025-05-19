@@ -32,6 +32,7 @@ def keep(conf):
         return False
     return True
 
+
 def ensure_contiguous(fn):
     @functools.wraps(fn)
     def wrapper(ctx, *args, **kwargs):
@@ -73,6 +74,7 @@ def compare_version(package: str, operator: Callable, target: str):
         return False
     pkg_version = Version(pkg.__version__)
     return operator(pkg_version, Version(target))
+
 
 torch_to_triton_dtype = {
     torch.float32: tl.float32,

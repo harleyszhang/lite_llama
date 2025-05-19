@@ -3,36 +3,46 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 class ReqTokensManager:
     """管理请求序列的 kv 内存 tokens 的类。
-    
+
     TokenTable 将一系列 kv tokens 映射到一组token 表中, 每个 token 表代表请求序列分配的 kv cache 内存空间。
     """
+
     def __init__(self, max_request_num, max_seq_len, mem_manager=None, device="cuda"):
         self.max_can_use_req_size = max_request_num
         self.can_use_req_size = max_request_num
         self.max_seq_len = max_seq_len
-        self.req_state = torch.zeros((max_request_num), dtype=torch.int32, device=device)
+        self.req_state = torch.zeros(
+            (max_request_num), dtype=torch.int32, device=device
+        )
         # 一个二维张量，形状为 [num_requests, max_seq_len]，用于存储每个请求的 Token 索引。
         # 每行表示一个请求，每列表示该请求在特定序列位置上的 Token 索引。
-        self.b_req_tokens_table = torch.zeros((max_request_num, max_seq_len), dtype=torch.int32, device=device)
+        self.b_req_tokens_table = torch.zeros(
+            (max_request_num, max_seq_len), dtype=torch.int32, device=device
+        )
         # self.mem_manager = mem_manager
 
     # 分配批次请求需要的内存空间
     def alloc_req(self, request_num):
         if request_num > self.can_use_req_size:
-            logger.error(f'Insufficient requested capacity, remaining {self.can_use_req_size}')
+            logger.error(
+                f"Insufficient requested capacity, remaining {self.can_use_req_size}"
+            )
             return None
 
-        logical_select_index = torch.nonzero(self.req_state==0).reshape(-1)[:request_num]
+        logical_select_index = torch.nonzero(self.req_state == 0).reshape(-1)[
+            :request_num
+        ]
         self.req_state[logical_select_index] = 1
         self.can_use_req_size -= len(logical_select_index)
         return logical_select_index
-    
+
     # 仅释放批次请求的索引
     def free_reqs(self, free_req_index, free_token_index):
         self.can_use_req_size += len(free_req_index)
-        self.req_state[free_token_index] = 0 # 对应批次请求的索引重新置为 0
+        self.req_state[free_token_index] = 0  # 对应批次请求的索引重新置为 0
         if self.can_use_req_size == len(self.req_state):
             logger.debug(f"freed all request size {self.can_use_req_size}")
         # self.mem_manager.free(free_token_index)
@@ -44,21 +54,28 @@ class ReqTokensManager:
             return
         self.can_use_req_size += 1
         self.req_state[free_req_index] = 0
-        return 
-    
+        return
+
     # 释放所有请求的内存，将所有请求状态 req_state 重置为未分配（都归 0）。
     def free_all(self):
         self.can_use_req_size = self.max_can_use_req_size
         self.req_state[:] = 0
 
+
 import unittest
 import torch
+
 
 class TestReqTokensManager(unittest.TestCase):
     def setUp(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.mem_manager_mock = unittest.mock.MagicMock()
-        self.table = ReqTokensManager(max_request_num=10, max_seq_len=5, mem_manager=self.mem_manager_mock, device=self.device)
+        self.table = ReqTokensManager(
+            max_request_num=10,
+            max_seq_len=5,
+            mem_manager=self.mem_manager_mock,
+            device=self.device,
+        )
 
     def test_alloc_req(self):
         indices = self.table.alloc_req(3)
@@ -83,6 +100,7 @@ class TestReqTokensManager(unittest.TestCase):
     def test_invalid_free_req(self):
         self.table.free_req(-1)  # Should not raise an error
         self.table.free_req(100)  # Should not raise an error
+
 
 if __name__ == "__main__":
     unittest.main()
