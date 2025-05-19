@@ -104,9 +104,9 @@ def logfileHandle(log_name="logs/common.log"):
 
 
 log = loggerHandle()
-logE = logfileHandle("logs/error.log")
-logP = logfileHandle("logs/post.log")
-logU = logfileHandle("logs/upload_data.log")
+logE = logfileHandle("../logs/error.log")
+logP = logfileHandle("../logs/post.log")
+logU = logfileHandle("../logs/upload_data.log")
 
 if __name__ == "__main__":
     
