@@ -84,11 +84,11 @@ def loggerHandle():
     return logger
 
 
-def logfileHandle(log_name="logs/common.log"):
+def logfileHandle(log_name="../logs/common.log"):
     project_path = getProjectPath()
     log_file = os.path.join(project_path, log_name)
-    if not os.path.exists(os.path.join(project_path, "logs")):
-        os.makedirs(os.path.join(project_path, "logs"))
+    if not os.path.exists(os.path.join(project_path, "../logs")):
+        os.makedirs(os.path.join(project_path, "../logs"))
     if not os.path.exists(log_file):
         os.mknod(log_file)
     logfile = logging.getLogger()
