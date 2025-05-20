@@ -3,7 +3,7 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
 import torch
 
-from evaluator.eval import *
+from .evaluator.eval import *
 
 import sys, os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
