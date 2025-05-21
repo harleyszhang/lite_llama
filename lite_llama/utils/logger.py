@@ -6,7 +6,7 @@ import time
 
 import logging
 sys.path.append("..")
-from utils.common import getProjectPath
+from lite_llama.utils.common import getProjectPath
 
 __all__ = ["log", "logE", "logP", "logU"]
 
