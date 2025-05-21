@@ -2,7 +2,7 @@ from typing import Optional
 import torch
 from utils.logger import log
 from typing import List, Literal, Optional, Tuple, TypedDict
-import torch.nn.functional as F 
+import torch.nn.functional as F
 from transformers import AutoTokenizer
 
 from .executor.model_executor import ModelExecutor
@@ -11,19 +11,23 @@ from .utils.file_interface import get_model_name_from_path
 
 Role = Literal["system", "user", "assistant"]
 
+
 class Message(TypedDict):
     role: Role
     content: str
+
 
 class CompletionPrediction(TypedDict, total=False):
     generation: str
     tokens: List[str]
     logprobs: List[float]
 
+
 class ChatPrediction(TypedDict, total=False):
     generation: Message
     tokens: List[str]
     logprobs: List[float]
+
 
 Dialog = List[Message]
 
@@ -31,6 +35,7 @@ B_INST, E_INST = "[INST]", "[/INST]"
 B_SYS, E_SYS = "<<SYS>>\n", "\n<</SYS>>\n\n"
 SPECIAL_TAGS = [B_INST, E_INST, "<<SYS>>", "<</SYS>>"]
 UNSAFE_ERROR = "Error: special tags are not allowed as part of the prompt."
+
 
 @torch.inference_mode()
 def sample_top_p(probs, p: float):
@@ -47,15 +52,17 @@ def sample_top_p(probs, p: float):
     next_token = torch.gather(probs_idx, -1, next_token_sorted_idx)
     return next_token
 
+
 class GenerateText:
-    def __init__(self, 
+    def __init__(
+        self,
         checkpoints_dir: str,
         tokenizer_path: str,
-        max_seq_len = 1024,
-        max_gpu_num_blocks = None,
-        load_model = True,
-        triton_weight = True,
-        compiled_model = False,
+        max_seq_len=1024,
+        max_gpu_num_blocks=None,
+        load_model=True,
+        triton_weight=True,
+        compiled_model=False,
         device="cuda",
     ):
         self.checkpoints_dir = checkpoints_dir
@@ -63,25 +70,27 @@ class GenerateText:
         self.device = device
 
         self.model_executor = ModelExecutor.build(
-            checkpoints_dir = checkpoints_dir,
-            load_model = load_model,
-            max_gpu_num_blocks = max_gpu_num_blocks,
-            max_seq_len = max_seq_len,
-            triton_weight = triton_weight,
-            device = device
+            checkpoints_dir=checkpoints_dir,
+            load_model=load_model,
+            max_gpu_num_blocks=max_gpu_num_blocks,
+            max_seq_len=max_seq_len,
+            triton_weight=triton_weight,
+            device=device,
         )
         self.model_config = self.model_executor.model_config
         self.tokenizer = self.load_tokenizer(tokenizer_path)
-    
+
     def load_tokenizer(self, pretrained_model_name_or_path):
         model_name = get_model_name_from_path(pretrained_model_name_or_path)
         # 根据模型名称决定是否使用 fast tokenizer
         use_fast = True
-        if 'llava' in model_name.lower():
+        if "llava" in model_name.lower():
             use_fast = False
-        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, use_fast=use_fast)
+        tokenizer = AutoTokenizer.from_pretrained(
+            pretrained_model_name_or_path, use_fast=use_fast
+        )
         return tokenizer
-    
+
     @torch.inference_mode()
     def generate(
         self,
@@ -91,7 +100,7 @@ class GenerateText:
         top_p: float = 0.9,
         logprobs: bool = True,
         echo: bool = False,
-        device = "cuda"
+        device="cuda",
     ) -> Tuple[List[List[int]], Optional[List[List[float]]]]:
         """
         基于提供的提示词 (prompts) 使用语言生成模型生成文本序列。
@@ -100,29 +109,43 @@ class GenerateText:
         max_prompt_len = max(len(t) for t in prompt_tokens)
         assert max_prompt_len <= self.model_config.max_seq_len
         total_len = min(self.model_config.max_seq_len, max_gen_len + max_prompt_len)
-        actual_prompt_lens = torch.tensor([len(t) for t in prompt_tokens], dtype=torch.long, device=device)
-        pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+        actual_prompt_lens = torch.tensor(
+            [len(t) for t in prompt_tokens], dtype=torch.long, device=device
+        )
+        pad_id = (
+            self.tokenizer.pad_token_id
+            if self.tokenizer.pad_token_id is not None
+            else self.tokenizer.eos_token_id
+        )
         self.model_executor.atten_info.max_actual_seq_len = max_prompt_len
 
         # 预分配tokens张量
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device=device)
-        
+
         # 填充提示词到 tokens 张量
         for seq_id, token_ids in enumerate(prompt_tokens):
             length = len(token_ids)
-            tokens[seq_id, :length] = torch.tensor(token_ids, dtype=torch.long, device=device)
+            tokens[seq_id, :length] = torch.tensor(
+                token_ids, dtype=torch.long, device=device
+            )
 
         # 生成一个布尔张量，它的值为 True 的位置表示输入序列的实际内容（即非填充部分）, 形状为 (batch_size, total_len)
         input_text_mask = tokens != pad_id
         eos_reached = torch.zeros(bsz, dtype=torch.bool, device=device)
-        token_logprobs = torch.zeros((bsz, total_len), dtype=torch.float, device=device) if logprobs else None
+        token_logprobs = (
+            torch.zeros((bsz, total_len), dtype=torch.float, device=device)
+            if logprobs
+            else None
+        )
 
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
-        b_req_idx = torch.arange(bsz, device = self.device)
+        b_req_idx = torch.arange(bsz, device=self.device)
         all_select_index_list = []
-        prefill_select_index, _ = self.model_executor.prefill_alloc_kv_cache(max_prompt_len, actual_prompt_lens, b_req_idx)
+        prefill_select_index, _ = self.model_executor.prefill_alloc_kv_cache(
+            max_prompt_len, actual_prompt_lens, b_req_idx
+        )
         all_select_index_list.append(prefill_select_index)
 
         token_count = 0
@@ -131,14 +154,14 @@ class GenerateText:
         # 实际上可以统一从 max_prompt_len 开始生成，因为在 (min_prompt_len, max_prompt_len) 的位置上，有的样本还属于prompt部分
         # 这样减少复杂判断逻辑
         prev_pos = 0
-        input_ids = tokens[:, : max_prompt_len]
+        input_ids = tokens[:, :max_prompt_len]
         for cur_pos in range(max_prompt_len, total_len):
             batch_size, seq_len = input_ids.shape
             position_ids = (
                 torch.arange(prev_pos, prev_pos + seq_len, device=input_ids.device)
-                .unsqueeze(0)            # shape: [1, seq_len]
-                .repeat(batch_size, 1)   # shape: [batch_size, seq_len], 不分配额外内存
-            )  
+                .unsqueeze(0)  # shape: [1, seq_len]
+                .repeat(batch_size, 1)  # shape: [batch_size, seq_len], 不分配额外内存
+            )
             logits = self.model_executor.forward(input_ids, position_ids)
             decode_select_index = self.model_executor.decode_alloc_kv_cache(bsz)
             all_select_index_list.append(decode_select_index)
@@ -150,12 +173,14 @@ class GenerateText:
                 next_token = sample_top_p(probs, top_p).reshape(-1)
             else:
                 next_token = torch.argmax(last_logits, dim=-1)
-            input_ids = next_token   # [batch_size, 1]
-            
+            input_ids = next_token  # [batch_size, 1]
+
             # 对仍在生成过程（非输入部分）的位置写入next_token
             # 对尚在prompt部分的位置保持原值不变
             to_generate = ~input_text_mask[:, cur_pos]
-            next_token = torch.where(input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token)
+            next_token = torch.where(
+                input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
+            )
             tokens[:, cur_pos] = next_token
 
             if logprobs:
@@ -166,7 +191,9 @@ class GenerateText:
                 target = tokens[:, cur_pos]
                 # 使用 log_softmax 代替 cross_entropy，可以只提取相应token的logprob
                 log_probs = F.log_softmax(last_logits, dim=-1)
-                step_logprobs = torch.gather(log_probs, 1, target.unsqueeze(1)).squeeze(1)
+                step_logprobs = torch.gather(log_probs, 1, target.unsqueeze(1)).squeeze(
+                    1
+                )
 
                 # 将计算结果写入相应位置
                 token_logprobs[:, cur_pos] = step_logprobs
@@ -184,12 +211,20 @@ class GenerateText:
         torch.cuda.synchronize()
 
         elapsed_time_sec = start_event.elapsed_time(end_event) / 1000.0
-        tokens_per_second = token_count / elapsed_time_sec if elapsed_time_sec > 0 else float('inf')
+        tokens_per_second = (
+            token_count / elapsed_time_sec if elapsed_time_sec > 0 else float("inf")
+        )
         log.info(f"Batch inference time, no decode: {elapsed_time_sec * 1000:.4f} ms")
         log.info(f"Tokens per second, no decode: {tokens_per_second:.2f} tokens/s")
 
         out_tokens, out_logprobs = self.process_output_tokens(
-            tokens, prompt_tokens, max_gen_len, logprobs, echo, self.tokenizer.eos_token_id, token_logprobs
+            tokens,
+            prompt_tokens,
+            max_gen_len,
+            logprobs,
+            echo,
+            self.tokenizer.eos_token_id,
+            token_logprobs,
         )
 
         # 减少 kv cache 内存管理器的引用计数
@@ -206,32 +241,38 @@ class GenerateText:
         max_gen_len: Optional[int] = None,
         logprobs: bool = False,
         echo: bool = False,
-        device = "cuda",
+        device="cuda",
     ) -> List[CompletionPrediction]:
         if max_gen_len is None:
             max_gen_len = self.model_config.max_seq_len - 1
 
-        input_ids = self.tokenizer.batch_encode_plus(prompts, add_special_tokens=True).input_ids
+        input_ids = self.tokenizer.batch_encode_plus(
+            prompts, add_special_tokens=True
+        ).input_ids
         generated_ids, generation_logprobs = self.generate(
-            prompt_tokens = input_ids,
-            max_gen_len = max_gen_len,
-            temperature = temperature,
-            top_p = top_p,
-            logprobs = logprobs,
-            echo = echo,
-            device = device,
+            prompt_tokens=input_ids,
+            max_gen_len=max_gen_len,
+            temperature=temperature,
+            top_p=top_p,
+            logprobs=logprobs,
+            echo=echo,
+            device=device,
         )
 
         if logprobs:
             return [
                 {
                     "generation": self.tokenizer.decode(t, skip_special_tokens=True),
-                    "tokens": [self.tokenizer.decode([x], skip_special_tokens=True) for x in t],
+                    "tokens": [
+                        self.tokenizer.decode([x], skip_special_tokens=True) for x in t
+                    ],
                     "logprobs": logprobs_i,
                 }
                 for t, logprobs_i in zip(generated_ids, generation_logprobs)
             ]
-        generated_texts = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        generated_texts = self.tokenizer.batch_decode(
+            generated_ids, skip_special_tokens=True
+        )
         return generated_texts
 
     def process_output_tokens(
@@ -242,9 +283,8 @@ class GenerateText:
         logprobs: bool,
         echo: bool,
         eos_token_id,
-        token_logprobs: Optional[torch.Tensor] = None
+        token_logprobs: Optional[torch.Tensor] = None,
     ) -> Tuple[List[List[int]], Optional[List[List[float]]]]:
-
         out_tokens = []
         out_logprobs = [] if logprobs else None
         tokens_list = tokens.tolist()  # 转为CPU列表，只在最终处理输出时进行
@@ -273,7 +313,7 @@ class GenerateText:
                 out_logprobs.append(seq_logprobs)
 
         return (out_tokens, out_logprobs if logprobs else None)
-    
+
     def chat_completion(
         self,
         dialogs: List[Dialog],
@@ -318,9 +358,9 @@ class GenerateText:
                 ],
                 [],
             )
-            assert (
-                dialog[-1]["role"] == "user"
-            ), f"Last message must be from user, got {dialog[-1]['role']}"
+            assert dialog[-1]["role"] == "user", (
+                f"Last message must be from user, got {dialog[-1]['role']}"
+            )
             dialog_tokens += self.tokenizer.encode(
                 f"{B_INST} {(dialog[-1]['content']).strip()} {E_INST}",
             )
@@ -342,7 +382,9 @@ class GenerateText:
                         if not unsafe
                         else UNSAFE_ERROR,
                     },
-                    "tokens": [self.tokenizer.decode([x], skip_special_tokens=True) for x in t],
+                    "tokens": [
+                        self.tokenizer.decode([x], skip_special_tokens=True) for x in t
+                    ],
                     "logprobs": logprobs_i,
                 }
                 for t, logprobs_i, unsafe in zip(
@@ -353,7 +395,9 @@ class GenerateText:
             {
                 "generation": {
                     "role": "assistant",
-                    "content": self.tokenizer.decode(t, skip_special_tokens=True) if not unsafe else UNSAFE_ERROR,
+                    "content": self.tokenizer.decode(t, skip_special_tokens=True)
+                    if not unsafe
+                    else UNSAFE_ERROR,
                 }
             }
             for t, unsafe in zip(generation_tokens, unsafe_requests)

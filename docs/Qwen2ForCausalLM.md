@@ -1,6 +1,6 @@
 ## hf qwen2 模型结构信息
 
-### 模型结构
+### Qwen2.5-1.5B 模型结构
 
 ```bash
 Qwen2ForCausalLM(
@@ -377,7 +377,7 @@ model.norm.weight torch.Size([1536])
 
 ## 自定义 qwen2 模型结构信息
 
-### 模型结构
+### Qwen2.5-1.5B 模型结构
 
 ```bash
 Qwen2Model(

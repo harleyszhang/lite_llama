@@ -1,12 +1,15 @@
 import json, os, sys
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from lite_llama.models.model_config import LlamaConfig
 
+
 def load_config_from_json(json_file_path: str) -> LlamaConfig:
-    with open(json_file_path, 'r', encoding='utf-8') as f:
+    with open(json_file_path, "r", encoding="utf-8") as f:
         config_dict = json.load(f)
-    config = LlamaConfig(config_dict, max_seq_len = 2048)
+    config = LlamaConfig(config_dict, max_seq_len=2048)
     return config
+
 
 if __name__ == "__main__":
     # 创建 LlamaConfig 实例，设置 max_batch_size=16
@@ -14,7 +17,7 @@ if __name__ == "__main__":
     print("max_batch_size:", config.max_batch_size)
 
     # JSON 文件的路径
-    json_file_path = '/gemini/code/Llama-3.2-1B-Instruct/config.json'
+    json_file_path = "/gemini/code/Llama-3.2-1B-Instruct/config.json"
 
     # 加载配置
     config = load_config_from_json(json_file_path)

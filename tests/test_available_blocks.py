@@ -4,22 +4,21 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaForCausalLM
 import json,os,sys
 
 # 获取 lite_llama 目录的绝对路径并添加到 sys.path 中
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from lite_llama.models.model_config import LlamaConfig
 
-from utils.logger import log
+from lite_llama.utils.logger import log
 
 
-def load_config_from_json(json_file_path: str, device: str="cuda") -> LlamaConfig:
+
+def load_config_from_json(json_file_path: str, device: str = "cuda") -> LlamaConfig:
     with open(json_file_path, "r") as f:
         config_dict = json.load(f)
-    config = LlamaConfig(config_dict, max_seq_len = 2048, device=device)
+    config = LlamaConfig(config_dict, max_seq_len=2048, device=device)
     return config
 
-def _get_cache_block_size(
-    model_config,
-    block_size: int = 1
-) -> int:
+
+def _get_cache_block_size(model_config, block_size: int = 1) -> int:
     head_size = model_config.head_dim
     num_heads = model_config.num_kv_heads
     num_attention_layers = model_config.num_layers
@@ -27,12 +26,15 @@ def _get_cache_block_size(
     key_cache_block = block_size * num_heads * head_size
     value_cache_block = key_cache_block
     total = num_attention_layers * (key_cache_block + value_cache_block)
-    dtype_size = 2 # torch.float16
+    dtype_size = 2  # torch.float16
 
     return dtype_size * total
 
+
 @torch.inference_mode()
-def determine_num_available_blocks(model_config, gpu_memory_utilization = 0.9) -> Tuple[int, int]:
+def determine_num_available_blocks(
+    model_config, gpu_memory_utilization=0.9
+) -> Tuple[int, int]:
     """
     评估模型的峰值内存使用情况，以确定在不发生内存溢出的情况下可以分配的 KV（键值）缓存块的数量。
 
@@ -54,27 +56,24 @@ def determine_num_available_blocks(model_config, gpu_memory_utilization = 0.9) -
     # 计算模型加载后的峰值内存使用量
     # Get the peak memory allocation recorded by torch
     peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
-    
+
     # 清理未使用的缓存，计算非Torch分配的内存
     torch.cuda.empty_cache()
     torch_allocated_bytes = torch.cuda.memory_stats()["allocated_bytes.all.current"]
 
     total_allocated_bytes = torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]
     non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
-    
+
     if non_torch_allocations > 0:
         peak_memory += non_torch_allocations
 
-    available_kv_cache_memory = (
-        total_gpu_memory * gpu_memory_utilization -
-        peak_memory)
-    
+    available_kv_cache_memory = total_gpu_memory * gpu_memory_utilization - peak_memory
+
     # 计算每个缓存块的大小
     cache_block_size = _get_cache_block_size(model_config)
     # 计算在剩余可用内存下，最多可以分配的 GPU 缓存块数量
     num_gpu_blocks = int(
-        (total_gpu_memory * gpu_memory_utilization -
-         peak_memory) // cache_block_size
+        (total_gpu_memory * gpu_memory_utilization - peak_memory) // cache_block_size
     )
     # 确保缓存块数量不为负数
     num_gpu_blocks = max(num_gpu_blocks, 0)
@@ -100,6 +99,7 @@ def determine_num_available_blocks(model_config, gpu_memory_utilization = 0.9) -
 
     return num_gpu_blocks, 0
 
+
 def load_original_llama(model_name_or_path: str, device: str = "cuda"):
     # config = LlamaConfig.from_pretrained(model_name_or_path)
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
@@ -111,6 +111,7 @@ def load_original_llama(model_name_or_path: str, device: str = "cuda"):
     model.to(device)
     return model, tokenizer
 
+
 if __name__ == "__main__":
     # 定义模型权重路径及配置参数
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -118,6 +119,8 @@ if __name__ == "__main__":
     # 加载原始模型
     original_model, tokenizer = load_original_llama(original_model_path, device)
     # 定义模型配置参数
-    json_file_path = '/gemini/code/Llama-3.2-1B-Instruct/my_weight/config.json' # JSON 文件的路径
-    model_config = load_config_from_json(json_file_path, device) # 加载配置
+    json_file_path = (
+        "/gemini/code/Llama-3.2-1B-Instruct/my_weight/config.json"  # JSON 文件的路径
+    )
+    model_config = load_config_from_json(json_file_path, device)  # 加载配置
     determine_num_available_blocks(model_config)

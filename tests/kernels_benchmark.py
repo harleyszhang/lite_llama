@@ -16,15 +16,18 @@ try:
     # This is https://github.com/NVIDIA/apex, NOT the apex on PyPi, so it
     # should not be added to extras_require in setup.py.
     import apex
+
     HAS_APEX = True
 except ModuleNotFoundError:
     HAS_APEX = False
-    
+
+
 def is_cuda():
     return torch.cuda.is_available()
 
+
 result_path = "/gemini/code/lite_llama/images/benchamrk_result"
-ref_lib = 'cuBLAS' if is_cuda() else 'rocBLAS'
+ref_lib = "cuBLAS" if is_cuda() else "rocBLAS"
 TORCH_HAS_FP8 = hasattr(torch, "float8_e5m2")
 ################################benchamrk matmul################################
 configs = []
@@ -34,18 +37,25 @@ for fp8_inputs in [False, True]:
     configs.append(
         triton.testing.Benchmark(
             x_names=["M", "N", "K"],  # Argument names to use as an x-axis for the plot
-            x_vals=[128 * i for i in range(2, 33)],  # Different possible values for `x_name`
+            x_vals=[
+                128 * i for i in range(2, 33)
+            ],  # Different possible values for `x_name`
             line_arg="provider",  # Argument name whose value corresponds to a different line in the plot
             # Possible values for `line_arg`
             # Don't compare to cublas for fp8 cases as torch.matmul doesn't support fp8 at the moment.
-            line_vals=["triton"] if fp8_inputs else [ref_lib.lower(), "triton"],  # Label name for the lines
+            line_vals=["triton"]
+            if fp8_inputs
+            else [ref_lib.lower(), "triton"],  # Label name for the lines
             line_names=["Triton"] if fp8_inputs else [ref_lib, "Triton"],  # Line styles
             styles=[("green", "-"), ("blue", "-")],
             ylabel="TFLOPS",  # Label name for the y-axis
-            plot_name="matmul-performance-" +
-            ("fp16" if not fp8_inputs else "fp8"),  # Name for the plot, used also as a file name for saving the plot.
+            plot_name="matmul-performance-"
+            + (
+                "fp16" if not fp8_inputs else "fp8"
+            ),  # Name for the plot, used also as a file name for saving the plot.
             args={"fp8_inputs": fp8_inputs},
-        ))
+        )
+    )
 
 
 # @triton.testing.perf_report(configs)
@@ -56,7 +66,7 @@ for fp8_inputs in [False, True]:
 #         a = a.to(torch.float8_e5m2)
 #         b = b.T.contiguous()   # 确保 b 在转置后是连续的
 #         b = b.to(torch.float8_e5m2)
-    
+
 #     # print("Weight is contiguous:", b.is_contiguous())  # 添加这一行
 #     quantiles = [0.5, 0.2, 0.8]
 #     if provider == ref_lib.lower():
@@ -77,13 +87,13 @@ for fp8_inputs in [False, True]:
 #         """
 #         super(RMSNorm, self).__init__()
 #         self.weight = nn.Parameter(torch.ones(dim))  # 可学习的缩放参数
-    
+
 #     def forward(self, x):
-#         # x 的形状为 [batch_size, seq_len, dim]        
+#         # x 的形状为 [batch_size, seq_len, dim]
 #         var = torch.mean(x ** 2, dim=-1, keepdim=True)
 #         rms = torch.sqrt( var)
 #         return x / rms * self.weight # 归一化，并应用缩放参数
-    
+
 # @triton.testing.perf_report(
 #     triton.testing.Benchmark(
 #         x_names=['N'],
@@ -124,7 +134,7 @@ for fp8_inputs in [False, True]:
 #     if mode == 'forward':
 #         gbps = lambda ms: 2 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
 #         ms, min_ms, max_ms = triton.testing.do_bench(y_fwd, quantiles=quantiles, rep=500)
-        
+
 #     return gbps(ms), gbps(max_ms), gbps(min_ms)
 
 # bench_rmsnorm.run(print_data=True, save_path=result_path)
@@ -186,7 +196,7 @@ for fp8_inputs in [False, True]:
 #             "Torch_softmax",
 #             "Triton_softmax",
 #             'Triton_online_v2_softmax',
-            
+
 #         ],  # label name for the lines
 #         styles=[('blue', '-'), ('green', '-'), ('yellow', '-')],  # line styles
 #         ylabel="GB/s",  # label name for the y-axis
@@ -208,7 +218,7 @@ for fp8_inputs in [False, True]:
 #     quantiles = [0.5, 0.2, 0.8]
 #     stream = torch.cuda.Stream()
 #     torch.cuda.set_stream(stream)
-    
+
 #     if provider == 'torch_softmax':
 #         ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.softmax(x, axis=-1), quantiles=quantiles)
 #     elif provider == 'triton_softmax':
@@ -223,28 +233,42 @@ for fp8_inputs in [False, True]:
 
 # bench_softmax.run(print_data=True, save_path=result_path)
 
+
 ################################## mlp_silu softmax ####################################
 # 对 mlp_silu 操作的不同实现（Triton、PyTorch、PyTorch JIT）进行性能基准测试（Benchmark）
-@triton.testing.perf_report( # 一个装饰器，用于测试和记录函数性能
-    triton.testing.Benchmark( # 定义了性能测试的不同维度，包括 x 轴参数、线条配置等
-        x_names=['N'],  # argument names to use as an x-axis for the plot
-        x_vals=[32 * i for i in range(1, 60, 8)],  # different possible values for `x_name`
-        line_arg='provider',  # argument name whose value corresponds to a different line in the plot
-        line_vals=['torch_mlp_silu', 'torch_fused_mlp', 'triton_mlp_silu', 'triton_torch_mlp_silu'],  # possible values for `line_arg``
+@triton.testing.perf_report(  # 一个装饰器，用于测试和记录函数性能
+    triton.testing.Benchmark(  # 定义了性能测试的不同维度，包括 x 轴参数、线条配置等
+        x_names=["N"],  # argument names to use as an x-axis for the plot
+        x_vals=[
+            32 * i for i in range(1, 60, 8)
+        ],  # different possible values for `x_name`
+        line_arg="provider",  # argument name whose value corresponds to a different line in the plot
+        line_vals=[
+            "torch_mlp_silu",
+            "torch_fused_mlp",
+            "triton_mlp_silu",
+            "triton_torch_mlp_silu",
+        ],  # possible values for `line_arg``
         line_names=[
             "Torch_mlp_silu",
             "Torch_fused_mlp",
             "Triton_mlp_silu",
             "Triton_torch_mlp_silu",
-            
         ],  # label name for the lines
-        styles=[('blue', '-'),('yellow', '-'), ('green', '-'), ('red', '-')],  # line styles
+        styles=[
+            ("blue", "-"),
+            ("yellow", "-"),
+            ("green", "-"),
+            ("red", "-"),
+        ],  # line styles
         ylabel="GB/s",  # label name for the y-axis
         plot_name="mlp-silu-performance",  # name for the plot. Used also as a file name for saving the plot.
-        args={'M': 3584},  # 设置除 x_names 和 line_arg 外的固定参数值，这里 M 表示批量大小。
-    ))
-
-def bench_mlp_silu(M, N, provider, mode='forward', eps=1e-5, device='cuda'):
+        args={
+            "M": 3584
+        },  # 设置除 x_names 和 line_arg 外的固定参数值，这里 M 表示批量大小。
+    )
+)
+def bench_mlp_silu(M, N, provider, mode="forward", eps=1e-5, device="cuda"):
     """定义性能测试函数 bench_softmax。
     参数：
         M: 批量大小（固定为 4096)。
@@ -257,10 +281,25 @@ def bench_mlp_silu(M, N, provider, mode='forward', eps=1e-5, device='cuda'):
     B = 4
     hidden_size = 3584
     intermediate_size = 18944
-    x = torch.randn(B, N, hidden_size, device='cuda', dtype=torch.float16)
-    w1 = torch.randn((intermediate_size, hidden_size), device='cuda', dtype=torch.float16) * 0.01
-    w2 = torch.randn((intermediate_size, hidden_size), device='cuda', dtype=torch.float16) * 0.01
-    w3 = torch.randn((hidden_size, intermediate_size), device='cuda', dtype=torch.float16) * 0.01
+    x = torch.randn(B, N, hidden_size, device="cuda", dtype=torch.float16)
+    w1 = (
+        torch.randn(
+            (intermediate_size, hidden_size), device="cuda", dtype=torch.float16
+        )
+        * 0.01
+    )
+    w2 = (
+        torch.randn(
+            (intermediate_size, hidden_size), device="cuda", dtype=torch.float16
+        )
+        * 0.01
+    )
+    w3 = (
+        torch.randn(
+            (hidden_size, intermediate_size), device="cuda", dtype=torch.float16
+        )
+        * 0.01
+    )
 
     w1_t = w1.t().contiguous()
     w2_t = w2.t().contiguous()
@@ -270,20 +309,29 @@ def bench_mlp_silu(M, N, provider, mode='forward', eps=1e-5, device='cuda'):
     quantiles = [0.5, 0.2, 0.8]
     stream = torch.cuda.Stream()
     torch.cuda.set_stream(stream)
-    
-    if provider == 'torch_mlp_silu':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch_mlp_silu(x, w1_t, w2_t, w3_t), quantiles=quantiles)
-    elif provider == 'torch_fused_mlp':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch_fused_mlp(x), quantiles=quantiles)
-    elif provider == 'triton_mlp_silu':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: mlp_silu(x, w1_t, w2_t, w3_t), quantiles=quantiles)
-    elif provider == 'triton_torch_mlp_silu':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: triton_torch_mlp_silu(x, w1_t, w2_t, w3_t), quantiles=quantiles)
+
+    if provider == "torch_mlp_silu":
+        ms, min_ms, max_ms = triton.testing.do_bench(
+            lambda: torch_mlp_silu(x, w1_t, w2_t, w3_t), quantiles=quantiles
+        )
+    elif provider == "torch_fused_mlp":
+        ms, min_ms, max_ms = triton.testing.do_bench(
+            lambda: torch_fused_mlp(x), quantiles=quantiles
+        )
+    elif provider == "triton_mlp_silu":
+        ms, min_ms, max_ms = triton.testing.do_bench(
+            lambda: mlp_silu(x, w1_t, w2_t, w3_t), quantiles=quantiles
+        )
+    elif provider == "triton_torch_mlp_silu":
+        ms, min_ms, max_ms = triton.testing.do_bench(
+            lambda: triton_torch_mlp_silu(x, w1_t, w2_t, w3_t), quantiles=quantiles
+        )
     else:
         raise ValueError(f"Unknown provider: {provider}")
     # * 3e-9 是将 bytes 转换为 gb 单位，* 1e-3 是将 s 转换成 ms 单位
     gbps = lambda ms: 2 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
     return gbps(ms), gbps(max_ms), gbps(min_ms)
+
 
 bench_mlp_silu.run(print_data=True, save_path=result_path)
 
@@ -300,6 +348,7 @@ gbps(max_ms) 和 gbps(min_ms)：这些值通常用于表示性能的波动范围
 try:
     from ..lite_llama.kernels.flashattention import flash_attention_v1
     from ..lite_llama.kernels.flashattentionv2 import flash_attention_v2
+
     HAS_FLASH = True
 except BaseException:
     HAS_FLASH = False
@@ -318,7 +367,8 @@ for mode in ["fwd"]:
                 x_vals=[2**i for i in range(4, 12)],
                 line_arg="provider",
                 line_vals=["triton-official"] + (["flash_me"] if FLASH_NEW else []),
-                line_names=["triton-official-fp16"] + (["flash-me-fp16"] if FLASH_NEW else []),
+                line_names=["triton-official-fp16"]
+                + (["flash-me-fp16"] if FLASH_NEW else []),
                 styles=[("red", "-"), ("blue", "-"), ("green", "-")],
                 ylabel="TFLOPS",
                 plot_name=f"fused-attention-batch{BATCH}-head{N_HEADS}-d{HEAD_DIM}-{mode}-causal={causal}",
@@ -329,18 +379,21 @@ for mode in ["fwd"]:
                     "mode": mode,
                     "causal": causal,
                 },
-            ))
+            )
+        )
 
 
 @triton.testing.perf_report(configs)
-def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider, device="cuda"):
+def bench_flash_attention(
+    BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider, device="cuda"
+):
     assert mode in ["fwd"]
     dtype = torch.float16
     if "flashattentionv2" in provider:
         q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
         k = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
         v = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
-    
+
         sm_scale = 1.3
         fn = lambda: flash_attention_v2(q, k, v, causal, sm_scale)
         if mode == "bwd":
@@ -356,7 +409,7 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider, dev
         batch, heads, m_size, head_dim = q.shape
         sm_scale = 1 / math.sqrt(head_dim)
         output = torch.empty_like(q)
-        
+
         fn = lambda: flash_attention_v1(q, k, v, sm_scale)
         ms = triton.testing.do_bench(fn)
 
@@ -367,6 +420,7 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider, dev
     if mode == "bwd":
         total_flops *= 2.5  # 2.0(bwd) + 0.5(recompute)
     return total_flops * 1e-12 / (ms * 1e-3)
+
 
 if __name__ == "__main__":
     # only works on post-Ampere GPUs right now

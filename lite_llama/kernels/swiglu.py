@@ -5,8 +5,10 @@ import triton
 import triton.language as tl
 import functools
 
+
 def is_hip() -> bool:
     return torch.version.hip is not None
+
 
 def ensure_contiguous(fn):
     @functools.wraps(fn)
@@ -41,6 +43,7 @@ def calculate_settings(n):
         num_warps = 8
     return BLOCK_SIZE, num_warps
 
+
 @triton.jit
 def silu(x):
     return x * tl.sigmoid(x)
@@ -68,7 +71,7 @@ def _swiglu_forward_kernel(
 
 
 def swiglu_forward(a, b):
-    ori_shape = a.shape # ori_shape is [batch_size, seq_len, hidden_size]
+    ori_shape = a.shape  # ori_shape is [batch_size, seq_len, hidden_size]
 
     n_cols = ori_shape[-1]
     a = a.view(-1, n_cols)
@@ -82,7 +85,7 @@ def swiglu_forward(a, b):
         a,
         b,
         c,
-        c.stride(-2), # c.stride(-2) = n_cols
+        c.stride(-2),  # c.stride(-2) = n_cols
         n_cols=n_cols,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,

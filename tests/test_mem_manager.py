@@ -1,9 +1,11 @@
 # 代码可直接运行，用于测试 KVCacheMemoryManager 的结果
 
 import unittest
-import torch, os,sys
+import torch, os, sys
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from lite_llama.executor.mem_manager import KVCacheMemoryManager
+
 
 class TestKVCacheMemoryManager(unittest.TestCase):
     def setUp(self):
@@ -20,7 +22,7 @@ class TestKVCacheMemoryManager(unittest.TestCase):
             num_layers=self.num_layers,
             gpu_num_blocks=self.gpu_num_blocks,
             dtype=self.dtype,
-            device=self.device
+            device=self.device,
         )
 
     def test_initialization(self):
@@ -37,14 +39,17 @@ class TestKVCacheMemoryManager(unittest.TestCase):
         self.assertEqual(select_index.numel(), need_size)
         # 检查分配的索引是否被标记为使用
         used_state = self.manager.kv_mem_use_state[select_index]
-        print("After alloc_kvcache(3) alloc_kvcache kv_mem_use_state ", self.manager.kv_mem_use_state)
+        print(
+            "After alloc_kvcache(3) alloc_kvcache kv_mem_use_state ",
+            self.manager.kv_mem_use_state,
+        )
         self.assertTrue(torch.all(used_state == 1))
         # 检查可用内存大小是否更新
         self.assertEqual(self.manager.can_use_mem_size, self.gpu_num_blocks - need_size)
-        
+
         self.manager.release_ref(select_index)
         print("after release_ref kv_mem_use_state ", self.manager.kv_mem_use_state)
-    
+
     def test_alloc_kvcache_failure(self):
         """尝试分配超过可用块数量的内存"""
         need_size = self.gpu_num_blocks + 1
@@ -61,7 +66,7 @@ class TestKVCacheMemoryManager(unittest.TestCase):
         select_index, start, end = result
         self.assertEqual(select_index.numel(), need_size)
         self.assertEqual(end - start, need_size)
-        
+
         # 检查分配的索引是否被标记为使用
         used_state = self.manager.kv_mem_use_state[select_index]
         self.assertTrue(torch.all(used_state == 1))
@@ -74,15 +79,15 @@ class TestKVCacheMemoryManager(unittest.TestCase):
         need_size = self.gpu_num_blocks
         print("self.can_use_mem_size ", self.manager.can_use_mem_size)
         result = self.manager.alloc_contiguous_kvcache(need_size)
-        
+
         print("result and need_size ", result, need_size)
         select_index, _, _ = result
-        
+
         self.assertIsNotNone(result)
 
         # 可用内存大小应为0
         self.assertEqual(self.manager.can_use_mem_size, 0)
-        
+
         self.manager.release_ref(select_index)
 
     def test_add_ref(self):
@@ -92,8 +97,11 @@ class TestKVCacheMemoryManager(unittest.TestCase):
         self.assertIsNotNone(select_index)
 
         # 检查引用计数是否为2
-        used_state = self.manager.kv_mem_use_state[select_index] # tensor([1, 1])
-        self.assertTrue(torch.sum(used_state != 0) == 2, "The number of non-zero elements is not equal to 2")
+        used_state = self.manager.kv_mem_use_state[select_index]  # tensor([1, 1])
+        self.assertTrue(
+            torch.sum(used_state != 0) == 2,
+            "The number of non-zero elements is not equal to 2",
+        )
         # 检查可用内存大小是否正确
         self.assertEqual(self.manager.can_use_mem_size, self.gpu_num_blocks - need_size)
         self.manager.release_ref(select_index)
@@ -153,7 +161,7 @@ class TestKVCacheMemoryManager(unittest.TestCase):
         self.assertEqual(new_select_index.numel(), 2)
         # 可用内存大小应为 gpu_num_blocks - 2
         self.assertEqual(self.manager.can_use_mem_size, self.gpu_num_blocks - 4)
-        
+
         self.manager.release_ref(new_select_index)  # 释放
 
     def test_in_alloc_contiguous_kvcache(self):
@@ -163,7 +171,7 @@ class TestKVCacheMemoryManager(unittest.TestCase):
         self.assertIsNotNone(select_index)
         # 手动设置块8为已使用以打破连续性
         self.manager.kv_mem_use_state[7] = 1
-        self.manager.can_use_mem_size -=1
+        self.manager.can_use_mem_size -= 1
         # 现在尝试分配 3 个连续块，应失败
         contiguous_result = self.manager.alloc_contiguous_kvcache(3)
         self.assertIsNone(contiguous_result)
@@ -181,7 +189,8 @@ class TestKVCacheMemoryManager(unittest.TestCase):
         # 检查 gpu_kv_buffer 是否为 None
         self.assertIsNone(self.manager.gpu_kv_buffer)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     suite = unittest.TestSuite()
     tests = [
         "test_initialization",
@@ -197,5 +206,7 @@ if __name__ == '__main__':
         "test_in_alloc_contiguous_kvcache",
         "test_free_buffers",
     ]
-    suite.addTests(unittest.TestLoader().loadTestsFromNames(tests, TestKVCacheMemoryManager))
+    suite.addTests(
+        unittest.TestLoader().loadTestsFromNames(tests, TestKVCacheMemoryManager)
+    )
     unittest.TextTestRunner().run(suite)

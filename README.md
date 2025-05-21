@@ -27,7 +27,7 @@
 ## Setup and Installation
  
 ### Pre-requisites
-> If you don't have a physical server, you can try using [virtaicloud remote server](https://growthdata.virtaicloud.com/t/hK).
+> If you don't have a physical server, you can try using [virtal cloud remote server](https://growthdata.virtaicloud.com/t/hK).
 
 lite_llama framework requires the following dependencies:
 
@@ -58,9 +58,7 @@ pytorch-triton-rocm 3.2.0
 torch               2.6.0+rocm6.2.4
 torchaudio          2.6.0+rocm6.2.4
 torchvision         0.21.0+rocm6.2.4
-
 ```
-
 
 ## Getting Started
 

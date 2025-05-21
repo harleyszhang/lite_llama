@@ -2,31 +2,35 @@ import torch
 from typing import Optional
 
 import sys, os
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
-from lite_llama.llava_generate_stream import LlavaGeneratorStream # 导入 GenerateText 类\
+from lite_llama.llava_generate_stream import (
+    LlavaGeneratorStream,
+)  # 导入 GenerateText 类
 
 checkpoints_dir = "/gemini/code/lite_llama/my_weight/llava-1.5-7b-hf"
+
 
 def main(
     temperature: float = 0.6,
     top_p: float = 0.9,
     max_seq_len: int = 2048,
-    max_gpu_num_blocks = None,
+    max_gpu_num_blocks=None,
     max_gen_len: Optional[int] = 64,
     load_model: bool = True,
     compiled_model: bool = True,
-    triton_weight: bool = True
+    triton_weight: bool = True,
 ):
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
     generator = LlavaGeneratorStream(
         checkpoints_dir=checkpoints_dir,
         tokenizer_path=checkpoints_dir,
-        max_gpu_num_blocks = max_gpu_num_blocks,
-        max_seq_len = max_seq_len,
-        load_model = load_model,
-        compiled_model = compiled_model,
-        triton_weight = triton_weight,
+        max_gpu_num_blocks=max_gpu_num_blocks,
+        max_seq_len=max_seq_len,
+        load_model=load_model,
+        compiled_model=compiled_model,
+        triton_weight=triton_weight,
         device=device,
     )
 
@@ -42,13 +46,14 @@ def main(
         max_gen_len=max_gen_len,
     )
 
-    completion = '' # 初始化生成结果
+    completion = ""  # 初始化生成结果
     # NOTE: 创建了一个 generator 后，可以通过 for 循环来迭代它
     for batch_completions in stream:
-        new_text = batch_completions[0]['generation'][len(completion):]
-        completion = batch_completions[0]['generation']
-        print(new_text, end=' ', flush=True)
+        new_text = batch_completions[0]["generation"][len(completion) :]
+        completion = batch_completions[0]["generation"]
+        print(new_text, end=" ", flush=True)
     print("\n\n==================================\n")
+
 
 if __name__ == "__main__":
     main()
