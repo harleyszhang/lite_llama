@@ -1,8 +1,10 @@
-import os, sys, torch
-from transformers import LlavaForConditionalGeneration, AutoConfig, AutoModelForCausalLM, LlavaConfig
-# 获取 lite_llama 目录的绝对路径并添加到 sys.path 中
-from lite_llama.executor.weight_convert import convert_llavallama_hf_to_litellama, \
-                                        convert_llama_hf_to_litellama, convert_qwen2_hf_to_litellama
+import torch
+from transformers import (
+    LlavaForConditionalGeneration,
+    AutoConfig,
+    AutoModelForCausalLM,
+    LlavaConfig,
+)
 
 import argparse
 from argparse import RawTextHelpFormatter

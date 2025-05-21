@@ -23,6 +23,7 @@ if compare_version("triton", operator.ge, "3.0.0"):
 else:
     from triton.language.math import rsqrt
 
+
 @triton.jit
 def _rms_norm_forward_kernel(
     Y_ptr,
@@ -55,7 +56,7 @@ def _rms_norm_forward_kernel(
     X_row = tl.load(X_ptr + col_offsets, mask=mask, other=0)
     X_row_dtype = X_row.dtype
     W_row = tl.load(W_ptr + col_offsets, mask=mask, other=0)
-    X_row = X_row.to(tl.float32) # On Llama, only rstd is computed on fp32
+    X_row = X_row.to(tl.float32)  # On Llama, only rstd is computed on fp32
 
     mean_square = tl.sum(X_row * X_row, axis=0) / n_cols
     rstd = rsqrt(mean_square + eps)
@@ -69,7 +70,6 @@ def _rms_norm_forward_kernel(
 
 @torch.no_grad()
 def rmsnorm_fwd(X, W, eps=1e-5, offset=0.0):
-
     shape = X.shape
     X = X.view(-1, shape[-1])
     n_rows, n_cols = X.shape
@@ -78,9 +78,9 @@ def rmsnorm_fwd(X, W, eps=1e-5, offset=0.0):
     Y = torch.empty((n_rows, n_cols), dtype=X.dtype, device=X.device)
 
     # Check constraints.
-    assert (
-        X.shape[1] == W.shape[0]
-    ), "Incompatible hidden size dimension between tensor1.shape[1] and tensor2.shape[0]"
+    assert X.shape[1] == W.shape[0], (
+        "Incompatible hidden size dimension between tensor1.shape[1] and tensor2.shape[0]"
+    )
 
     _rms_norm_forward_kernel[(n_rows,)](
         Y,
@@ -99,36 +99,42 @@ def rmsnorm_fwd(X, W, eps=1e-5, offset=0.0):
 
 
 def test_rms_layernorm(
-    dim = 1024, eps = 1e-5, dtype = torch.float16,
-    bsz = 21, random_state = 3407, seqlen = 3341,
+    dim=1024,
+    eps=1e-5,
+    dtype=torch.float16,
+    bsz=21,
+    random_state=3407,
+    seqlen=3341,
 ):
     from transformers.models.llama.modeling_llama import LlamaRMSNorm
-    layernorm = LlamaRMSNorm((dim,), eps = eps).to("cuda")
+
+    layernorm = LlamaRMSNorm((dim,), eps=eps).to("cuda")
     torch.cuda.manual_seed(random_state)
     torch.manual_seed(random_state)
     torch.nn.init.uniform_(layernorm.weight)
-    X = torch.randn((bsz, seqlen, dim), dtype = dtype, device = "cuda")
+    X = torch.randn((bsz, seqlen, dim), dtype=dtype, device="cuda")
     Y = layernorm(X)
     Y2 = rmsnorm_fwd(X, layernorm.weight, eps)
 
-    assert(torch.amax(Y - Y2).item() <= 0.05)
+    assert torch.amax(Y - Y2).item() <= 0.05
     print("max delta:", torch.max(torch.abs(Y - Y2)))
 
 
 def testing_suite_layernorm():
     for dim in [512, 1024, 2048]:
         for dtype in [torch.float16, torch.bfloat16]:
-            with torch.autocast(device_type = "cuda", dtype = dtype):
+            with torch.autocast(device_type="cuda", dtype=dtype):
                 for seqlen in [3341, 2048, 349]:
                     for random_state in [3407, 42]:
                         test_rms_layernorm(
-                            dim = dim,
-                            eps = 1e-5,
-                            dtype = dtype,
-                            bsz = 21,
-                            random_state = random_state,
-                            seqlen = seqlen,
+                            dim=dim,
+                            eps=1e-5,
+                            dtype=dtype,
+                            bsz=21,
+                            random_state=random_state,
+                            seqlen=seqlen,
                         )
+
 
 if __name__ == "__main__":
     testing_suite_layernorm()

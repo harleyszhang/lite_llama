@@ -12,11 +12,12 @@ from lite_llama.llava_generate_stream import LlavaGeneratorStream
 
 import sys, os, time
 from pathlib import Path
+
 # support running without installing as a package
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 import psutil
-from utils.logger import log
+from lite_llama.utils.logger import log
 import argparse
 from argparse import RawTextHelpFormatter
 
@@ -27,7 +28,7 @@ def report_resource_usage(ram_before, vram_before) -> None:
     ram_after = process.memory_info().rss
     vram_after = get_gpu_memory(detect_device())
 
-    ram_used = (ram_after - ram_before) / (1024 ** 3)  # Bytes to GB
+    ram_used = (ram_after - ram_before) / (1024**3)  # Bytes to GB
 
     if vram_before is not None and vram_after is not None:
         vram_used = vram_after - vram_before
@@ -54,14 +55,16 @@ def generate_llama(
         checkpoint_path: Path = Path("checkpoints/lit-llama/7B/"),
         quantize: Optional[str] = None,
 ):
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     assert checkpoint_path.is_dir(), checkpoint_path
     checkpoint_path = str(checkpoint_path)
     if max_seq_len <= 1024:
         short_prompt = True
     else:
         short_prompt = False
-    model_prompter = get_prompter(get_model_type(checkpoint_path), checkpoint_path, short_prompt)
+    model_prompter = get_prompter(
+        get_model_type(checkpoint_path), checkpoint_path, short_prompt
+    )
     # Start resource tracking
     ram_before = process.memory_info().rss
 
@@ -92,7 +95,7 @@ def generate_llama(
         max_gen_len=max_gen_len,
     )
 
-    completion = ''  # Initialize to generate the result
+    completion = ""  # Initialize to generate the result
     # NOTE: After creating a generator, it can be iterated through a for loop
     text_msg = ""
     for batch_completions in stream:
@@ -190,6 +193,7 @@ def generate_llava(
     log.info(f"Time for inference: {(end - start):.2f} sec, {count_tokens(text_msg, generator.tokenizer)/(end - start):.2f} tokens/sec")
     # Report resource usage
     report_resource_usage(ram_before, vram_before)
+
 
 if __name__ == "__main__":
 

@@ -6,20 +6,32 @@ import torch
 import triton
 import triton.language as tl
 
+
 @triton.jit
 def _flash_decoding_stage1_kernel(
-    Q, K, V, sm_scale,
-
+    Q,
+    K,
+    V,
+    sm_scale,
     actual_seq_len,  # 实际序列长度
-    Mid_O, Mid_O_LogExpSum,
-
-    q_bs_stride, q_heads_stride, q_dim_stride,  # Q 的 strides
-    k_bs_stride, k_heads_stride, k_dim_stride,  # K 的 strides
-    v_bs_stride, v_heads_stride, v_dim_stride,  # V 的 strides
-
-    mido_batch_stride, mido_heads_stride, mido_partitions_stride, mido_dim_stride,
-    mido_les_batch_stride, mido_les_heads_stride, mido_les_partitions_stride,
-
+    Mid_O,
+    Mid_O_LogExpSum,
+    q_bs_stride,
+    q_heads_stride,
+    q_dim_stride,  # Q 的 strides
+    k_bs_stride,
+    k_heads_stride,
+    k_dim_stride,  # K 的 strides
+    v_bs_stride,
+    v_heads_stride,
+    v_dim_stride,  # V 的 strides
+    mido_batch_stride,
+    mido_heads_stride,
+    mido_partitions_stride,
+    mido_dim_stride,
+    mido_les_batch_stride,
+    mido_les_heads_stride,
+    mido_les_partitions_stride,
     BLOCK_SEQ: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
@@ -35,21 +47,21 @@ def _flash_decoding_stage1_kernel(
 
     # 计算当前分区的起始和结束索引
     cur_batch_partition_start_index = seq_block_idx * BLOCK_SEQ
-    cur_batch_partition_end_index = tl.minimum(actual_seq_len, cur_batch_partition_start_index + BLOCK_SEQ)
+    cur_batch_partition_end_index = tl.minimum(
+        actual_seq_len, cur_batch_partition_start_index + BLOCK_SEQ
+    )
 
     # 计算需要处理的块数
-    num_blocks = (cur_batch_partition_end_index - cur_batch_partition_start_index + BLOCK_N - 1) // BLOCK_N
+    num_blocks = (
+        cur_batch_partition_end_index - cur_batch_partition_start_index + BLOCK_N - 1
+    ) // BLOCK_N
 
     # 初始化偏移向量
     offs_n = cur_batch_partition_start_index + tl.arange(0, BLOCK_N)  # [BLOCK_N]
     offs_d = tl.arange(0, BLOCK_DMODEL)  # [BLOCK_DMODEL]
 
     # 计算 Q 的偏移量
-    q_offs = (
-        batch_idx * q_bs_stride
-        + head_idx * q_heads_stride
-        + offs_d * q_dim_stride
-    )
+    q_offs = batch_idx * q_bs_stride + head_idx * q_heads_stride + offs_d * q_dim_stride
 
     # 计算 K 和 V 的偏移量
     k_offs = (
@@ -145,35 +157,44 @@ def _flash_decoding_stage1_kernel(
 
 @torch.no_grad()
 def flash_decode_stage1(
-    q, k, v,         # Q: [batchs, num_heads, head_dim], K, V: [batchs * seq_len, num_heads, head_dim]
+    q,
+    k,
+    v,  # Q: [batchs, num_heads, head_dim], K, V: [batchs * seq_len, num_heads, head_dim]
     actual_seq_len,  # 实际的序列长度
-    mid_o, mid_o_logexpsum, # Mid_O: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE), head_dim], Mid_O_LogExpSum: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE)]
+    mid_o,
+    mid_o_logexpsum,  # Mid_O: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE), head_dim], Mid_O_LogExpSum: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE)]
     PARTITION_SIZE,
 ):
     BLOCK_N_SIZE = 32
     BLOCK_DMODEL = q.shape[-1]
-    assert PARTITION_SIZE % BLOCK_N_SIZE == 0, "PARTITION_SIZE 必须是 BLOCK_N_SIZE 的倍数"
+    assert PARTITION_SIZE % BLOCK_N_SIZE == 0, (
+        "PARTITION_SIZE 必须是 BLOCK_N_SIZE 的倍数"
+    )
 
     batchs, num_heads, head_dim = q.shape
-    sm_scale = 1.0 / (head_dim ** 0.5)
+    sm_scale = 1.0 / (head_dim**0.5)
     grid = (batchs, num_heads, triton.cdiv(actual_seq_len, PARTITION_SIZE))
 
     _flash_decoding_stage1_kernel[grid](
-        q, k, v, sm_scale,
+        q,
+        k,
+        v,
+        sm_scale,
         actual_seq_len,  # 使用实际序列长度
-        mid_o, mid_o_logexpsum,
+        mid_o,
+        mid_o_logexpsum,
         *q.stride(),
         *k.stride(),
         *v.stride(),
         *mid_o.stride(),
         *mid_o_logexpsum.stride(),
-
-        BLOCK_SEQ = PARTITION_SIZE,
-        BLOCK_N = BLOCK_N_SIZE,
-        BLOCK_DMODEL = head_dim,
-        num_warps = 1,
-        num_stages = 2,
+        BLOCK_SEQ=PARTITION_SIZE,
+        BLOCK_N=BLOCK_N_SIZE,
+        BLOCK_DMODEL=head_dim,
+        num_warps=1,
+        num_stages=2,
     )
+
 
 import torch
 
@@ -185,24 +206,42 @@ batchs, num_heads, head_dim, seq_len = 2, 4, 64, 128
 partition_size = 32
 
 # 随机初始化 Q, K, V
-q = torch.randn(batchs, num_heads, head_dim, device='cuda', dtype=torch.float32)
-k = torch.randn(batchs * seq_len, num_heads, head_dim, device='cuda', dtype=torch.float32)
-v = torch.randn(batchs * seq_len, num_heads, head_dim, device='cuda', dtype=torch.float32)
+q = torch.randn(batchs, num_heads, head_dim, device="cuda", dtype=torch.float32)
+k = torch.randn(
+    batchs * seq_len, num_heads, head_dim, device="cuda", dtype=torch.float32
+)
+v = torch.randn(
+    batchs * seq_len, num_heads, head_dim, device="cuda", dtype=torch.float32
+)
 
 # 初始化 mid_o 和 mid_o_logexpsum
-mid_o = torch.zeros(batchs, num_heads, (seq_len + partition_size -1) // partition_size, head_dim, device='cuda', dtype=torch.float32)
-mid_o_logexpsum = torch.zeros(batchs, num_heads, (seq_len + partition_size -1) // partition_size, device='cuda', dtype=torch.float32)
+mid_o = torch.zeros(
+    batchs,
+    num_heads,
+    (seq_len + partition_size - 1) // partition_size,
+    head_dim,
+    device="cuda",
+    dtype=torch.float32,
+)
+mid_o_logexpsum = torch.zeros(
+    batchs,
+    num_heads,
+    (seq_len + partition_size - 1) // partition_size,
+    device="cuda",
+    dtype=torch.float32,
+)
 
 # 调用修复后的函数
 flash_decode_stage1(
-    q, k, v,
+    q,
+    k,
+    v,
     actual_seq_len=seq_len,
-    mid_o=mid_o, 
-    mid_o_logexpsum=mid_o_logexpsum, 
+    mid_o=mid_o,
+    mid_o_logexpsum=mid_o_logexpsum,
     PARTITION_SIZE=partition_size,
 )
 
 # 打印输出结果
 print("Mid_O:", mid_o)
 print("Mid_O_LogExpSum:", mid_o_logexpsum)
-
