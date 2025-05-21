@@ -67,7 +67,7 @@ def get_gpu_memory(gpu_type, device_id="0"):
         elif gpu_type == "cpu":
             return None
     except Exception as e:
-        from utils.logger import log
+        from lite_llama.utils.logger import log
 
         log.warning(f"Unable to fetch GPU memory: {e}")
         return None
