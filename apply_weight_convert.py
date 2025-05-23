@@ -5,8 +5,13 @@ from transformers import (
     AutoModelForCausalLM,
     LlavaConfig,
 )
+from lite_llama.executor.weight_convert import (
+    convert_llavallama_hf_to_litellama,
+    convert_llama_hf_to_litellama,
+    convert_qwen2_hf_to_litellama,
+)
 
-import argparse
+import argparse, os
 from argparse import RawTextHelpFormatter
 
 def main(checkpoints_dir: str):
@@ -57,20 +62,4 @@ if __name__ == '__main__':
     args = PARSER.parse_args()
 
     model_path = os.path.abspath(args.model_path)
-
     main(str(model_path))
-# from transformers import LlavaNextConfig, LlavaNextForConditionalGeneration
-# from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-# from lite_llama.models.llava import LlavaLlama
-# from lite_llama.models.model_config import LlamaConfig
-
-# with init_empty_weights():
-#     llava_config = LlavaConfig.from_pretrained(checkpoints_dir)
-#     text_config = llava_config.text_config # TODO: 将 text_config 转换成 LlamaConfig 类型
-#     llama_config = LlamaConfig.from_dict(text_config.to_dict())
-
-# 使用 init_empty_weights 初始化空模型
-# with init_empty_weights():
-#     llava_config = LlavaConfig.from_pretrained(checkpoints_dir)
-#     model = LlavaLlama(llava_config)  
-#     llama_config = model.llama_config
