@@ -274,7 +274,8 @@ def quantize_litellama_model(
         groupsize: int = 128,
         device: str = "cuda",
         num_samples: int = 128,
-        seq_length: int = 2048
+        seq_length: int = 2048,
+        skip_vision: bool = False,
 ) -> None:
     """
     Main function to quantize a lite_llama model using GPTQ
@@ -320,26 +321,50 @@ def quantize_litellama_model(
         "layers": {}
     }
 
+    # Detect if this is a LLaVA model by checking for language_model prefix
+    is_llava = any("language_model" in key for key in state_dict.keys())
+
     # Get all weight keys that need quantization
     weight_keys_to_quantize = []
+
+    # Updated patterns for both regular and LLaVA models
+    patterns = [
+        # Regular model patterns
+        "q_proj", "kv_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+        "lm_head", "embed_tokens",
+        # LLaVA specific patterns (without _weight suffix in search)
+        "q_proj_weight", "kv_proj_weight", "o_proj_weight"
+    ]
+
     for key in state_dict.keys():
-        if any(pattern in key for pattern in [
-            "q_proj", "kv_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
-            "lm_head", "embed_tokens"
-        ]) and "weight" in key:
+        # For LLaVA models, also check for language_model prefix
+        if is_llava and "language_model" in key:
+            if any(pattern in key for pattern in patterns):
+                weight_keys_to_quantize.append(key)
+        elif any(pattern in key for pattern in patterns) and ("weight" in key or key.endswith(("_weight", ".weight"))):
             weight_keys_to_quantize.append(key)
 
     print(f"Found {len(weight_keys_to_quantize)} weights to quantize")
+    if is_llava:
+        print("Detected LLaVA model structure")
 
     # Process each weight
+    skipped_vision_count = 0
     for key in tqdm(weight_keys_to_quantize, desc="Quantizing layers"):
         weight = state_dict[key]
+        is_vision = "vision" in key.lower() or "multi_modal_projector" in key.lower()
 
         # Skip if weight is too small
         if weight.numel() < 1024:
             print(f"\nSkipping {key} (too small: {weight.numel()} parameters)")
             quantized_state_dict[key] = weight
+            continue
+
+        # Skip vision weights if requested
+        if skip_vision and is_vision:
+            quantized_state_dict[key] = weight
+            skipped_vision_count += 1
             continue
 
         print(f"\nQuantizing {key} (shape: {weight.shape})...")
@@ -364,12 +389,21 @@ def quantize_litellama_model(
         )
 
         # Add calibration data (simplified - in practice, you'd run forward passes)
-        # For better results, we should use embeddings from the actual text
         # Get embedding weight if available
         embed_key = None
+
+        # Search for embedding key - handle both regular and LLaVA models
+        embed_patterns = [
+            "embed_tokens.weight",
+            "language_model.embed_tokens.weight"
+        ]
+
         for k in state_dict.keys():
-            if "embed_tokens.weight" in k:
-                embed_key = k
+            for pattern in embed_patterns:
+                if pattern in k:
+                    embed_key = k
+                    break
+            if embed_key:
                 break
 
         if embed_key and len(calibration_data) > 0:
@@ -450,6 +484,9 @@ def quantize_litellama_model(
 
     print(f"Quantization complete! Model saved to {output_path}")
 
+    if skipped_vision_count > 0:
+        print(f"Skipped {skipped_vision_count} vision model weights")
+
     # Print compression statistics
     original_size = sum(p.numel() * p.element_size() for p in state_dict.values())
     quantized_size = sum(p.numel() * p.element_size() for p in quantized_state_dict.values())
@@ -500,7 +537,8 @@ def quantize_after_conversion(
         wbits: int = 4,
         groupsize: int = 128,
         num_samples: int = 128,
-        seq_length: int = 2048
+        seq_length: int = 2048,
+        skip_vision: bool = False
 ):
     """
     Quantize model after it has been converted to lite_llama format
@@ -513,6 +551,7 @@ def quantize_after_conversion(
         groupsize: Group size for quantization (0 for auto-detect)
         num_samples: Number of calibration samples
         seq_length: Sequence length for calibration
+        skip_vision: Skip quantization of vision weights (for LLaVA)
     """
     # Construct paths
     model_id = os.path.basename(os.path.normpath(checkpoints_dir))
@@ -532,7 +571,8 @@ def quantize_after_conversion(
         wbits=wbits,
         groupsize=groupsize,
         num_samples=num_samples,
-        seq_length=seq_length
+        seq_length=seq_length,
+        skip_vision=skip_vision
     )
 
     return quantized_model_path
