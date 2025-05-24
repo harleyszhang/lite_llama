@@ -13,7 +13,8 @@ import torch
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from lite_llama.quantization.gptq import quantize_litellama_model
-
+from lite_llama.utils.common import get_model_info, check_model_compatibility
+from lite_llama.utils.logger import log
 
 def parse_arguments():
     """Parse command line arguments"""
@@ -94,71 +95,6 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def check_model_compatibility(model_path):
-    """Check if the model is compatible for quantization"""
-    # Check if model path exists and contains .pth files
-    if not os.path.exists(model_path):
-        return False, f"Model path does not exist: {model_path}"
-
-    pth_files = [f for f in os.listdir(model_path) if f.endswith('.pth')]
-    if not pth_files:
-        return False, f"No .pth files found in {model_path}"
-
-    # Check if required config files exist
-    config_files = ["config.json", "tokenizer_config.json"]
-    missing_configs = [f for f in config_files if not os.path.exists(os.path.join(model_path, f))]
-    if missing_configs:
-        print(f"Warning: Missing config files: {missing_configs}")
-
-    return True, "Model is compatible"
-
-
-def get_model_info(model_path):
-    """Get basic information about the model"""
-    model_info = {
-        "model_name": os.path.basename(model_path),
-        "model_type": "unknown",
-        "size": 0.0
-    }
-
-    # Detect model type from path or config
-    model_name_lower = model_info["model_name"].lower()
-    if "llava" in model_name_lower:
-        model_info["model_type"] = "llava"
-    elif "qwen2" in model_name_lower:
-        model_info["model_type"] = "qwen2"
-    elif "llama" in model_name_lower:
-        model_info["model_type"] = "llama"
-
-    # Try to read from config.json
-    config_path = os.path.join(model_path, "config.json")
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-                if "architectures" in config:
-                    arch = config["architectures"][0].lower()
-                    if "llava" in arch:
-                        model_info["model_type"] = "llava"
-                    elif "qwen2" in arch:
-                        model_info["model_type"] = "qwen2"
-                    elif "llama" in arch:
-                        model_info["model_type"] = "llama"
-        except:
-            pass
-
-    # Calculate total size
-    total_size = 0
-    for f in os.listdir(model_path):
-        if f.endswith('.pth'):
-            file_path = os.path.join(model_path, f)
-            total_size += os.path.getsize(file_path)
-
-    model_info["size"] = total_size / (1024 ** 3)  # Convert to GB
-
-    return model_info
-
-
 def main():
     # Parse arguments
     args = parse_arguments()
@@ -190,9 +126,9 @@ def main():
             print("   Skipping vision weights by default (use --quantize_vision to override)")
 
     print(f"\nModel Information:")
-    print(f"  Name: {model_info['model_name']}")
-    print(f"  Type: {model_info['model_type']}")
-    print(f"  Size: {model_info['size']:.2f} GB")
+    print(f"Name: {model_info['model_name']}")
+    print(f"Type: {model_info['model_type']}")
+    print(f"Size: {model_info['size']:.2f} GB")
     if is_llava:
         print(f"  Vision weights: {'Will be quantized' if args.quantize_vision else 'Will be skipped'}")
 
@@ -232,10 +168,10 @@ def main():
             del sample_weights
 
     print(f"\nQuantization Settings:")
-    print(f"  Bits: {args.wbits}")
-    print(f"  Group size: {args.groupsize}")
-    print(f"  Device: {args.device}")
-    print(f"  Calibration data: {args.calibration_data or 'Default'}")
+    print(f"Bits: {args.wbits}")
+    print(f"Group size: {args.groupsize}")
+    print(f"Device: {args.device}")
+    print(f"Calibration data: {args.calibration_data or 'Default'}")
 
     # Check CUDA availability
     if args.device == "cuda" and not torch.cuda.is_available():
@@ -297,19 +233,19 @@ def main():
         if quantized_size > 0:
             compression_ratio = original_size / quantized_size
         else:
-            print("\nWarning: Could not calculate compression ratio (output files not found)")
+            log.warning("\nWarning: Could not calculate compression ratio (output files not found)")
             compression_ratio = 0
 
-        print(f"\nCompression Statistics:")
-        print(f"  Original size: {original_size:.2f} GB")
-        print(f"  Quantized size: {quantized_size:.2f} GB")
-        print(f"  Compression ratio: {compression_ratio:.2f}x")
-        print(f"  Space saved: {(1 - 1 / compression_ratio) * 100:.1f}%")
+        log.info(f"\nCompression Statistics:")
+        print(f"Original size: {original_size:.2f} GB")
+        print(f"Quantized size: {quantized_size:.2f} GB")
+        print(f"Compression ratio: {compression_ratio:.2f}x")
+        print(f"Space saved: {(1 - 1 / compression_ratio) * 100:.1f}%")
 
         # Expected compression analysis
         expected_ratio = 32 / (args.wbits + 0.5)  # 0.5 for metadata overhead
         if compression_ratio < 1.5:
-            print(f"\n⚠️  Warning: Low compression ratio detected!")
+            log.warning(f"\n⚠️Low compression ratio detected!")
             print(f"  Expected: ~{expected_ratio:.1f}x for {args.wbits}-bit quantization")
             print(f"  Actual: {compression_ratio:.2f}x")
             print("\nPossible reasons:")
@@ -322,10 +258,10 @@ def main():
             print("  - Quantizing embeddings (if safe for your use case)")
 
     except KeyboardInterrupt:
-        print("\n\nQuantization interrupted by user.")
+        log.error("\n\nQuantization interrupted by user.")
         return 1
     except Exception as e:
-        print(f"\nError during quantization: {e}")
+        log.error(f"\nError during quantization: {e}")
         import traceback
         traceback.print_exc()
         return 1

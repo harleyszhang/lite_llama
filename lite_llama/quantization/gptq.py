@@ -1,3 +1,14 @@
+"""
+GPTQ Quantization for Lite-LLaMA Models
+
+Key improvements in this version:
+1. Proper weight packing for 4-bit quantization (2 weights per byte)
+2. Stores quantized weights as uint8/int16 instead of float32
+3. Separate storage of scale/zero parameters
+4. Accurate compression ratio calculation
+5. Support for LLaVA models with vision weight skipping
+"""
+
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -7,6 +18,37 @@ import json
 from typing import Dict, List, Optional, Tuple
 from transformers import AutoTokenizer
 import gc
+
+
+def pack_4bit_weights(qweight, n_rows, n_cols):
+    """Pack 4-bit weights into uint8 format (2 weights per byte)"""
+    # Ensure even number of columns for packing
+    if n_cols % 2 != 0:
+        # Pad with zeros if odd number of columns
+        qweight = torch.nn.functional.pad(qweight, (0, 1), value=0)
+        n_cols += 1
+
+    # Pack two 4-bit values into one 8-bit value
+    packed = torch.zeros((n_rows, n_cols // 2), dtype=torch.uint8, device=qweight.device)
+    for i in range(0, n_cols, 2):
+        # First 4-bit value in lower nibble, second in upper nibble
+        packed[:, i // 2] = (qweight[:, i] & 0xF) | ((qweight[:, i + 1] & 0xF) << 4)
+
+    return packed
+
+
+def unpack_4bit_weights(packed, n_rows, original_n_cols):
+    """Unpack 4-bit weights from uint8 format"""
+    n_packed_cols = packed.shape[1]
+    unpacked = torch.zeros((n_rows, n_packed_cols * 2), dtype=torch.uint8, device=packed.device)
+
+    for i in range(n_packed_cols):
+        # Extract lower and upper nibbles
+        unpacked[:, i * 2] = packed[:, i] & 0xF
+        unpacked[:, i * 2 + 1] = (packed[:, i] >> 4) & 0xF
+
+    # Remove padding if it was added
+    return unpacked[:, :original_n_cols]
 
 
 class GPTQ:
@@ -126,6 +168,13 @@ class GPTQ:
         scale = torch.zeros((n_groups, 1), device=self.device)
         zero = torch.zeros((n_groups, 1), device=self.device)
 
+        # Create quantized weight tensor with appropriate dtype
+        if self.wbits <= 8:
+            Q = torch.zeros((self.rows, self.columns), dtype=torch.uint8, device=self.device)
+        else:
+            # For now, use int16 for >8 bits, though this won't save space
+            Q = torch.zeros((self.rows, self.columns), dtype=torch.int16, device=self.device)
+
         # Quantize layer weights
         for i1 in range(0, self.columns, 128):
             i2 = min(i1 + 128, self.columns)
@@ -185,15 +234,16 @@ class GPTQ:
                     update = err_col.matmul(hinv_row)  # Shape: (rows, remaining_cols)
                     W1[:, i + 1:] -= update
 
-            W[:, i1:i2] = Q1
+            # Store in compact format
+            Q[:, i1:i2] = Q1.to(Q.dtype)
 
-        # Store quantized weights and parameters
-        self.layer.weight.data = W.to(self.layer.weight.dtype)
+        # Store quantized weights in packed format
+        self.qweight = Q
         self.scale = scale
         self.zero = zero
         self.quantized = True
 
-        return scale, zero
+        return Q, scale, zero
 
 
 def prepare_calibration_data(
@@ -435,16 +485,33 @@ def quantize_litellama_model(
                 gptq.add_batch(fake_inp)
 
         # Quantize
-        scale, zero = gptq.quantize()
+        qweight, scale, zero = gptq.quantize()
 
-        # Store quantized weight and parameters
-        quantized_state_dict[key] = layer.weight.data.cpu()
-        quantization_config["layers"][key] = {
-            "scale": scale.cpu().tolist(),
-            "zero": zero.cpu().tolist(),
-            "groupsize": groupsize,
-            "wbits": wbits
-        }
+        # Pack weights if 4-bit quantization
+        if wbits == 4:
+            # Store original shape for unpacking
+            original_shape = qweight.shape
+            packed_weight = pack_4bit_weights(qweight, qweight.shape[0], qweight.shape[1])
+            quantized_state_dict[key] = packed_weight.cpu()
+            # Store scale and zero as tensors with specific keys
+            quantized_state_dict[f"{key}.scale"] = scale.cpu()
+            quantized_state_dict[f"{key}.zero"] = zero.cpu()
+            quantization_config["layers"][key] = {
+                "groupsize": groupsize,
+                "wbits": wbits,
+                "original_shape": list(original_shape),
+                "packed": True
+            }
+        else:
+            # For 8-bit or other, store directly
+            quantized_state_dict[key] = qweight.cpu()
+            quantized_state_dict[f"{key}.scale"] = scale.cpu()
+            quantized_state_dict[f"{key}.zero"] = zero.cpu()
+            quantization_config["layers"][key] = {
+                "groupsize": groupsize,
+                "wbits": wbits,
+                "packed": False
+            }
 
         # Clean up
         del layer, gptq
@@ -456,7 +523,7 @@ def quantize_litellama_model(
         if key not in quantized_state_dict:
             quantized_state_dict[key] = state_dict[key]
 
-    # Save quantized model
+    # Save quantized model - now everything is in the state dict
     model_id = os.path.basename(model_path)
     torch.save(
         quantized_state_dict,
@@ -489,12 +556,25 @@ def quantize_litellama_model(
 
     # Print compression statistics
     original_size = sum(p.numel() * p.element_size() for p in state_dict.values())
-    quantized_size = sum(p.numel() * p.element_size() for p in quantized_state_dict.values())
-    compression_ratio = original_size / quantized_size
 
-    print(f"Original model size: {original_size / 1e9:.2f} GB")
+    # Calculate quantized size more accurately
+    quantized_size = 0
+    for key, tensor in quantized_state_dict.items():
+        # Add size of each tensor in the quantized state dict
+        quantized_size += tensor.numel() * tensor.element_size()
+
+    compression_ratio = original_size / quantized_size if quantized_size > 0 else 0
+
+    print(f"\nOriginal model size: {original_size / 1e9:.2f} GB")
     print(f"Quantized model size: {quantized_size / 1e9:.2f} GB")
     print(f"Compression ratio: {compression_ratio:.2f}x")
+    print(f"Space saved: {(1 - quantized_size / original_size) * 100:.1f}%")
+
+    # Expected compression ratios
+    expected_ratio = 32 / (wbits + 0.5)  # 0.5 for metadata overhead
+    if compression_ratio < expected_ratio * 0.8:
+        print(f"\nNote: Compression ratio is lower than expected ({expected_ratio:.1f}x)")
+        print("This may be due to non-quantized layers (embeddings, layer norms, etc.)")
 
 
 def dequantize_weight(
@@ -502,21 +582,35 @@ def dequantize_weight(
         scale: torch.Tensor,
         zero: torch.Tensor,
         wbits: int = 4,
-        groupsize: int = 128
+        groupsize: int = 128,
+        original_shape: Optional[Tuple[int, int]] = None,
+        packed: bool = False
 ) -> torch.Tensor:
     """
     Dequantize a weight tensor
 
     Args:
-        quantized_weight: Quantized weight tensor
+        quantized_weight: Quantized weight tensor (possibly packed)
         scale: Scale parameters
         zero: Zero point parameters
         wbits: Quantization bits
         groupsize: Group size used in quantization
+        original_shape: Original shape before packing (for 4-bit)
+        packed: Whether the weights are packed
 
     Returns:
         Dequantized weight tensor
     """
+    # Unpack if necessary
+    if packed and wbits == 4:
+        if original_shape is None:
+            raise ValueError("original_shape required for unpacking 4-bit weights")
+        quantized_weight = unpack_4bit_weights(
+            quantized_weight,
+            original_shape[0],
+            original_shape[1]
+        )
+
     weight = torch.zeros_like(quantized_weight, dtype=torch.float32)
 
     for i in range(0, quantized_weight.shape[0], groupsize):
@@ -524,9 +618,69 @@ def dequantize_weight(
         group_idx = i // groupsize
 
         if group_idx < scale.shape[0]:
-            weight[i:j] = (quantized_weight[i:j] - zero[group_idx]) * scale[group_idx]
+            weight[i:j] = (quantized_weight[i:j].float() - zero[group_idx]) * scale[group_idx]
 
     return weight
+
+
+def load_quantized_model(model_path: str, device: str = "cpu"):
+    """
+    Load a quantized model
+
+    Args:
+        model_path: Path to the quantized .pth file
+        device: Device to load the model to
+
+    Returns:
+        state_dict with quantized weights and metadata
+    """
+    return torch.load(model_path, map_location=device)
+
+
+def dequantize_model(model_path: str, quantization_config: dict, output_path: str = None):
+    """
+    Fully dequantize a quantized model back to fp16/fp32
+
+    Args:
+        model_path: Path to quantized model
+        quantization_config: Quantization configuration dict
+        output_path: Where to save dequantized model
+    """
+    # Load quantized model
+    state_dict = load_quantized_model(model_path)
+
+    # Dequantize each layer
+    dequantized_dict = {}
+    for key, tensor in state_dict.items():
+        # Skip scale and zero tensors
+        if key.endswith('.scale') or key.endswith('.zero'):
+            continue
+
+        # Check if this is a quantized layer
+        if key in quantization_config["layers"]:
+            layer_config = quantization_config["layers"][key]
+            scale = state_dict[f"{key}.scale"]
+            zero = state_dict[f"{key}.zero"]
+
+            dequantized = dequantize_weight(
+                tensor,
+                scale,
+                zero,
+                wbits=layer_config["wbits"],
+                groupsize=layer_config["groupsize"],
+                original_shape=layer_config.get("original_shape"),
+                packed=layer_config.get("packed", False)
+            )
+            dequantized_dict[key] = dequantized
+        else:
+            dequantized_dict[key] = tensor
+
+    # Save if output path provided
+    if output_path:
+        torch.save(dequantized_dict, output_path)
+        print(f"Dequantized model saved to {output_path}")
+
+    return dequantized_dict
 
 
 # Integration with your existing code
