@@ -23,8 +23,8 @@ def build_new_weight_dir(checkpoints_dir: str, new_sd):
     # 获取所有 JSON 文件
     json_files = glob.glob(osp.join(checkpoints_dir, "*.json"))
     for file_path in json_files:
-        shutil.copy(file_path, my_weight_dir)  # 复制 hf 权重目录的所有 json 文件到新的目录
-        print(f"已复制: {file_path} -> {my_weight_dir}")
+        shutil.copy(file_path, my_weight_dir) # 复制 hf 权重目录的所有 json 文件到新的目录
+        print(f"Copy: {file_path} -> {my_weight_dir}")
 
     if osp.exists(osp.join(checkpoints_dir, "tokenizer.model")):
         shutil.copy(osp.join(checkpoints_dir, "tokenizer.model"), my_weight_dir)
