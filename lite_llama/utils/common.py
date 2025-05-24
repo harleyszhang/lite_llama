@@ -81,16 +81,54 @@ def count_tokens(texts: List[str], tokenizer) -> int:
     return total_tokens
 
 
-def get_model_type(checkpoint_path: str) -> str | None:
-    from utils.logger import log
+def check_model_compatibility(model_path):
+    """Check if the model is a valid converted lite_llama model"""
+    # Check for required files
+    required_files = []
+    optional_files = ["config.json", "tokenizer.model", "tokenizer.json"]
 
-    model_type = ["llama", "falcon", "mpt", "qwen2", "llava"]
+    # Find .pth file
+    pth_files = [f for f in os.listdir(model_path) if f.endswith('.pth')]
+    if not pth_files:
+        return False, "No .pth file found in the model directory"
 
-    config_content = read_json(os.path.join(checkpoint_path, "config.json"))
-    for m in model_type:
-        if m in config_content["model_type"].lower():
-            if m == "llava":
-                return "llama"
-            return m
-    log.error(f"No model type found: {checkpoint_path}")
-    return None
+    # Check if already quantized
+    if any('gptq' in f for f in pth_files):
+        return False, "Model appears to be already quantized"
+
+    # Check for config files
+    found_configs = []
+    for config_file in optional_files:
+        if os.path.exists(os.path.join(model_path, config_file)):
+            found_configs.append(config_file)
+
+    if not found_configs:
+        return False, "No configuration files found (config.json, tokenizer.json, etc.)"
+
+    return True, "Model is compatible"
+
+
+def get_model_info(model_path):
+    """Extract model information from the directory"""
+    info = {
+        "model_name": os.path.basename(model_path),
+        "model_type": "unknown",
+        "size": 0
+    }
+
+    # Try to determine model type from name
+    model_name_lower = info["model_name"].lower()
+    if "llava" in model_name_lower:
+        info["model_type"] = "llava"
+    elif "qwen2" in model_name_lower:
+        info["model_type"] = "qwen2"
+    elif "llama" in model_name_lower:
+        info["model_type"] = "llama"
+
+    # Calculate model size
+    pth_files = [f for f in os.listdir(model_path) if f.endswith('.pth')]
+    if pth_files:
+        model_file = os.path.join(model_path, pth_files[0])
+        info["size"] = os.path.getsize(model_file) / (1024 ** 3)  # Size in GB
+
+    return info

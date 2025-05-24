@@ -79,60 +79,84 @@ def parse_arguments():
         help="Sequence length for calibration samples (default: 2048)"
     )
 
+    parser.add_argument(
+        "--skip_vision",
+        action="store_true",
+        help="Skip quantization of vision model weights (for LLaVA models)"
+    )
+
+    parser.add_argument(
+        "--quantize_vision",
+        action="store_true",
+        help="Force quantization of vision model weights (not recommended for LLaVA)"
+    )
+
     return parser.parse_args()
 
 
 def check_model_compatibility(model_path):
-    """Check if the model is a valid converted lite_llama model"""
-    # Check for required files
-    required_files = []
-    optional_files = ["config.json", "tokenizer.model", "tokenizer.json"]
+    """Check if the model is compatible for quantization"""
+    # Check if model path exists and contains .pth files
+    if not os.path.exists(model_path):
+        return False, f"Model path does not exist: {model_path}"
 
-    # Find .pth file
     pth_files = [f for f in os.listdir(model_path) if f.endswith('.pth')]
     if not pth_files:
-        return False, "No .pth file found in the model directory"
+        return False, f"No .pth files found in {model_path}"
 
-    # Check if already quantized
-    if any('gptq' in f for f in pth_files):
-        return False, "Model appears to be already quantized"
-
-    # Check for config files
-    found_configs = []
-    for config_file in optional_files:
-        if os.path.exists(os.path.join(model_path, config_file)):
-            found_configs.append(config_file)
-
-    if not found_configs:
-        return False, "No configuration files found (config.json, tokenizer.json, etc.)"
+    # Check if required config files exist
+    config_files = ["config.json", "tokenizer_config.json"]
+    missing_configs = [f for f in config_files if not os.path.exists(os.path.join(model_path, f))]
+    if missing_configs:
+        print(f"Warning: Missing config files: {missing_configs}")
 
     return True, "Model is compatible"
 
 
 def get_model_info(model_path):
-    """Extract model information from the directory"""
-    info = {
+    """Get basic information about the model"""
+    model_info = {
         "model_name": os.path.basename(model_path),
         "model_type": "unknown",
-        "size": 0
+        "size": 0.0
     }
 
-    # Try to determine model type from name
-    model_name_lower = info["model_name"].lower()
+    # Detect model type from path or config
+    model_name_lower = model_info["model_name"].lower()
     if "llava" in model_name_lower:
-        info["model_type"] = "llava"
+        model_info["model_type"] = "llava"
     elif "qwen2" in model_name_lower:
-        info["model_type"] = "qwen2"
+        model_info["model_type"] = "qwen2"
     elif "llama" in model_name_lower:
-        info["model_type"] = "llama"
+        model_info["model_type"] = "llama"
 
-    # Calculate model size
-    pth_files = [f for f in os.listdir(model_path) if f.endswith('.pth')]
-    if pth_files:
-        model_file = os.path.join(model_path, pth_files[0])
-        info["size"] = os.path.getsize(model_file) / (1024 ** 3)  # Size in GB
+    # Try to read from config.json
+    config_path = os.path.join(model_path, "config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                if "architectures" in config:
+                    arch = config["architectures"][0].lower()
+                    if "llava" in arch:
+                        model_info["model_type"] = "llava"
+                    elif "qwen2" in arch:
+                        model_info["model_type"] = "qwen2"
+                    elif "llama" in arch:
+                        model_info["model_type"] = "llama"
+        except:
+            pass
 
-    return info
+    # Calculate total size
+    total_size = 0
+    for f in os.listdir(model_path):
+        if f.endswith('.pth'):
+            file_path = os.path.join(model_path, f)
+            total_size += os.path.getsize(file_path)
+
+    model_info["size"] = total_size / (1024 ** 3)  # Convert to GB
+
+    return model_info
 
 
 def main():
@@ -157,10 +181,20 @@ def main():
     # Get model information
     model_info = get_model_info(args.model_path)
 
+    # Detect if this is a LLaVA model
+    is_llava = model_info["model_type"] == "llava"
+    if is_llava:
+        print("\n⚠️  Detected LLaVA model - will handle vision weights specially")
+        if not args.quantize_vision and not args.skip_vision:
+            args.skip_vision = True  # Default to skipping vision weights
+            print("   Skipping vision weights by default (use --quantize_vision to override)")
+
     print(f"\nModel Information:")
     print(f"  Name: {model_info['model_name']}")
     print(f"  Type: {model_info['model_type']}")
     print(f"  Size: {model_info['size']:.2f} GB")
+    if is_llava:
+        print(f"  Vision weights: {'Will be quantized' if args.quantize_vision else 'Will be skipped'}")
 
     # Auto-detect groupsize if requested
     if args.groupsize == 0:
@@ -213,8 +247,7 @@ def main():
     if args.output_path is None:
         parent_dir = os.path.dirname(args.model_path)
         model_name = os.path.basename(args.model_path)
-        args.output_path = parent_dir + f"{model_name}-{args.wbits}bit-gptq"
-
+        args.output_path = os.path.join(parent_dir, f"{model_name}-{args.wbits}bit-gptq")
 
     print(f"\nOutput path: {args.output_path}")
 
@@ -239,7 +272,8 @@ def main():
             groupsize=args.groupsize,
             device=args.device,
             num_samples=args.num_samples,
-            seq_length=args.seq_length
+            seq_length=args.seq_length,
+            skip_vision=args.skip_vision
         )
 
         print("\n" + "=" * 60)
@@ -251,18 +285,41 @@ def main():
 
         # Calculate and show compression ratio
         original_size = model_info['size']
-        quantized_size = sum(
-            os.path.getsize(os.path.join(args.output_path, f)) / (1024 ** 3)
-            for f in os.listdir(args.output_path)
-            if f.endswith('.pth')
-        )
-        compression_ratio = original_size / quantized_size if quantized_size > 0 else 0
+
+        # Calculate quantized size
+        quantized_size = 0
+        if os.path.exists(args.output_path):
+            for f in os.listdir(args.output_path):
+                if f.endswith('.pth'):
+                    file_path = os.path.join(args.output_path, f)
+                    quantized_size += os.path.getsize(file_path) / (1024 ** 3)
+
+        if quantized_size > 0:
+            compression_ratio = original_size / quantized_size
+        else:
+            print("\nWarning: Could not calculate compression ratio (output files not found)")
+            compression_ratio = 0
 
         print(f"\nCompression Statistics:")
         print(f"  Original size: {original_size:.2f} GB")
         print(f"  Quantized size: {quantized_size:.2f} GB")
         print(f"  Compression ratio: {compression_ratio:.2f}x")
         print(f"  Space saved: {(1 - 1 / compression_ratio) * 100:.1f}%")
+
+        # Expected compression analysis
+        expected_ratio = 32 / (args.wbits + 0.5)  # 0.5 for metadata overhead
+        if compression_ratio < 1.5:
+            print(f"\n⚠️  Warning: Low compression ratio detected!")
+            print(f"  Expected: ~{expected_ratio:.1f}x for {args.wbits}-bit quantization")
+            print(f"  Actual: {compression_ratio:.2f}x")
+            print("\nPossible reasons:")
+            print("  - Model has many non-quantizable layers (embeddings, norms)")
+            print("  - Vision components were skipped (for LLaVA)")
+            print("  - Small model size (quantization overhead is more significant)")
+            print("\nFor better compression, consider:")
+            print("  - Using fewer bits (e.g., 3-bit or 2-bit)")
+            print("  - Larger groupsize (reduces metadata overhead)")
+            print("  - Quantizing embeddings (if safe for your use case)")
 
     except KeyboardInterrupt:
         print("\n\nQuantization interrupted by user.")

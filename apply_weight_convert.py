@@ -214,13 +214,17 @@ def main():
         print(f"Groupsize: {args.groupsize}")
         print("=" * 50 + "\n")
 
+        # Check if it's a LLaVA model and set skip_vision accordingly
+        skip_vision = model_type == "llava"
+
         try:
             quantized_path = quantize_after_conversion(
                 checkpoints_dir=checkpoints_dir,
                 model_type=model_type,
                 calibration_data_path=args.calibration_data,
                 wbits=args.wbits,
-                groupsize=args.groupsize
+                groupsize=args.groupsize,
+                skip_vision=skip_vision
             )
             print(f"\nQuantization completed successfully!")
             print(f"Quantized model saved to: {quantized_path}")
