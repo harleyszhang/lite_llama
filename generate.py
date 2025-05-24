@@ -201,7 +201,7 @@ if __name__ == "__main__":
 
 
     PARSER = argparse.ArgumentParser(formatter_class=RawTextHelpFormatter)
-    PARSER.add_argument('-m', "--model_path", type=str,
+    PARSER.add_argument('-m', "--checkpoint_path", type=str,
                         default='checkpoints/lit-llama/7B/',
                         help='Path of the Model')
     PARSER.add_argument('-q', "--quant_method", type=str,
