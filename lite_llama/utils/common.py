@@ -82,53 +82,65 @@ def count_tokens(texts: List[str], tokenizer) -> int:
 
 
 def check_model_compatibility(model_path):
-    """Check if the model is a valid converted lite_llama model"""
-    # Check for required files
-    required_files = []
-    optional_files = ["config.json", "tokenizer.model", "tokenizer.json"]
+    """Check if the model is compatible for quantization"""
+    # Check if model path exists and contains .pth files
+    if not os.path.exists(model_path):
+        return False, f"Model path does not exist: {model_path}"
 
-    # Find .pth file
     pth_files = [f for f in os.listdir(model_path) if f.endswith('.pth')]
     if not pth_files:
-        return False, "No .pth file found in the model directory"
+        return False, f"No .pth files found in {model_path}"
 
-    # Check if already quantized
-    if any('gptq' in f for f in pth_files):
-        return False, "Model appears to be already quantized"
-
-    # Check for config files
-    found_configs = []
-    for config_file in optional_files:
-        if os.path.exists(os.path.join(model_path, config_file)):
-            found_configs.append(config_file)
-
-    if not found_configs:
-        return False, "No configuration files found (config.json, tokenizer.json, etc.)"
+    # Check if required config files exist
+    config_files = ["config.json", "tokenizer_config.json"]
+    missing_configs = [f for f in config_files if not os.path.exists(os.path.join(model_path, f))]
+    if missing_configs:
+        print(f"Warning: Missing config files: {missing_configs}")
 
     return True, "Model is compatible"
 
 
 def get_model_info(model_path):
-    """Extract model information from the directory"""
-    info = {
+    """Get basic information about the model"""
+    model_info = {
         "model_name": os.path.basename(model_path),
         "model_type": "unknown",
-        "size": 0
+        "size": 0.0
     }
 
-    # Try to determine model type from name
-    model_name_lower = info["model_name"].lower()
+    # Detect model type from path or config
+    model_name_lower = model_info["model_name"].lower()
     if "llava" in model_name_lower:
-        info["model_type"] = "llava"
+        model_info["model_type"] = "llava"
     elif "qwen2" in model_name_lower:
-        info["model_type"] = "qwen2"
+        model_info["model_type"] = "qwen2"
     elif "llama" in model_name_lower:
-        info["model_type"] = "llama"
+        model_info["model_type"] = "llama"
 
-    # Calculate model size
-    pth_files = [f for f in os.listdir(model_path) if f.endswith('.pth')]
-    if pth_files:
-        model_file = os.path.join(model_path, pth_files[0])
-        info["size"] = os.path.getsize(model_file) / (1024 ** 3)  # Size in GB
+    # Try to read from config.json
+    config_path = os.path.join(model_path, "config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                if "architectures" in config:
+                    arch = config["architectures"][0].lower()
+                    if "llava" in arch:
+                        model_info["model_type"] = "llava"
+                    elif "qwen2" in arch:
+                        model_info["model_type"] = "qwen2"
+                    elif "llama" in arch:
+                        model_info["model_type"] = "llama"
+        except:
+            pass
 
-    return info
+    # Calculate total size
+    total_size = 0
+    for f in os.listdir(model_path):
+        if f.endswith('.pth'):
+            file_path = os.path.join(model_path, f)
+            total_size += os.path.getsize(file_path)
+
+    model_info["size"] = total_size / (1024 ** 3)  # Convert to GB
+
+    return model_info
