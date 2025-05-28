@@ -2,7 +2,7 @@ import json
 import time, os
 import subprocess
 from typing import List, Optional
-
+import torch
 
 def read_json(json_path):
     with open(json_path, "r") as json_file:
@@ -82,7 +82,7 @@ def count_tokens(texts: List[str], tokenizer) -> int:
 
 
 def get_model_type(checkpoint_path: str) -> str | None:
-    from utils.logger import log
+    from logger import log
 
     model_type = ["llama", "falcon", "mpt", "qwen2", "llava"]
 
@@ -159,3 +159,41 @@ def get_model_info(model_path):
     model_info["size"] = total_size / (1024 ** 3)  # Convert to GB
 
     return model_info
+
+
+def get_model_dtype(checkpoints_dir: str) -> torch.dtype:
+    """
+    Get the model dtype from config.json
+
+    Args:
+        checkpoints_dir: Path to model checkpoint directory
+
+    Returns:
+        torch.dtype: The dtype specified in config.json
+    """
+    config_path = os.path.join(checkpoints_dir, "config.json")
+
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+
+        torch_dtype_str = config.get("torch_dtype", "float16")
+
+        # Map string to torch dtype
+        dtype_mapping = {
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float32": torch.float32,
+            "float": torch.float32,
+        }
+
+        dtype = dtype_mapping.get(torch_dtype_str, torch.float16)
+        print(f"Detected model dtype from config: {torch_dtype_str} -> {dtype}")
+
+        return dtype
+
+    except Exception as e:
+        print(f"Warning: Could not read dtype from config.json: {e}")
+        print("Defaulting to torch.float16")
+        return torch.float16
+

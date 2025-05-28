@@ -1,43 +1,63 @@
 from tqdm.auto import tqdm
 import torch, os, shutil, glob
 import os.path as osp
-from typing import Dict
+from typing import Dict, Optional
+from ..quantization.gptq.gptq import quantize_gptq  # Import our GPTQ implementation
 
 
-def build_new_weight_dir(checkpoints_dir: str, new_sd):
+def build_new_weight_dir(checkpoints_dir: str, new_sd, quantized: bool = False):
     # 保存 lite_llama 模型权重并构建新的权重目录
     model_id = osp.basename(osp.normpath(checkpoints_dir))
     current_dir = osp.dirname(osp.abspath(__file__))  # 获取当前文件所在的目录
-    my_weight_dir = osp.join(
-        current_dir, "../../my_weight/" + model_id
-    )  # 项目所在根目录
+
+    # Add quantized suffix if using GPTQ
+    weight_dir_name = f"../../my_weight/{model_id}"
+    if quantized:
+        weight_dir_name += "_gptq"
+
+    my_weight_dir = osp.join(current_dir, weight_dir_name)  # 项目所在根目录
     os.makedirs(my_weight_dir, exist_ok=True)  # 创建文件夹（如果不存在）
 
     # 保存模型的状态字典。
+    save_filename = f"{model_id}_gptq.pth" if quantized else f"{model_id}.pth"
     torch.save(
         new_sd,
-        osp.join(my_weight_dir, model_id + ".pth"),
+        osp.join(my_weight_dir, save_filename),
         _use_new_zipfile_serialization=True,
     )
 
     # 获取所有 JSON 文件
     json_files = glob.glob(osp.join(checkpoints_dir, "*.json"))
     for file_path in json_files:
-        shutil.copy(file_path, my_weight_dir) # 复制 hf 权重目录的所有 json 文件到新的目录
-        print(f"Copy: {file_path} -> {my_weight_dir}")
+        shutil.copy(file_path, my_weight_dir)  # 复制 hf 权重目录的所有 json 文件到新的目录
+        print(f"已复制: {file_path} -> {my_weight_dir}")
 
     if osp.exists(osp.join(checkpoints_dir, "tokenizer.model")):
         shutil.copy(osp.join(checkpoints_dir, "tokenizer.model"), my_weight_dir)
 
+
 def convert_qwen2_hf_to_litellama(
-    checkpoints_dir: str,
-    hf_sd,
-    num_layers,
-    print_params: bool = True,
-    device: str = "cuda",
+        checkpoints_dir: str,
+        hf_sd,
+        num_layers,
+        print_params: bool = True,
+        device: str = "cuda",
+        use_gptq: bool = False,
+        wbits: int = 4,
+        groupsize: int = 128,
 ) -> Dict[str, torch.Tensor]:
     """
     将 Hugging Face 格式的预训练模型的权重字典转换为自定义模型的权重字典。
+
+    Args:
+        checkpoints_dir: 模型权重目录
+        hf_sd: HuggingFace 模型状态字典
+        num_layers: 模型层数
+        print_params: 是否打印参数信息
+        device: 设备
+        use_gptq: 是否使用 GPTQ 量化
+        wbits: 量化位数
+        groupsize: 量化组大小
     """
     # 映射嵌入层、映射归一化层、映射模型最后的输出线性层
     mapping = {
@@ -88,10 +108,10 @@ def convert_qwen2_hf_to_litellama(
         v_bias_key = f"layers.{i}.self_attn.v_proj_bias"
 
         if (
-            k_key in new_sd
-            and v_key in new_sd
-            and k_bias_key in new_sd
-            and v_bias_key in new_sd
+                k_key in new_sd
+                and v_key in new_sd
+                and k_bias_key in new_sd
+                and v_bias_key in new_sd
         ):
             # 1. kv weight 权重合并
             k_tensor = new_sd[k_key]
@@ -119,8 +139,28 @@ def convert_qwen2_hf_to_litellama(
             del new_sd[k_bias_key]
             del new_sd[v_bias_key]
 
+    # Apply GPTQ quantization if requested
+    if use_gptq:
+        print(f"\nApplying GPTQ quantization with {wbits} bits and groupsize {groupsize}...")
+        # Define layers to quantize (excluding embeddings and layer norms)
+        target_layers = []
+        for name in new_sd.keys():
+            if any(pattern in name for pattern in [
+                "q_proj_weight", "kv_proj_weight", "o_proj_weight",
+                "gate_proj.weight", "up_proj.weight", "down_proj.weight"
+            ]) and "bias" not in name:
+                target_layers.append(name)
+
+        new_sd = quantize_gptq(
+            model_state_dict=new_sd,
+            wbits=wbits,
+            groupsize=groupsize,
+            target_layers=target_layers,
+            device=device
+        )
+
     # 保存转换好的自定义权重
-    build_new_weight_dir(checkpoints_dir, new_sd)
+    build_new_weight_dir(checkpoints_dir, new_sd, quantized=use_gptq)
 
     if print_params:
         # 打印预训练模型的参数名称
@@ -129,20 +169,33 @@ def convert_qwen2_hf_to_litellama(
             print(name, parameters.shape)
 
         # 打印自定义模型的参数名称
-        print("Custom model parameters:")
+        print("\nCustom model parameters:")
         for name, parameters in new_sd.items():
-            print(name, parameters.shape)
+            if hasattr(parameters, 'shape'):
+                print(name, parameters.shape)
+            else:
+                print(name, parameters)
 
-    # return new_sd
 
-
-def convert_llama_torch_to_litellama(checkpoints_dir, hf_sd, num_layers):
+def convert_llama_torch_to_litellama(
+        checkpoints_dir,
+        hf_sd,
+        num_layers,
+        use_gptq: bool = False,
+        wbits: int = 4,
+        groupsize: int = 128,
+        device: str = "cuda"
+):
     """
     将 pytorch bin 格式的模型的权重字典转换为自定义模型的权重字典。
 
     参数:
         checkpoints_dir: pytorch 模型的目录
         hf_sd (dict): pytorch 模型的状态字典。
+        use_gptq: 是否使用 GPTQ 量化
+        wbits: 量化位数
+        groupsize: 量化组大小
+        device: 设备
 
     返回:
         dict: 转换后的状态字典。
@@ -183,17 +236,48 @@ def convert_llama_torch_to_litellama(checkpoints_dir, hf_sd, num_layers):
 
     del hf_sd
 
-    build_new_weight_dir(checkpoints_dir, new_sd)
+    # Apply GPTQ quantization if requested
+    if use_gptq:
+        print(f"\nApplying GPTQ quantization with {wbits} bits and groupsize {groupsize}...")
+        target_layers = []
+        for name in new_sd.keys():
+            if any(pattern in name for pattern in [
+                "q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight",
+                "gate_proj.weight", "up_proj.weight", "down_proj.weight"
+            ]):
+                target_layers.append(name)
+
+        new_sd = quantize_gptq(
+            model_state_dict=new_sd,
+            wbits=wbits,
+            groupsize=groupsize,
+            target_layers=target_layers,
+            device=device
+        )
+
+    build_new_weight_dir(checkpoints_dir, new_sd, quantized=use_gptq)
     return new_sd
 
 
-def convert_llama_hf_to_litellama(checkpoints_dir, hf_sd, num_layers):
+def convert_llama_hf_to_litellama(
+        checkpoints_dir,
+        hf_sd,
+        num_layers,
+        use_gptq: bool = False,
+        wbits: int = 4,
+        groupsize: int = 128,
+        device: str = "cuda"
+):
     """
     将 hf 格式的模型的权重字典转换为自定义模型的权重字典。
 
     参数:
         checkpoints_dir: Hugging Face 模型的目录
         hf_sd (dict): Hugging Face 模型的状态字典。
+        use_gptq: 是否使用 GPTQ 量化
+        wbits: 量化位数
+        groupsize: 量化组大小
+        device: 设备
 
     返回:
         dict: 转换后的状态字典。
@@ -251,14 +335,44 @@ def convert_llama_hf_to_litellama(checkpoints_dir, hf_sd, num_layers):
             del new_sd[k_key]
             del new_sd[v_key]
 
+    # Apply GPTQ quantization if requested
+    if use_gptq:
+        print(f"\nApplying GPTQ quantization with {wbits} bits and groupsize {groupsize}...")
+        target_layers = []
+        for name in new_sd.keys():
+            if any(pattern in name for pattern in [
+                "q_proj.weight", "kv_proj_weight", "o_proj.weight",
+                "gate_proj.weight", "up_proj.weight", "down_proj.weight"
+            ]):
+                target_layers.append(name)
+
+        new_sd = quantize_gptq(
+            model_state_dict=new_sd,
+            wbits=wbits,
+            groupsize=groupsize,
+            target_layers=target_layers,
+            device=device
+        )
+
     for name, parameters in new_sd.items():
-        print(name, parameters.shape)
+        if hasattr(parameters, 'shape'):
+            print(name, parameters.shape)
+        else:
+            print(name, parameters)
 
     # 将处理后的权重保存到指定目录
-    build_new_weight_dir(checkpoints_dir, new_sd)
+    build_new_weight_dir(checkpoints_dir, new_sd, quantized=use_gptq)
 
 
-def convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, num_layers):
+def convert_llavallama_hf_to_litellama(
+        checkpoints_dir,
+        hf_sd,
+        num_layers,
+        use_gptq: bool = False,
+        wbits: int = 4,
+        groupsize: int = 128,
+        device: str = "cuda"
+):
     """
     将 Hugging Face 模型的权重字典转换为自定义模型的权重字典。
 
@@ -266,6 +380,10 @@ def convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, num_layers):
         checkpoints_dir: Hugging Face 模型的目录
         hf_sd (dict): Hugging Face 模型的状态字典。
         model_config (LlamaConfig): 自定义模型的配置参数。
+        use_gptq: 是否使用 GPTQ 量化
+        wbits: 量化位数
+        groupsize: 量化组大小
+        device: 设备
 
     返回:
         dict: 转换后的状态字典。
@@ -326,7 +444,30 @@ def convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, num_layers):
             del new_sd[k_key]
             del new_sd[v_key]
 
-    for name, parameters in new_sd.items():
-        print(name, parameters.shape)
+    # Apply GPTQ quantization if requested
+    if use_gptq:
+        print(f"\nApplying GPTQ quantization with {wbits} bits and groupsize {groupsize}...")
+        target_layers = []
+        for name in new_sd.keys():
+            if any(pattern in name for pattern in [
+                "q_proj.weight", "kv_proj_weight", "o_proj.weight",
+                "gate_proj.weight", "up_proj.weight", "down_proj.weight"
+            ]) and "language_model" in name:
+                target_layers.append(name)
 
-    build_new_weight_dir(checkpoints_dir, new_sd)
+        new_sd = quantize_gptq(
+            model_state_dict=new_sd,
+            wbits=wbits,
+            groupsize=groupsize,
+            target_layers=target_layers,
+            device=device
+        )
+
+    for name, parameters in new_sd.items():
+        if hasattr(parameters, 'shape'):
+            print(name, parameters.shape)
+        else:
+            print(name, parameters)
+
+    build_new_weight_dir(checkpoints_dir, new_sd, quantized=use_gptq)
+

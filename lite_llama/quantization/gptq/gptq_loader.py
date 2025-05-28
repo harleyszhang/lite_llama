@@ -1,550 +1,216 @@
-"""
-GPTQ weight loading and dequantization utilities for lite_llama
-"""
-
 import torch
 import torch.nn as nn
-from pathlib import Path
-import json
-import time
-from typing import Dict, Optional, Tuple, Any
-import numpy as np
-
-try:
-    import safetensors.torch
-    HAS_SAFETENSORS = True
-except ImportError:
-    HAS_SAFETENSORS = False
-    print("Warning: safetensors not installed. Install with: pip install safetensors")
+from typing import Dict, Optional
+import os.path as osp
+from .gptq import dequantize_weight
 
 
-class GPTQConfig:
-    """Configuration for GPTQ quantization parameters"""
-    def __init__(self, bits: int = 4, group_size: int = 128,
-                 desc_act: bool = False, sym: bool = True,
-                 true_sequential: bool = True):
-        self.bits = bits
-        self.group_size = group_size
-        self.desc_act = desc_act
-        self.sym = sym
-        self.true_sequential = true_sequential
-        self.pack_num = 32 // self.bits  # number of weights packed in int32
-
-    @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any]) -> "GPTQConfig":
-        """Create GPTQConfig from dictionary"""
-        return cls(
-            bits=config_dict.get("bits", 4),
-            group_size=config_dict.get("group_size", 128),
-            desc_act=config_dict.get("desc_act", False),
-            sym=config_dict.get("sym", True),
-            true_sequential=config_dict.get("true_sequential", True)
-        )
-
-
-def load_gptq_quantize_config(model_path: str) -> Optional[GPTQConfig]:
-    """Load GPTQ quantization config from model directory"""
-    quantize_config_path = Path(model_path) / "quantization_config.json"
-    if not quantize_config_path.exists():
-        return None
-
-    with open(quantize_config_path, 'r') as f:
-        config_dict = json.load(f)
-
-    return GPTQConfig.from_dict(config_dict)
-
-
-def unpack_gptq_weights(qweight: torch.Tensor, bits: int = 4) -> torch.Tensor:
+class GPTQLinear(nn.Module):
     """
-    Unpack GPTQ quantized weights from int32 format
-
-    Args:
-        qweight: Packed quantized weights [out_features, in_features // pack_num]
-        bits: Number of bits per weight (4 or 8)
-
-    Returns:
-        Unpacked weights [out_features, in_features]
+    A linear layer that uses GPTQ quantized weights.
+    Automatically dequantizes during forward pass.
     """
-    pack_num = 32 // bits
-    out_features = qweight.shape[0]
-    in_features = qweight.shape[1] * pack_num
 
-    unpacked_weights = torch.zeros((out_features, in_features),
-                                   dtype=torch.int32, device=qweight.device)
-
-    for i in range(pack_num):
-        shift = i * bits
-        if bits == 4:
-            mask = 0xF
-        elif bits == 8:
-            mask = 0xFF
+    def __init__(self, qweight, qzeros, scales, wbits=4, bias=None):
+        super().__init__()
+        self.register_buffer('qweight', qweight)
+        self.register_buffer('qzeros', qzeros)
+        self.register_buffer('scales', scales)
+        self.wbits = wbits
+        if bias is not None:
+            self.register_buffer('bias', bias)
         else:
-            raise ValueError(f"Unsupported bits: {bits}")
+            self.bias = None
 
-        unpacked_weights[:, i::pack_num] = (qweight >> shift) & mask
-
-    return unpacked_weights
-
-
-def dequantize_gptq(qweight: torch.Tensor, qzeros: torch.Tensor,
-                    scales: torch.Tensor, g_idx: Optional[torch.Tensor] = None,
-                    bits: int = 4, group_size: int = 128) -> torch.Tensor:
-    """
-    Dequantize GPTQ weights
-
-    Args:
-        qweight: Packed quantized weights
-        qzeros: Packed zero points
-        scales: Scale factors
-        g_idx: Group indices (optional, for act-order)
-        bits: Quantization bits
-        group_size: Quantization group size
-
-    Returns:
-        Dequantized weights in fp16
-    """
-    # Unpack weights and zeros
-    weight = unpack_gptq_weights(qweight, bits).to(torch.float16)
-    zeros = unpack_gptq_weights(qzeros, bits).to(torch.float16)
-
-    # Handle act-order if needed
-    if g_idx is not None:
-        weight = weight[:, g_idx]
-        zeros = zeros[:, g_idx]
-
-    # Reshape for group-wise dequantization
-    out_features, in_features = weight.shape
-    num_groups = in_features // group_size
-
-    weight = weight.reshape(out_features, num_groups, group_size)
-    zeros = zeros.reshape(-1, num_groups, 1)
-    scales = scales.reshape(-1, num_groups, 1)
-
-    # Dequantize: w = (w_q - z) * s
-    weight = (weight - zeros) * scales
-
-    # Reshape back
-    weight = weight.reshape(out_features, in_features)
-
-    return weight
-
-
-def load_gptq_linear_weights(checkpoint_path: str, layer_name: str,
-                            gptq_config: GPTQConfig) -> Dict[str, torch.Tensor]:
-    """
-    Load GPTQ quantized linear layer weights
-
-    Args:
-        checkpoint_path: Path to checkpoint file
-        layer_name: Name prefix of the layer (e.g., "layers.0.self_attn.q_proj")
-        gptq_config: GPTQ configuration
-
-    Returns:
-        Dictionary containing dequantized weight and bias (if exists)
-    """
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-
-    # Load quantized components
-    qweight = checkpoint.get(f"{layer_name}.qweight")
-    qzeros = checkpoint.get(f"{layer_name}.qzeros")
-    scales = checkpoint.get(f"{layer_name}.scales")
-    g_idx = checkpoint.get(f"{layer_name}.g_idx", None)
-    bias = checkpoint.get(f"{layer_name}.bias", None)
-
-    if qweight is None or qzeros is None or scales is None:
-        # Fallback to non-quantized weight
-        weight = checkpoint.get(f"{layer_name}.weight")
-        if weight is None:
-            raise ValueError(f"No weight found for {layer_name}")
-        return {"weight": weight, "bias": bias}
-
-    # Dequantize
-    weight = dequantize_gptq(qweight, qzeros, scales, g_idx,
-                            gptq_config.bits, gptq_config.group_size)
-
-    return {"weight": weight, "bias": bias}
-
-
-def convert_gptq_to_lite_llama(checkpoints_dir: str, model_config) -> Dict[str, torch.Tensor]:
-    """
-    Convert GPTQ quantized model to lite_llama format
-
-    Args:
-        checkpoints_dir: Directory containing GPTQ model files
-        model_config: Model configuration
-
-    Returns:
-        State dictionary in lite_llama format
-    """
-    import safetensors.torch
-
-    # Load GPTQ config
-    gptq_config = load_gptq_quantize_config(checkpoints_dir)
-    if gptq_config is None:
-        raise ValueError(f"No quantization_config.json found in {checkpoints_dir}")
-
-    # Find checkpoint files
-    checkpoint_files = sorted(Path(checkpoints_dir).glob("*.safetensors"))
-    use_safetensors = len(checkpoint_files) > 0
-
-    if not checkpoint_files:
-        checkpoint_files = sorted(Path(checkpoints_dir).glob("*.bin"))
-
-    if not checkpoint_files:
-        checkpoint_files = sorted(Path(checkpoints_dir).glob("*.pth"))
-
-    if not checkpoint_files:
-        raise ValueError(f"No checkpoint files found in {checkpoints_dir}")
-
-    # Load all checkpoints (handle sharded models)
-    full_state_dict = {}
-    for checkpoint_file in checkpoint_files:
-        if use_safetensors:
-            if not HAS_SAFETENSORS:
-                raise ImportError("safetensors is required for loading .safetensors files. Install with: pip install safetensors")
-            state_dict = safetensors.torch.load_file(str(checkpoint_file))
-        else:
-            state_dict = torch.load(str(checkpoint_file), map_location="cpu")
-        full_state_dict.update(state_dict)
-
-    # Check if already in lite_llama format
-    is_lite_llama_format = any("kv_proj_weight" in key for key in full_state_dict.keys())
-
-    if is_lite_llama_format:
-        print("Model is already in lite_llama format")
-        # Just dequantize if needed
-        new_state_dict = {}
-        for key, value in full_state_dict.items():
-            # Check if this is a quantized weight
-            base_key = key.replace(".qweight", "").replace(".qzeros", "").replace(".scales", "").replace(".g_idx", "")
-
-            if key.endswith(".qweight"):
-                # This is a quantized weight, dequantize it
-                qweight = value
-                qzeros = full_state_dict.get(base_key + ".qzeros")
-                scales = full_state_dict.get(base_key + ".scales")
-                g_idx = full_state_dict.get(base_key + ".g_idx", None)
-
-                if qzeros is not None and scales is not None:
-                    weight = dequantize_gptq(
-                        qweight, qzeros, scales, g_idx,
-                        gptq_config.bits, gptq_config.group_size
-                    )
-                    new_state_dict[base_key] = weight
-            elif not any(key.endswith(suffix) for suffix in [".qzeros", ".scales", ".g_idx"]):
-                # Regular weight, just copy
-                new_state_dict[key] = value
-
-        return new_state_dict
-
-    # Otherwise, convert based on model type
-    if model_config.model_type.lower() == "llama":
-        new_state_dict = convert_gptq_llama_to_lite_llama(
-            full_state_dict, gptq_config, model_config
+    def forward(self, x):
+        # Dequantize weight on-the-fly
+        weight = dequantize_weight(
+            self.qweight,
+            self.qzeros,
+            self.scales,
+            self.wbits
         )
-    elif model_config.model_type.lower() == "qwen2":
-        new_state_dict = convert_gptq_qwen2_to_lite_llama(
-            full_state_dict, gptq_config, model_config
-        )
+
+        # Perform linear transformation
+        output = torch.matmul(x, weight.t())
+
+        if self.bias is not None:
+            output += self.bias
+
+        return output
+
+
+def load_quantized_state_dict(checkpoint_path: str, device: str = "cuda") -> Dict[str, torch.Tensor]:
+    """
+    Load a quantized state dictionary from checkpoint.
+
+    Args:
+        checkpoint_path: Path to the .pth file
+        device: Device to load tensors to
+
+    Returns:
+        State dictionary with quantized weights
+    """
+    print(f"Loading quantized model from {checkpoint_path}")
+    state_dict = torch.load(checkpoint_path, map_location=device)
+
+    # Check if this is a quantized model
+    quantized_keys = [k for k in state_dict.keys() if '.qweight' in k]
+    if quantized_keys:
+        print(f"Found {len(quantized_keys)} quantized layers")
     else:
-        raise ValueError(f"Unsupported model type for GPTQ: {model_config.model_type}")
+        print("No quantized layers found - this appears to be a regular model")
 
-    return new_state_dict
+    return state_dict
 
 
-def convert_gptq_llama_to_lite_llama(
-    checkpoint: Dict[str, torch.Tensor],
-    gptq_config: GPTQConfig,
-    model_config
-) -> Dict[str, torch.Tensor]:
-    """Convert GPTQ Llama model to lite_llama format"""
-    new_state_dict = {}
+def replace_linear_with_gptq(module: nn.Module, state_dict: Dict[str, torch.Tensor], prefix: str = ""):
+    """
+    Recursively replace Linear layers with GPTQLinear layers based on quantized state dict.
 
-    # Check if this is already in lite_llama format
-    is_lite_llama_format = any("kv_proj_weight" in key for key in checkpoint.keys())
+    Args:
+        module: The module to modify
+        state_dict: State dictionary containing quantized weights
+        prefix: Current prefix for parameter names
+    """
+    for name, child in module.named_children():
+        full_name = f"{prefix}.{name}" if prefix else name
 
-    if is_lite_llama_format:
-        # Already in lite_llama format, just process the weights
-        for key, value in checkpoint.items():
-            new_state_dict[key] = value
-        return new_state_dict
+        if isinstance(child, nn.Linear):
+            # Check if this layer has quantized weights
+            qweight_key = f"{full_name}.qweight"
+            if qweight_key in state_dict:
+                # Extract quantization parameters
+                qweight = state_dict[qweight_key]
+                qzeros = state_dict[f"{full_name}.qzeros"]
+                scales = state_dict[f"{full_name}.scales"]
+                wbits = state_dict.get(f"{full_name}.wbits", torch.tensor(4)).item()
 
-    # Load embeddings and norms (these are not quantized)
-    new_state_dict["embed_tokens.weight"] = checkpoint.get("model.embed_tokens.weight")
-    new_state_dict["norm_weight"] = checkpoint.get("model.norm.weight")
-    new_state_dict["lm_head.weight"] = checkpoint.get("lm_head.weight")
+                # Check for bias
+                bias_key = f"{full_name}.bias"
+                bias = state_dict.get(bias_key, None)
 
-    # Process each layer
-    for i in range(model_config.num_layers):
-        # Check if we have separate k_proj and v_proj or merged kv_proj
-        has_separate_kv = f"model.layers.{i}.self_attn.k_proj.weight" in checkpoint or \
-                         f"model.layers.{i}.self_attn.k_proj.qweight" in checkpoint
+                # Replace with GPTQLinear
+                gptq_linear = GPTQLinear(qweight, qzeros, scales, wbits, bias)
+                setattr(module, name, gptq_linear)
 
-        if has_separate_kv:
-            # Process separate K and V projections
-            for proj in ["q_proj", "k_proj", "v_proj", "o_proj"]:
-                prefix = f"model.layers.{i}.self_attn.{proj}"
+                print(f"Replaced {full_name} with GPTQLinear")
+        else:
+            # Recursively process child modules
+            replace_linear_with_gptq(child, state_dict, full_name)
 
-                # Check if quantized weights exist
-                if f"{prefix}.qweight" in checkpoint:
-                    # Load and dequantize
-                    qweight = checkpoint[f"{prefix}.qweight"]
-                    qzeros = checkpoint[f"{prefix}.qzeros"]
-                    scales = checkpoint[f"{prefix}.scales"]
-                    g_idx = checkpoint.get(f"{prefix}.g_idx", None)
 
-                    weight = dequantize_gptq(
-                        qweight, qzeros, scales, g_idx,
-                        gptq_config.bits, gptq_config.group_size
-                    )
+def create_dequantized_state_dict(quantized_state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """
+    Create a dequantized state dictionary from a quantized one.
+    This is useful for models that don't support on-the-fly dequantization.
+
+    Args:
+        quantized_state_dict: State dictionary with quantized weights
+
+    Returns:
+        State dictionary with dequantized weights
+    """
+    dequantized_dict = {}
+    processed_layers = set()
+
+    for key, value in quantized_state_dict.items():
+        if '.qweight' in key:
+            # Extract base name
+            base_name = key.replace('.qweight', '')
+
+            if base_name not in processed_layers:
+                processed_layers.add(base_name)
+
+                # Get quantization parameters
+                qweight = quantized_state_dict[f"{base_name}.qweight"]
+                qzeros = quantized_state_dict[f"{base_name}.qzeros"]
+                scales = quantized_state_dict[f"{base_name}.scales"]
+                wbits = quantized_state_dict.get(f"{base_name}.wbits", torch.tensor(4)).item()
+
+                # Dequantize
+                weight = dequantize_weight(qweight, qzeros, scales, wbits)
+
+                # Store dequantized weight
+                # Handle different naming conventions
+                if "_weight" in base_name:
+                    dequantized_dict[f"{base_name}"] = weight
                 else:
-                    # Use original weight if not quantized
-                    weight = checkpoint.get(f"{prefix}.weight")
-                    if weight is None and proj in ["k_proj", "v_proj"]:
-                        # Skip if k_proj/v_proj don't exist (might be merged already)
-                        continue
-                    elif weight is None:
-                        raise ValueError(f"No weight found for {prefix}")
+                    dequantized_dict[f"{base_name}.weight"] = weight
 
-                if proj in ["k_proj", "v_proj"]:
-                    # Store temporarily for merging
-                    new_state_dict[f"_temp_{i}_{proj}_weight"] = weight
-                else:
-                    new_state_dict[f"layers.{i}.self_attn.{proj}.weight"] = weight
+                # Copy bias if exists
+                bias_keys = [f"{base_name}.bias", f"{base_name}_bias"]
+                for bias_key in bias_keys:
+                    if bias_key in quantized_state_dict:
+                        dequantized_dict[bias_key] = quantized_state_dict[bias_key]
 
-            # Merge k and v projections if they were separate
-            if f"_temp_{i}_k_proj_weight" in new_state_dict:
-                k_weight = new_state_dict.pop(f"_temp_{i}_k_proj_weight")
-                v_weight = new_state_dict.pop(f"_temp_{i}_v_proj_weight")
-                new_state_dict[f"layers.{i}.self_attn.kv_proj_weight"] = torch.cat([k_weight, v_weight], dim=0)
-        else:
-            # Already has merged kv_proj
-            # Q projection
-            prefix = f"model.layers.{i}.self_attn.q_proj"
-            if f"{prefix}.qweight" in checkpoint:
-                qweight = checkpoint[f"{prefix}.qweight"]
-                qzeros = checkpoint[f"{prefix}.qzeros"]
-                scales = checkpoint[f"{prefix}.scales"]
-                g_idx = checkpoint.get(f"{prefix}.g_idx", None)
+        elif not any(suffix in key for suffix in ['.qzeros', '.scales', '.wbits', '.groupsize']):
+            # Copy non-quantization related parameters as-is
+            dequantized_dict[key] = value
 
-                weight = dequantize_gptq(
-                    qweight, qzeros, scales, g_idx,
-                    gptq_config.bits, gptq_config.group_size
-                )
-            else:
-                weight = checkpoint.get(f"{prefix}.weight")
-
-            new_state_dict[f"layers.{i}.self_attn.q_proj.weight"] = weight
-
-            # O projection
-            prefix = f"model.layers.{i}.self_attn.o_proj"
-            if f"{prefix}.qweight" in checkpoint:
-                qweight = checkpoint[f"{prefix}.qweight"]
-                qzeros = checkpoint[f"{prefix}.qzeros"]
-                scales = checkpoint[f"{prefix}.scales"]
-                g_idx = checkpoint.get(f"{prefix}.g_idx", None)
-
-                weight = dequantize_gptq(
-                    qweight, qzeros, scales, g_idx,
-                    gptq_config.bits, gptq_config.group_size
-                )
-            else:
-                weight = checkpoint.get(f"{prefix}.weight")
-
-            new_state_dict[f"layers.{i}.self_attn.o_proj.weight"] = weight
-
-            # KV projection (already merged)
-            prefix = f"model.layers.{i}.self_attn.kv_proj"
-            if f"{prefix}.qweight" in checkpoint:
-                qweight = checkpoint[f"{prefix}.qweight"]
-                qzeros = checkpoint[f"{prefix}.qzeros"]
-                scales = checkpoint[f"{prefix}.scales"]
-                g_idx = checkpoint.get(f"{prefix}.g_idx", None)
-
-                weight = dequantize_gptq(
-                    qweight, qzeros, scales, g_idx,
-                    gptq_config.bits, gptq_config.group_size
-                )
-            else:
-                weight = checkpoint.get(f"{prefix}.weight",
-                                       checkpoint.get(f"layers.{i}.self_attn.kv_proj_weight"))
-
-            if weight is not None:
-                new_state_dict[f"layers.{i}.self_attn.kv_proj_weight"] = weight
-
-        # MLP projections
-        for proj in ["gate_proj", "up_proj", "down_proj"]:
-            prefix = f"model.layers.{i}.mlp.{proj}"
-
-            if f"{prefix}.qweight" in checkpoint:
-                # Load and dequantize
-                qweight = checkpoint[f"{prefix}.qweight"]
-                qzeros = checkpoint[f"{prefix}.qzeros"]
-                scales = checkpoint[f"{prefix}.scales"]
-                g_idx = checkpoint.get(f"{prefix}.g_idx", None)
-
-                weight = dequantize_gptq(
-                    qweight, qzeros, scales, g_idx,
-                    gptq_config.bits, gptq_config.group_size
-                )
-            else:
-                weight = checkpoint.get(f"{prefix}.weight")
-                if weight is None:
-                    raise ValueError(f"No weight found for {prefix}")
-
-            new_state_dict[f"layers.{i}.mlp.{proj}.weight"] = weight
-
-        # Layer norms (not quantized) - handle different naming conventions
-        attention_norm = checkpoint.get(f"model.layers.{i}.input_layernorm.weight") or \
-                        checkpoint.get(f"layers.{i}.attention_norm_weight") or \
-                        checkpoint.get(f"layers.{i}.input_layernorm_weight")
-
-        ffn_norm = checkpoint.get(f"model.layers.{i}.post_attention_layernorm.weight") or \
-                   checkpoint.get(f"layers.{i}.ffn_norm_weight") or \
-                   checkpoint.get(f"layers.{i}.post_attention_layernorm_weight")
-
-        if attention_norm is not None:
-            new_state_dict[f"layers.{i}.attention_norm_weight"] = attention_norm
-        if ffn_norm is not None:
-            new_state_dict[f"layers.{i}.ffn_norm_weight"] = ffn_norm
-
-    return new_state_dict
+    print(f"Dequantized {len(processed_layers)} layers")
+    return dequantized_dict
 
 
-def convert_gptq_qwen2_to_lite_llama(
-    checkpoint: Dict[str, torch.Tensor],
-    gptq_config: GPTQConfig,
-    model_config
-) -> Dict[str, torch.Tensor]:
-    """Convert GPTQ Qwen2 model to lite_llama format"""
-    new_state_dict = {}
+# Example usage functions
 
-    # Load embeddings and norms
-    new_state_dict["embed_tokens.weight"] = checkpoint.get("model.embed_tokens.weight")
-    new_state_dict["norm_weight"] = checkpoint.get("model.norm.weight")
-    new_state_dict["lm_head_weight"] = checkpoint.get("lm_head.weight")
+def load_gptq_model_for_inference(model: nn.Module, checkpoint_path: str, device: str = "cuda"):
+    """
+    Load a GPTQ quantized model for inference.
 
-    # Process each layer
-    for i in range(model_config.num_layers):
-        # Self attention - handle q_proj separately due to bias
-        prefix = f"model.layers.{i}.self_attn.q_proj"
-        if f"{prefix}.qweight" in checkpoint:
-            qweight = checkpoint[f"{prefix}.qweight"]
-            qzeros = checkpoint[f"{prefix}.qzeros"]
-            scales = checkpoint[f"{prefix}.scales"]
-            g_idx = checkpoint.get(f"{prefix}.g_idx", None)
+    Args:
+        model: The model architecture (should match the quantized model)
+        checkpoint_path: Path to the quantized .pth file
+        device: Device to load model to
 
-            weight = dequantize_gptq(
-                qweight, qzeros, scales, g_idx,
-                gptq_config.bits, gptq_config.group_size
-            )
-        else:
-            weight = checkpoint.get(f"{prefix}.weight")
+    Example:
+        >>> model = YourModelClass(config)
+        >>> load_gptq_model_for_inference(model, "my_weight/model_gptq.pth")
+        >>> # Model is now ready for inference with automatic dequantization
+    """
+    # Load quantized state dict
+    quantized_state_dict = load_quantized_state_dict(checkpoint_path, device)
 
-        new_state_dict[f"layers.{i}.self_attn.q_proj_weight"] = weight
-        new_state_dict[f"layers.{i}.self_attn.q_proj_bias"] = checkpoint.get(f"{prefix}.bias")
+    # Check if model uses quantized weights
+    if any('.qweight' in k for k in quantized_state_dict.keys()):
+        print("Dequantizing weights for standard model inference...")
+        # Create dequantized state dict
+        dequantized_state_dict = create_dequantized_state_dict(quantized_state_dict)
+        # Load into model
+        model.load_state_dict(dequantized_state_dict, strict=False)
+    else:
+        # Regular model, load normally
+        model.load_state_dict(quantized_state_dict)
 
-        # Handle k_proj and v_proj for merging
-        for proj in ["k_proj", "v_proj"]:
-            prefix = f"model.layers.{i}.self_attn.{proj}"
+    model.to(device)
+    model.eval()
 
-            if f"{prefix}.qweight" in checkpoint:
-                qweight = checkpoint[f"{prefix}.qweight"]
-                qzeros = checkpoint[f"{prefix}.qzeros"]
-                scales = checkpoint[f"{prefix}.scales"]
-                g_idx = checkpoint.get(f"{prefix}.g_idx", None)
-
-                weight = dequantize_gptq(
-                    qweight, qzeros, scales, g_idx,
-                    gptq_config.bits, gptq_config.group_size
-                )
-            else:
-                weight = checkpoint.get(f"{prefix}.weight")
-
-            new_state_dict[f"_temp_{i}_{proj}_weight"] = weight
-            new_state_dict[f"_temp_{i}_{proj}_bias"] = checkpoint.get(f"{prefix}.bias")
-
-        # Merge k and v
-        k_weight = new_state_dict.pop(f"_temp_{i}_k_proj_weight")
-        v_weight = new_state_dict.pop(f"_temp_{i}_v_proj_weight")
-        k_bias = new_state_dict.pop(f"_temp_{i}_k_proj_bias")
-        v_bias = new_state_dict.pop(f"_temp_{i}_v_proj_bias")
-
-        new_state_dict[f"layers.{i}.self_attn.kv_proj_weight"] = torch.cat([k_weight, v_weight], dim=0)
-        new_state_dict[f"layers.{i}.self_attn.kv_proj_bias"] = torch.cat([k_bias, v_bias], dim=0)
-
-        # O projection
-        prefix = f"model.layers.{i}.self_attn.o_proj"
-        if f"{prefix}.qweight" in checkpoint:
-            qweight = checkpoint[f"{prefix}.qweight"]
-            qzeros = checkpoint[f"{prefix}.qzeros"]
-            scales = checkpoint[f"{prefix}.scales"]
-            g_idx = checkpoint.get(f"{prefix}.g_idx", None)
-
-            weight = dequantize_gptq(
-                qweight, qzeros, scales, g_idx,
-                gptq_config.bits, gptq_config.group_size
-            )
-        else:
-            weight = checkpoint.get(f"{prefix}.weight")
-
-        new_state_dict[f"layers.{i}.self_attn.o_proj_weight"] = weight
-
-        # MLP layers
-        for proj in ["gate_proj", "up_proj", "down_proj"]:
-            prefix = f"model.layers.{i}.mlp.{proj}"
-
-            if f"{prefix}.qweight" in checkpoint:
-                qweight = checkpoint[f"{prefix}.qweight"]
-                qzeros = checkpoint[f"{prefix}.qzeros"]
-                scales = checkpoint[f"{prefix}.scales"]
-                g_idx = checkpoint.get(f"{prefix}.g_idx", None)
-
-                weight = dequantize_gptq(
-                    qweight, qzeros, scales, g_idx,
-                    gptq_config.bits, gptq_config.group_size
-                )
-            else:
-                weight = checkpoint.get(f"{prefix}.weight")
-
-            new_state_dict[f"layers.{i}.mlp.{proj}.weight"] = weight
-
-        # Layer norms
-        new_state_dict[f"layers.{i}.input_layernorm_weight"] = checkpoint.get(
-            f"model.layers.{i}.input_layernorm.weight"
-        )
-        new_state_dict[f"layers.{i}.post_attention_layernorm_weight"] = checkpoint.get(
-            f"model.layers.{i}.post_attention_layernorm.weight"
-        )
-
-    return new_state_dict
+    return model
 
 
-class GPTQModelLoader:
-    """Helper class to load GPTQ models"""
+def compare_model_sizes(original_path: str, quantized_path: str):
+    """
+    Compare file sizes between original and quantized models.
 
-    @staticmethod
-    def load(checkpoints_dir: str, model_config, device: str = "cuda") -> Dict[str, torch.Tensor]:
-        """
-        Load GPTQ model and convert to lite_llama format
+    Args:
+        original_path: Path to original .pth file
+        quantized_path: Path to quantized .pth file
+    """
+    import os
 
-        Args:
-            checkpoints_dir: Directory containing GPTQ model
-            model_config: Model configuration
-            device: Target device
+    if os.path.exists(original_path):
+        original_size = os.path.getsize(original_path) / (1024 ** 3)  # GB
+        print(f"Original model size: {original_size:.2f} GB")
+    else:
+        print(f"Original model not found at {original_path}")
+        return
 
-        Returns:
-            State dictionary ready for lite_llama
-        """
-        print(f"Loading GPTQ model from {checkpoints_dir}")
-        start_time = time.time()
+    if os.path.exists(quantized_path):
+        quantized_size = os.path.getsize(quantized_path) / (1024 ** 3)  # GB
+        print(f"Quantized model size: {quantized_size:.2f} GB")
 
-        state_dict = convert_gptq_to_lite_llama(checkpoints_dir, model_config)
-
-        # Move to device and convert to fp16
-        for key, value in state_dict.items():
-            if value is not None:
-                state_dict[key] = value.to(device).half()
-
-        print(f"GPTQ model loaded and converted in {time.time() - start_time:.2f}s")
-        return state_dict
+        compression_ratio = original_size / quantized_size
+        print(f"Compression ratio: {compression_ratio:.2f}x")
+        print(f"Size reduction: {(1 - quantized_size / original_size) * 100:.1f}%")
+    else:
+        print(f"Quantized model not found at {quantized_path}")

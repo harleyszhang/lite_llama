@@ -5,7 +5,6 @@ warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
 from lite_llama.utils.common import get_gpu_memory, detect_device, count_tokens, get_model_type
 from lite_llama.utils.prompt_templates import get_prompter
 from lite_llama.generate_stream import GenerateStreamText  # Original import
-from lite_llama.quantization.gptq.gptq_executor import GPTQGenerateStreamText  # GPTQ import
 
 import sys, os, time
 from pathlib import Path
@@ -84,32 +83,17 @@ def main(
         if use_gptq:
             print(f"GPTQ quantized model detected in {checkpoint_path}")
 
-    # Choose appropriate generator class
-    if use_gptq:
-        print("Using GPTQ-enabled generator")
-        generator = GPTQGenerateStreamText(
-            checkpoints_dir=checkpoint_path,
-            tokenizer_path=checkpoint_path,
-            max_gpu_num_blocks=max_gpu_num_blocks,
-            max_seq_len=max_seq_len,
-            load_model=load_model,
-            compiled_model=compiled_model,
-            triton_weight=triton_weight,
-            device=device,
-            use_gptq=True,  # Explicitly set GPTQ mode
-        )
-    else:
-        print("Using standard FP16 generator")
-        generator = GenerateStreamText(
-            checkpoints_dir=checkpoint_path,
-            tokenizer_path=checkpoint_path,
-            max_gpu_num_blocks=max_gpu_num_blocks,
-            max_seq_len=max_seq_len,
-            load_model=load_model,
-            compiled_model=compiled_model,
-            triton_weight=triton_weight,
-            device=device,
-        )
+    print("Using standard FP16 generator")
+    generator = GenerateStreamText(
+        checkpoints_dir=checkpoint_path,
+        tokenizer_path=checkpoint_path,
+        max_gpu_num_blocks=max_gpu_num_blocks,
+        max_seq_len=max_seq_len,
+        load_model=load_model,
+        compiled_model=compiled_model,
+        triton_weight=triton_weight,
+        device=device,
+    )
 
     model_prompter.insert_prompt(prompt)
     prompts = [model_prompter.model_input]
