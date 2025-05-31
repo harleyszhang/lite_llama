@@ -63,7 +63,7 @@ def convert_qwen2_hf_to_litellama(
     mapping = {
         "model.norm.weight": "norm_weight",
         "model.embed_tokens.weight": "embed_tokens.weight",
-        "lm_head.weight": "lm_head_weight",  # 只支持 hf 格式模型权重
+        "lm_head.weight": "lm_head.weight",  # 只支持 hf 格式模型权重
     }
 
     # 映射层
@@ -146,8 +146,9 @@ def convert_qwen2_hf_to_litellama(
         target_layers = []
         for name in new_sd.keys():
             if any(pattern in name for pattern in [
-                "q_proj_weight", "kv_proj_weight", "o_proj_weight",
-                "gate_proj.weight", "up_proj.weight", "down_proj.weight"
+                "q_proj.weight", "kv_proj_weight", "o_proj.weight",
+                "gate_proj.weight", "up_proj.weight", "down_proj.weight",
+                "lm_head.weight"  # Add lm_head to quantization targets
             ]) and "bias" not in name:
                 target_layers.append(name)
 
@@ -242,8 +243,9 @@ def convert_llama_torch_to_litellama(
         target_layers = []
         for name in new_sd.keys():
             if any(pattern in name for pattern in [
-                "q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight",
-                "gate_proj.weight", "up_proj.weight", "down_proj.weight"
+                "q_proj.weight", "kv_proj_weight", "o_proj.weight",
+                "gate_proj.weight", "up_proj.weight", "down_proj.weight",
+                "lm_head.weight"  # Add lm_head to quantization targets
             ]):
                 target_layers.append(name)
 
@@ -342,7 +344,8 @@ def convert_llama_hf_to_litellama(
         for name in new_sd.keys():
             if any(pattern in name for pattern in [
                 "q_proj.weight", "kv_proj_weight", "o_proj.weight",
-                "gate_proj.weight", "up_proj.weight", "down_proj.weight"
+                "gate_proj.weight", "up_proj.weight", "down_proj.weight",
+                "lm_head.weight"  # Add lm_head to quantization targets
             ]):
                 target_layers.append(name)
 
@@ -450,8 +453,9 @@ def convert_llavallama_hf_to_litellama(
         target_layers = []
         for name in new_sd.keys():
             if any(pattern in name for pattern in [
-                "q_proj.weight", "kv_proj_weight", "o_proj.weight",
-                "gate_proj.weight", "up_proj.weight", "down_proj.weight"
+                "q_proj.weight", "k_proj.weight", "o_proj.weight", "v_proj.weight",
+                "gate_proj.weight", "up_proj.weight", "down_proj.weight",
+                "lm_head.weight"  # Add lm_head to quantization targets
             ]) and "language_model" in name:
                 target_layers.append(name)
 

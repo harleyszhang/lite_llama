@@ -82,7 +82,7 @@ def count_tokens(texts: List[str], tokenizer) -> int:
 
 
 def get_model_type(checkpoint_path: str) -> str | None:
-    from logger import log
+    from .logger import log
 
     model_type = ["llama", "falcon", "mpt", "qwen2", "llava"]
 
