@@ -140,6 +140,10 @@ class ModelExecutor:
             state_dict = torch.load(
                 ckpt_path, mmap=True, weights_only=True, map_location=device
             )
+            if any(key.endswith(".qweight") for key in state_dict.keys()):
+                from ..quantization.gptq.gptq_loader import create_dequantized_state_dict
+                log.info("Detected GPTQ quantized weights. Dequantizing...")
+                state_dict = create_dequantized_state_dict(state_dict)
         else:
             conversion_func = get_conversion_func(model_config.model_type)
             if conversion_func is None:
