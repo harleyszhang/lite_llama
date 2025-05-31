@@ -116,36 +116,39 @@ def create_dequantized_state_dict(quantized_state_dict: Dict[str, torch.Tensor])
 
     for key, value in quantized_state_dict.items():
         if '.qweight' in key:
-            # Extract base name
+            # Extract base name without the '.qweight' suffix
             base_name = key.replace('.qweight', '')
 
             if base_name not in processed_layers:
                 processed_layers.add(base_name)
 
-                # Get quantization parameters
+                # Retrieve quantization parameters
                 qweight = quantized_state_dict[f"{base_name}.qweight"]
                 qzeros = quantized_state_dict[f"{base_name}.qzeros"]
                 scales = quantized_state_dict[f"{base_name}.scales"]
                 wbits = quantized_state_dict.get(f"{base_name}.wbits", torch.tensor(4)).item()
+                original_cols = quantized_state_dict.get(f"{base_name}.original_cols")
+                if original_cols is not None:
+                    original_cols = int(original_cols)
+                # Dequantize to regular fp16 weights
+                weight = dequantize_weight(qweight, qzeros, scales, wbits, original_cols)
 
-                # Dequantize
-                weight = dequantize_weight(qweight, qzeros, scales, wbits)
-
-                # Store dequantized weight
-                # Handle different naming conventions
+                # Store dequantized weight; handle naming with or without '.weight'
                 if "_weight" in base_name:
-                    dequantized_dict[f"{base_name}"] = weight
+                    dequantized_dict[base_name] = weight
                 else:
                     dequantized_dict[f"{base_name}.weight"] = weight
 
-                # Copy bias if exists
-                bias_keys = [f"{base_name}.bias", f"{base_name}_bias"]
-                for bias_key in bias_keys:
+                # Copy bias if present
+                for bias_key in (f"{base_name}.bias", f"{base_name}_bias"):
                     if bias_key in quantized_state_dict:
                         dequantized_dict[bias_key] = quantized_state_dict[bias_key]
 
-        elif not any(suffix in key for suffix in ['.qzeros', '.scales', '.wbits', '.groupsize']):
-            # Copy non-quantization related parameters as-is
+
+
+        elif not any(suffix in key for suffix in ['.qzeros', '.scales', '.wbits', '.groupsize', '.original_cols']):
+
+            # Preserve all other parameters
             dequantized_dict[key] = value
 
     print(f"Dequantized {len(processed_layers)} layers")
