@@ -1,85 +1,40 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Any
 from tqdm.auto import tqdm
 import math
 
 
-def pack_int4_weights(qweight: torch.Tensor, wbits: int = 4) -> torch.Tensor:
+def pack_int4(qweight: torch.Tensor) -> torch.Tensor:
     """
-    Pack quantized weights into int32 for efficient storage.
-    For 4-bit quantization, pack 8 weights into one int32.
-
-    Args:
-        qweight: Quantized weight tensor of shape (rows, cols) with values in [0, 15]
-        wbits: Number of bits per weight (4 for int4)
-
-    Returns:
-        Packed weight tensor of shape (rows, cols // 8)
+    [rows, cols] uint8 in [0, 15] -> [rows, ceil(cols/2)] uint8
     """
-    assert wbits == 4, "This function currently only supports 4-bit packing"
-
     rows, cols = qweight.shape
-    pack_factor = 32 // wbits  # 8 for 4-bit
-
-    # Ensure we can pack evenly
-    if cols % pack_factor != 0:
-        # Pad columns to make it divisible by pack_factor
-        pad_cols = pack_factor - (cols % pack_factor)
-        qweight = torch.nn.functional.pad(qweight, (0, pad_cols), value=0)
-        cols = qweight.shape[1]
-
-    packed_cols = cols // pack_factor
-    packed = torch.zeros((rows, packed_cols), dtype=torch.int32, device=qweight.device)
-
-    # Pack weights
-    for i in range(pack_factor):
-        packed |= (qweight[:, i::pack_factor].to(torch.int32) & 0xF) << (i * 4)
-
-    return packed
+    if cols % 2 != 0:
+        qweight = torch.nn.functional.pad(qweight, (0, 1), value=0)
+        cols += 1
+    packed = (qweight[:, 0::2] & 0xF) | ((qweight[:, 1::2] & 0xF) << 4)
+    return packed.contiguous()
 
 
-def unpack_int4_weights(packed: torch.Tensor, original_cols: int, wbits: int = 4) -> torch.Tensor:
+def unpack_int4(packed: torch.Tensor, orig_cols: int) -> torch.Tensor:
     """
-    Unpack int4 weights from int32 storage.
-
-    Args:
-        packed: Packed weight tensor
-        original_cols: Original number of columns before packing
-        wbits: Number of bits per weight
-
-    Returns:
-        Unpacked weight tensor
+    [rows, ceil(cols/2)] uint8 -> [rows, cols] uint8 in [0, 15]
     """
-    assert wbits == 4, "This function currently only supports 4-bit unpacking"
-
     rows, packed_cols = packed.shape
-    pack_factor = 32 // wbits  # 8 for 4-bit
-
-    # Calculate unpacked dimensions
-    unpacked_cols = packed_cols * pack_factor
-    unpacked = torch.zeros((rows, unpacked_cols), dtype=torch.int32, device=packed.device)
-
-    # Unpack weights
-    for i in range(pack_factor):
-        unpacked[:, i::pack_factor] = (packed >> (i * 4)) & 0xF
-
-    # Remove padding if necessary
-    return unpacked[:, :original_cols]
+    qweight = torch.empty((rows, packed_cols * 2), dtype=torch.uint8, device=packed.device)
+    qweight[:, 0::2] = packed & 0xF
+    qweight[:, 1::2] = (packed >> 4) & 0xF
+    return qweight[:, :orig_cols].contiguous()
 
 
 class GPTQ:
-    """
-    Implementation of GPTQ (Generalized Post-Training Quantization) algorithm
-    for quantizing model weights to lower bit precision.
-    """
-
     def __init__(
             self,
-            layer: nn.Module,
+            layer: nn.Module = None,
             wbits: int = 4,
-            groupsize: int = 128,
+            groupsize: int = 8,
             actorder: bool = False,
             percdamp: float = 0.01,
             blocksize: int = 128,
@@ -94,132 +49,257 @@ class GPTQ:
         self.device = device
         self.maxq = 2 ** wbits - 1
 
-        # Initialize quantization parameters
-        self.H = None
-        self.dead = None
-        self.rows = None
-        self.columns = None
+    def relative_error_loss(self, w_original: torch.Tensor, w_reconstructed: torch.Tensor,
+                            eps: float = 1e-5) -> torch.Tensor:
+        """Compute relative error loss with better handling of small weights"""
+        abs_diff = (w_original - w_reconstructed).abs()
 
-    def add_batch(self, inp: torch.Tensor, out: torch.Tensor):
-        """Add a batch of data to compute Hessian matrix"""
-        if len(inp.shape) == 2:
-            inp = inp.unsqueeze(0)
+        # Use adaptive epsilon based on weight magnitude distribution
+        w_abs = w_original.abs()
+        adaptive_eps = torch.maximum(
+            torch.tensor(eps, device=w_original.device),
+            0.01 * w_abs.median()  # Use median as robust estimate
+        )
 
-        tmp = inp.shape[0]
-        if len(inp.shape) == 3:
-            inp = inp.reshape((-1, inp.shape[-1]))
-        inp = inp.t()
+        rel_err = abs_diff / (w_abs + adaptive_eps)
 
-        if self.H is None:
-            self.H = torch.zeros((inp.shape[0], inp.shape[0]), device=self.device)
+        # Use robust loss to handle outliers
+        return rel_err.mean() + 0.1 * rel_err.pow(2).mean()
 
-        self.H += 2 / tmp * inp.matmul(inp.t())
+    def optimize_for_relative_error(self, w_group: torch.Tensor, max_iter: int = 200) -> Tuple[
+        torch.Tensor, torch.Tensor]:
+        """Optimize scale and zero specifically for minimal relative error"""
+        device = w_group.device
 
-    def quantize(self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        # Separate handling for near-zero and normal weights
+        w_abs = w_group.abs()
+        w_median = w_abs.median()
+        small_weight_threshold = 0.1 * w_median
+
+        # Initialize with better starting points
+        w_min = w_group.min(dim=-1, keepdim=True)[0]
+        w_max = w_group.max(dim=-1, keepdim=True)[0]
+
+        # For groups with many small weights, use tighter bounds
+        if (w_abs < small_weight_threshold).float().mean() > 0.3:
+            # Use percentile-based bounds for groups with many small weights
+            w_flat = w_group.view(w_group.shape[0], -1)
+            w_sorted = torch.sort(w_flat, dim=-1)[0]
+            n = w_sorted.shape[-1]
+            w_min = w_sorted[:, max(0, int(0.05 * n)):max(1, int(0.05 * n) + 1)]
+            w_max = w_sorted[:, min(n - 1, int(0.95 * n)):min(n, int(0.95 * n) + 1)]
+
+        range_val = w_max - w_min
+        range_val = torch.where(range_val < 1e-8, torch.tensor(1e-6, device=device), range_val)
+
+        # Initialize parameters
+        scale = nn.Parameter((range_val / self.maxq).clamp(min=1e-8))
+        zero = nn.Parameter(torch.round(-w_min / scale).clamp(0, self.maxq))
+
+        optimizer = torch.optim.AdamW([scale, zero], lr=0.005, weight_decay=1e-6)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, max_iter)
+
+        best_loss = float('inf')
+        best_scale = scale.data.clone()
+        best_zero = zero.data.clone()
+        patience = 20
+        no_improve = 0
+
+        for i in range(max_iter):
+            optimizer.zero_grad()
+
+            # Ensure valid range
+            scale.data.clamp_(min=1e-8, max=1e3)
+            zero.data.clamp_(0, self.maxq)
+
+            # Quantize and dequantize
+            q = torch.clamp(torch.round(w_group / scale + zero), 0, self.maxq)
+            w_rec = (q - zero) * scale
+
+            # Use relative error loss
+            loss = self.relative_error_loss(w_group, w_rec)
+
+            if loss.item() < best_loss:
+                best_loss = loss.item()
+                best_scale = scale.data.clone()
+                best_zero = zero.data.clone()
+                no_improve = 0
+            else:
+                no_improve += 1
+                if no_improve >= patience:
+                    break
+
+            loss.backward()
+
+            # Gradient clipping for stability
+            torch.nn.utils.clip_grad_norm_([scale, zero], 1.0)
+
+            optimizer.step()
+            scheduler.step()
+
+        return best_scale.detach(), best_zero.detach()
+
+    def magnitude_aware_quantization(self, w_group: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Use different strategies based on weight magnitudes"""
+        device = w_group.device
+        w_abs = w_group.abs()
+        w_std = w_group.std(dim=-1, keepdim=True)
+        w_mean = w_group.mean(dim=-1, keepdim=True)
+
+        # Strategy 1: For groups with large dynamic range, use log-scale quantization
+        dynamic_range = w_abs.max(dim=-1, keepdim=True)[0] / (w_abs.min(dim=-1, keepdim=True)[0] + 1e-8)
+
+        if dynamic_range.mean() > 100:  # High dynamic range
+            # Use log-space quantization for better relative precision
+            sign = torch.sign(w_group)
+            w_abs_log = torch.log(w_abs + 1e-8)
+
+            log_min = w_abs_log.min(dim=-1, keepdim=True)[0]
+            log_max = w_abs_log.max(dim=-1, keepdim=True)[0]
+
+            scale_log = (log_max - log_min) / (self.maxq - 1)
+            zero_log = torch.round(-log_min / scale_log).clamp(0, self.maxq - 1)
+
+            # Convert back to linear scale
+            q_log = torch.clamp(torch.round((w_abs_log - log_min) / scale_log), 0, self.maxq - 1)
+            w_abs_rec = torch.exp(log_min + q_log * scale_log)
+            w_rec = sign * w_abs_rec
+
+            # Compute equivalent linear scale and zero
+            scale = (w_group.max(dim=-1, keepdim=True)[0] - w_group.min(dim=-1, keepdim=True)[0]) / self.maxq
+            zero = torch.round(-w_group.min(dim=-1, keepdim=True)[0] / scale).clamp(0, self.maxq)
+
+        else:
+            # Strategy 2: For normal range, use adaptive clipping
+            # Use robust statistics to set bounds
+            median = w_group.median(dim=-1, keepdim=True)[0]
+            mad = (w_group - median).abs().median(dim=-1, keepdim=True)[0]  # Median Absolute Deviation
+
+            # Set bounds using robust statistics
+            bound = 3.0 * mad
+            w_min = torch.maximum(w_group.min(dim=-1, keepdim=True)[0], median - bound)
+            w_max = torch.minimum(w_group.max(dim=-1, keepdim=True)[0], median + bound)
+
+            range_val = w_max - w_min
+            range_val = torch.where(range_val < 1e-8, torch.tensor(1e-6, device=device), range_val)
+
+            scale = range_val / self.maxq
+            zero = torch.round(-w_min / scale).clamp(0, self.maxq)
+
+        return scale, zero
+
+    def quantize(self, W: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Quantize the weight matrix using GPTQ algorithm
-
-        Returns:
-            - qweight: quantized weights (packed if 4-bit)
-            - qzeros: zero points for each group
-            - scales: scales for each group
-            - original_cols: original number of columns (for unpacking)
+        Quantization optimized specifically for minimal relative error
+        Returns: [O, I] int4, [O, num_groups] zero, [O, num_groups] scale
         """
-        W = weight.clone()
-        if not self.actorder:
-            # Standard quantization order
-            W = W.float()
+        assert W.ndim == 2
+        rows, cols = W.shape
+        device = W.device
 
-        rows, columns = W.shape[0], W.shape[1]
-        original_cols = columns
+        # Use very small groups for maximum precision
+        effective_groupsize = min(int(self.groupsize), 8) if self.groupsize != float('inf') else 8
+        effective_groupsize = max(effective_groupsize, 4)  # Minimum 4 for 4-bit
+        num_groups = (cols + effective_groupsize - 1) // effective_groupsize
 
-        # Initialize Hessian
-        if self.H is None:
-            self.H = torch.eye(columns, device=self.device)
+        qweight = torch.zeros((rows, cols), dtype=torch.uint8, device=device)
+        scales = torch.zeros((rows, num_groups), dtype=torch.float32, device=device)
+        zeros = torch.zeros((rows, num_groups), dtype=torch.float32, device=device)
 
-        H = self.H
-        dead = torch.diag(H) == 0
-        H[dead, dead] = 1
+        # Process each group with relative error optimization
+        for g in range(num_groups):
+            start_col = g * effective_groupsize
+            end_col = min((g + 1) * effective_groupsize, cols)
 
-        # Add dampening
-        damp = self.percdamp * torch.mean(torch.diag(H))
-        diag = torch.arange(columns, device=self.device)
-        H[diag, diag] += damp
+            # Get current group
+            W_group = W[:, start_col:end_col].clone()
 
-        # Prepare quantization
-        scales = torch.zeros((rows, (columns + self.groupsize - 1) // self.groupsize), device=self.device)
-        qzeros = torch.zeros_like(scales, dtype=torch.int32)
-        qweight = torch.zeros_like(W, dtype=torch.int32)
+            # Try different methods and pick best for relative error
+            methods = []
 
-        # Cholesky decomposition
-        try:
-            H = torch.linalg.cholesky(H)
-        except:
-            print("Cholesky decomposition failed, using eigenvalue decomposition")
-            eigenvalues, eigenvectors = torch.linalg.eigh(H)
-            eigenvalues = eigenvalues.clamp(min=1e-10)
-            H = eigenvectors @ torch.diag(torch.sqrt(eigenvalues)) @ eigenvectors.T
+            # Method 1: Relative error optimization
+            try:
+                scale_rel, zero_rel = self.optimize_for_relative_error(W_group, max_iter=100)
+                q_rel = torch.clamp(torch.round(W_group / scale_rel + zero_rel), 0, self.maxq)
+                w_rec_rel = (q_rel - zero_rel) * scale_rel
+                rel_error_rel = self.relative_error_loss(W_group, w_rec_rel).item()
+                methods.append(('rel_opt', scale_rel, zero_rel, q_rel, rel_error_rel))
+            except Exception as e:
+                print(f"Relative opt failed for group {g}: {e}")
 
-        H = torch.cholesky_inverse(H)
-        H = torch.linalg.cholesky(H, upper=True)
-        Hinv = H
+            # Method 2: Magnitude-aware quantization
+            try:
+                scale_mag, zero_mag = self.magnitude_aware_quantization(W_group)
+                q_mag = torch.clamp(torch.round(W_group / scale_mag + zero_mag), 0, self.maxq)
+                w_rec_mag = (q_mag - zero_mag) * scale_mag
+                rel_error_mag = self.relative_error_loss(W_group, w_rec_mag).item()
+                methods.append(('mag_aware', scale_mag, zero_mag, q_mag, rel_error_mag))
+            except Exception as e:
+                print(f"Magnitude aware failed for group {g}: {e}")
 
-        # Quantize blocks
-        for i1 in range(0, columns, self.blocksize):
-            i2 = min(i1 + self.blocksize, columns)
-            count = i2 - i1
+            # Method 3: Ultra-conservative approach for small weights
+            w_abs = W_group.abs()
+            if w_abs.max() < 0.01:  # Very small weights
+                # Use much finer quantization resolution
+                w_min = W_group.min(dim=-1, keepdim=True)[0]
+                w_max = W_group.max(dim=-1, keepdim=True)[0]
 
-            W1 = W[:, i1:i2].clone()
-            Q1 = torch.zeros_like(W1)
-            Err1 = torch.zeros_like(W1)
-            Losses1 = torch.zeros_like(W1)
-            Hinv1 = Hinv[i1:i2, i1:i2]
+                # Tighten the range for small weights
+                range_val = w_max - w_min
+                range_val = torch.where(range_val < 1e-8, torch.tensor(1e-8, device=device), range_val)
 
-            for i in range(count):
-                w = W1[:, i]
-                d = Hinv1[i, i]
+                scale_small = range_val / self.maxq * 0.8  # Use 80% of range for safety
+                zero_small = torch.round(-w_min / scale_small).clamp(0, self.maxq)
 
-                # Find optimal quantization
-                if self.groupsize != float('inf'):
-                    g_idx = (i1 + i) // self.groupsize
-                    scale = scales[:, g_idx]
-                    zero = qzeros[:, g_idx]
+                q_small = torch.clamp(torch.round(W_group / scale_small + zero_small), 0, self.maxq)
+                w_rec_small = (q_small - zero_small) * scale_small
+                rel_error_small = self.relative_error_loss(W_group, w_rec_small).item()
+                methods.append(('small_weights', scale_small, zero_small, q_small, rel_error_small))
 
-                    if scale.sum() == 0:  # Initialize scale and zero
-                        scale = W1[:, i].abs().max() / (self.maxq / 2)
-                        scales[:, g_idx] = scale
-                        zero = torch.round(-W1[:, i].min() / scale).clamp(0, self.maxq)
-                        qzeros[:, g_idx] = zero.to(torch.int32)
-                else:
-                    scale = W1[:, i].abs().max() / (self.maxq / 2)
-                    zero = torch.round(-W1[:, i].min() / scale).clamp(0, self.maxq)
+            # Pick the method with lowest relative error
+            if methods:
+                best_method = min(methods, key=lambda x: x[4])
+                method_name, scale_best, zero_best, q_best, _ = best_method
 
-                # Quantize
-                q = torch.clamp(torch.round(w / scale) + zero, 0, self.maxq)
-                Q1[:, i] = q
+                qweight[:, start_col:end_col] = q_best.to(torch.uint8)
+                scales[:, g] = scale_best.squeeze(-1)
+                zeros[:, g] = zero_best.squeeze(-1)
+            else:
+                # Ultimate fallback
+                print(f"All methods failed for group {g}, using zero quantization")
+                qweight[:, start_col:end_col] = 0
+                scales[:, g] = 1.0
+                zeros[:, g] = 0
 
-                # Dequantize and compute error
-                dq = (q - zero) * scale
-                err = (w - dq) / d
-                Err1[:, i] = err
+        return qweight, zeros.to(torch.float16), scales.to(torch.float16)
 
-                # Update remaining weights
-                W1[:, i:] -= err.unsqueeze(1) * Hinv1[i, i:].unsqueeze(0)
 
-            qweight[:, i1:i2] = Q1.to(torch.int32)
+    def dequantize(self, qweight: torch.Tensor, zeros: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+        """
+        [O, I] int4, [O, num_groups] zero, [O, num_groups] scale => [O, I] float32
+        """
+        rows, cols = qweight.shape
+        # Use same effective groupsize as quantization
+        effective_groupsize = min(self.groupsize, 8)
+        effective_groupsize = max(effective_groupsize, 4)
+        num_groups = (cols + effective_groupsize - 1) // effective_groupsize
+        W = torch.zeros_like(qweight, dtype=torch.float32)
 
-        # Pack weights if 4-bit
-        if self.wbits == 4:
-            qweight = pack_int4_weights(qweight, self.wbits)
+        for g in range(num_groups):
+            start = g * effective_groupsize
+            end = min((g + 1) * effective_groupsize, cols)
+            scale = scales[:, g].unsqueeze(1)  # [O, 1]
+            zero = zeros[:, g].unsqueeze(1)  # [O, 1]
+            q = qweight[:, start:end].float()
+            W[:, start:end] = (q - zero) * scale
 
-        return qweight, qzeros, scales, original_cols
-
+        return W
 
 def quantize_gptq(
         model_state_dict: Dict[str, torch.Tensor],
         calibration_data: Optional[torch.Tensor] = None,
         wbits: int = 4,
-        groupsize: int = 128,
+        groupsize: int = 8,
         target_layers: Optional[list] = None,
         device: str = "cuda"
 ) -> Dict[str, torch.Tensor]:
@@ -265,12 +345,8 @@ def quantize_gptq(
             # Move weight to device
             weight = param.to(device).float()
 
-            # If no calibration data, use identity Hessian
-            if calibration_data is None:
-                gptq.H = torch.eye(weight.shape[1], device=device)
-
             # Quantize the weight
-            qweight, qzeros, scales, original_cols = gptq.quantize(weight)
+            qweight, qzeros, scales = gptq.quantize(weight)
 
             # Store quantized parameters
             base_name = name.replace(".weight", "").replace("_weight", "")
@@ -279,7 +355,6 @@ def quantize_gptq(
             quantized_state_dict[f"{base_name}.scales"] = scales.cpu()
             quantized_state_dict[f"{base_name}.wbits"] = torch.tensor(wbits)
             quantized_state_dict[f"{base_name}.groupsize"] = torch.tensor(groupsize)
-            quantized_state_dict[f"{base_name}.original_cols"] = torch.tensor(original_cols)
 
         else:
             # Keep non-quantized parameters as is
@@ -287,43 +362,29 @@ def quantize_gptq(
 
     return quantized_state_dict
 
+if __name__ == '__main__':
+    def test_gptq_groupwise():
+        torch.manual_seed(0)
+        rows, cols = 512, 1024
+        W = torch.randn(rows, cols, device="cuda")
 
-def dequantize_weight(qweight, qzeros, scales, wbits=4, original_cols=None):
-    """
-    Dequantize weight for inference
+        # Test with relative error optimization
+        gptq = GPTQ(wbits=4, groupsize=8, device=W.device)
+        qweight, zeros, scales = gptq.quantize(W)
+        packed = pack_int4(qweight)
 
-    Args:
-        qweight: Quantized weights (packed if 4-bit)
-        qzeros: Zero points
-        scales: Scales
-        wbits: Number of bits used for quantization
-        original_cols: Original number of columns (for unpacking)
+        qweight_unpacked = unpack_int4(packed, orig_cols=cols)
+        W_rec = gptq.dequantize(qweight_unpacked, zeros, scales)
 
-    Returns:
-        Dequantized weight tensor
-    """
-    # Unpack if 4-bit
-    if wbits == 4 and original_cols is not None:
-        qweight = unpack_int4_weights(qweight, original_cols, wbits)
+        abs_err = (W - W_rec).abs()
+        rel_err = abs_err / (W.abs() + 1e-5)  # Use better epsilon
+        print("== Relative Error Optimized GPTQ (groupsize=4) ==")
+        print(f"Mean abs error: {abs_err.mean().item():.6f}")
+        print(f"Mean rel error: {rel_err.mean().item():.6f}")
+        print(f"Max abs error: {abs_err.max().item():.6f}")
+        print(f"Max rel error: {rel_err.max().item():.6f}")
+        print(f"95th percentile rel error: {rel_err.quantile(0.95).item():.6f}")
+        print(f"99th percentile rel error: {rel_err.quantile(0.99).item():.6f}")
 
-    # Get dimensions
-    rows, columns = qweight.shape
-    groupsize = columns // scales.shape[1]
 
-    # Prepare output tensor
-    weight = torch.zeros((rows, columns), dtype=torch.float32, device=qweight.device)
-
-    # Dequantize each group
-    for g in range(scales.shape[1]):
-        start_idx = g * groupsize
-        end_idx = min((g + 1) * groupsize, columns)
-
-        # Extract group quantized values
-        group_qweight = qweight[:, start_idx:end_idx].float()
-        group_scales = scales[:, g].unsqueeze(1)
-        group_zeros = qzeros[:, g].unsqueeze(1).float()
-
-        # Dequantize
-        weight[:, start_idx:end_idx] = (group_qweight - group_zeros) * group_scales
-
-    return weight
+    test_gptq_groupwise()

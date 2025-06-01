@@ -42,8 +42,8 @@ def main():
     parser.add_argument(
         "--groupsize",
         type=int,
-        default=128,
-        help="Group size for quantization (default: 128)"
+        default=8,
+        help="Group size for quantization (default: 8)"
     )
     parser.add_argument(
         "--device",
@@ -154,50 +154,4 @@ if __name__ == "__main__":
     # If script is run directly without arguments, use default values
     import sys
 
-    if len(sys.argv) == 1:
-        # Legacy behavior - use hardcoded path
-        checkpoints_dir = "/path/llm_weights/llava-v1.5-7b"
-
-        print(f"Running with default path: {checkpoints_dir}")
-        print("To use command line arguments, run with --help")
-        print("-" * 50)
-
-        if "llava" in checkpoints_dir.lower():
-            model = (
-                LlavaForConditionalGeneration.from_pretrained(
-                    checkpoints_dir,
-                    torch_dtype=torch.float16,
-                    low_cpu_mem_usage=True,
-                ).to("cuda")
-            )
-        else:
-            model = AutoModelForCausalLM.from_pretrained(
-                checkpoints_dir,
-                torch_dtype=torch.float16,
-                low_cpu_mem_usage=True,
-            ).to("cuda")
-
-        hf_sd = model.state_dict()
-
-        if "qwen2" in checkpoints_dir.lower():
-            llm_config = AutoConfig.from_pretrained(checkpoints_dir)
-            num_layers = llm_config.num_hidden_layers
-            print("num_layers: ", num_layers)
-            convert_qwen2_hf_to_litellama(checkpoints_dir, hf_sd, num_layers)
-
-        elif "llama" in checkpoints_dir.lower():
-            llm_config = AutoConfig.from_pretrained(checkpoints_dir)
-            num_layers = llm_config.num_hidden_layers
-            print("num_layers: ", num_layers)
-            convert_llama_hf_to_litellama(checkpoints_dir, hf_sd, num_layers)
-
-        elif "llava" in checkpoints_dir.lower():
-            llava_config = LlavaConfig.from_pretrained(checkpoints_dir)
-            num_layers = llava_config.text_config.num_hidden_layers
-            print("num_layers: ", num_layers)
-            convert_llavallama_hf_to_litellama(checkpoints_dir, hf_sd, num_layers)
-        else:
-            print("Error! Unsupported model type!")
-    else:
-        # Use argparse for command line interface
-        main()
+    main()

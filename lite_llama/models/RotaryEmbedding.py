@@ -2,7 +2,7 @@ import torch, math
 import torch.nn as nn
 from typing import Optional, Tuple
 from .model_config import LlamaConfig, Qwen2Config
-from utils.logger import log
+from ..utils.logger import log
 
 
 

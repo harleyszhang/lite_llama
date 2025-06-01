@@ -7,7 +7,7 @@ from lite_llama.utils.image_process import vis_images
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
-from utils.common import get_gpu_memory, detect_device, count_tokens, get_model_type
+from lite_llama.utils.common import get_gpu_memory, detect_device, count_tokens, get_model_type
 from lite_llama.llava_generate_stream import LlavaGeneratorStream
 
 import sys, os, time
@@ -16,7 +16,7 @@ from pathlib import Path
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 import psutil
-from utils.logger import log
+from lite_llama.utils.logger import log
 import argparse
 from argparse import RawTextHelpFormatter
 

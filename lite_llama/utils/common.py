@@ -161,7 +161,7 @@ def get_model_info(model_path):
     return model_info
 
 
-def get_model_dtype(checkpoints_dir: str) -> torch.dtype:
+def get_model_dtype(checkpoints_dir: str):
     """
     Get the model dtype from config.json
 
@@ -169,7 +169,7 @@ def get_model_dtype(checkpoints_dir: str) -> torch.dtype:
         checkpoints_dir: Path to model checkpoint directory
 
     Returns:
-        torch.dtype: The dtype specified in config.json
+        torch.dtype or str: The dtype specified in config.json
     """
     config_path = os.path.join(checkpoints_dir, "config.json")
 
@@ -177,20 +177,27 @@ def get_model_dtype(checkpoints_dir: str) -> torch.dtype:
         with open(config_path, 'r') as f:
             config = json.load(f)
 
-        torch_dtype_str = config.get("torch_dtype", "float16")
+        torch_dtype_str = config.get("torch_dtype", "float16").lower()
 
-        # Map string to torch dtype
+        # Map string to torch dtype or string identifiers for quantized formats
         dtype_mapping = {
             "float16": torch.float16,
             "bfloat16": torch.bfloat16,
             "float32": torch.float32,
             "float": torch.float32,
+            "int8": torch.int8,
+            "int4": "int4",  # Placeholder, since PyTorch doesn't natively support int4
         }
 
         dtype = dtype_mapping.get(torch_dtype_str, torch.float16)
         print(f"Detected model dtype from config: {torch_dtype_str} -> {dtype}")
 
         return dtype
+
+    except Exception as e:
+        print(f"Warning: Could not read dtype from config.json: {e}")
+        print("Defaulting to torch.float16")
+        return torch.float16
 
     except Exception as e:
         print(f"Warning: Could not read dtype from config.json: {e}")
