@@ -19,13 +19,8 @@ from .weight_convert import (
     convert_qwen2_hf_to_litellama,
 )
 from ..kernels import update_kv_index
-
-
-import sys, os
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
-from utils.logger import log
-
+from ..utils.logger import log
+from ..utils.common import get_model_dtype
 
 def get_conversion_func(model_type: str):
     """
@@ -154,6 +149,19 @@ class ModelExecutor:
                 f"Weight conversion completed. Time elapsed: {time.time() - start_time:.2f} sec"
             )
 
+        # Some checkpoints may use the HuggingFace naming style with a dot
+        # before "weight" or "bias" for fused kv projections.  Rename these
+        # keys to match our Module definition so that `load_state_dict` can
+        # succeed without requiring an explicit conversion step.
+        renamed_state_dict = {}
+        for k, v in state_dict.items():
+            new_key = k
+            if "kv_proj.weight" in k:
+                new_key = k.replace("kv_proj.weight", "kv_proj_weight")
+            elif "kv_proj.bias" in k:
+                new_key = k.replace("kv_proj.bias", "kv_proj_bias")
+            renamed_state_dict[new_key] = v
+        state_dict = renamed_state_dict
         model.load_state_dict(
             state_dict, strict=True, assign=True
         )  # 将加载的 state_dict 应用到模型实例中。

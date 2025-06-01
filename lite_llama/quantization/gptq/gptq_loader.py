@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Dict, Optional
 import os.path as osp
-from .gptq import dequantize_weight
+from .gptq import *
 
 
 class GPTQLinear(nn.Module):
@@ -21,10 +21,10 @@ class GPTQLinear(nn.Module):
             self.register_buffer('bias', bias)
         else:
             self.bias = None
-
+        self.gptq = GPTQ
     def forward(self, x):
         # Dequantize weight on-the-fly
-        weight = dequantize_weight(
+        weight = self.gptq.dequantize(
             self.qweight,
             self.qzeros,
             self.scales,
@@ -127,11 +127,10 @@ def create_dequantized_state_dict(quantized_state_dict: Dict[str, torch.Tensor])
                 qzeros = quantized_state_dict[f"{base_name}.qzeros"]
                 scales = quantized_state_dict[f"{base_name}.scales"]
                 wbits = quantized_state_dict.get(f"{base_name}.wbits", torch.tensor(4)).item()
-                original_cols = quantized_state_dict.get(f"{base_name}.original_cols")
-                if original_cols is not None:
-                    original_cols = int(original_cols)
+
                 # Dequantize to regular fp16 weights
-                weight = dequantize_weight(qweight, qzeros, scales, wbits, original_cols)
+                gptq = GPTQ(wbits=4, groupsize=8)
+                weight = gptq.dequantize(qweight, qzeros, scales)
 
                 # Store dequantized weight; handle naming with or without '.weight'
                 if "_weight" in base_name:
@@ -146,7 +145,7 @@ def create_dequantized_state_dict(quantized_state_dict: Dict[str, torch.Tensor])
 
 
 
-        elif not any(suffix in key for suffix in ['.qzeros', '.scales', '.wbits', '.groupsize', '.original_cols']):
+        elif not any(suffix in key for suffix in ['.qzeros', '.scales', '.wbits', '.groupsize']):
 
             # Preserve all other parameters
             dequantized_dict[key] = value

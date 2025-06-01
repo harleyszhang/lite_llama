@@ -30,7 +30,7 @@ def build_new_weight_dir(checkpoints_dir: str, new_sd, quantized: bool = False):
     json_files = glob.glob(osp.join(checkpoints_dir, "*.json"))
     for file_path in json_files:
         shutil.copy(file_path, my_weight_dir)  # 复制 hf 权重目录的所有 json 文件到新的目录
-        print(f"已复制: {file_path} -> {my_weight_dir}")
+        print(f"Copied: {file_path} -> {my_weight_dir}")
 
     if osp.exists(osp.join(checkpoints_dir, "tokenizer.model")):
         shutil.copy(osp.join(checkpoints_dir, "tokenizer.model"), my_weight_dir)
@@ -44,7 +44,7 @@ def convert_qwen2_hf_to_litellama(
         device: str = "cuda",
         use_gptq: bool = False,
         wbits: int = 4,
-        groupsize: int = 128,
+        groupsize: int = 8,
 ) -> Dict[str, torch.Tensor]:
     """
     将 Hugging Face 格式的预训练模型的权重字典转换为自定义模型的权重字典。
@@ -184,7 +184,7 @@ def convert_llama_torch_to_litellama(
         num_layers,
         use_gptq: bool = False,
         wbits: int = 4,
-        groupsize: int = 128,
+        groupsize: int = 8,
         device: str = "cuda"
 ):
     """
@@ -267,7 +267,7 @@ def convert_llama_hf_to_litellama(
         num_layers,
         use_gptq: bool = False,
         wbits: int = 4,
-        groupsize: int = 128,
+        groupsize: int = 8,
         device: str = "cuda"
 ):
     """
@@ -373,7 +373,7 @@ def convert_llavallama_hf_to_litellama(
         num_layers,
         use_gptq: bool = False,
         wbits: int = 4,
-        groupsize: int = 128,
+        groupsize: int = 8,
         device: str = "cuda"
 ):
     """
