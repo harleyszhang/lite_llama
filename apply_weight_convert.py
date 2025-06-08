@@ -248,7 +248,7 @@ def convert(checkpoints_dir: Path,
             logger.debug("忽略未映射参数 %s", k)
 
     # ---------- 2. 仅对 *Qwen* 系列执行 KV 合并 ----------
-    if model_type.startswith("qwen"):              # 只处理 Qwen-2 / Qwen-3 等
+    if model_type.startswith("qwen") or model_type.startswith("llama"):              # 只处理 Qwen-2 / Qwen-3 等
         for i in range(num_layers):
             prefix = f"layers.{i}.self_attn"       # Qwen 无额外前缀
             merge_kv_weights(new_sd, prefix, with_bias=spec["merge_bias"])
