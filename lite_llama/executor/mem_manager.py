@@ -11,9 +11,10 @@ def get_dtype_size(dtype: torch.dtype) -> int:
 
 
 class ComputeMaxAvailableBlocks:
-    """A class that can execute a forward pass with dummy inputs to profile the memory usage of the model.
-    and  calculate the maximum possible number of GPU blocks that can be allocated with the remaining free memory.
-    if not execute dummy forward run, it should be run after cuda graph!
+    """A class that can execute a forward pass with dummy inputs to profile the memory 
+    usage of the model. and  calculate the maximum possible number of GPU blocks that 
+    can be allocated with the remaining free memory. if not execute dummy forward run, 
+    it should be run after cuda graph!
     """
 
     def __init__(

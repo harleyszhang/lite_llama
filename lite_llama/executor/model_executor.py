@@ -14,12 +14,7 @@ from .cuda_graph import ModelRunner
 from .executor_struct import AttentionInfo
 from ..models.model_config import LlamaConfig, Qwen2Config, Qwen3Config
 from ..kernels import update_kv_index
-
-
-import sys, os
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
-from utils.logger import log
+from ..utils.logger import log
 
 
 class ModelExecutor:
