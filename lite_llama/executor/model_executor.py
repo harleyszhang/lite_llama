@@ -3,6 +3,7 @@ import torch.nn as nn
 
 import json, time
 from pathlib import Path
+from typing import Callable, Type
 
 from transformers import LlavaConfig
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
@@ -16,6 +17,17 @@ from ..models.model_config import LlamaConfig, Qwen2Config, Qwen3Config
 from ..kernels import update_kv_index
 from ..utils.logger import log
 
+
+# -----------------------------------------------------------------------------
+# Registry helpers (avoid long if/elif chains)
+# -----------------------------------------------------------------------------
+
+CONFIG_CLASS_MAP: dict[str, Type] = {
+    "llama": LlamaConfig,
+    "qwen2": Qwen2Config,
+    "qwen3": Qwen3Config,
+    "llava": LlavaConfig,
+}
 
 class ModelExecutor:
     # 定义类属性
@@ -45,18 +57,27 @@ class ModelExecutor:
         返回:
             ModelExecutor: 初始化后的 ModelExecutor 实例。
         """
-        model_config = ModelExecutor._load_model_config(
-            checkpoints_dir, max_seq_len, device=device
-        )
-        # model = ModelExecutor._accelerate_load_weight(model_config, checkpoints_dir)
-        model = ModelExecutor._load_model_weight(
-            model_config, checkpoints_dir, device=device
-        )  # 加载权重后的模型
+        model_config = ModelExecutor._load_model_config(checkpoints_dir, max_seq_len)
+        # 加载权重后的模型
+        model = ModelExecutor._load_model_weight(model_config, checkpoints_dir, device=device)
 
         return ModelExecutor(
             model_config, model, max_gpu_num_blocks, compiled_model, device
         )
 
+    @staticmethod
+    def _load_model_config(checkpoints_dir: str, max_seq_len: int):
+        cfg_path = Path(checkpoints_dir) / "config.json"
+        if not cfg_path.exists():
+            raise FileNotFoundError(f"{cfg_path} not found")
+
+        params = json.loads(cfg_path.read_text())
+        params.setdefault("max_seq_len", max_seq_len)
+        cfg_cls = CONFIG_CLASS_MAP.get(params["model_type"].lower())
+        if cfg_cls is None:
+            raise ValueError(f"Unsupported model_type {params['model_type']!r}")
+        return cfg_cls.from_dict(params)
+    
     @staticmethod
     def _accelerate_load_weight(
         model_config,
@@ -154,30 +175,6 @@ class ModelExecutor:
 
         log.info(f"The model has been initialized and moved to the device. '{device}'")
         return model
-
-    @staticmethod
-    def _load_model_config(checkpoints_dir, max_seq_len, device="cuda"):
-        params_path = Path(checkpoints_dir) / "config.json"  # 定义模型配置文件
-        assert params_path.exists(), f"config.json not found in {checkpoints_dir}"
-        try:
-            with open(params_path, "r") as f:
-                params = json.load(f)
-        except FileNotFoundError:
-            log.error(
-                f"Configuration file '{params_path}' does not exist. Please check if the path is correct."
-            )
-            raise
-
-        if params["model_type"] == "llama":
-            model_config: LlamaConfig = LlamaConfig.from_dict(params)
-        elif params["model_type"] == "qwen2":
-            model_config: Qwen2Config = Qwen2Config.from_dict(params)
-        elif params["model_type"] == "qwen3":
-            model_config: Qwen3Config = Qwen3Config.from_dict(params)
-        elif params["model_type"] == "llava":
-            model_config = LlavaConfig.from_pretrained(checkpoints_dir)
-
-        return model_config
 
     def __init__(
         self,
