@@ -285,7 +285,8 @@ def run_flash_attention2_no_pad_benchmark(
     batch=4, n_heads=32, head_dim=128, max_seq_len_list=[1024, 2048, 4096]
 ):
     """
-    构造输入 q/k/v 张量形状为 [batch, n_heads, head_dim] (q) 和 [max_seq_len, n_heads, head_dim] (k, v),
+    构造输入 q/k/v 张量形状为 [batch, n_heads, head_dim] (q) 
+    和 [max_seq_len, n_heads, head_dim] (k, v),
     验证 flash_attention2_no_pad 输出结果与标准 attention 对齐（允许一定误差），
     并比较两者在 decode 阶段的性能，输出性能对比曲线。
     返回一个字典，包含验证误差及各 max_seq_len 下的平均执行时间。

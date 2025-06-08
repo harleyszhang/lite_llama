@@ -1,8 +1,8 @@
 tokenizers==0.20.3
 huggingface-hub==0.24.6
 transformers==4.46.3
-torch=2.1.2
-triton>=2.1.0
+torch>=2.2.1
+triton>=2.2.0
 tqdm==4.65.0
 pytest==8.3.3
 pynvml==11.5.0

@@ -12,12 +12,7 @@ from .req_tokens_manager import ReqTokensManager
 
 from .cuda_graph import ModelRunner
 from .executor_struct import AttentionInfo
-from ..models.model_config import LlamaConfig, Qwen2Config
-from .weight_convert import (
-    convert_llama_torch_to_litellama,
-    convert_llavallama_hf_to_litellama,
-    convert_qwen2_hf_to_litellama,
-)
+from ..models.model_config import LlamaConfig, Qwen2Config, Qwen3Config
 from ..kernels import update_kv_index
 
 
@@ -25,24 +20,6 @@ import sys, os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from utils.logger import log
-
-
-def get_conversion_func(model_type: str):
-    """
-    根据模型类型获取相应的权重转换函数。
-
-    参数:
-        model_type (str): 模型类型。
-
-    返回:
-        function: 相应的权重转换函数，如果不支持则返回 None。
-    """
-    conversion_funcs = {
-        "llama": convert_llama_torch_to_litellama,
-        "qwen2": convert_qwen2_hf_to_litellama,
-        "llava": convert_llavallama_hf_to_litellama,
-    }
-    return conversion_funcs.get(model_type.lower())
 
 
 class ModelExecutor:
@@ -58,8 +35,6 @@ class ModelExecutor:
         checkpoints_dir: str,
         max_seq_len: int,
         max_gpu_num_blocks: None,
-        load_model: bool = True,
-        triton_weight: bool = True,
         compiled_model: bool = False,
         device: str = "cuda",
     ):
@@ -80,7 +55,7 @@ class ModelExecutor:
         )
         # model = ModelExecutor._accelerate_load_weight(model_config, checkpoints_dir)
         model = ModelExecutor._load_model_weight(
-            model_config, checkpoints_dir, load_model, triton_weight, device=device
+            model_config, checkpoints_dir, device=device
         )  # 加载权重后的模型
 
         return ModelExecutor(
@@ -91,8 +66,6 @@ class ModelExecutor:
     def _accelerate_load_weight(
         model_config,
         checkpoints_dir,
-        load_model=True,
-        triton_weight=True,
         device="cuda",
     ):
         with init_empty_weights():
@@ -116,8 +89,6 @@ class ModelExecutor:
     def _load_model_weight(
         model_config,
         checkpoints_dir,
-        load_model=True,
-        triton_weight=True,
         device="cuda",
     ):
         start_time = time.time()
@@ -128,27 +99,18 @@ class ModelExecutor:
             model = ModelExecutor._initialize_model(model_config, device=device)
             state_dict = None
 
-        if load_model:
-            checkpoints = sorted(Path(checkpoints_dir).glob("*.pth"))
-            assert len(checkpoints) > 0, (
-                f"no checkpoint files found in {checkpoints_dir}"
-            )
-            ckpt_path = str(checkpoints[0])
-            log.debug("Type(ckpt_path) ", type(ckpt_path))
-            log.info(f'Loading checkpoint "{ckpt_path}"')
-            # 使用 torch.load 加载权重文件。torch.load 可以根据需要将权重加载到指定的设备上
-            state_dict = torch.load(
-                ckpt_path, mmap=True, weights_only=True, map_location=device
-            )
-        else:
-            conversion_func = get_conversion_func(model_config.model_type)
-            if conversion_func is None:
-                log.error(f"Unsupported model type: {model_config.model_type}")
-                raise ValueError(f"Unsupported model type: {model_config.model_type}")
-            state_dict = conversion_func(checkpoints_dir, hf_sd, model_config)
-            log.info(
-                f"Weight conversion completed. Time elapsed: {time.time() - start_time:.2f} sec"
-            )
+   
+        checkpoints = sorted(Path(checkpoints_dir).glob("*.pth"))
+        assert len(checkpoints) > 0, (
+            f"no checkpoint files found in {checkpoints_dir}"
+        )
+        ckpt_path = str(checkpoints[0])
+        log.debug("Type(ckpt_path) ", type(ckpt_path))
+        log.info(f'Loading checkpoint "{ckpt_path}"')
+        # 使用 torch.load 加载权重文件。torch.load 可以根据需要将权重加载到指定的设备上
+        state_dict = torch.load(
+            ckpt_path, mmap=True, weights_only=True, map_location=device
+        )
 
         model.load_state_dict(
             state_dict, strict=True, assign=True
@@ -182,15 +144,15 @@ class ModelExecutor:
         )
         if model_type == "llama":
             from ..models.llama import LlamaModel
-
             model = LlamaModel(model_config)
         elif model_type == "qwen2":
             from ..models.qwen2 import Qwen2Model
-
             model = Qwen2Model(model_config)
+        elif model_type == "qwen3":
+            from ..models.qwen3 import Qwen3Model
+            model = Qwen3Model(model_config)
         elif model_type == "llava":
             from ..models.llava import LlavaLlama
-
             model = LlavaLlama(model_config)
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
@@ -214,9 +176,9 @@ class ModelExecutor:
         if params["model_type"] == "llama":
             model_config: LlamaConfig = LlamaConfig.from_dict(params)
         elif params["model_type"] == "qwen2":
-            model_config: Qwen2Config = Qwen2Config(
-                params, max_seq_len=max_seq_len, device=device
-            )
+            model_config: Qwen2Config = Qwen2Config.from_dict(params)
+        elif params["model_type"] == "qwen3":
+            model_config: Qwen3Config = Qwen3Config.from_dict(params)
         elif params["model_type"] == "llava":
             model_config = LlavaConfig.from_pretrained(checkpoints_dir)
 

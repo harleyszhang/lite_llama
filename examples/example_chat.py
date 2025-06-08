@@ -40,9 +40,7 @@ def cli_generate_stream(
         tokenizer_path=checkpoints_dir,
         max_gpu_num_blocks=max_gpu_num_blocks,
         max_seq_len=max_seq_len,
-        load_model=True,
         compiled_model=True,
-        triton_weight=True,
         device=device,
     )
 
@@ -105,9 +103,7 @@ def cli_generate(
         checkpoints_dir=checkpoints_dir,
         tokenizer_path=checkpoints_dir,
         max_seq_len=max_seq_len,
-        load_model=True,
         compiled_model=True,
-        triton_weight=True,
         device=device,
     )
 

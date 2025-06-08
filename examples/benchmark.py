@@ -30,9 +30,7 @@ def load_lite_llama_generator(
         tokenizer_path=checkpoints_dir,
         max_seq_len=max_seq_len,
         max_gpu_num_blocks=max_gpu_num_blocks,
-        load_model=True,
         compiled_model=True,
-        triton_weight=True,
         device=device,
     )
     return generator

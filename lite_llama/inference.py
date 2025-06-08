@@ -33,9 +33,7 @@ class Inference(object):
             tokenizer_path=self.lite_llama_ckpt_dir,
             max_seq_len=self.max_seq_len,
             max_gpu_num_blocks=max_gpu_num_blocks,
-            load_model=True,
             compiled_model=True,
-            triton_weight=True,
             device=self.device,
         )
         return generator

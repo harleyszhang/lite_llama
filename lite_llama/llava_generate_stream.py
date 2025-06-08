@@ -84,8 +84,6 @@ class LlavaGeneratorStream:
         tokenizer_path: str,
         max_gpu_num_blocks=None,
         max_seq_len=2048,
-        load_model=True,
-        triton_weight=True,
         compiled_model=False,
         device="cuda",
     ):
@@ -96,10 +94,8 @@ class LlavaGeneratorStream:
 
         self.model_executor = ModelExecutor.build(
             checkpoints_dir=checkpoints_dir,
-            load_model=load_model,
             max_gpu_num_blocks=max_gpu_num_blocks,
             max_seq_len=max_seq_len,
-            triton_weight=triton_weight,
             device=device,
         )
         self.tokenizer = self.load_tokenizer(tokenizer_path)
