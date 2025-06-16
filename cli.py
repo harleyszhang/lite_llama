@@ -14,9 +14,7 @@ def main(
     max_seq_len: int = 2048,
     max_gpu_num_blocks=40960,
     max_gen_len: Optional[int] = 1024,
-    load_model: bool = True,
     compiled_model: bool = False,
-    triton_weight: bool = True,
 ):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if max_seq_len <= 1024:
