@@ -33,7 +33,6 @@ class ModelExecutor:
     # 定义类属性
     model_config = None
     model = None
-    # model_runner_config = ModelRunnerConfig
     atten_info = AttentionInfo
 
     # 通过静态方法 build 将类属性当作默认配置使用
@@ -58,7 +57,6 @@ class ModelExecutor:
             ModelExecutor: 初始化后的 ModelExecutor 实例。
         """
         model_config = ModelExecutor._load_model_config(checkpoints_dir, max_seq_len)
-        # 加载权重后的模型
         model = ModelExecutor._load_model_weight(model_config, checkpoints_dir, device=device)
 
         return ModelExecutor(
@@ -72,10 +70,11 @@ class ModelExecutor:
             raise FileNotFoundError(f"{cfg_path} not found")
 
         params = json.loads(cfg_path.read_text())
-        params.setdefault("max_seq_len", max_seq_len)
         cfg_cls = CONFIG_CLASS_MAP.get(params["model_type"].lower())
+        
         if cfg_cls is None:
             raise ValueError(f"Unsupported model_type {params['model_type']!r}")
+        
         return cfg_cls.from_dict(params)
     
     @staticmethod
@@ -108,14 +107,12 @@ class ModelExecutor:
         device="cuda",
     ):
         start_time = time.time()
-        hf_sd = None
 
         # 初始化模型
         with init_empty_weights():
             model = ModelExecutor._initialize_model(model_config, device=device)
             state_dict = None
 
-   
         checkpoints = sorted(Path(checkpoints_dir).glob("*.pth"))
         assert len(checkpoints) > 0, (
             f"no checkpoint files found in {checkpoints_dir}"
