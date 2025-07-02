@@ -238,4 +238,4 @@ if __name__ == "__main__":
         f"The maximum difference between torch and triton is {torch.max(torch.abs(output_torch - q_out))}"
     )
     print("torch:", triton.testing.do_bench(lambda: torch_rotary_emb(q, cos, sin)))
-    print("triton:", triton.testing.do_bench(lambda: torch_rotary_emb(q, cos, sin)))
+    print("triton:", triton.testing.do_bench(lambda: rotary_emb_fwd(q, k, cos, sin)))
