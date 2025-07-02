@@ -5,41 +5,6 @@ import os.path as osp
 from .gptq import *
 
 
-class GPTQLinear(nn.Module):
-    """
-    A linear layer that uses GPTQ quantized weights.
-    Automatically dequantizes during forward pass.
-    """
-
-    def __init__(self, qweight, qzeros, scales, wbits=4, bias=None):
-        super().__init__()
-        self.register_buffer('qweight', qweight)
-        self.register_buffer('qzeros', qzeros)
-        self.register_buffer('scales', scales)
-        self.wbits = wbits
-        if bias is not None:
-            self.register_buffer('bias', bias)
-        else:
-            self.bias = None
-        self.gptq = GPTQ
-    def forward(self, x):
-        # Dequantize weight on-the-fly
-        weight = self.gptq.dequantize(
-            self.qweight,
-            self.qzeros,
-            self.scales,
-            self.wbits
-        )
-
-        # Perform linear transformation
-        output = torch.matmul(x, weight.t())
-
-        if self.bias is not None:
-            output += self.bias
-
-        return output
-
-
 def load_quantized_state_dict(checkpoint_path: str, device: str = "cuda") -> Dict[str, torch.Tensor]:
     """
     Load a quantized state dictionary from checkpoint.
@@ -62,42 +27,6 @@ def load_quantized_state_dict(checkpoint_path: str, device: str = "cuda") -> Dic
         print("No quantized layers found - this appears to be a regular model")
 
     return state_dict
-
-
-def replace_linear_with_gptq(module: nn.Module, state_dict: Dict[str, torch.Tensor], prefix: str = ""):
-    """
-    Recursively replace Linear layers with GPTQLinear layers based on quantized state dict.
-
-    Args:
-        module: The module to modify
-        state_dict: State dictionary containing quantized weights
-        prefix: Current prefix for parameter names
-    """
-    for name, child in module.named_children():
-        full_name = f"{prefix}.{name}" if prefix else name
-
-        if isinstance(child, nn.Linear):
-            # Check if this layer has quantized weights
-            qweight_key = f"{full_name}.qweight"
-            if qweight_key in state_dict:
-                # Extract quantization parameters
-                qweight = state_dict[qweight_key]
-                qzeros = state_dict[f"{full_name}.qzeros"]
-                scales = state_dict[f"{full_name}.scales"]
-                wbits = state_dict.get(f"{full_name}.wbits", torch.tensor(4)).item()
-
-                # Check for bias
-                bias_key = f"{full_name}.bias"
-                bias = state_dict.get(bias_key, None)
-
-                # Replace with GPTQLinear
-                gptq_linear = GPTQLinear(qweight, qzeros, scales, wbits, bias)
-                setattr(module, name, gptq_linear)
-
-                print(f"Replaced {full_name} with GPTQLinear")
-        else:
-            # Recursively process child modules
-            replace_linear_with_gptq(child, state_dict, full_name)
 
 
 def create_dequantized_state_dict(quantized_state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:

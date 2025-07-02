@@ -7,7 +7,7 @@ from lite_llama.utils.image_process import vis_images
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
-from lite_llama.utils.common import get_gpu_memory, detect_device, count_tokens, get_model_type
+from lite_llama.utils.common import get_gpu_memory, detect_device, count_tokens, get_model_type, quantization
 from lite_llama.llava_generate_stream import LlavaGeneratorStream
 
 import sys, os, time
@@ -17,8 +17,6 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 import psutil
 from lite_llama.utils.logger import log
-import argparse
-from argparse import RawTextHelpFormatter
 
 process = psutil.Process(os.getpid())
 
@@ -41,6 +39,7 @@ def report_resource_usage(ram_before, vram_before) -> None:
 
 def generate_llama(
         prompt: str = "Hello, my name is",
+        quantize: Optional[str] = None,
         *,
         temperature: float = 0.6,
         top_p: float = 0.9,
@@ -52,7 +51,6 @@ def generate_llama(
         triton_weight: bool = True,
         gpu_type: str = "nvidia",
         checkpoint_path: Path = Path("checkpoints/lit-llama/7B/"),
-        quantize: Optional[str] = None,
 ):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     assert checkpoint_path.is_dir(), checkpoint_path
@@ -62,22 +60,25 @@ def generate_llama(
     else:
         short_prompt = False
     model_prompter = get_prompter(get_model_type(checkpoint_path), checkpoint_path, short_prompt)
+
     # Start resource tracking
     ram_before = process.memory_info().rss
 
     vram_before = get_gpu_memory(gpu_type)
 
     # Init LLM generator
-    generator = GenerateStreamText(
-        checkpoints_dir=checkpoint_path,
-        tokenizer_path=checkpoint_path,
-        max_gpu_num_blocks=max_gpu_num_blocks,
-        max_seq_len=max_seq_len,
-        load_model=load_model,
-        compiled_model=compiled_model,
-        triton_weight=triton_weight,
-        device=device,
-    )
+    with quantization(quantize):
+
+        generator = GenerateStreamText(
+            checkpoints_dir=checkpoint_path,
+            tokenizer_path=checkpoint_path,
+            max_gpu_num_blocks=max_gpu_num_blocks,
+            max_seq_len=max_seq_len,
+            load_model=load_model,
+            compiled_model=compiled_model,
+            triton_weight=triton_weight,
+            device=device,
+        )
 
 
     model_prompter.insert_prompt(prompt)
@@ -113,6 +114,7 @@ def generate_llava(
         checkpoint_path: Path = Path("checkpoints/lit-llama/7B/"),
         figure_path: Path = Path("figures/lit-llama/"),
         gpu_type: str = "nvidia",
+        quantize: Optional[str] = None,
         temperature: float = 0.6,
         top_p: float = 0.9,
         max_seq_len: int = 2048,
@@ -145,20 +147,22 @@ def generate_llava(
     vram_before = get_gpu_memory(gpu_type)
 
     # Initializing the Multimodal Model Text Generator
-    try:
-        generator = LlavaGeneratorStream(
-            checkpoints_dir=checkpoint_path,
-            tokenizer_path=checkpoint_path,
-            max_gpu_num_blocks=max_gpu_num_blocks,
-            max_seq_len=max_seq_len,
-            load_model=load_model,
-            compiled_model=compiled_model,
-            triton_weight=triton_weight,
-            device=device,
-        )
-    except Exception as e:
-        log.error(f"Model loading failure: {e}")
-        sys.exit(1)
+    with quantization(quantize):
+
+        try:
+            generator = LlavaGeneratorStream(
+                checkpoints_dir=checkpoint_path,
+                tokenizer_path=checkpoint_path,
+                max_gpu_num_blocks=max_gpu_num_blocks,
+                max_seq_len=max_seq_len,
+                load_model=load_model,
+                compiled_model=compiled_model,
+                triton_weight=triton_weight,
+                device=device,
+            )
+        except Exception as e:
+            log.error(f"Model loading failure: {e}")
+            sys.exit(1)
 
     image_token = get_image_token()
     model_prompter.insert_prompt(image_token * image_num + prompt)
@@ -202,6 +206,7 @@ if __name__ == "__main__":
         prompt: str = "Hello, my name is",
         checkpoint_path: Path = Path("checkpoints/lite-llama/7B/"),
         figure_path: Optional[Path] = None,
+        quant: str = "gpt.int4"
     ):
         """
         Generate text using lite_llama with automatic GPTQ detection
@@ -210,14 +215,15 @@ if __name__ == "__main__":
             prompt: Input prompt text
             checkpoint_path: Path to model checkpoint directory
             figure_path: Path to Image file for LLaVA generation, optional
+            quant: GPTQ quantization mode
         """
         # Determine use_gptq based on force flags
         gpu_type = detect_device()
         model_path = os.path.abspath(checkpoint_path)
         if figure_path:
             generate_llava(prompt=prompt, checkpoint_path=Path(model_path), figure_path=Path(figure_path),
-                           gpu_type=gpu_type)
+                           gpu_type=gpu_type, quantization=quant)
         else:
-            generate_llama(prompt=prompt, checkpoint_path=Path(model_path), gpu_type=gpu_type)
+            generate_llama(prompt=prompt, checkpoint_path=Path(model_path), gpu_type=gpu_type, quantization=quant)
 
     CLI(main)

@@ -3,6 +3,8 @@ import time, os
 import subprocess
 from typing import List, Optional
 import torch
+from contextlib import contextmanager
+import functools
 
 def read_json(json_path):
     with open(json_path, "r") as json_file:
@@ -199,8 +201,21 @@ def get_model_dtype(checkpoints_dir: str):
         print("Defaulting to torch.float16")
         return torch.float16
 
-    except Exception as e:
-        print(f"Warning: Could not read dtype from config.json: {e}")
-        print("Defaulting to torch.float16")
-        return torch.float16
+
+@contextmanager
+def quantization(mode: str = None):
+    quantized_linear_cls = None
+    if mode == 'gptq.int4':
+        from ..quantization.gptq.gptq import GPTQLinear
+        quantized_linear_cls = functools.partial(GPTQLinear, bits=4, tile_cols=-1)
+    elif mode is not None:
+        raise ValueError(f"Unknown quantization mode: {mode}")
+
+    enabled = mode is not None
+    torch_linear_cls = torch.nn.Linear
+    if enabled:
+        torch.nn.Linear = quantized_linear_cls
+    yield
+    if enabled:
+        torch.nn.Linear = torch_linear_cls
 
