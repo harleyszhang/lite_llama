@@ -543,9 +543,7 @@ def triton_int4_gemm(
     M, K = inp.shape
     N = weight.shape[1]
 
-
-
-    c = torch.empty((M, N), device=inp.device, dtype=torch.float32)
+    c = torch.empty((M, N), device=inp.device, dtype=torch.float16)
 
     grid = lambda META: (
         triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
@@ -620,75 +618,3 @@ class GPTQLinear(nn.Module):
         return output.view(*x.shape[:-1], self.out_features)
 
 
-def get_gpu_memory():
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-        return torch.cuda.memory_allocated() // (1024 ** 2)
-    return 0
-
-
-def test_gptqlinear_vs_nnlinear(
-    in_features=2048,
-    out_features=4096,
-    groupsize=64,
-    wbits=4,
-    device="cuda"
-):
-    torch.manual_seed(42)
-    np.random.seed(42)
-
-    # ---- Create single input vector ----
-    x = torch.randn(in_features, device=device, dtype=torch.float16)
-    linear = nn.Linear(in_features, out_features, bias=True, device=device, dtype=torch.float16).eval()
-
-    weight = linear.weight.detach().to(device).float()
-    bias = linear.bias.detach().to(device).float() if linear.bias is not None else None
-
-    # --- Quantize using GPTQ ---
-    gptq = GPTQ(wbits=wbits, groupsize=groupsize, device=device)
-    qweight, qzeros, qscales = gptq.quantize(weight)
-    packed_weight = GPTQLinear.pack_weight(qweight)
-
-    gptqlinear = GPTQLinear(in_features, out_features, bias=True, groupsize=groupsize, device=device).to(device)
-    gptqlinear.packed_weight = packed_weight
-    gptqlinear.scales = qscales
-    gptqlinear.zeros = qzeros
-    gptqlinear.bias = bias if bias is not None else None
-    gptqlinear.eval()
-
-    # ---- Memory ----
-    gc.collect()
-    torch.cuda.empty_cache()
-    mem0 = get_gpu_memory()
-    _ = linear(x)
-    mem_fp = get_gpu_memory()
-    del _
-    gc.collect()
-    torch.cuda.empty_cache()
-    mem1 = get_gpu_memory()
-    _ = gptqlinear(x)
-    mem_q = get_gpu_memory()
-    del _
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    # ---- Print ----
-
-
-    print("\n== Memory Usage (VRAM, MB) ==")
-    print(f"nn.Linear (fp16): {mem_fp} MB MB)")
-    print(f"GPTQLinear:       {mem_q} MB MB)")
-
-    print("\n== Latency ==")
-    time_fp = triton.testing.do_bench(lambda: linear(x))
-    time_q = triton.testing.do_bench(lambda: gptqlinear(x))
-    print(f"nn.Linear (fp16): {time_fp:.3f} ms")
-    print(f"GPTQLinear:       {time_q:.3f} ms")
-
-
-    print("\n== VRAM saving ratio ==")
-    print(f"GPTQLinear / nn.Linear: {(mem_q-mem1)/(mem_fp-mem0 + 1e-9):.3f}x")
-    print(f"Speedup: {time_fp/time_q:.2f}x\n")
-
-if __name__ == "__main__":
-    test_gptqlinear_vs_nnlinear()
