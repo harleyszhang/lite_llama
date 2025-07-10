@@ -37,6 +37,8 @@ def report_resource_usage(ram_before, vram_before) -> None:
     log.info(f"GPU VRAM Used: {vram_text}")
 
 
+# Add these modifications to generate.py
+
 def generate_llama(
         prompt: str = "Hello, my name is",
         quantize: Optional[str] = None,
@@ -51,10 +53,13 @@ def generate_llama(
         triton_weight: bool = True,
         gpu_type: str = "nvidia",
         checkpoint_path: Path = Path("checkpoints/lit-llama/7B/"),
+        use_gptq: bool = False,  # Add GPTQ parameter
+        gptq_groupsize: int = 128,  # Add groupsize parameter
 ):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     assert checkpoint_path.is_dir(), checkpoint_path
     checkpoint_path = str(checkpoint_path)
+
     if max_seq_len <= 1024:
         short_prompt = True
     else:
@@ -63,12 +68,15 @@ def generate_llama(
 
     # Start resource tracking
     ram_before = process.memory_info().rss
-
     vram_before = get_gpu_memory(gpu_type)
 
-    # Init LLM generator
-    with quantization(quantize):
+    # Determine quantization method
+    if use_gptq:
+        log.info("Using GPTQ quantization for inference")
+        quantize = None  # GPTQ doesn't use the legacy quantization context manager
 
+    # Init LLM generator with GPTQ support
+    with quantization(quantize):
         generator = GenerateStreamText(
             checkpoints_dir=checkpoint_path,
             tokenizer_path=checkpoint_path,
@@ -80,9 +88,9 @@ def generate_llama(
             device=device,
         )
 
-
     model_prompter.insert_prompt(prompt)
     prompts = [model_prompter.model_input]
+
     # Call the generation function and start the stream generation
     stream = generator.text_completion_stream(
         prompts,
@@ -91,19 +99,19 @@ def generate_llama(
         max_gen_len=max_gen_len,
     )
 
-    completion = ''  # Initialize to generate the result
-    # NOTE: After creating a generator, it can be iterated through a for loop
+    completion = ''
     text_msg = ""
     start = time.perf_counter()
     for batch_completions in stream:
         new_text = batch_completions[0]['generation'][len(completion):]
         completion = batch_completions[0]['generation']
         print(new_text, end='', flush=True)
-        text_msg +=new_text
+        text_msg += new_text
     end = time.perf_counter()
 
     print("\n\n==================================\n")
-    log.info(f"Time for inference: {(end - start):.2f} sec, {count_tokens(text_msg, generator.tokenizer)/(end - start):.2f} tokens/sec")
+    log.info(
+        f"Time for inference: {(end - start):.2f} sec, {count_tokens(text_msg, generator.tokenizer) / (end - start):.2f} tokens/sec")
 
     # Report resource usage
     report_resource_usage(ram_before, vram_before)
@@ -122,7 +130,9 @@ def generate_llava(
         max_gen_len: Optional[int] = 512,
         load_model: bool = True,
         compiled_model: bool = False,
-        triton_weight: bool = True
+        triton_weight: bool = True,
+        use_gptq: bool = False,  # Add GPTQ parameter
+        gptq_groupsize: int = 128,  # Add groupsize parameter
 ):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     if max_seq_len <= 1024:
@@ -134,21 +144,22 @@ def generate_llava(
         log.error(f"'{figure_path}' Not a valid file path！")
     else:
         image_input = str(figure_path).strip()
-    image_items = [image_input]  # Prepare the image_items list
-    image_num = len(image_items)  # Calculate the number of input images
-    vis_images(image_items)  # Displaying images in the terminal
+    image_items = [image_input]
+    image_num = len(image_items)
+    vis_images(image_items)
     assert checkpoint_path.is_dir(), checkpoint_path
     checkpoint_path = str(checkpoint_path)
     model_prompter = get_prompter("llama", checkpoint_path, short_prompt)
 
     # Start resource tracking
     ram_before = process.memory_info().rss
-
     vram_before = get_gpu_memory(gpu_type)
 
-    # Initializing the Multimodal Model Text Generator
-    with quantization(quantize):
+    # Initialize the Multimodal Model Text Generator with GPTQ support
+    if use_gptq:
+        quantize = None  # GPTQ doesn't use legacy quantization
 
+    with quantization(quantize):
         try:
             generator = LlavaGeneratorStream(
                 checkpoints_dir=checkpoint_path,
@@ -179,19 +190,21 @@ def generate_llava(
     except Exception as e:
         log.error(f"Text Generation Failure: {e}")
 
-    completion = ''  # Initialization generates results
+    completion = ''
     text_msg = ""
     start = time.perf_counter()
 
     for batch_completions in stream:
         next_text = batch_completions[0]['generation'][len(completion):]
         completion = batch_completions[0]['generation']
-        print(f"\033[91m{next_text}\033[0m", end='', flush=True)  # 红色文本
+        print(f"\033[91m{next_text}\033[0m", end='', flush=True)
         text_msg += next_text
     end = time.perf_counter()
 
     print("\n\n==================================\n")
-    log.info(f"Time for inference: {(end - start):.2f} sec, {count_tokens(text_msg, generator.tokenizer)/(end - start):.2f} tokens/sec")
+    log.info(
+        f"Time for inference: {(end - start):.2f} sec, {count_tokens(text_msg, generator.tokenizer) / (end - start):.2f} tokens/sec")
+
     # Report resource usage
     report_resource_usage(ram_before, vram_before)
 
@@ -201,12 +214,14 @@ if __name__ == "__main__":
 
     torch.set_float32_matmul_precision("high")
 
-    # Create a wrapper function that adds the use_gptq parameter
+
     def main(
-        prompt: str = "Hello, my name is",
-        checkpoint_path: Path = Path("checkpoints/lite-llama/7B/"),
-        figure_path: Optional[Path] = None,
-        quant: str = "gpt.int4"
+            prompt: str = "Hello, my name is",
+            checkpoint_path: Path = Path("checkpoints/lite-llama/7B/"),
+            figure_path: Optional[Path] = None,
+            quant: Optional[str] = None,
+            use_gptq: Optional[bool] = False,  # Add GPTQ flag
+            gptq_groupsize: Optional[int] = 8,  # Add groupsize parameter
     ):
         """
         Generate text using lite_llama with automatic GPTQ detection
@@ -215,15 +230,32 @@ if __name__ == "__main__":
             prompt: Input prompt text
             checkpoint_path: Path to model checkpoint directory
             figure_path: Path to Image file for LLaVA generation, optional
-            quant: GPTQ quantization mode
+            quant: Legacy quantization mode (ignored if use_gptq=True)
+            use_gptq: Whether to use GPTQ quantization
+            gptq_groupsize: Group size for GPTQ quantization
         """
-        # Determine use_gptq based on force flags
         gpu_type = detect_device()
         model_path = os.path.abspath(checkpoint_path)
+
         if figure_path:
-            generate_llava(prompt=prompt, checkpoint_path=Path(model_path), figure_path=Path(figure_path),
-                           gpu_type=gpu_type, quantization=quant)
+            generate_llava(
+                prompt=prompt,
+                checkpoint_path=Path(model_path),
+                figure_path=Path(figure_path),
+                gpu_type=gpu_type,
+                quantize=quant if not use_gptq else None,
+                use_gptq=use_gptq,
+                gptq_groupsize=gptq_groupsize
+            )
         else:
-            generate_llama(prompt=prompt, checkpoint_path=Path(model_path), gpu_type=gpu_type, quantization=quant)
+            generate_llama(
+                prompt=prompt,
+                checkpoint_path=Path(model_path),
+                gpu_type=gpu_type,
+                quantize=quant if not use_gptq else None,
+                use_gptq=use_gptq,
+                gptq_groupsize=gptq_groupsize
+            )
+
 
     CLI(main)

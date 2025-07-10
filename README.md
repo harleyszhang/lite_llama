@@ -93,8 +93,11 @@ pip install -r requirement.txt
 python apply_weight_convert.py -m /path/to/model/Llama-3.2-1B-Instruct/# model weight transformation
 python generate.py -p "What is large language model" -m /path/to/model/Llama-3.2-1B-Instruct/ -f /path/to/figure# Run on the basis that the model has been downloaded and placed in the specified directory
 ```
-
-
+Quantitization
+```bash
+python apply_weight_convert.py --checkpoints_dir ../../Model/origin/Llama-3.2-3B-Instruct-cp/ --use_gptq
+python generate.py --prompt "What is llama?" --checkpoint_path  my_weight/Llama-3.2-3B-Instruct-cp_gptq/ --quant gptq.int4
+```
 ## Evaluation
 
 After `generate.py` runs successfully, the terminal displays the interface as shown below, and you can enter your question in the terminal.
