@@ -148,9 +148,13 @@ def flash_decode_stage1(
     b_seq_len,
     max_actual_seq_len,  # 最大的实际序列长度
     mid_o,
-    mid_o_logexpsum,  # Mid_O: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE), head_dim], Mid_O_LogExpSum: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE)]
+    mid_o_logexpsum,  
     PARTITION_SIZE,
 ):
+    """
+    # Mid_O: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE), head_dim], 
+    # Mid_O_LogExpSum: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE)]
+    """
     BLOCK_N_SIZE = 16
 
     # BLOCK_DMODEL = q.shape[-1]
@@ -196,6 +200,7 @@ def flash_decode_stage1(
 
 @triton.jit
 def _flash_decoding_stage2_kernel(
+
     Mid_O,  # [batch, head, seq_block_num, head_dim]
     Mid_O_LogExpSum,  # [batch, head, seq_block_num]
     Ouput,  # attention 输出首地址

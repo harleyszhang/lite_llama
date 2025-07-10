@@ -28,9 +28,7 @@ def main(
         tokenizer_path=checkpoints_dir,
         max_gpu_num_blocks=max_gpu_num_blocks,
         max_seq_len=max_seq_len,
-        load_model=load_model,
         compiled_model=compiled_model,
-        triton_weight=triton_weight,
         device=device,
     )
 

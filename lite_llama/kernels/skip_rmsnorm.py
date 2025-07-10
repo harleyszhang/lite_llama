@@ -183,14 +183,14 @@ def skip_rms_norm_kernel(
 @torch.no_grad()
 def skip_rmsnorm(X, residual, weight, eps=1e-5):
     orig_shape = X.shape
-    X = X.view(-1, orig_shape[-1])
+    X = X.contiguous().view(-1, orig_shape[-1])
 
     M, N = X.shape  # n_rows, n_cols
     BLOCK_SIZE, num_warps = calculate_settings(N)
     Y = torch.empty_like(X)
 
     if residual is not None:
-        residual = residual.view(-1, N)
+        residual = residual.contiguous().view(-1, N)
         skip_rms_norm_kernel[M,](
             Y,
             X,

@@ -48,13 +48,9 @@ def generate_llama(
         max_seq_len: int = 2048,
         max_gpu_num_blocks=40960,
         max_gen_len: Optional[int] = 1024,
-        load_model: bool = True,
         compiled_model: bool = False,
-        triton_weight: bool = True,
         gpu_type: str = "nvidia",
         checkpoint_path: Path = Path("checkpoints/lit-llama/7B/"),
-        use_gptq: bool = False,  # Add GPTQ parameter
-        gptq_groupsize: int = 128,  # Add groupsize parameter
 ):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     assert checkpoint_path.is_dir(), checkpoint_path
@@ -70,23 +66,14 @@ def generate_llama(
     ram_before = process.memory_info().rss
     vram_before = get_gpu_memory(gpu_type)
 
-    # Determine quantization method
-    if use_gptq:
-        log.info("Using GPTQ quantization for inference")
-        quantize = None  # GPTQ doesn't use the legacy quantization context manager
-
-    # Init LLM generator with GPTQ support
-    with quantization(quantize):
-        generator = GenerateStreamText(
-            checkpoints_dir=checkpoint_path,
-            tokenizer_path=checkpoint_path,
-            max_gpu_num_blocks=max_gpu_num_blocks,
-            max_seq_len=max_seq_len,
-            load_model=load_model,
-            compiled_model=compiled_model,
-            triton_weight=triton_weight,
-            device=device,
-        )
+    generator = GenerateStreamText(
+        checkpoints_dir=checkpoint_path,
+        tokenizer_path=checkpoint_path,
+        max_gpu_num_blocks=max_gpu_num_blocks,
+        max_seq_len=max_seq_len,
+        compiled_model=compiled_model,
+        device=device,
+    )
 
     model_prompter.insert_prompt(prompt)
     prompts = [model_prompter.model_input]
@@ -128,11 +115,7 @@ def generate_llava(
         max_seq_len: int = 2048,
         max_gpu_num_blocks=None,
         max_gen_len: Optional[int] = 512,
-        load_model: bool = True,
         compiled_model: bool = False,
-        triton_weight: bool = True,
-        use_gptq: bool = False,  # Add GPTQ parameter
-        gptq_groupsize: int = 128,  # Add groupsize parameter
 ):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     if max_seq_len <= 1024:
@@ -155,25 +138,18 @@ def generate_llava(
     ram_before = process.memory_info().rss
     vram_before = get_gpu_memory(gpu_type)
 
-    # Initialize the Multimodal Model Text Generator with GPTQ support
-    if use_gptq:
-        quantize = None  # GPTQ doesn't use legacy quantization
-
-    with quantization(quantize):
-        try:
-            generator = LlavaGeneratorStream(
-                checkpoints_dir=checkpoint_path,
-                tokenizer_path=checkpoint_path,
-                max_gpu_num_blocks=max_gpu_num_blocks,
-                max_seq_len=max_seq_len,
-                load_model=load_model,
-                compiled_model=compiled_model,
-                triton_weight=triton_weight,
-                device=device,
-            )
-        except Exception as e:
-            log.error(f"Model loading failure: {e}")
-            sys.exit(1)
+    try:
+        generator = LlavaGeneratorStream(
+            checkpoints_dir=checkpoint_path,
+            tokenizer_path=checkpoint_path,
+            max_gpu_num_blocks=max_gpu_num_blocks,
+            max_seq_len=max_seq_len,
+            compiled_model=compiled_model,
+            device=device,
+        )
+    except Exception as e:
+        log.error(f"Model loading failure: {e}")
+        sys.exit(1)
 
     image_token = get_image_token()
     model_prompter.insert_prompt(image_token * image_num + prompt)
@@ -220,8 +196,6 @@ if __name__ == "__main__":
             checkpoint_path: Path = Path("checkpoints/lite-llama/7B/"),
             figure_path: Optional[Path] = None,
             quant: Optional[str] = None,
-            use_gptq: Optional[bool] = False,  # Add GPTQ flag
-            gptq_groupsize: Optional[int] = 8,  # Add groupsize parameter
     ):
         """
         Generate text using lite_llama with automatic GPTQ detection
@@ -243,18 +217,14 @@ if __name__ == "__main__":
                 checkpoint_path=Path(model_path),
                 figure_path=Path(figure_path),
                 gpu_type=gpu_type,
-                quantize=quant if not use_gptq else None,
-                use_gptq=use_gptq,
-                gptq_groupsize=gptq_groupsize
+                quantize=quant,
             )
         else:
             generate_llama(
                 prompt=prompt,
                 checkpoint_path=Path(model_path),
                 gpu_type=gpu_type,
-                quantize=quant if not use_gptq else None,
-                use_gptq=use_gptq,
-                gptq_groupsize=gptq_groupsize
+                quantize=quant
             )
 
 

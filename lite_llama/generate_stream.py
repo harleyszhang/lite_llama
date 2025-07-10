@@ -1,12 +1,15 @@
 from typing import Optional
-import torch
-from typing import List, Optional, Tuple, TypedDict, Generator
+import torch, logging
+from typing import Optional, TypedDict, Generator
 from .executor.model_executor import ModelExecutor
 from .utils.file_interface import get_model_name_from_path
 from .kernels.softmax_split import softmax_split
 
 from transformers import AutoTokenizer
 
+# 设置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class CompletionPrediction(TypedDict, total=False):
@@ -61,8 +64,6 @@ class GenerateStreamText:
         tokenizer_path: str,
         max_gpu_num_blocks=None,
         max_seq_len=1024,
-        load_model=True,
-        triton_weight=True,
         compiled_model=False,
         device="cuda",
     ):
@@ -70,10 +71,8 @@ class GenerateStreamText:
 
         self.model_executor = ModelExecutor.build(
             checkpoints_dir=checkpoints_dir,
-            load_model=load_model,
             max_gpu_num_blocks=max_gpu_num_blocks,
             max_seq_len=max_seq_len,
-            triton_weight=triton_weight,
             compiled_model=compiled_model,
             device=device,
         )

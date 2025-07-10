@@ -17,7 +17,7 @@
 ## Features
 
 - Up to `4x` speedup over transformers, llama3 1B and 3B models.
-- Supports the latest `llama3`, `Qwen2.5`, `Llava1.5` model inference, `top-p` sampling, streaming output.
+- Supports the latest `llama3`, `Qwen2.5`, `Qwen3`, `Llava1.5` model inference, `top-p` sampling, streaming output.
 - Supports GQA, ~~cuda graph optimization (with limitations)~~.
 - Supports `flashattention1`, `flashattention2`, `flashdecoding` (supports `NopadAttention`).
 - Support efficient dynamic management of kv cache (`auto tokenattnetion`).
@@ -42,11 +42,16 @@ Cuda compilation tools, release 12.1, V12.1.105
 Build cuda_12.1.r12.1/compiler.32688072_0
 # Python 3.11.8:
 # pip list | grep torch
-torch                          2.1.2
-triton                         2.1.0
+torch                          2.2.1
+triton                         2.2.0
+transformers                   4.52.4
 triton-nightly                 3.0.0.post20240716052845
 ```
+
+The latest version of transformers requires the `flash-attn` package to run correctly, otherwise the error `flash_attn_2_cuda.cpython-310-x86_64-linux-gnu.so: undefined symbol: _ZNK3c105Error4whatEv` will be reported. Flash-attn can be installed through `pip install flash-attn`. However, this download and compilation speed is too slow. It is recommended to download the corresponding version of the wheel package from the [github-flash-attention-prebuild-wheels](https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/tag/v0.0.6) website for installation.
+
 For rocm, torch, and triton version:
+
 ```bash
 # rocminfo | grep -i version
 ROCk module version 6.10.5 is loaded
@@ -72,7 +77,7 @@ conda activate lite_llama
 git clone https://github.com/harleyszhang/lite_llama.git
 cd lite_llama/
 pip install -r requirement.txt
-python apply_weight_convert.py -m /path/to/model/Llama-3.2-1B-Instruct/# model weight transformation
+python apply_weight_convert.py --checkpoints_dir /path/to/model/Llama-3.2-1B-Instruct/ --model_type llama # model weight transformation
 python generate.py -p "What is large language model" -m /path/to/model/Llama-3.2-1B-Instruct/ -f /path/to/figure# Run on the basis that the model has been downloaded and placed in the specified directory
 ```
 
@@ -90,14 +95,10 @@ conda activate lite_llama
 git clone https://github.com/harleyszhang/lite_llama.git
 cd lite_llama/
 pip install -r requirement.txt
-python apply_weight_convert.py -m /path/to/model/Llama-3.2-1B-Instruct/# model weight transformation
+python apply_weight_convert.py --checkpoints_dir /path/to/model/Llama-3.2-1B-Instruct/ --model_type llama # model weight transformation
 python generate.py -p "What is large language model" -m /path/to/model/Llama-3.2-1B-Instruct/ -f /path/to/figure# Run on the basis that the model has been downloaded and placed in the specified directory
 ```
-Quantitization
-```bash
-python apply_weight_convert.py --checkpoints_dir ../../Model/origin/Llama-3.2-3B-Instruct-cp/ --use_gptq
-python generate.py --prompt "What is llama?" --checkpoint_path  my_weight/Llama-3.2-3B-Instruct-cp_gptq/ --quant gptq.int4
-```
+
 ## Evaluation
 
 After `generate.py` runs successfully, the terminal displays the interface as shown below, and you can enter your question in the terminal.
