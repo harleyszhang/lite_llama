@@ -1,14 +1,13 @@
 import torch, gc
 from typing import List, Tuple
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaForCausalLM
-import json,os,sys
+import logging, json, os, sys
 
 # 获取 lite_llama 目录的绝对路径并添加到 sys.path 中
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from lite_llama.models.model_config import LlamaConfig
 
-from lite_llama.utils.logger import log
-
+logger = logging.getLogger(__name__)
 
 
 def load_config_from_json(json_file_path: str, device: str = "cuda") -> LlamaConfig:
@@ -78,18 +77,20 @@ def determine_num_available_blocks(
     # 确保缓存块数量不为负数
     num_gpu_blocks = max(num_gpu_blocks, 0)
 
-    log.info(
-            "Memory profiling results: total_gpu_memory=%.2fGiB \n"
-            " initial_memory_usage=%.2fGiB peak_torch_memory=%.2fGiB \n"
-            " memory_usage_post_profile=%.2fGib \n"
-            " non_torch_memory=%.2fGiB kv_cache_size=%.2fGiB \n"
-            " gpu_memory_utilization=%.2f", total_gpu_memory / (1024**3),
-            (total_gpu_memory - free_memory_pre_profile) / (1024**3),
-            (peak_memory - non_torch_allocations) / (1024**3),
-            total_allocated_bytes / (1024**3),
-            non_torch_allocations / (1024**3),
-            available_kv_cache_memory / (1024**3),
-            gpu_memory_utilization)
+    logger.info(
+        "Memory profiling results: total_gpu_memory=%.2fGiB \n"
+        " initial_memory_usage=%.2fGiB peak_torch_memory=%.2fGiB \n"
+        " memory_usage_post_profile=%.2fGib \n"
+        " non_torch_memory=%.2fGiB kv_cache_size=%.2fGiB \n"
+        " gpu_memory_utilization=%.2f",
+        total_gpu_memory / (1024**3),
+        (total_gpu_memory - free_memory_pre_profile) / (1024**3),
+        (peak_memory - non_torch_allocations) / (1024**3),
+        total_allocated_bytes / (1024**3),
+        non_torch_allocations / (1024**3),
+        available_kv_cache_memory / (1024**3),
+        gpu_memory_utilization,
+    )
 
     # 进行垃圾回收，释放未使用的内存
     gc.collect()

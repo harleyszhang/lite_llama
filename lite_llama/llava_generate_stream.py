@@ -1,5 +1,5 @@
 from typing import Optional
-import torch, re
+import torch, logging, re
 from PIL import Image
 
 from typing import Optional, TypedDict, Generator, Union
@@ -9,6 +9,9 @@ from .utils.file_interface import get_model_name_from_path
 
 from transformers import AutoTokenizer, AutoProcessor
 
+# 设置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class CompletionPrediction(TypedDict, total=False):
@@ -81,8 +84,6 @@ class LlavaGeneratorStream:
         tokenizer_path: str,
         max_gpu_num_blocks=None,
         max_seq_len=2048,
-        load_model=True,
-        triton_weight=True,
         compiled_model=False,
         device="cuda",
     ):
@@ -93,10 +94,8 @@ class LlavaGeneratorStream:
 
         self.model_executor = ModelExecutor.build(
             checkpoints_dir=checkpoints_dir,
-            load_model=load_model,
             max_gpu_num_blocks=max_gpu_num_blocks,
             max_seq_len=max_seq_len,
-            triton_weight=triton_weight,
             device=device,
         )
         self.tokenizer = self.load_tokenizer(tokenizer_path)

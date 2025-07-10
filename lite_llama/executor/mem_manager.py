@@ -1,8 +1,8 @@
 import torch
-import gc
+import logging, gc
 from typing import List
 
-from lite_llama.utils.logger import log
+logger = logging.getLogger(__name__)
 
 
 def get_dtype_size(dtype: torch.dtype) -> int:
@@ -11,9 +11,10 @@ def get_dtype_size(dtype: torch.dtype) -> int:
 
 
 class ComputeMaxAvailableBlocks:
-    """A class that can execute a forward pass with dummy inputs to profile the memory usage of the model.
-    and  calculate the maximum possible number of GPU blocks that can be allocated with the remaining free memory.
-    if not execute dummy forward run, it should be run after cuda graph!
+    """A class that can execute a forward pass with dummy inputs to profile the memory 
+    usage of the model. and  calculate the maximum possible number of GPU blocks that 
+    can be allocated with the remaining free memory. if not execute dummy forward run, 
+    it should be run after cuda graph!
     """
 
     def __init__(
@@ -119,11 +120,20 @@ class ComputeMaxAvailableBlocks:
         # 确保缓存块数量不为负数
         num_gpu_blocks = max(num_gpu_blocks, 0)
 
-        log.info("Memory profiling results: total_gpu_memory = %.2f GB", total_gpu_memory / (1024**3))
-        log.info("initial_memory_usage = %.2f GB peak_torch_memory = %.2f GB", (total_gpu_memory - free_memory_pre_profile) / (1024**3), (peak_memory - non_torch_allocations) / (1024**3))
-        log.info("memory_usage_post_profile = %.2f GB", total_allocated_bytes / (1024**3))
-        log.info("non_torch_memory = %.2f GB, kv_cache_size = %.2f GB", non_torch_allocations / (1024**3), available_kv_cache_memory / (1024**3))
-        log.info("gpu_memory_utilization = %.2f", self.gpu_memory_utilization)
+        logger.info(
+            " Memory profiling results: total_gpu_memory = %.2f GB \n"
+            "    initial_memory_usage = %.2f GB peak_torch_memory = %.2f GB \n"
+            "    memory_usage_post_profile = %.2f GB \n"
+            "    non_torch_memory = %.2f GB, kv_cache_size = %.2f GB \n"
+            "    gpu_memory_utilization = %.2f",
+            total_gpu_memory / (1024**3),
+            (total_gpu_memory - free_memory_pre_profile) / (1024**3),
+            (peak_memory - non_torch_allocations) / (1024**3),
+            total_allocated_bytes / (1024**3),
+            non_torch_allocations / (1024**3),
+            available_kv_cache_memory / (1024**3),
+            self.gpu_memory_utilization,
+        )
 
         # 进行垃圾回收，释放未使用的内存
         gc.collect()
@@ -187,12 +197,14 @@ class KVCacheMemoryManager:
             )
             for _ in range(num_layers)
         ]
-        log.debug(f"gpu_kv_buffer per layer shape: {self.gpu_kv_buffer[0].shape}")
-    
+        logger.debug(f"gpu_kv_buffer per layer shape: {self.gpu_kv_buffer[0].shape}")
+
     @torch.no_grad()
     def alloc_kvcache(self, need_size):
         if need_size > self.can_use_mem_size:
-            log.warning(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
+            logger.warning(
+                f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}"
+            )
             return None
 
         can_use_pos_index = torch.nonzero(self.kv_mem_use_state == 0).view(-1)
@@ -204,7 +216,9 @@ class KVCacheMemoryManager:
     @torch.no_grad()
     def alloc_contiguous_kvcache(self, need_size):
         if need_size > self.can_use_mem_size:
-            log.warning(f"warn no enough contiguous cache need_size {need_size} left_size {self.can_use_mem_size}")
+            logger.warning(
+                f"warn no enough contiguous cache need_size {need_size} left_size {self.can_use_mem_size}"
+            )
             return None
 
         # 获取未使用的内存块索引
@@ -280,7 +294,7 @@ class KVCacheMemoryManager:
         free_index = free_index.long()
         self.release_ref(free_index)
         if self.can_use_mem_size == len(self.mem_state):
-            log.debug(f"freed all gpu mem size {self.can_use_mem_size}")
+            logger.debug(f"freed all gpu mem size {self.can_use_mem_size}")
         return
 
     # 释放所有内存

@@ -353,8 +353,6 @@ if __name__ == "__main__":
         tokenizer_path=original_model_path,  # Assuming tokenizer is at original_model_path
         max_batch_size=64,
         max_seq_len=2048,
-        load_model=True,
-        triton_weight=True,
         device=device,
     )
 

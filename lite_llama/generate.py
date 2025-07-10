@@ -58,8 +58,6 @@ class GenerateText:
         tokenizer_path: str,
         max_seq_len=1024,
         max_gpu_num_blocks=None,
-        load_model=True,
-        triton_weight=True,
         compiled_model=False,
         device="cuda",
     ):
@@ -71,8 +69,6 @@ class GenerateText:
             checkpoints_dir=checkpoints_dir,
             max_seq_len=max_seq_len,
             max_gpu_num_blocks=max_gpu_num_blocks,
-            load_model=load_model,
-            triton_weight=triton_weight,
             compiled_model=compiled_model,
             device=device,
         )

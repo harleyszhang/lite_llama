@@ -4,10 +4,10 @@ import torch
 from transformers import AutoModel, AutoConfig, PreTrainedModel
 from accelerate import init_empty_weights
 
-MODEL_ID = "/home/honggao/llm_weights/Qwen3-30B-A3B"
+MODEL_ID = "/home/honggao/llm_weights/Qwen3-235B-A22B"
 
 
-def print_init_model(model_id):
+def print_empty_model(model_id):
 	"""
 	Accelerate 提供 init_empty_weights 上下文管理器，令所有 Parameter 和 Buffer 
 	都放在 meta device，尺寸为 0，因此既 不下载权重 也 不占内存。
@@ -17,7 +17,8 @@ def print_init_model(model_id):
 	with init_empty_weights(): 
 		model = AutoModel.from_config(cfg)
 		print(model)
-		
+	return model
+
 def print_transformers_model_summary(
     model: PreTrainedModel,
     *,
@@ -139,12 +140,12 @@ def save_model_graph(model, input_example: torch.Tensor, file_name: str = "model
     print(f"✅ Graph saved to {file_name}")
 
 if __name__ == "__main__":
-	model = AutoModel.from_pretrained(MODEL_ID)
-	input_example = torch.randint(0, 1000, (2, 2048))  # 随机输入
-	print_transformers_model_summary(
-		model=model,
-		use_torchinfo=True,
-		input_size=(2, 2048),
-		file="transformers_model_structure.txt"
-	)
-	# save_model_graph(model, input_example, "transformers_model_graph.svg")
+    # model = AutoModel.from_pretrained(MODEL_ID)
+    model =  print_empty_model(MODEL_ID)
+    input_example = torch.randint(0, 1000, (2, 2048))  # 随机输入
+    print_transformers_model_summary(
+        model=model,
+        use_torchinfo=True,
+        input_size=(2, 2048),
+        file="qwen3_8b_structure.txt"
+    )

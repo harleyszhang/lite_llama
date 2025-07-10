@@ -5,7 +5,7 @@ A light llama-like llm inference framework based on the triton kernel.
 ## 特性
 
 - 相比 transformers, llama3 1B 和 3B 模型加速比最高达 `4x` 倍。
-- 支持最新的 `llama3`、`Qwen2.5`、`Llava1.5` 模型推理，支持 `top-p` 采样, 支持流式输出。
+- 支持最新的 `llama3`、`Qwen2.5`、`Qwen3`、`Llava1.5` 模型推理，支持 `top-p` 采样, 支持流式输出。
 - 支持 GQA、~~cuda graph 优化（有限制）~~。
 - 支持 `flashattention1`、`flashattention2`、 `flashdecoding`(支持 `NopadAttention`)。
 - 支持 kv cache 的高效动态管理（`auto tokenattnetion`）。
@@ -25,11 +25,20 @@ Cuda compilation tools, release 12.1, V12.1.105
 Build cuda_12.1.r12.1/compiler.32688072_0
 # Python 3.11.8 包版本:
 # pip list | grep torch
-torch                          2.1.2
-triton                         2.1.0
+torch                          2.2.1
+triton                         2.2.0
+transformers                   4.52.4
 triton-nightly                 3.0.0.post20240716052845
 ```
+
+最新版本的 transformers 需要安装 `flash-attn` 包才能正确运行，否则会报 `flash_attn_2_cuda.cpython-310-x86_64-linux-gnu.so: undefined symbol: _ZNK3c105Error4whatEv` 错误，flash-attn 的安装可以通过 `pip install flash-attn` 方式。但是这种下载编译速度太慢，建议到 [github-flash-attention-prebuild-wheels](https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/tag/v0.0.6) 网站去下载对应版本的 wheel 包安装。
+
+```bash
+pip install flash_attn-2.4.3+cu126torch2.2-cp310-cp310-linux_x86_64.whl 
+```
+
 rocm 版本以及 torch、triton 版本：
+
 ```bash
 # rocminfo | grep -i version
 ROCk module version 6.10.5 is loaded
@@ -41,7 +50,6 @@ pytorch-triton-rocm 3.2.0
 torch               2.6.0+rocm6.2.4
 torchaudio          2.6.0+rocm6.2.4
 torchvision         0.21.0+rocm6.2.4
-
 ```
 
 ## 回答准确性验证

@@ -21,9 +21,7 @@ def main(
     max_seq_len: int = 2048,
     max_gpu_num_blocks=None,
     max_gen_len: Optional[int] = 512,
-    load_model: bool = True,
     compiled_model: bool = False,
-    triton_weight: bool = True,
 ):
     """
     主函数，处理用户输入并生成响应。
@@ -54,9 +52,7 @@ def main(
             tokenizer_path=checkpoints_dir,
             max_gpu_num_blocks=max_gpu_num_blocks,
             max_seq_len=max_seq_len,
-            load_model=load_model,
             compiled_model=compiled_model,
-            triton_weight=triton_weight,
             device=device,
         )
     except Exception as e:
