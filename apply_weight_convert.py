@@ -29,21 +29,9 @@ def main():
         help="Path to the model checkpoint directory"
     )
     parser.add_argument(
-        "--use_gptq",
-        action="store_true",
+        "--quant_method",
+        type=str,
         help="Enable GPTQ quantization"
-    )
-    parser.add_argument(
-        "--wbits",
-        type=int,
-        default=4,
-        help="Number of bits for quantization (default: 4)"
-    )
-    parser.add_argument(
-        "--groupsize",
-        type=int,
-        default=8,
-        help="Group size for quantization (default: 8)"
     )
     parser.add_argument(
         "--device",
@@ -60,18 +48,12 @@ def main():
     args = parser.parse_args()
 
     checkpoints_dir = args.checkpoints_dir
-    use_gptq = args.use_gptq
-    wbits = args.wbits
-    groupsize = args.groupsize
+    quant_method = args.quant_method
     device = args.device
     print_params = not args.no_print_params
 
     # Print configuration
     print(f"Converting model from: {checkpoints_dir}")
-    if use_gptq:
-        print(f"GPTQ Quantization enabled: {wbits} bits, groupsize {groupsize}")
-    else:
-        print("GPTQ Quantization: Disabled")
     print(f"Device: {device}")
     print("-" * 50)
 
@@ -105,9 +87,7 @@ def main():
             num_layers,
             print_params=print_params,
             device=device,
-            use_gptq=use_gptq,
-            wbits=wbits,
-            groupsize=groupsize
+            quant_method=quant_method,
         )
 
     elif "llama" in checkpoints_dir.lower():
@@ -119,9 +99,7 @@ def main():
             checkpoints_dir,
             hf_sd,
             num_layers,
-            use_gptq=use_gptq,
-            wbits=wbits,
-            groupsize=groupsize,
+            quant_method=quant_method,
             device=device
         )
 
@@ -134,9 +112,7 @@ def main():
             checkpoints_dir,
             hf_sd,
             num_layers,
-            use_gptq=use_gptq,
-            wbits=wbits,
-            groupsize=groupsize,
+            quant_method=quant_method,
             device=device
         )
     else:

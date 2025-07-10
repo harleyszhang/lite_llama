@@ -3,7 +3,9 @@ import triton.language as tl
 import torch
 import torch.nn as nn
 import numpy as np
-from ..quantization.gptq.gptq import GPTQ
+from lite_llama.quantization.gptq import GPTQ
+from lite_llama.quantization.quant_config import GPTQConfig
+
 
 @triton.autotune(
         configs=[
@@ -228,13 +230,14 @@ class GPTQLinear(nn.Module):
     4-bit quantized linear layer using Triton kernels
     """
 
-    def __init__(self, in_features, out_features, bias=True, groupsize=64, device="cuda"):
+    def __init__(self, in_features, out_features, bias=True, dtype=torch.float16, bits=4, groupsize=64, device="cuda", tile_cols=None,):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.groupsize = groupsize
         self.device = device
-
+        self.dtype = dtype  # optional
+        self.bits = bits  # optional
         self.tile_cols = groupsize
         self.original_out_features = out_features
 
@@ -280,11 +283,30 @@ class GPTQLinear(nn.Module):
         return output.view(*x.shape[:-1], self.out_features)
 
 
-def get_gpu_memory():
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-        return torch.cuda.memory_allocated() // (1024 ** 2)
-    return 0
+class AWQLinear(nn.Module):
+    """AWQ Quantized Linear Layer"""
+
+    def __init__(self, in_features: int, out_features: int, bias: bool = False,
+                 w_bit: int = 4, group_size: int = 128):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.w_bit = w_bit
+        self.group_size = group_size
+
+        # Scales and zeros for each group
+        self.register_buffer("packed_weight", None)
+        self.register_buffer("scales", None)
+        self.register_buffer("zeros", None)
+        self.register_buffer("bias", None if not bias else torch.empty(out_features))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass with dequantization"""
+        # Dequantize weights on the fly
+        weight = self.dequantize_weights()
+        return torch.nn.functional.linear(x, weight.T, self.bias)
+
+
 
 
 def test_gptqlinear_vs_nnlinear(
@@ -305,8 +327,12 @@ def test_gptqlinear_vs_nnlinear(
     bias = linear.bias.detach().to(device).float() if linear.bias is not None else None
 
     # --- Quantize using GPTQ ---
-    gptq = GPTQ(wbits=wbits, groupsize=groupsize, device=device)
-    qweight, qzeros, qscales = gptq.quantize(weight)
+    config = GPTQConfig(
+        w_bit=wbits,
+        group_size=groupsize,
+    )
+    gptq = GPTQ(config)
+    qweight, qzeros, qscales, _ = gptq.quantize(weight)
     packed_weight = GPTQLinear.pack_weight(qweight)
 
     gptqlinear = GPTQLinear(in_features, out_features, bias=True, groupsize=groupsize, device=device).to(device)
