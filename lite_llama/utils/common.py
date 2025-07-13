@@ -206,7 +206,7 @@ def get_model_dtype(checkpoints_dir: str):
 def quantization(mode: str = None):
     quantized_linear_cls = None
     if mode == 'gptq.int4':
-        from ..kernels.int4_linear import GPTQLinear
+        from ..kernels.gptq_linear import GPTQLinear
         quantized_linear_cls = functools.partial(GPTQLinear, bits=4, tile_cols=-1)
     elif mode is not None:
         raise ValueError(f"Unknown quantization mode: {mode}")
