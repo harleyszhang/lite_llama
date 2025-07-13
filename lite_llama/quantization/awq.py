@@ -9,27 +9,28 @@ import triton
 import triton.language as tl
 import time, gc, psutil, os, sys
 
-from lite_llama.quantization.quant_config import GPTQConfig  # Reusing config structure
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from lite_llama.utils.common import get_gpu_memory
 from utils import pack_weight, unpack_weight
 from lite_llama.quantization.quant_config import AWQConfig
 
+
 class AWQ:
     def __init__(
             self,
             config: AWQConfig = field(default_factory=AWQConfig),
+            wbits: int = 4,
     ):
-        self.wbits = config.w_bit
-        self.groupsize = config.group_size if config.group_size != -1 else float('inf')
-        self.device = config.device
-        self.maxq = 2 ** self.wbits - 1
+        self.config = config
+        self.wbits = self.config.w_bit
+        self.groupsize = self.config.group_size if self.config.group_size != -1 else float('inf')
+        self.device = self.config.device
+        self.maxq = 2 ** wbits - 1
         self.zero_point = config.zero_point
-        self.alpha = config.alpha
-        self.search_scale = config.search_scale
-        self.auto_scale = config.auto_scale
+        self.alpha = self.config.alpha
+        self.search_scale = self.config.search_scale
+        self.auto_scale = self.config.auto_scale
 
         # Store activation statistics
         self.activation_stats = {}
@@ -248,8 +249,26 @@ class AWQ:
                 q = torch.clamp(torch.round(w_group / scale), -(2 ** (self.wbits - 1)), 2 ** (self.wbits - 1) - 1)
 
             qweight[:, start_col:end_col] = q.to(torch.uint8)
-            qscales[:, g] = scale.squeeze(-1)
-            qzeros[:, g] = zero.squeeze(-1)
+
+            # Ensure proper dimensions when storing scales and zeros
+            scale_flat = scale.squeeze(-1) if scale.dim() > 1 else scale.flatten()
+            zero_flat = zero.squeeze(-1) if zero.dim() > 1 else zero.flatten()
+
+            # Handle dimension mismatches
+            if scale_flat.shape[0] != rows:
+                if scale_flat.numel() == 1:
+                    scale_flat = scale_flat.expand(rows)
+                else:
+                    scale_flat = scale_flat[:rows]
+
+            if zero_flat.shape[0] != rows:
+                if zero_flat.numel() == 1:
+                    zero_flat = zero_flat.expand(rows)
+                else:
+                    zero_flat = zero_flat[:rows]
+
+            qscales[:, g] = scale_flat
+            qzeros[:, g] = zero_flat
 
         return qweight, qzeros, qscales
 
@@ -305,6 +324,37 @@ class AWQ:
         num_groups = (cols + groupsize - 1) // groupsize
 
         weight = torch.zeros_like(qweight, dtype=torch.float16)
+
+        # Handle dimension mismatch - ensure scales and zeros are 2D
+        if qscales.dim() == 1:
+            if len(qscales) == rows:
+                # If scales is per-row, expand to per-group
+                qscales = qscales.unsqueeze(1).expand(-1, num_groups)
+            else:
+                # If scales is per-group, expand to per-row
+                qscales = qscales.unsqueeze(0).expand(rows, -1)
+
+        if qzeros.dim() == 1:
+            if len(qzeros) == rows:
+                # If zeros is per-row, expand to per-group
+                qzeros = qzeros.unsqueeze(1).expand(-1, num_groups)
+            else:
+                # If zeros is per-group, expand to per-row
+                qzeros = qzeros.unsqueeze(0).expand(rows, -1)
+
+        # Ensure we have the right number of groups
+        if qscales.shape[1] != num_groups:
+            # Repeat or truncate to match expected groups
+            if qscales.shape[1] == 1:
+                qscales = qscales.expand(-1, num_groups)
+            else:
+                qscales = qscales[:, :num_groups]
+
+        if qzeros.shape[1] != num_groups:
+            if qzeros.shape[1] == 1:
+                qzeros = qzeros.expand(-1, num_groups)
+            else:
+                qzeros = qzeros[:, :num_groups]
 
         for g in range(num_groups):
             start_col = g * groupsize
@@ -461,6 +511,8 @@ def demo_awq():
         "other_param": torch.randn(100)
     }
 
+    print("Starting AWQ demo...")
+
     # Quantize without calibration data (will use default scaling)
     quantized_dict = quantize_awq(
         model_state_dict=dummy_state_dict,
@@ -475,17 +527,31 @@ def demo_awq():
     config = AWQConfig(w_bit=4, group_size=128, device="cpu")
     awq = AWQ(config)
 
+    # Debug: Check dimensions of quantized tensors
+    layer_name = "layer1.q_proj"
+    print(f"\nDebugging {layer_name}:")
+    qweight = quantized_dict[f"{layer_name}.qweight"]
+    qzeros = quantized_dict[f"{layer_name}.qzeros"]
+    qscales = quantized_dict[f"{layer_name}.qscales"]
+
+    print(f"qweight shape: {qweight.shape}")
+    print(f"qzeros shape: {qzeros.shape}")
+    print(f"qscales shape: {qscales.shape}")
+
     # Dequantize one layer
     original_weight = dummy_state_dict["layer1.q_proj.weight"]
-    dequant_weight = awq.dequantize(
-        quantized_dict["layer1.q_proj.qweight"],
-        quantized_dict["layer1.q_proj.qzeros"],
-        quantized_dict["layer1.q_proj.qscales"]
-    )
+    try:
+        dequant_weight = awq.dequantize(qweight, qzeros, qscales)
 
-    print(f"Original shape: {original_weight.shape}")
-    print(f"Dequantized shape: {dequant_weight.shape}")
-    print(f"Quantization error: {(original_weight - dequant_weight).abs().mean():.6f}")
+        print(f"\nResults:")
+        print(f"Original shape: {original_weight.shape}")
+        print(f"Dequantized shape: {dequant_weight.shape}")
+        print(f"Quantization error: {(original_weight - dequant_weight).abs().mean():.6f}")
+        print("AWQ demo completed successfully!")
+
+    except Exception as e:
+        print(f"Error during dequantization: {e}")
+        print("This might indicate a dimension mismatch in the quantization process.")
 
 
 if __name__ == "__main__":

@@ -3,6 +3,8 @@ import triton.language as tl
 import torch
 import torch.nn as nn
 import numpy as np
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from lite_llama.quantization.gptq import GPTQ
 from lite_llama.quantization.quant_config import GPTQConfig
 
@@ -281,32 +283,6 @@ class GPTQLinear(nn.Module):
             output += self.bias
 
         return output.view(*x.shape[:-1], self.out_features)
-
-
-class AWQLinear(nn.Module):
-    """AWQ Quantized Linear Layer"""
-
-    def __init__(self, in_features: int, out_features: int, bias: bool = False,
-                 w_bit: int = 4, group_size: int = 128):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.w_bit = w_bit
-        self.group_size = group_size
-
-        # Scales and zeros for each group
-        self.register_buffer("packed_weight", None)
-        self.register_buffer("scales", None)
-        self.register_buffer("zeros", None)
-        self.register_buffer("bias", None if not bias else torch.empty(out_features))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass with dequantization"""
-        # Dequantize weights on the fly
-        weight = self.dequantize_weights()
-        return torch.nn.functional.linear(x, weight.T, self.bias)
-
-
 
 
 def test_gptqlinear_vs_nnlinear(
