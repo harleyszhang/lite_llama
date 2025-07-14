@@ -7,12 +7,11 @@ from typing import Dict, Tuple, Optional, Any, List
 from tqdm.auto import tqdm
 import triton
 import triton.language as tl
-import time, gc, psutil, os, sys
+import psutil, os, sys
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from lite_llama.utils.common import get_gpu_memory
-from utils import pack_weight, unpack_weight
+from lite_llama.quantization.utils import pack_weight
 from lite_llama.quantization.quant_config import AWQConfig
 
 
@@ -314,71 +313,10 @@ class AWQ:
 
         # Quantize with computed scales
         qweight, qzeros, qscales = self.quantize_with_scales(weight, scales)
+        packed_qweight = pack_weight(qweight)
 
-        return qweight, qzeros, qscales
+        return packed_qweight, qzeros.to(torch.float16), qscales.to(torch.float16)
 
-    def dequantize(self, qweight: torch.Tensor, qzeros: torch.Tensor, qscales: torch.Tensor) -> torch.Tensor:
-        """Dequantize weights back to floating point"""
-        rows, cols = qweight.shape
-        groupsize = min(int(self.groupsize), cols) if self.groupsize != float('inf') else cols
-        num_groups = (cols + groupsize - 1) // groupsize
-
-        weight = torch.zeros_like(qweight, dtype=torch.float16)
-
-        # Handle dimension mismatch - ensure scales and zeros are 2D
-        if qscales.dim() == 1:
-            if len(qscales) == rows:
-                # If scales is per-row, expand to per-group
-                qscales = qscales.unsqueeze(1).expand(-1, num_groups)
-            else:
-                # If scales is per-group, expand to per-row
-                qscales = qscales.unsqueeze(0).expand(rows, -1)
-
-        if qzeros.dim() == 1:
-            if len(qzeros) == rows:
-                # If zeros is per-row, expand to per-group
-                qzeros = qzeros.unsqueeze(1).expand(-1, num_groups)
-            else:
-                # If zeros is per-group, expand to per-row
-                qzeros = qzeros.unsqueeze(0).expand(rows, -1)
-
-        # Ensure we have the right number of groups
-        if qscales.shape[1] != num_groups:
-            # Repeat or truncate to match expected groups
-            if qscales.shape[1] == 1:
-                qscales = qscales.expand(-1, num_groups)
-            else:
-                qscales = qscales[:, :num_groups]
-
-        if qzeros.shape[1] != num_groups:
-            if qzeros.shape[1] == 1:
-                qzeros = qzeros.expand(-1, num_groups)
-            else:
-                qzeros = qzeros[:, :num_groups]
-
-        for g in range(num_groups):
-            start_col = g * groupsize
-            end_col = min((g + 1) * groupsize, cols)
-
-            scale = qscales[:, g].unsqueeze(1)
-            zero = qzeros[:, g].unsqueeze(1)
-
-            q = qweight[:, start_col:end_col].float()
-
-            if self.zero_point:
-                weight[:, start_col:end_col] = (q - zero) * scale
-            else:
-                weight[:, start_col:end_col] = q * scale
-
-        return weight
-
-    def dequantize_packed(self, packed_qweight: torch.Tensor, qzeros: torch.Tensor,
-                          qscales: torch.Tensor, original_cols: int) -> torch.Tensor:
-        """Dequantize packed weights"""
-        # Unpack the weights first
-        qweight = unpack_weight(packed_qweight, original_cols)
-        # Then dequantize normally
-        return self.dequantize(qweight, qzeros, qscales)
 
 
 def quantize_awq(
@@ -523,10 +461,6 @@ def demo_awq():
 
     print("Quantized keys:", list(quantized_dict.keys()))
 
-    # Test dequantization
-    config = AWQConfig(w_bit=4, group_size=128, device="cpu")
-    awq = AWQ(config)
-
     # Debug: Check dimensions of quantized tensors
     layer_name = "layer1.q_proj"
     print(f"\nDebugging {layer_name}:")
@@ -538,20 +472,6 @@ def demo_awq():
     print(f"qzeros shape: {qzeros.shape}")
     print(f"qscales shape: {qscales.shape}")
 
-    # Dequantize one layer
-    original_weight = dummy_state_dict["layer1.q_proj.weight"]
-    try:
-        dequant_weight = awq.dequantize(qweight, qzeros, qscales)
-
-        print(f"\nResults:")
-        print(f"Original shape: {original_weight.shape}")
-        print(f"Dequantized shape: {dequant_weight.shape}")
-        print(f"Quantization error: {(original_weight - dequant_weight).abs().mean():.6f}")
-        print("AWQ demo completed successfully!")
-
-    except Exception as e:
-        print(f"Error during dequantization: {e}")
-        print("This might indicate a dimension mismatch in the quantization process.")
 
 
 if __name__ == "__main__":
