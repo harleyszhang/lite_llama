@@ -254,27 +254,6 @@ class GPTQ:
         return packed_qweight, zeros.to(torch.float16), scales.to(torch.float16), original_cols
 
 
-    def dequantize(self, qweight: torch.Tensor, zeros: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
-        """
-        [O, I] int4, [O, num_groups] zero, [O, num_groups] scale => [O, I] float16
-        """
-        rows, cols = qweight.shape
-        # Use same effective groupsize as quantization
-        effective_groupsize = min(self.groupsize, 8)
-        effective_groupsize = max(effective_groupsize, 4)
-        num_groups = (cols + effective_groupsize - 1) // effective_groupsize
-        W = torch.zeros_like(qweight, dtype=torch.float16)
-
-        for g in range(num_groups):
-            start = g * effective_groupsize
-            end = min((g + 1) * effective_groupsize, cols)
-            scale = scales[:, g].unsqueeze(1)  # [O, 1]
-            zero = zeros[:, g].unsqueeze(1)  # [O, 1]
-            q = qweight[:, start:end].float()
-            W[:, start:end] = (q - zero) * scale
-
-        return W
-
 def quantize_gptq(
         model_state_dict: Dict[str, torch.Tensor],
         target_layers: Optional[list] = None,
