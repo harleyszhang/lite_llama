@@ -248,69 +248,6 @@ class SmoothQuantizer:
             return (qactivation.float() - zero_point) * scale
 
 
-class SmoothQuantLinear(nn.Module):
-    """Quantized Linear layer with SmoothQuant"""
-
-    def __init__(self, in_features: int, out_features: int, bias: bool = True,
-                 smoothing_factor: Optional[torch.Tensor] = None,
-                 config: SmoothQuantConfig = None):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.config = config or SmoothQuantConfig()
-
-        # Store quantized weights
-        self.register_buffer('qweight', torch.zeros(out_features, in_features, dtype=torch.int8))
-        self.register_buffer('weight_scale', torch.zeros(out_features, 1))
-        self.register_buffer('weight_zero_point', torch.zeros(out_features, 1))
-
-        # Store smoothing factor
-        if smoothing_factor is not None:
-            self.register_buffer('smoothing_factor', smoothing_factor)
-        else:
-            self.register_buffer('smoothing_factor', torch.ones(in_features))
-
-        # Bias
-        if bias:
-            self.bias = nn.Parameter(torch.zeros(out_features))
-        else:
-            self.register_parameter('bias', None)
-
-        self.quantizer = SmoothQuantizer(config)
-
-    def set_quantized_weight(self, qweight: torch.Tensor, scale: torch.Tensor,
-                             zero_point: torch.Tensor):
-        """Set quantized weight parameters"""
-        self.qweight.copy_(qweight)
-        self.weight_scale.copy_(scale)
-        self.weight_zero_point.copy_(zero_point)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Apply inverse smoothing to input activations
-        # x_smoothed = x / smoothing_factor
-        # Ensure smoothing_factor is broadcastable
-        if x.dim() == 3:  # [batch, seq, hidden]
-            smoothing_factor = self.smoothing_factor.unsqueeze(0).unsqueeze(0)  # [1, 1, hidden]
-        else:  # [batch, hidden] or other shapes
-            smoothing_factor = self.smoothing_factor.unsqueeze(0)  # [1, hidden]
-
-        x_smooth = x / smoothing_factor
-
-        # Quantize input activations
-        qx, act_scale, act_zero_point = self.quantizer.quantize_activation(x_smooth)
-
-        # Dequantize for computation (in practice, this would be done in INT8)
-        x_dequant = self.quantizer.dequantize_activation(qx, act_scale, act_zero_point)
-        weight_dequant = self.quantizer.dequantize_weight(
-            self.qweight, self.weight_scale, self.weight_zero_point
-        )
-
-        # Linear computation
-        output = F.linear(x_dequant, weight_dequant, self.bias)
-
-        return output
-
-
 def convert_to_smoothquant(model, calibration_dataloader, config: SmoothQuantConfig = None):
     """Convert a model to use SmoothQuant"""
     config = config or SmoothQuantConfig()
@@ -340,19 +277,6 @@ def convert_to_smoothquant(model, calibration_dataloader, config: SmoothQuantCon
                 smoothing_factor = quantizer.smoothing_factors.get(name,
                                                                    torch.ones(module.in_features))
 
-                # Create quantized layer
-                sq_linear = SmoothQuantLinear(
-                    module.in_features,
-                    module.out_features,
-                    bias=module.bias is not None,
-                    smoothing_factor=smoothing_factor,
-                    config=config
-                )
-
-                # Set quantized parameters
-                sq_linear.set_quantized_weight(qweight, weight_scale, weight_zero_point)
-                if module.bias is not None:
-                    sq_linear.bias.data.copy_(module.bias.data)
 
                 # Store in state dict
                 base_name = name.replace(".weight", "").replace("_weight", "")
