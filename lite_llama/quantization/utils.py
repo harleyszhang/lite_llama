@@ -1,11 +1,11 @@
 import torch
-
+from .quant_config import GPTQConfig
 
 def pack_weight(weight):
     """Pack two 4-bit values into one uint8 value"""
     rows, cols = weight.shape
     if cols % 2 != 0:
-        weight = torch.nn.functional.pad(weight, (0, 1), value=0)
+        weight = torch.cat([weight, torch.zeros(rows, 1, dtype=weight.dtype, device=weight.device)], dim=1)
         cols += 1
     packed = (weight[:, 0::2] & 0xF) | ((weight[:, 1::2] & 0xF) << 4)
     return packed.contiguous()
