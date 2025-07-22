@@ -323,9 +323,8 @@ def quantize_awq(
         model_state_dict: Dict[str, torch.Tensor],
         calibration_loader: Optional[Any] = None,
         model: Optional[torch.nn.Module] = None,
-        wbits: int = 4,
-        groupsize: int = 128,
         target_layers: Optional[List[str]] = None,
+        config: AWQConfig = None,
         device: str = "cuda"
 ) -> Dict[str, torch.Tensor]:
     """
@@ -343,12 +342,7 @@ def quantize_awq(
     Returns:
         Dictionary containing quantized weights and quantization parameters
     """
-    config = AWQConfig(
-        w_bit=wbits,
-        group_size=groupsize,
-        device=device
-    )
-
+    wbits = config.w_bit
     awq = AWQ(config)
     quantized_state_dict = {}
 
@@ -385,29 +379,6 @@ def quantize_awq(
                 hook = module.register_forward_hook(make_hook(name))
                 hooks.append(hook)
 
-        # Run calibration
-        model.eval()
-        with torch.no_grad():
-            for i, batch in enumerate(tqdm(calibration_loader, desc="Calibration")):
-                if i >= 32:  # Limit calibration samples
-                    break
-
-                # Move batch to device
-                if isinstance(batch, dict):
-                    batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
-                    outputs = model(**batch)
-                elif isinstance(batch, (list, tuple)):
-                    batch = [b.to(device) if torch.is_tensor(b) else b for b in batch]
-                    outputs = model(*batch)
-                else:
-                    batch = batch.to(device)
-                    outputs = model(batch)
-
-        # Remove hooks
-        for hook in hooks:
-            hook.remove()
-
-        print(f"Collected statistics for {len(awq.activation_stats)} layers")
 
     print(f"Quantizing {len(target_layers)} layers to {wbits} bits with AWQ...")
 
@@ -415,7 +386,7 @@ def quantize_awq(
     for name, param in tqdm(model_state_dict.items(), desc="Quantizing layers"):
         if name in target_layers and param.dim() == 2:
             # Move weight to device
-            weight = param.to(device).float()
+            weight = param.to(device)
 
             # Get layer name without .weight suffix for activation lookup
             layer_name = name.replace(".weight", "").replace("_weight", "")

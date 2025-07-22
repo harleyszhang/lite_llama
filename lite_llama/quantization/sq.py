@@ -294,7 +294,6 @@ def convert_to_smoothquant(model, calibration_dataloader, config: SmoothQuantCon
 
 
 def apply_smoothquant(model_state_dict: Dict[str, torch.Tensor],
-                      calibration_dataloader,
                       config: SmoothQuantConfig = None) -> Dict[str, torch.Tensor]:
     """
     Apply SmoothQuant to a model state dictionary
