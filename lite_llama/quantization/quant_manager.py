@@ -19,7 +19,7 @@ from .quant_config import AWQConfig, GPTQConfig, SmoothQuantConfig, QuantLayerCo
 from ..kernels.awq_linear import AWQLinear
 from ..kernels.gptq_linear import GPTQLinear
 from ..kernels.sq_linear import SmoothQuantLinear
-
+from ..utils.logger import log
 
 class QuantizationType:
     NONE = "none"
@@ -41,7 +41,7 @@ class QuantizationManager:
         }
 
     def detect_quantization_type(self, model_path: str) -> str:
-        """自动检测模型的量化类型"""
+        """Automatically detect the quantization type of the model"""
         model_path = Path(model_path)
 
         # 检查量化配置文件
@@ -77,14 +77,14 @@ class QuantizationManager:
             calibration_data: Optional[Any] = None,
             model: Optional[torch.nn.Module] = None
     ) -> str:
-        """量化模型"""
-        print(f"开始使用 {method} 方法量化模型...")
+        """Quantitative model"""
+        log.info(f"Using the {method} method to quantify the model...")
 
         # 加载原始模型状态字典
         model_path = Path(model_path)
         weight_files = list(model_path.glob("*.pth"))
         if not weight_files:
-            raise ValueError(f"在 {model_path} 中未找到权重文件")
+            raise ValueError(f"The weight file was not found in {model_path}")
 
         state_dict = torch.load(weight_files[0], map_location="cpu")
 
@@ -103,7 +103,6 @@ class QuantizationManager:
             awq_config = AWQConfig(**config)
             quantized_state_dict = quantize_awq(
                 model_state_dict=state_dict,
-                calibration_loader=calibration_data,
                 model=model,
                 config=awq_config,
                 target_layers=self._get_target_layers(state_dict),
@@ -120,7 +119,7 @@ class QuantizationManager:
             )
 
         else:
-            raise ValueError(f"不支持的量化方法: {method}")
+            raise ValueError(f"Unsupported quantitative methods: {method}")
 
         # 保存量化后的模型
         output_path = Path(output_path)
@@ -154,7 +153,7 @@ class QuantizationManager:
         with open(output_path / "quantization_config.json", 'w') as f:
             json.dump(quant_config, f, indent=2)
 
-        print(f"量化完成! 输出保存至: {output_path}")
+        log.info(f"Quantification completed! Saved to: {output_path}")
         return str(output_path)
 
     def load_quantized_model(
@@ -163,7 +162,7 @@ class QuantizationManager:
             model_config: Any,
             device: str = "cuda"
     ) -> torch.nn.Module:
-        """加载量化后的模型"""
+        """Load the quantized model"""
         quant_type = self.detect_quantization_type(model_path)
 
         if quant_type == QuantizationType.NONE:
@@ -173,10 +172,10 @@ class QuantizationManager:
         if quant_type in self.supported_methods:
             return self.supported_methods[quant_type](model_path, model_config, device)
         else:
-            raise ValueError(f"不支持的量化类型: {quant_type}")
+            raise ValueError(f"Unsupported quantization types: {quant_type}")
 
     def _load_gptq(self, model_path: str, model_config: Any, device: str) -> torch.nn.Module:
-        """加载GPTQ量化模型"""
+        """Load the GPTQ quantitative model"""
         from ..models.quantized_models import create_quantized_model
 
         # 读取量化配置
@@ -200,7 +199,7 @@ class QuantizationManager:
         return model
 
     def _load_awq(self, model_path: str, model_config: Any, device: str) -> torch.nn.Module:
-        """加载AWQ量化模型"""
+        """Load the AWQ quantification model"""
         from ..models.quantized_models import create_quantized_model
 
         # 读取量化配置
@@ -224,7 +223,7 @@ class QuantizationManager:
         return model
 
     def _load_smoothquant(self, model_path: str, model_config: Any, device: str) -> torch.nn.Module:
-        """加载SmoothQuant量化模型"""
+        """Load the SmoothQuant quantitative model"""
         from ..models.quantized_models import create_quantized_model
 
         # 读取量化配置
@@ -254,10 +253,11 @@ class QuantizationManager:
         pass
 
     def _get_target_layers(self, state_dict: Dict[str, torch.Tensor]) -> List[str]:
-        """获取需要量化的层"""
+        """Obtain the layers that need to be quantified"""
         target_layers = []
+        quant_layer = QuantLayerConfig()
         for name in state_dict.keys():
-            if any(pattern in name for pattern in QuantLayerConfig.quant_layers):
+            if any(pattern in name for pattern in quant_layer.quant_layers):
                 target_layers.append(name)
         return target_layers
 

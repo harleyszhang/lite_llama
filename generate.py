@@ -63,7 +63,7 @@ def generate_llama(
     if quantization is None:
         quantization = quantization_manager.detect_quantization_type(checkpoint_path)
         if quantization != QuantizationType.NONE:
-            log.info(f"自动检测到量化类型: {quantization}")
+            log.info(f"Automatically detect the quantization type: {quantization}")
 
     if max_seq_len <= 1024:
         short_prompt = True
@@ -134,7 +134,7 @@ def generate_llava(
     if quantization is None:
         quantization = quantization_manager.detect_quantization_type(str(checkpoint_path))
         if quantization != QuantizationType.NONE:
-            log.info(f"自动检测到量化类型: {quantization}")
+            log.info(f"Automatically detect the quantization type: {quantization}")
     
     if max_seq_len <= 1024:
         short_prompt = True
