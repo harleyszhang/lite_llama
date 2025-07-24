@@ -97,7 +97,6 @@ class QuantizedAttentionMixin:
             in_features=original_layer.in_features,
             out_features=original_layer.out_features,
             bias=original_layer.bias is not None,
-            config=sq_config
         )
         return sq_layer
 
@@ -150,13 +149,11 @@ class QuantizedMLPMixin:
     def _create_sq_linear(self, original_layer: nn.Linear, config: Dict[str, Any]) -> SmoothQuantLinear:
         """创建SmoothQuant量化线性层"""
         from ..quantization.quant_config import SmoothQuantConfig
-        sq_config = SmoothQuantConfig(**config)
 
         sq_layer = SmoothQuantLinear(
             in_features=original_layer.in_features,
             out_features=original_layer.out_features,
             bias=original_layer.bias is not None,
-            config=sq_config
         )
         return sq_layer
 

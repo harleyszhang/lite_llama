@@ -66,9 +66,9 @@ class ModelExecutor:
         # 检测或使用指定的量化类型
         if quantization is None:
             quantization = quantization_manager.detect_quantization_type(checkpoints_dir)
-            log.info(f"自动检测到量化类型: {quantization}")
+            log.info(f"Automatically detect the quantization type: {quantization}")
         else:
-            log.info(f"使用指定的量化类型: {quantization}")
+            log.info(f"Use the specified quantization type: {quantization}")
 
         model = ModelExecutor._load_model_weight(
             model_config, checkpoints_dir, device=device, quantization=quantization
@@ -105,14 +105,14 @@ class ModelExecutor:
 
         if quantization and quantization != QuantizationType.NONE:
             # 加载量化模型
-            log.info(f"加载量化模型: {quantization}")
+            log.info(f"Load quantitative model: {quantization}")
             model = quantization_manager.load_quantized_model(
                 model_path=checkpoints_dir,
                 model_config=model_config,
                 device=device
             )
 
-            log.info(f"量化模型加载完成，耗时 {time.time() - start_time:.2f}s")
+            log.info(f"The quantitative model has been loaded successfully, taking {time.time() - start_time:.2f}s")
             return model
 
         # 原有的非量化模型加载逻辑

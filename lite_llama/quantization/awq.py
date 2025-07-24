@@ -1,31 +1,19 @@
-from dataclasses import field
-
 import torch
 import torch.nn as nn
 import numpy as np
 from typing import Dict, Tuple, Optional, Any, List
 from tqdm.auto import tqdm
-import triton
-import triton.language as tl
-import psutil, os, sys
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-
 from lite_llama.quantization.utils import pack_weight
 from lite_llama.quantization.quant_config import AWQConfig
 
 
 class AWQ:
-    def __init__(
-            self,
-            config: AWQConfig = field(default_factory=AWQConfig),
-            wbits: int = 4,
-    ):
+    def __init__(self, config: AWQConfig):
         self.config = config
         self.wbits = self.config.w_bit
         self.groupsize = self.config.group_size if self.config.group_size != -1 else float('inf')
         self.device = self.config.device
-        self.maxq = 2 ** wbits - 1
+        self.maxq = 2 ** self.wbits - 1  # For 4-bit: 0-15
         self.zero_point = config.zero_point
         self.alpha = self.config.alpha
         self.search_scale = self.config.search_scale
@@ -33,7 +21,6 @@ class AWQ:
 
         # Store activation statistics
         self.activation_stats = {}
-        self.collected_inputs = {}
 
     def collect_activations(self, layer_name: str, input_tensor: torch.Tensor):
         """Collect activation statistics for AWQ calibration"""
@@ -44,22 +31,18 @@ class AWQ:
                 'inputs': []
             }
 
-        # Store input activations
-        if len(self.activation_stats[layer_name]['inputs']) < 128:  # Limit storage
+        # Store input activations (limit storage to prevent OOM)
+        if len(self.activation_stats[layer_name]['inputs']) < 32:
             self.activation_stats[layer_name]['inputs'].append(input_tensor.detach().cpu())
 
-        # Compute statistics across the sequence dimension
-        # Input shape is typically [batch, seq_len, hidden_dim]
-        if input_tensor.dim() == 3:
-            # Average across batch and sequence dimensions
+        # Compute per-channel statistics
+        if input_tensor.dim() == 3:  # [batch, seq, hidden]
             channel_means = input_tensor.abs().mean(dim=(0, 1))
             channel_maxs = input_tensor.abs().max(dim=1)[0].max(dim=0)[0]
-        elif input_tensor.dim() == 2:
-            # Average across batch dimension
+        elif input_tensor.dim() == 2:  # [batch, hidden]
             channel_means = input_tensor.abs().mean(dim=0)
             channel_maxs = input_tensor.abs().max(dim=0)[0]
         else:
-            # Flatten and compute
             channel_means = input_tensor.abs().view(-1, input_tensor.shape[-1]).mean(dim=0)
             channel_maxs = input_tensor.abs().view(-1, input_tensor.shape[-1]).max(dim=0)[0]
 
@@ -72,8 +55,6 @@ class AWQ:
             return None
 
         stats = self.activation_stats[layer_name]
-
-        # Aggregate statistics across all collected samples
         if stats['mean']:
             mean_activations = torch.stack(stats['mean']).mean(dim=0)
             max_activations = torch.stack(stats['max']).mean(dim=0)
@@ -84,114 +65,57 @@ class AWQ:
             # Select top-k% most salient channels
             num_salient = max(1, int(len(saliency_score) * top_k))
             _, salient_indices = torch.topk(saliency_score, num_salient)
-
             return salient_indices
 
         return None
-
-    def pseudo_quantize_tensor(self, w: torch.Tensor, n_bit: int = 4, zero_point: bool = True,
-                               q_group_size: int = -1, inplace: bool = False):
-        """Pseudo-quantize tensor to simulate quantization effects"""
-        org_w_shape = w.shape
-        if q_group_size > 0:
-            assert org_w_shape[-1] % q_group_size == 0
-            w = w.reshape(-1, q_group_size)
-
-        assert w.dim() == 2
-        if zero_point:
-            max_val = w.amax(dim=1, keepdim=True)
-            min_val = w.amin(dim=1, keepdim=True)
-            max_int = 2 ** n_bit - 1
-            min_int = 0
-            scales = (max_val - min_val).clamp(min=1e-5) / max_int
-            zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)
-        else:
-            max_val = w.abs().amax(dim=1, keepdim=True)
-            max_val = max_val.clamp(min=1e-5)
-            max_int = 2 ** (n_bit - 1) - 1
-            min_int = -(2 ** (n_bit - 1))
-            scales = max_val / max_int
-            zeros = torch.zeros_like(scales)
-
-        assert torch.isnan(scales).sum() == 0
-        assert torch.isnan(w).sum() == 0
-
-        if inplace:
-            ((w.div_(scales).round_().add_(zeros)).clamp_(min_int, max_int).sub_(zeros)).mul_(scales)
-            return w
-        else:
-            w_sim = ((w / scales).round() + zeros).clamp(min_int, max_int)
-            w_sim = (w_sim - zeros) * scales
-            return w_sim.reshape(org_w_shape)
 
     def search_best_scale(self, layer_name: str, weight: torch.Tensor, input_feat: torch.Tensor) -> torch.Tensor:
         """Search for the best per-channel scaling factors"""
         device = weight.device
         org_out = torch.matmul(input_feat, weight.t())
 
-        if org_out.abs().max() < 0.2:
+        if org_out.abs().max() < 0.01:  # Very small activations
             return torch.ones(weight.shape[0], device=device, dtype=weight.dtype)
 
-        w_abs_max = weight.abs().max(dim=1)[0].clamp(min=1e-5)
-
-        # Get salient channels for this layer
+        # Get salient channels
         salient_channels = self.get_salient_channels(layer_name)
 
-        # Grid search for best scaling factors
         best_error = float('inf')
-        best_scales = torch.ones_like(w_abs_max)
+        best_scales = torch.ones(weight.shape[0], device=device, dtype=weight.dtype)
 
-        # Different alpha values for grid search
+        # Grid search for best alpha
         alpha_candidates = [0.0, 0.1, 0.25, 0.5, 0.75, 1.0] if self.search_scale else [self.alpha]
 
         for alpha in alpha_candidates:
-            # Compute scales based on activation statistics
-            if salient_channels is not None and len(salient_channels) > 0:
-                # Protect salient channels with different scaling
-                scales = torch.ones_like(w_abs_max)
+            # Compute channel-wise scaling factors
+            if layer_name in self.activation_stats and self.activation_stats[layer_name]['mean']:
+                stats = self.activation_stats[layer_name]
+                mean_activations = torch.stack(stats['mean']).mean(dim=0).to(device)
 
-                # For salient channels, use more conservative scaling
-                if layer_name in self.activation_stats:
-                    stats = self.activation_stats[layer_name]
-                    if stats['mean']:
-                        mean_activations = torch.stack(stats['mean']).mean(dim=0).to(device)
+                # AWQ scaling: s_j = (max|X_j|^alpha) / (max|W_j|^(1-alpha))
+                weight_max = weight.abs().max(dim=0)[0].clamp(min=1e-5)
+                act_max = mean_activations.clamp(min=1e-5)
 
-                        # Scale based on activation magnitude
-                        activation_scales = mean_activations.pow(alpha)
-                        activation_scales = activation_scales / activation_scales.max()
+                scales = act_max.pow(alpha) / weight_max.pow(1 - alpha)
+                scales = scales.clamp(min=0.1, max=10.0)  # Prevent extreme values
 
-                        # Apply different scaling to salient vs non-salient channels
-                        scales = activation_scales.clamp(min=0.1, max=1.0)
-
-                        # Give salient channels more protection (higher scale values)
-                        scales[salient_channels] = scales[salient_channels].clamp(min=0.5)
-                else:
-                    # Fallback to weight-based scaling
-                    scales = w_abs_max.pow(alpha)
-                    scales = scales / scales.max()
+                # Protect salient channels with higher scale values
+                if salient_channels is not None:
+                    scales[salient_channels] = scales[salient_channels].clamp(min=0.5)
             else:
-                # Standard AWQ scaling without saliency
-                if layer_name in self.activation_stats and self.activation_stats[layer_name]['mean']:
-                    stats = self.activation_stats[layer_name]
-                    mean_activations = torch.stack(stats['mean']).mean(dim=0).to(device)
-                    scales = mean_activations.pow(alpha)
-                    scales = scales / scales.max()
-                else:
-                    scales = w_abs_max.pow(alpha)
-                    scales = scales / scales.max()
+                # Fallback to weight-based scaling
+                weight_max = weight.abs().max(dim=0)[0]
+                scales = weight_max.pow(alpha).clamp(min=0.1, max=10.0)
+                scales = scales / scales.max()  # Normalize
 
-            scales = scales.clamp(min=0.1, max=1.0)
-
-            # Apply scaling and quantize
+            # Test this scaling
             weight_scaled = weight * scales.view(-1, 1)
-            weight_sim = self.pseudo_quantize_tensor(
-                weight_scaled,
-                n_bit=self.wbits,
-                zero_point=self.zero_point,
-                q_group_size=self.groupsize if self.groupsize != float('inf') else -1
-            )
+            qweight, qzeros, qscales = self.quantize_with_scales(weight_scaled, torch.ones_like(scales))
 
-            # Compute error
+            # Dequantize to test reconstruction quality
+            weight_sim = self.dequantize_weight(qweight, qzeros, qscales, weight.shape[1])
+
+            # Compute reconstruction error
             out_sim = torch.matmul(input_feat, weight_sim.t())
             loss = (org_out - out_sim).float().pow(2).mean().item()
 
@@ -203,11 +127,11 @@ class AWQ:
 
     def quantize_with_scales(self, weight: torch.Tensor, scales: torch.Tensor) -> Tuple[
         torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Quantize weight with given per-channel scales"""
+        """quantization with proper scaling"""
         device = weight.device
         rows, cols = weight.shape
 
-        # Apply per-channel scaling
+        # Apply per-output-channel scaling
         weight_scaled = weight * scales.view(-1, 1)
 
         # Group-wise quantization
@@ -225,72 +149,67 @@ class AWQ:
         for g in range(num_groups):
             start_col = g * groupsize
             end_col = min((g + 1) * groupsize, cols)
-
             w_group = weight_scaled[:, start_col:end_col]
 
             if self.zero_point:
+                # Asymmetric quantization: map [w_min, w_max] to [0, 2^bits-1]
                 w_min = w_group.min(dim=1, keepdim=True)[0]
                 w_max = w_group.max(dim=1, keepdim=True)[0]
 
+                # Compute scale and zero point
                 range_val = (w_max - w_min).clamp(min=1e-5)
                 scale = range_val / self.maxq
-                zero = torch.round(-w_min / scale).clamp(0, self.maxq)
+                zero = (-w_min / scale).round().clamp(0, self.maxq)
 
+                # Quantize: q = round((w - w_min) / scale) = round(w/scale + zero)
+                q = torch.round(w_group / scale + zero).clamp(0, self.maxq)
             else:
+                # Symmetric quantization around zero
                 w_max = w_group.abs().max(dim=1, keepdim=True)[0].clamp(min=1e-5)
-                scale = w_max / (2 ** (self.wbits - 1) - 1)
-                zero = torch.zeros_like(scale)
+                scale = w_max / (self.maxq // 2)  # Use half range for signed values
+                zero = torch.full_like(scale, self.maxq // 2)  # Midpoint as zero
 
-            # Quantize
-            if self.zero_point:
-                q = torch.clamp(torch.round(w_group / scale + zero), 0, self.maxq)
-            else:
-                q = torch.clamp(torch.round(w_group / scale), -(2 ** (self.wbits - 1)), 2 ** (self.wbits - 1) - 1)
+                # Quantize: q = round(w / scale) + zero_point
+                q = torch.round(w_group / scale + zero).clamp(0, self.maxq)
 
             qweight[:, start_col:end_col] = q.to(torch.uint8)
+            qscales[:, g] = scale.squeeze(-1)
+            qzeros[:, g] = zero.squeeze(-1)
 
-            # Ensure proper dimensions when storing scales and zeros
-            scale_flat = scale.squeeze(-1) if scale.dim() > 1 else scale.flatten()
-            zero_flat = zero.squeeze(-1) if zero.dim() > 1 else zero.flatten()
+        return qweight, qzeros.to(torch.float16), qscales.to(torch.float16)
 
-            # Handle dimension mismatches
-            if scale_flat.shape[0] != rows:
-                if scale_flat.numel() == 1:
-                    scale_flat = scale_flat.expand(rows)
-                else:
-                    scale_flat = scale_flat[:rows]
+    def dequantize_weight(self, qweight: torch.Tensor, qzeros: torch.Tensor,
+                          qscales: torch.Tensor, original_cols: int) -> torch.Tensor:
+        """Dequantize weights for testing"""
+        rows, _ = qweight.shape
+        num_groups = qzeros.shape[1]
+        groupsize = (original_cols + num_groups - 1) // num_groups
 
-            if zero_flat.shape[0] != rows:
-                if zero_flat.numel() == 1:
-                    zero_flat = zero_flat.expand(rows)
-                else:
-                    zero_flat = zero_flat[:rows]
+        weight = torch.zeros((rows, original_cols), dtype=torch.float16, device=qweight.device)
 
-            qscales[:, g] = scale_flat
-            qzeros[:, g] = zero_flat
+        for g in range(num_groups):
+            start_col = g * groupsize
+            end_col = min((g + 1) * groupsize, original_cols)
 
-        return qweight, qzeros, qscales
+            q = qweight[:, start_col:end_col].float()
+            scale = qscales[:, g:g + 1]
+            zero = qzeros[:, g:g + 1]
+
+            # Dequantize: w = (q - zero) * scale
+            weight[:, start_col:end_col] = ((q - zero) * scale).to(torch.float16)
+
+        return weight
 
     def quantize(self, weight: torch.Tensor, layer_name: str = "") -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Main AWQ quantization function
-        Args:
-            weight: Weight tensor to quantize [out_features, in_features]
-            layer_name: Name of the layer for activation lookup
-        Returns:
-            Tuple of (quantized_weight, zeros, scales)
-        """
+        """Main AWQ quantization function with fixes"""
         assert weight.ndim == 2
         device = weight.device
 
         # Get representative input if available
         input_feat = None
         if layer_name in self.activation_stats and self.activation_stats[layer_name]['inputs']:
-            # Use first few inputs for calibration
-            inputs = self.activation_stats[layer_name]['inputs'][:5]
+            inputs = self.activation_stats[layer_name]['inputs'][:3]  # Use first few
             input_feat = torch.cat([inp.to(device) for inp in inputs], dim=0)
-
-            # Reshape if needed: [batch*seq, hidden] -> [batch*seq, hidden]
             if input_feat.dim() == 3:
                 input_feat = input_feat.view(-1, input_feat.shape[-1])
 
@@ -298,14 +217,17 @@ class AWQ:
         if input_feat is not None and self.search_scale:
             scales = self.search_best_scale(layer_name, weight, input_feat)
         else:
-            # Fallback to uniform scaling or activation-based scaling
+            # Use activation statistics for scaling
             if self.auto_scale and layer_name in self.activation_stats:
                 stats = self.activation_stats[layer_name]
                 if stats['mean']:
                     mean_activations = torch.stack(stats['mean']).mean(dim=0).to(device)
-                    scales = mean_activations.pow(self.alpha)
-                    scales = scales / scales.max()
-                    scales = scales.clamp(min=0.1, max=1.0)
+                    weight_max = weight.abs().max(dim=0)[0].clamp(min=1e-5)
+                    act_max = mean_activations.clamp(min=1e-5)
+
+                    scales = act_max.pow(self.alpha) / weight_max.pow(1 - self.alpha)
+                    scales = scales.clamp(min=0.1, max=10.0)
+                    scales = scales / scales.max()  # Normalize
                 else:
                     scales = torch.ones(weight.shape[0], device=device, dtype=weight.dtype)
             else:
@@ -313,10 +235,11 @@ class AWQ:
 
         # Quantize with computed scales
         qweight, qzeros, qscales = self.quantize_with_scales(weight, scales)
+
+        # Pack weights consistently
         packed_qweight = pack_weight(qweight)
 
-        return packed_qweight, qzeros.to(torch.float16), qscales.to(torch.float16)
-
+        return packed_qweight, qzeros, qscales
 
 
 def quantize_awq(
@@ -327,26 +250,12 @@ def quantize_awq(
         config: AWQConfig = None,
         device: str = "cuda"
 ) -> Dict[str, torch.Tensor]:
-    """
-    Quantize model weights using AWQ algorithm
+    """AWQ quantization function"""
 
-    Args:
-        model_state_dict: Original model state dictionary
-        calibration_loader: DataLoader for calibration data
-        model: Original model for activation collection
-        wbits: Number of bits for quantization
-        groupsize: Group size for quantization
-        target_layers: List of layer names to quantize
-        device: Device to perform quantization on
-
-    Returns:
-        Dictionary containing quantized weights and quantization parameters
-    """
-    wbits = config.w_bit
     awq = AWQ(config)
     quantized_state_dict = {}
 
-    # Default target layers if not specified
+    # Default target layers
     if target_layers is None:
         target_layers = []
         for name in model_state_dict.keys():
@@ -361,7 +270,6 @@ def quantize_awq(
     if calibration_loader is not None and model is not None:
         print("Collecting activation statistics for AWQ...")
 
-        # Register hooks to collect activations
         hooks = []
 
         def make_hook(layer_name):
@@ -373,22 +281,35 @@ def quantize_awq(
 
             return hook_fn
 
-        # Register hooks for target layers
+        # Register hooks
         for name, module in model.named_modules():
             if name in target_layers and isinstance(module, torch.nn.Linear):
                 hook = module.register_forward_hook(make_hook(name))
                 hooks.append(hook)
 
+        # Run calibration
+        model.eval()
+        with torch.no_grad():
+            for i, batch in enumerate(tqdm(calibration_loader, desc="Calibrating")):
+                if i >= 32:  # Limit calibration samples
+                    break
+                try:
+                    if hasattr(model, 'forward'):
+                        _ = model(batch)
+                except Exception as e:
+                    print(f"Calibration batch {i} failed: {e}")
+                    continue
 
-    print(f"Quantizing {len(target_layers)} layers to {wbits} bits with AWQ...")
+        # Remove hooks
+        for hook in hooks:
+            hook.remove()
+
+    print(f"Quantizing {len(target_layers)} layers to {config.w_bit} bits with AWQ...")
 
     # Quantize each target layer
     for name, param in tqdm(model_state_dict.items(), desc="Quantizing layers"):
         if name in target_layers and param.dim() == 2:
-            # Move weight to device
             weight = param.to(device)
-
-            # Get layer name without .weight suffix for activation lookup
             layer_name = name.replace(".weight", "").replace("_weight", "")
 
             # Quantize using AWQ
@@ -399,51 +320,9 @@ def quantize_awq(
             quantized_state_dict[f"{base_name}.qweight"] = qweight.cpu()
             quantized_state_dict[f"{base_name}.qzeros"] = qzeros.cpu()
             quantized_state_dict[f"{base_name}.qscales"] = qscales.cpu()
-
         else:
-            # Keep non-quantized parameters as is
+            # Keep non-quantized parameters
             quantized_state_dict[name] = param.cpu()
 
     print("AWQ quantization completed!")
     return quantized_state_dict
-
-
-# Example usage function
-def demo_awq():
-    """Demo function showing how to use AWQ"""
-    # Create a dummy model state dict
-    dummy_state_dict = {
-        "layer1.q_proj.weight": torch.randn(768, 768),
-        "layer1.k_proj.weight": torch.randn(768, 768),
-        "layer1.v_proj.weight": torch.randn(768, 768),
-        "layer1.o_proj.weight": torch.randn(768, 768),
-        "other_param": torch.randn(100)
-    }
-
-    print("Starting AWQ demo...")
-
-    # Quantize without calibration data (will use default scaling)
-    quantized_dict = quantize_awq(
-        model_state_dict=dummy_state_dict,
-        wbits=4,
-        groupsize=128,
-        device="cpu"
-    )
-
-    print("Quantized keys:", list(quantized_dict.keys()))
-
-    # Debug: Check dimensions of quantized tensors
-    layer_name = "layer1.q_proj"
-    print(f"\nDebugging {layer_name}:")
-    qweight = quantized_dict[f"{layer_name}.qweight"]
-    qzeros = quantized_dict[f"{layer_name}.qzeros"]
-    qscales = quantized_dict[f"{layer_name}.qscales"]
-
-    print(f"qweight shape: {qweight.shape}")
-    print(f"qzeros shape: {qzeros.shape}")
-    print(f"qscales shape: {qscales.shape}")
-
-
-
-if __name__ == "__main__":
-    demo_awq()
