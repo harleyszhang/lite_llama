@@ -86,10 +86,11 @@ class AWQBenchmark:
             state_dict["test_layer.bias"] = linear_layer.bias.data
 
         # Quantize using AWQ
+        from lite_llama.quantization.quant_config import AWQConfig
+        awq_config = AWQConfig()
         quantized_dict = quantize_awq(
             model_state_dict=state_dict,
-            wbits=4,
-            groupsize=group_size,
+            config=awq_config,
             target_layers=["test_layer.weight"],
             device=str(self.device)
         )
