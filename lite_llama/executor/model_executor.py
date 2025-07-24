@@ -199,7 +199,7 @@ class ModelExecutor:
             self.max_gpu_num_tokens = max_gpu_num_blocks
         else:
             max_gpu_num_blocks, self.max_gpu_num_tokens = (
-                self._get_max_avaliable_tokens(gpu_memory_utilization=0.9, block_size=1)
+                self._get_max_avaliable_tokens(model,gpu_memory_utilization=0.9, block_size=1)
             )
             self.kv_mem_manager = self._init_mem_manager(
                 max_gpu_num_blocks, block_size=1
@@ -219,7 +219,7 @@ class ModelExecutor:
         if self.compiled_model:
             self.apply_cuda_graph()  # 调用 cuda graph 优化
 
-    def _get_max_avaliable_tokens(self, gpu_memory_utilization=0.9, block_size=1):
+    def _get_max_avaliable_tokens(self,model, gpu_memory_utilization=0.9, block_size=1):
         avaliable_blocks = ComputeMaxAvailableBlocks(
             num_layers=self.llm_config.num_layers,
             hidden_size=self.llm_config.hidden_size,
@@ -228,7 +228,7 @@ class ModelExecutor:
             gpu_memory_utilization=gpu_memory_utilization,
             block_size=block_size,
         )
-        max_gpu_num_blocks = avaliable_blocks.compute_num_available_blocks()
+        max_gpu_num_blocks = avaliable_blocks.compute_num_available_blocks(model,model_path='/home/hvac/wangkai/workspace/lite_llama/my_weight/Qwen2.5-3B-Instruct')
         max_gpu_num_tokens = max_gpu_num_blocks * block_size
 
         return max_gpu_num_blocks, max_gpu_num_tokens
