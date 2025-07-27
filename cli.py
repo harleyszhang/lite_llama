@@ -12,7 +12,7 @@ def main(
     temperature: float = 0.6,
     top_p: float = 0.9,
     max_seq_len: int = 2048,
-    max_gpu_num_blocks=40960,
+    max_gpu_num_blocks=None,
     max_gen_len: Optional[int] = 1024,
     compiled_model: bool = False,
 ):

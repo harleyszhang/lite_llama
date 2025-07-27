@@ -1,13 +1,14 @@
 from typing import Optional
 import torch
-from utils.logger import log
-from typing import List, Literal, Optional, Tuple, TypedDict
+from typing import Literal, Optional, TypedDict
 import torch.nn.functional as F
 from transformers import AutoTokenizer
 
 from .executor.model_executor import ModelExecutor
 from .utils.file_interface import get_model_name_from_path
+from .utils.logger import get_logger
 
+logger = get_logger(__name__)
 
 Role = Literal["system", "user", "assistant"]
 
@@ -19,17 +20,17 @@ class Message(TypedDict):
 
 class CompletionPrediction(TypedDict, total=False):
     generation: str
-    tokens: List[str]
-    logprobs: List[float]
+    tokens: list[str]
+    logprobs: list[float]
 
 
 class ChatPrediction(TypedDict, total=False):
     generation: Message
-    tokens: List[str]
-    logprobs: List[float]
+    tokens: list[str]
+    logprobs: list[float]
 
 
-Dialog = List[Message]
+Dialog = list[Message]
 
 B_INST, E_INST = "[INST]", "[/INST]"
 B_SYS, E_SYS = "<<SYS>>\n", "\n<</SYS>>\n\n"
@@ -90,14 +91,14 @@ class GenerateText:
     @torch.inference_mode()
     def generate(
         self,
-        prompt_tokens: List[List[int]],
+        prompt_tokens: list[list[int]],
         max_gen_len: int,
         temperature: float = 0.6,
         top_p: float = 0.9,
         logprobs: bool = True,
         echo: bool = False,
         device="cuda",
-    ) -> Tuple[List[List[int]], Optional[List[List[float]]]]:
+    ) -> tuple[list[list[int]], Optional[list[list[float]]]]:
         """
         基于提供的提示词 (prompts) 使用语言生成模型生成文本序列。
         """
@@ -210,8 +211,8 @@ class GenerateText:
         tokens_per_second = (
             token_count / elapsed_time_sec if elapsed_time_sec > 0 else float("inf")
         )
-        log.info(f"Batch inference time, no decode: {elapsed_time_sec * 1000:.4f} ms")
-        log.info(f"Tokens per second, no decode: {tokens_per_second:.2f} tokens/s")
+        logger.info(f"Batch inference time, no decode: {elapsed_time_sec * 1000:.4f} ms")
+        logger.info(f"Tokens per second, no decode: {tokens_per_second:.2f} tokens/s")
 
         out_tokens, out_logprobs = self.process_output_tokens(
             tokens,
@@ -231,14 +232,14 @@ class GenerateText:
 
     def text_completion(
         self,
-        prompts: List[str],
+        prompts: list[str],
         temperature: float = 0.6,
         top_p: float = 0.9,
         max_gen_len: Optional[int] = None,
         logprobs: bool = False,
         echo: bool = False,
         device="cuda",
-    ) -> List[CompletionPrediction]:
+    ) -> list[CompletionPrediction]:
         if max_gen_len is None:
             max_gen_len = self.model_config.max_seq_len - 1
 
@@ -274,13 +275,13 @@ class GenerateText:
     def process_output_tokens(
         self,
         tokens: torch.Tensor,
-        prompt_tokens: List[List[int]],
+        prompt_tokens: list[list[int]],
         max_gen_len: int,
         logprobs: bool,
         echo: bool,
         eos_token_id,
         token_logprobs: Optional[torch.Tensor] = None,
-    ) -> Tuple[List[List[int]], Optional[List[List[float]]]]:
+    ) -> tuple[list[list[int]], Optional[list[list[float]]]]:
         out_tokens = []
         out_logprobs = [] if logprobs else None
         tokens_list = tokens.tolist()  # 转为CPU列表，只在最终处理输出时进行
@@ -312,12 +313,12 @@ class GenerateText:
 
     def chat_completion(
         self,
-        dialogs: List[Dialog],
+        dialogs: list[Dialog],
         temperature: float = 0.6,
         top_p: float = 0.9,
         max_gen_len: Optional[int] = None,
         logprobs: bool = False,
-    ) -> List[ChatPrediction]:
+    ) -> list[ChatPrediction]:
         if max_gen_len is None:
             max_gen_len = self.model_config.max_seq_len - 1
         prompt_tokens = []
@@ -342,7 +343,7 @@ class GenerateText:
                 "model only supports 'system', 'user' and 'assistant' roles, "
                 "starting with 'system', then 'user' and alternating (u/a/u/a/u...)"
             )
-            dialog_tokens: List[int] = sum(
+            dialog_tokens: list[int] = sum(
                 [
                     self.tokenizer.encode(
                         f"{B_INST} {(prompt['content']).strip()} {E_INST} {(answer['content']).strip()} "

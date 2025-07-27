@@ -1,14 +1,13 @@
 import torch
-import logging, gc
-from typing import List
-
-from ..utils.Dummy_data import DummyInputGenerator
-from ..models.model_config import LlamaConfig, Qwen2Config
-from ..executor.executor_struct import AttentionInfo
-import json
+import json, gc
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from ..utils.dummy_data import DummyInputGenerator
+from .executor_struct import AttentionInfo, CONFIG_CLASS_MAP
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 def get_dtype_size(dtype: torch.dtype) -> int:
     """Get the size of the data type in bytes."""
@@ -25,10 +24,11 @@ class ComputeMaxAvailableBlocks:
         hidden_size, 
         num_heads, 
         num_kv_heads, 
-        head_dim = None, 
+        head_dim, 
         gpu_memory_utilization=0.9, 
         block_size=1, 
-        dtype="float16"
+        dtype=torch.float16,
+        device="cuda"
     ):
         self.hidden_size = hidden_size
         self.num_heads = num_heads
@@ -39,33 +39,21 @@ class ComputeMaxAvailableBlocks:
         self.gpu_memory_utilization = gpu_memory_utilization
         self.block_size = block_size # 一个 block 表示多少个 tokens
         self.dtype = dtype
-        
-        if self.dtype in ["float16", "bfloat16", "fp16", "bfp16"]:
-            self.dtype_size = 2
-        elif self.dtype in ["int8", "fp18"]:
-            self.dtype_size = 1 # byte
-        else:
-            print(f"Unsupported dtype: {self.dtype_size}!")
+        self.device = device
+        self.dtype_size = get_dtype_size(dtype)
         
     def compute_cache_block_size_bytes(self):
         """Get the size of the KV cache block size in bytes.
         """
-        if self.head_dim is None:
-            head_size = self.hidden_size // self.num_heads
-        else:
-            head_size = self.head_dim
-        
-        num_layers = self.num_layers
-        num_kv_heads = self.num_kv_heads
-        # num_heads * head_size = hidden_size
-        kv_cache_token_bytes_per_layer = (num_kv_heads * head_size) * 2 * self.dtype_size
-        transformer_kv_cache_token_bytes = kv_cache_token_bytes_per_layer * num_layers
+
+        kv_cache_token_bytes_per_layer = (self.num_kv_heads * self.head_dim) * 2 * self.dtype_size
+        transformer_kv_cache_token_bytes = kv_cache_token_bytes_per_layer * self.num_layers
 
         transformer_kv_cache_blocks_bytes = transformer_kv_cache_token_bytes * self.block_size
 
         return transformer_kv_cache_blocks_bytes
 
-    def compute_num_available_blocks(self, model,model_path=None, model_byes=None):
+    def compute_num_available_blocks(self, model, model_path=None):
         """
         评估模型的峰值内存使用情况，以确定在不发生内存溢出的情况下可以分配的 KV（键值）缓存块的数量。
 
@@ -80,46 +68,37 @@ class ComputeMaxAvailableBlocks:
         # NOTE: torch.cuda.reset_peak_memory_stats() 用于重置 CUDA 内存分配器所跟踪的“峰值”统计数据。
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
-        # 获取当前 GPU 的空闲内存和总内存（单位：字节）
-        # free_memory_pre_profile=9178578944
+        # 获取当前 GPU 的空闲内存和总内存（单位：字节）# free_memory_pre_profile=9178578944
         free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
         # 使用虚拟输入执行一次前向传播，以评估模型的内存使用情况        
-        # # 加载模型配置
         params_path = Path(model_path) / "config.json"
         if params_path.exists():
             with open(params_path, "r") as f:
                 params = json.load(f)
-                    
-                # 根据模型类型创建适当的配置
-                if params.get("model_type") == "llama":
-                    model_config = LlamaConfig.from_dict(params)
-                elif params.get("model_type") == "qwen2":
-                    model_config = Qwen2Config(params, max_seq_len=2048, device="cuda")
-                else:
-                    logger.warning(f"Unsupported model type: {params.get('model_type')}, skipping dummy forward pass")
-                    return 0
+                model_config = CONFIG_CLASS_MAP.get(params["model_type"].lower())
                     
                 # 创建虚拟输入 
                 batch_size = 1
                 seq_len = 32  # 使用较小的序列长度进行内存评估
                 dummy_generator = DummyInputGenerator(device="cuda")
-                dummy_input, dummy_position_ids = dummy_generator.generate_dummy_input(model_config,batch_size,seq_len)
+                dummy_input, dummy_position_ids = dummy_generator.generate_dummy_input(model_config, batch_size, seq_len)
                     
                 # 创建虚拟的 atten_info 对象
-                
                 dummy_atten_info = AttentionInfo()
+                
                 dummy_atten_info.kv_buffer = [
-                        torch.empty((seq_len, 2 * model_config.num_kv_heads, model_config.head_dim), dtype=torch.float16, device="cuda:5") for _ in range(model_config.num_layers)
-                    ]
+                    torch.empty((seq_len, 2 * self.num_kv_heads, self.head_dim), dtype=self.dtype, device=self.device) for _ in range(self.num_layers)
+                ]
+                
                 dummy_atten_info.cur_select_index = torch.arange(seq_len, dtype=torch.int32, device="cuda")
                 dummy_atten_info.b_start_loc = torch.tensor([0], dtype=torch.int32, device="cuda")
-                dummy_atten_info.b_seq_len = torch.tensor([1])
+                dummy_atten_info.b_seq_len = torch.tensor([1], device="cuda")
                 dummy_atten_info.max_actual_seq_len=seq_len
                 # 执行前向传播
                 with torch.no_grad():
                     _ = model(dummy_input, dummy_position_ids, dummy_atten_info)
-                                
-        print("模型加载后可用内存:", torch.cuda.mem_get_info()[0] / (1024**3), "GB")        
+
+        logger.info(f"模型加载后可用内存: {torch.cuda.mem_get_info()[0] / (1024**3):.2f} GB")
         # 同步 CUDA 操作，确保内存信息准确
         torch.cuda.synchronize()
         # 计算模型加载后的峰值内存使用量. Get the peak memory allocation recorded by torch
@@ -145,29 +124,23 @@ class ComputeMaxAvailableBlocks:
             (total_gpu_memory * self.gpu_memory_utilization -
             peak_memory) // cache_block_size
         )
-        # 确保缓存块数量不为负数
-        num_gpu_blocks = max(num_gpu_blocks, 0)
+        
+        num_gpu_blocks = max(num_gpu_blocks, 0) # 确保缓存块数量不为负数
 
         logger.info(
-                " Memory profiling results: total_gpu_memory = %.2f GB \n"
-                "    initial_memory_usage = %.2f GB peak_torch_memory = %.2f GB \n"
-                "    memory_usage_post_profile = %.2f GB \n"
-                "    non_torch_memory = %.2f GB, kv_cache_size = %.2f GB \n"
-                "    gpu_memory_utilization = %.2f", total_gpu_memory / (1024**3),
-                (total_gpu_memory - free_memory_pre_profile) / (1024**3),
-                (peak_memory - non_torch_allocations) / (1024**3),
-                total_allocated_bytes / (1024**3),
-                non_torch_allocations / (1024**3),
-                available_kv_cache_memory / (1024**3),
-                self.gpu_memory_utilization)
+            f" Memory profiling results: total_gpu_memory = {total_gpu_memory / (1024**3):.2f} GB \n"
+            f"    initial_memory_usage = {(total_gpu_memory - free_memory_pre_profile) / (1024**3):.2f} GB "
+            f"peak_torch_memory = {(peak_memory - non_torch_allocations) / (1024**3):.2f} GB \n"
+            f"    memory_usage_post_profile = {total_allocated_bytes / (1024**3):.2f} GB \n"
+            f"    non_torch_memory = {non_torch_allocations / (1024**3):.2f} GB, "
+            f"kv_cache_size = {available_kv_cache_memory / (1024**3):.2f} GB \n"
+            f"    gpu_memory_utilization = {self.gpu_memory_utilization:.2f}"
+        )
 
-        # 进行垃圾回收，释放未使用的内存
-        gc.collect()
-        # 再次清理 CUDA 缓存
-        torch.cuda.empty_cache()
-        # 返回可分配的 GPU 和 CPU 缓存块数量（此处 CPU 块数量为 0）
-
-        return num_gpu_blocks
+        gc.collect() # 进行垃圾回收，释放未使用的内存
+        torch.cuda.empty_cache() # 再次清理 CUDA 缓存
+        
+        return num_gpu_blocks # 返回可分配的 GPU 和 CPU 缓存块数量（此处 CPU 块数量为 0）
     
 
 class KVCacheMemoryManager:
@@ -199,14 +172,15 @@ class KVCacheMemoryManager:
         self.init_kv_buffers(
             self.max_num_tokens,
             head_dim, num_kv_heads, num_layers, 
-            dtype, device)
+            dtype, device
+        )
 
     def init_kv_buffers(self,    # 为每一层预先分配KV缓存的GPU内存， shape = [max_num_tokens, 2 * num_kv_heads, head_dim]  2 表示 kv 两个缓存d的拼接
         max_num_tokens,
         head_dim, num_kv_heads, num_layers,
         dtype,
         device: str="cuda"
-    )-> List[torch.Tensor]:
+    )-> list[torch.Tensor]:
         # kv cache shape: config.max_batch_size, config.max_seq_len, self.num_kv_heads, self.head_dim
         # max_num_tokens = max_num_blocks * self.block_size
         # TODO 修改 kv buffer 形状支持 PagedAttention
@@ -280,9 +254,6 @@ class KVCacheMemoryManager:
             )
         
         return select_index.to(torch.int32), kv_cache
-    
-    
-    
     
     # 增加引用计数
     @torch.no_grad()

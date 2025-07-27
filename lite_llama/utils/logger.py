@@ -1,121 +1,71 @@
-# -*- coding: UTF-8 -*-
-
-import os
-import sys
-import time
-
 import logging
-from .common import getProjectPath
-
-__all__ = ["log", "logE", "logP", "logU"]
-
-# Set up the logger
-BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE = range(8)
-
-# These are the sequences need to get colored ouput
-RESET_SEQ = "\033[0m"
-COLOR_SEQ = "\033[1;%dm"
-BOLD_SEQ = "\033[1m"
-
-COLORS = {
-    "WARNING": YELLOW,
-    "INFO": GREEN,
-    "DEBUG": BLUE,
-    "CRITICAL": YELLOW,
-    "ERROR": RED,
-}
-
-LEVEL_SIM = {
-    "WARNING": "[W]",
-    "INFO": "[I]",
-    "DEBUG": "[D]",
-    "CRITICAL": "[C]",
-    "ERROR": "[E]",
-}
-
-
-def formatter_message(message, use_color=True):
-    if use_color:
-        message = message.replace("$RESET", RESET_SEQ).replace("$BOLD", BOLD_SEQ)
-    else:
-        message = message.replace("$RESET", "").replace("$BOLD", "")
-    return message
-
 
 class ColoredFormatter(logging.Formatter):
-    def __init__(self, msg, use_color=True):
-        logging.Formatter.__init__(self, msg, datefmt="%m-%d %H:%M:%S")
-        self.use_color = use_color
+    """
+    A logging formatter that outputs colored log messages
+    based on the log level.
+    """
+
+    COLORS = {
+        "DEBUG": "\033[36m",  # blue
+        "INFO": "\033[32m",  # green
+        "WARNING": "\033[33m",  # yellow
+        "ERROR": "\033[31m",  # red
+        "CRITICAL": "\033[41m",  # red background
+    }
+    RESET = "\033[0m"
 
     def format(self, record):
-        levelname = record.levelname
-        if self.use_color and levelname in COLORS:
-            simple_ln = LEVEL_SIM.get(levelname)
-            levelname_color = (
-                COLOR_SEQ % (30 + COLORS[levelname]) + simple_ln + RESET_SEQ
-            )
-            record.levelname = levelname_color
-        return logging.Formatter.format(self, record)
+        """
+        Format the specified record as text.
+        """
+        # Get the color corresponding to the log level. If not, use RESET
+        color = self.COLORS.get(record.levelname, self.RESET)
+        # Call the parent class to format the log message
+        message = super().format(record)
 
+        return f"{color}{message}{self.RESET}"
 
-# Custom logger class with multiple destinations
-class ColoredLogger(logging.Logger):
-    FORMAT = (
-        "%(asctime)s $RESET%(levelname)s %(filename)s$RESET:%(lineno)d %(message)s "
-    )
-    COLOR_FORMAT = formatter_message(FORMAT, True)
-
-    def __init__(self, name):
-        logging.Logger.__init__(self, name, logging.ERROR)
-
-        color_formatter = ColoredFormatter(self.COLOR_FORMAT)
-
-        console = logging.StreamHandler()
-        console.setFormatter(color_formatter)
-
-        self.addHandler(console)
-        return
-
-def loggerHandle():
-    logging.setLoggerClass(ColoredLogger)
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)
-    return logger
-
-
-def logfileHandle(log_name="../logs/common.log"):
-    project_path = getProjectPath()
-    log_file = os.path.join(project_path, log_name)
-    if not os.path.exists(os.path.join(project_path, "../logs")):
-        os.makedirs(os.path.join(project_path, "../logs"))
-    if not os.path.exists(log_file):
-        os.mknod(log_file)
-    logfile = logging.getLogger()
-    logfile.setLevel(logging.DEBUG)
-    handler = logging.FileHandler(log_file, encoding="UTF-8")
-    formatter = logging.Formatter(
-        "%(asctime)s %(levelname)s %(filename)s:%(lineno)d  %(message)s",
-        datefmt="%m-%d %H:%M:%S",
-    )
-    handler.setFormatter(formatter)
-    logfile.addHandler(handler)
-    return logfile
-
-
-log = loggerHandle()
-logE = logfileHandle("../logs/error.log")
-logP = logfileHandle("../logs/post.log")
-logU = logfileHandle("../logs/upload_data.log")
-
-if __name__ == "__main__":
+class SmartLogger:
+    """Wrapper around logger with enhanced formatting support"""
     
-    logging.setLoggerClass(ColoredLogger)
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)
+    def __init__(self, logger):
+        self._logger = logger
+    
+    def debug(self, msg, *args, **kwargs):
+        if self._logger.isEnabledFor(logging.DEBUG):
+            self._logger.debug(msg, *args, **kwargs)
+    
+    def info(self, msg, *args, **kwargs):
+        if self._logger.isEnabledFor(logging.INFO):
+            self._logger.info(msg, *args, **kwargs)
+    
+    def warning(self, msg, *args, **kwargs):
+        if self._logger.isEnabledFor(logging.WARNING):
+            self._logger.warning(msg, *args, **kwargs)
+    
+    def error(self, msg, *args, **kwargs):
+        if self._logger.isEnabledFor(logging.ERROR):
+            self._logger.error(msg, *args, **kwargs)
+    
+    def critical(self, msg, *args, **kwargs):
+        if self._logger.isEnabledFor(logging.CRITICAL):
+            self._logger.critical(msg, *args, **kwargs)
 
-    logger.debug("\033[1;32mMessage Error\033[0m")
-    logger.info("test")
-    logger.warning("test")
-    logger.error("test")
-    time.sleep(10)
-    logger.info("aaaaa")
+def get_logger(name):
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
+    
+    # Prevent duplicate logging by not propagating to parent loggers
+    logger.propagate = False
+
+    # Avoid adding handlers repeatedly
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        formatter = ColoredFormatter(
+            fmt="[%(asctime)s] [%(levelname)s] [%(filename)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S")
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    return SmartLogger(logger)

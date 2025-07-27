@@ -1,5 +1,5 @@
 import torch, gc
-from typing import List, Tuple
+from typing import tuple
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaForCausalLM
 import logging, json, os, sys
 
@@ -33,7 +33,7 @@ def _get_cache_block_size(model_config, block_size: int = 1) -> int:
 @torch.inference_mode()
 def determine_num_available_blocks(
     model_config, gpu_memory_utilization=0.9
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     """
     评估模型的峰值内存使用情况，以确定在不发生内存溢出的情况下可以分配的 KV（键值）缓存块的数量。
 

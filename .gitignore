@@ -5,7 +5,7 @@ lite_llama/models/__pycache__
 lite_llama/executor/__pycache__
 
 lite_llama/__pycache__
-
+**/__pycache__**
 images/tmp
 test/tmp
 test/debug

@@ -15,21 +15,18 @@ Author: harleyszhang (2025-06-08)
 from __future__ import annotations
 
 import argparse
-import logging
 import shutil
 from pathlib import Path
-from typing import Dict, Mapping
+from typing import Mapping
 
 import torch
 from tqdm.auto import tqdm
 from transformers import (AutoConfig, AutoModelForCausalLM,
                           LlavaConfig, LlavaForConditionalGeneration)
 
-# --------------------------------------------------------------------------- #
-# 日志配置
-# --------------------------------------------------------------------------- #
-logging.basicConfig(format="%(levelname)s | %(message)s", level=logging.INFO)
-logger = logging.getLogger(__name__)
+from lite_llama.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 # --------------------------------------------------------------------------- #
 # 通用工具函数
@@ -40,7 +37,7 @@ def ensure_dir(path: Path) -> Path:
     return path
 
 
-def save_state_dict(out_dir: Path, model_id: str, state: Dict[str, torch.Tensor]) -> None:
+def save_state_dict(out_dir: Path, model_id: str, state: dict[str, torch.Tensor]) -> None:
     """保存 state_dict 并打印信息。"""
     torch.save(state, out_dir / f"{model_id}.pth", _use_new_zipfile_serialization=True)
     logger.info("✅ 已保存权重到 %s", out_dir / f"{model_id}.pth")
@@ -58,7 +55,7 @@ def copy_metadata(src: Path, dst: Path) -> None:
 # --------------------------------------------------------------------------- #
 # 修订后的 merge_kv_weights —— 只生成 kv_proj_weight，下划线风格
 # --------------------------------------------------------------------------- #
-def merge_kv_weights(state: Dict[str, torch.Tensor],
+def merge_kv_weights(state: dict[str, torch.Tensor],
                      prefix: str,
                      with_bias: bool = False) -> None:
     """
@@ -105,7 +102,7 @@ def merge_kv_weights(state: Dict[str, torch.Tensor],
 
 def build_mapping(common: Mapping[str, str],
                   layer_tpl: Mapping[str, str],
-                  num_layers: int) -> Dict[str, str]:
+                  num_layers: int) -> dict[str, str]:
     """根据层数展开模板映射表。"""
     mapping = dict(common)
     for i in range(num_layers):
@@ -232,13 +229,13 @@ _SPEC = {
 # 核心转换逻辑
 # --------------------------------------------------------------------------- #
 def convert(checkpoints_dir: Path,
-            hf_state: Dict[str, torch.Tensor],
+            hf_state: dict[str, torch.Tensor],
             model_type: str,
-            num_layers: int) -> Dict[str, torch.Tensor]:
+            num_layers: int) -> dict[str, torch.Tensor]:
     """执行主转换流程并把结果保存到 my_weight/<model_id>/ 目录。"""
     spec = _SPEC[model_type]
     mapping = build_mapping(spec["common"], spec["layer"], num_layers)
-    new_sd: Dict[str, torch.Tensor] = {}
+    new_sd: dict[str, torch.Tensor] = {}
 
     # ---------- 1. 重映射 ----------
     for k, v in tqdm(hf_state.items(), desc=f"[{model_type}] 权重重映射"):
@@ -288,7 +285,7 @@ def detect_model_type(checkpoints_dir: Path) -> str:
 
 def load_hf_state(checkpoints_dir: Path,
                   model_type: str,
-                  device: str = "cpu") -> Dict[str, torch.Tensor]:
+                  device: str = "cpu") -> dict[str, torch.Tensor]:
     """加载 HF / bin 权重到 state_dict。"""
     if model_type == "llava":
         model = (LlavaForConditionalGeneration

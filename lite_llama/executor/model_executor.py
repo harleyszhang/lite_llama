@@ -3,7 +3,6 @@ import torch.nn as nn
 
 import json, time
 from pathlib import Path
-from typing import Callable, Type
 
 from transformers import LlavaConfig
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
@@ -12,22 +11,16 @@ from .mem_manager import ComputeMaxAvailableBlocks, KVCacheMemoryManager
 from .req_tokens_manager import ReqTokensManager
 
 from .cuda_graph import ModelRunner
-from .executor_struct import AttentionInfo
-from ..models.model_config import LlamaConfig, Qwen2Config, Qwen3Config
+from .executor_struct import AttentionInfo, CONFIG_CLASS_MAP
+from ..models.model_config import LlamaConfig
 from ..kernels import update_kv_index
-from ..utils.logger import log
+from ..utils.logger import get_logger
 
+logger = get_logger(__name__)
 
 # -----------------------------------------------------------------------------
 # Registry helpers (avoid long if/elif chains)
 # -----------------------------------------------------------------------------
-
-CONFIG_CLASS_MAP: dict[str, Type] = {
-    "llama": LlamaConfig,
-    "qwen2": Qwen2Config,
-    "qwen3": Qwen3Config,
-    "llava": LlavaConfig,
-}
 
 class ModelExecutor:
     # 定义类属性
@@ -58,9 +51,9 @@ class ModelExecutor:
         """
         model_config = ModelExecutor._load_model_config(checkpoints_dir, max_seq_len)
         model = ModelExecutor._load_model_weight(model_config, checkpoints_dir, device=device)
-
+    
         return ModelExecutor(
-            model_config, model, max_gpu_num_blocks, compiled_model, device
+            checkpoints_dir, model_config, model, max_gpu_num_blocks, compiled_model, device
         )
 
     @staticmethod
@@ -96,7 +89,7 @@ class ModelExecutor:
         model.half()
         for param in model.parameters():
             assert param.dtype == torch.float16, "Model parameters are not in FP16"
-        log.info("Converted model to half precision (FP16)")
+        logger.info("Converted model to half precision (FP16)")
 
         return model
 
@@ -118,8 +111,7 @@ class ModelExecutor:
             f"no checkpoint files found in {checkpoints_dir}"
         )
         ckpt_path = str(checkpoints[0])
-        log.debug("Type(ckpt_path) ", type(ckpt_path))
-        log.info(f'Loading checkpoint "{ckpt_path}"')
+        logger.info(f'Loading checkpoint "{ckpt_path}"')
         # 使用 torch.load 加载权重文件。torch.load 可以根据需要将权重加载到指定的设备上
         state_dict = torch.load(
             ckpt_path, mmap=True, weights_only=True, map_location=device
@@ -129,13 +121,13 @@ class ModelExecutor:
             state_dict, strict=True, assign=True
         )  # 将加载的 state_dict 应用到模型实例中。
         model.eval()
-        log.info(f"Loaded state dict in {time.time() - start_time:.2f}s")
+        logger.info(f"Loaded state dict in {time.time() - start_time:.2f}s")
 
         # 将模型转换为半精度, 并验证转换
         model.half().to(device)
         for param in model.parameters():
             assert param.dtype == torch.float16, "Model parameters are not in FP16"
-        log.info("Converted model to half precision (FP16)")
+        logger.info("Converted model to half precision (FP16)")
 
         return model
 
@@ -152,7 +144,7 @@ class ModelExecutor:
             nn.Module: 初始化后的模型。
         """
         model_type = model_config.model_type.lower()
-        log.info(
+        logger.info(
             f"Initializing model of type '{model_type}' and moving it to device '{device}'..."
         )
         if model_type == "llama":
@@ -170,17 +162,19 @@ class ModelExecutor:
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
 
-        log.info(f"The model has been initialized and moved to the device. '{device}'")
+        logger.info(f"The model has been initialized and moved to the device. '{device}'")
         return model
 
     def __init__(
         self,
+        checkpoints_dir: str,
         model_config,
         model,
         max_gpu_num_blocks=None,
         compiled_model=False,
         device="cuda",
     ):
+        self.checkpoints_dir = checkpoints_dir
         self.model_config = model_config
         self.device = device
         if isinstance(model_config, LlavaConfig):
@@ -225,10 +219,11 @@ class ModelExecutor:
             hidden_size=self.llm_config.hidden_size,
             num_heads=self.llm_config.num_heads,
             num_kv_heads=self.llm_config.num_kv_heads,
+            head_dim=self.llm_config.head_dim,
             gpu_memory_utilization=gpu_memory_utilization,
             block_size=block_size,
         )
-        max_gpu_num_blocks = avaliable_blocks.compute_num_available_blocks(model,model_path='/home/hvac/wangkai/workspace/lite_llama/my_weight/Qwen2.5-3B-Instruct')
+        max_gpu_num_blocks = avaliable_blocks.compute_num_available_blocks(model, model_path=self.checkpoints_dir)
         max_gpu_num_tokens = max_gpu_num_blocks * block_size
 
         return max_gpu_num_blocks, max_gpu_num_tokens
