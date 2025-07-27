@@ -1,9 +1,11 @@
+# 在原有的model_executor.py基础上添加以下修改
+
 import torch
 import torch.nn as nn
 
 import json, time
 from pathlib import Path
-from typing import Callable, Type
+from typing import Callable, Type, Optional
 
 from transformers import LlavaConfig
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
@@ -17,10 +19,9 @@ from ..models.model_config import LlamaConfig, Qwen2Config, Qwen3Config
 from ..kernels import update_kv_index
 from ..utils.logger import log
 
-
-# -----------------------------------------------------------------------------
-# Registry helpers (avoid long if/elif chains)
-# -----------------------------------------------------------------------------
+# 新增导入
+from ..quantization.quant_manager import quantization_manager, QuantizationType
+from ..models.quantized_models import create_quantized_model
 
 CONFIG_CLASS_MAP: dict[str, Type] = {
     "llama": LlamaConfig,
@@ -28,6 +29,7 @@ CONFIG_CLASS_MAP: dict[str, Type] = {
     "qwen3": Qwen3Config,
     "llava": LlavaConfig,
 }
+
 
 class ModelExecutor:
     # 定义类属性
@@ -38,26 +40,39 @@ class ModelExecutor:
     # 通过静态方法 build 将类属性当作默认配置使用
     @staticmethod
     def build(
-        checkpoints_dir: str,
-        max_seq_len: int,
-        max_gpu_num_blocks: None,
-        compiled_model: bool = False,
-        device: str = "cuda",
+            checkpoints_dir: str,
+            max_seq_len: int,
+            max_gpu_num_blocks: None,
+            compiled_model: bool = False,
+            device: str = "cuda",
+            quantization: Optional[str] = None,  # 新增参数
     ):
         """
         构建 ModelExecutor 实例, 加载模型、分词器和初始化推理信息结构体 atten_info。
 
         参数:
             checkpoints_dir (str): 模型检查点目录路径。
-            load_model (bool): 是否加载模型权重。
             max_seq_len (int): 最大序列长度。
+            max_gpu_num_blocks: GPU块数量限制。
+            compiled_model (bool): 是否使用编译模型。
             device (str): 设备类型（'cuda'或'cpu'）。
+            quantization (str, optional): 量化类型，如'gptq', 'awq', 'smoothquant'等。
 
         返回:
             ModelExecutor: 初始化后的 ModelExecutor 实例。
         """
         model_config = ModelExecutor._load_model_config(checkpoints_dir, max_seq_len)
-        model = ModelExecutor._load_model_weight(model_config, checkpoints_dir, device=device)
+
+        # 检测或使用指定的量化类型
+        if quantization is None:
+            quantization = quantization_manager.detect_quantization_type(checkpoints_dir)
+            log.info(f"Automatically detect the quantization type: {quantization}")
+        else:
+            log.info(f"Use the specified quantization type: {quantization}")
+
+        model = ModelExecutor._load_model_weight(
+            model_config, checkpoints_dir, device=device, quantization=quantization
+        )
 
         return ModelExecutor(
             model_config, model, max_gpu_num_blocks, compiled_model, device
@@ -71,43 +86,36 @@ class ModelExecutor:
 
         params = json.loads(cfg_path.read_text())
         cfg_cls = CONFIG_CLASS_MAP.get(params["model_type"].lower())
-        
+
         if cfg_cls is None:
             raise ValueError(f"Unsupported model_type {params['model_type']!r}")
-        
-        return cfg_cls.from_dict(params)
-    
-    @staticmethod
-    def _accelerate_load_weight(
-        model_config,
-        checkpoints_dir,
-        device="cuda",
-    ):
-        with init_empty_weights():
-            model = ModelExecutor._initialize_model(model_config, device=device)
 
-        # 假设 model 是使用 init_empty_weights 初始化的空模型
-        model = load_checkpoint_and_dispatch(
-            model, checkpoints_dir, device_map="auto", dtype=torch.float16
-        )
-
-        # 将模型转换为半精度, 并验证抓换
-        model.to(device)
-        model.half()
-        for param in model.parameters():
-            assert param.dtype == torch.float16, "Model parameters are not in FP16"
-        log.info("Converted model to half precision (FP16)")
-
-        return model
+        config = cfg_cls.from_dict(params)
+        config.max_seq_len = max_seq_len  # 确保设置正确的max_seq_len
+        return config
 
     @staticmethod
     def _load_model_weight(
-        model_config,
-        checkpoints_dir,
-        device="cuda",
+            model_config,
+            checkpoints_dir,
+            device="cuda",
+            quantization: Optional[str] = None,
     ):
         start_time = time.time()
 
+        if quantization and quantization != QuantizationType.NONE:
+            # 加载量化模型
+            log.info(f"Load quantitative model: {quantization}")
+            model = quantization_manager.load_quantized_model(
+                model_path=checkpoints_dir,
+                model_config=model_config,
+                device=device
+            )
+
+            log.info(f"The quantitative model has been loaded successfully, taking {time.time() - start_time:.2f}s")
+            return model
+
+        # 原有的非量化模型加载逻辑
         # 初始化模型
         with init_empty_weights():
             model = ModelExecutor._initialize_model(model_config, device=device)
@@ -174,12 +182,12 @@ class ModelExecutor:
         return model
 
     def __init__(
-        self,
-        model_config,
-        model,
-        max_gpu_num_blocks=None,
-        compiled_model=False,
-        device="cuda",
+            self,
+            model_config,
+            model,
+            max_gpu_num_blocks=None,
+            compiled_model=False,
+            device="cuda",
     ):
         self.model_config = model_config
         self.device = device
@@ -219,6 +227,8 @@ class ModelExecutor:
         if self.compiled_model:
             self.apply_cuda_graph()  # 调用 cuda graph 优化
 
+    # ... 其余方法保持不变 ...
+
     def _get_max_avaliable_tokens(self, gpu_memory_utilization=0.9, block_size=1):
         avaliable_blocks = ComputeMaxAvailableBlocks(
             num_layers=self.llm_config.num_layers,
@@ -234,7 +244,7 @@ class ModelExecutor:
         return max_gpu_num_blocks, max_gpu_num_tokens
 
     def _init_mem_manager(
-        self, gpu_num_blocks, block_size=1, dtype=torch.float16, device="cuda"
+            self, gpu_num_blocks, block_size=1, dtype=torch.float16, device="cuda"
     ):
         kv_mem_manager = KVCacheMemoryManager(
             num_layers=self.llm_config.num_layers,
@@ -249,7 +259,7 @@ class ModelExecutor:
         return kv_mem_manager
 
     def apply_cuda_graph(
-        self,
+            self,
     ):
         """应用 cuda graph 优化
         参数:
@@ -266,7 +276,7 @@ class ModelExecutor:
         self.model_runner.capture_decode_graph()
 
     def init_req_to_tokens_table(
-        self, b_req_tokens_table, b_req_idx, b_seq_len, alloc_mem_index
+            self, b_req_tokens_table, b_req_idx, b_seq_len, alloc_mem_index
     ):
         """
         初始化 prefill 阶段已分配的批次请求项的 kv cache 所用 tokens 索引
@@ -282,19 +292,19 @@ class ModelExecutor:
                 b_start_loc[i] = start_index
             cur_seq_len = b_seq_len_numpy[i]
             b_req_tokens_table[b_req_idx_numpy[i], :cur_seq_len] = alloc_mem_index[
-                start_index : start_index + cur_seq_len
-            ]
+                                                                   start_index: start_index + cur_seq_len
+                                                                   ]
             start_index += cur_seq_len
 
         return b_start_loc
 
     def prefill_alloc_kv_cache(
-        self,
-        max_prompt_len,
-        actual_prompt_lens,
-        b_req_idx,
-        image_batch_size=None,
-        debug_mode=False,
+            self,
+            max_prompt_len,
+            actual_prompt_lens,
+            b_req_idx,
+            image_batch_size=None,
+            debug_mode=False,
     ):
         """
         start_index:        tensor([  0, 270, 540, 810], device='cuda:0', dtype=torch.int32)

@@ -77,8 +77,8 @@ conda activate lite_llama
 git clone https://github.com/harleyszhang/lite_llama.git
 cd lite_llama/
 pip install -r requirement.txt
-python test_weight_convert.py # model weight transformation
-python generate.py --prompt "What is large language model" --checkpoint_path /path/to/model/Llama-3.2-1B-Instruct/ # Run on the basis that the model has been downloaded and placed in the specified directory
+python apply_weight_convert.py --checkpoints_dir /path/to/model/Llama-3.2-1B-Instruct/ --model_type llama # model weight transformation
+python generate.py -p "What is large language model" -m /path/to/model/Llama-3.2-1B-Instruct/ -f /path/to/figure# Run on the basis that the model has been downloaded and placed in the specified directory
 ```
 
 ROCm version 5.7 and above is recommended.
@@ -95,20 +95,19 @@ conda activate lite_llama
 git clone https://github.com/harleyszhang/lite_llama.git
 cd lite_llama/
 pip install -r requirement.txt
-python test_weight_convert.py # model weight transformation
-python generate.py --prompt "What is large language model" --checkpoint_path /path/to/model/Llama-3.2-1B-Instruct/ # Run on the basis that the model has been downloaded and placed in the specified directory
+python apply_weight_convert.py --checkpoints_dir /path/to/model/Llama-3.2-1B-Instruct/ --model_type llama # model weight transformation
+python generate.py -p "What is large language model" -m /path/to/model/Llama-3.2-1B-Instruct/ -f /path/to/figure# Run on the basis that the model has been downloaded and placed in the specified directory
 ```
 
-
 ## Evaluation
-
-After `cli.py` runs successfully, the terminal displays the interface as shown below, and you can enter your question in the terminal.
-
-![cli](./images/cli_stream.png)
 
 After `generate.py` runs successfully, the terminal displays the interface as shown below, and you can enter your question in the terminal.
 
 ![generate](./images/generate_stream.png)
+
+After `cli.py` runs successfully, the terminal displays the interface as shown below, and you can enter your question in the terminal.
+
+![cli](./images/cli_stream.png)
 
 After `cli_llava.py` runs successfully, the terminal displays the interface as shown below, enter your picture and prompt word in the terminal, and then enter.
 

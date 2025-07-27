@@ -2,7 +2,9 @@ import json
 import time, os
 import subprocess
 from typing import List, Optional
-
+import torch
+from contextlib import contextmanager
+import functools
 
 def read_json(json_path):
     with open(json_path, "r") as json_file:
@@ -37,7 +39,7 @@ def getProjectPath():
     return os.path.abspath(os.path.join(script_path, ".."))
 
 
-def get_gpu_memory(gpu_type="amd", device_id="0"):
+def get_gpu_memory(gpu_type, device_id="0"):
     try:
         if gpu_type == "amd":
             result = subprocess.run(
@@ -67,7 +69,7 @@ def get_gpu_memory(gpu_type="amd", device_id="0"):
         elif gpu_type == "cpu":
             return None
     except Exception as e:
-        from utils.logger import log
+        from lite_llama.utils.logger import log
 
         log.warning(f"Unable to fetch GPU memory: {e}")
         return None
@@ -82,7 +84,7 @@ def count_tokens(texts: List[str], tokenizer) -> int:
 
 
 def get_model_type(checkpoint_path: str) -> str | None:
-    from utils.logger import log
+    from .logger import log
 
     model_type = ["llama", "falcon", "mpt", "qwen2", "llava"]
 
@@ -94,3 +96,126 @@ def get_model_type(checkpoint_path: str) -> str | None:
             return m
     log.error(f"No model type found: {checkpoint_path}")
     return None
+
+
+def check_model_compatibility(model_path):
+    """Check if the model is compatible for quantization"""
+    # Check if model path exists and contains .pth files
+    if not os.path.exists(model_path):
+        return False, f"Model path does not exist: {model_path}"
+
+    pth_files = [f for f in os.listdir(model_path) if f.endswith('.pth')]
+    if not pth_files:
+        return False, f"No .pth files found in {model_path}"
+
+    # Check if required config files exist
+    config_files = ["config.json", "tokenizer_config.json"]
+    missing_configs = [f for f in config_files if not os.path.exists(os.path.join(model_path, f))]
+    if missing_configs:
+        print(f"Warning: Missing config files: {missing_configs}")
+
+    return True, "Model is compatible"
+
+
+def get_model_info(model_path):
+    """Get basic information about the model"""
+    model_info = {
+        "model_name": os.path.basename(model_path),
+        "model_type": "unknown",
+        "size": 0.0
+    }
+
+    # Detect model type from path or config
+    model_name_lower = model_info["model_name"].lower()
+    if "llava" in model_name_lower:
+        model_info["model_type"] = "llava"
+    elif "qwen2" in model_name_lower:
+        model_info["model_type"] = "qwen2"
+    elif "llama" in model_name_lower:
+        model_info["model_type"] = "llama"
+
+    # Try to read from config.json
+    config_path = os.path.join(model_path, "config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                if "architectures" in config:
+                    arch = config["architectures"][0].lower()
+                    if "llava" in arch:
+                        model_info["model_type"] = "llava"
+                    elif "qwen2" in arch:
+                        model_info["model_type"] = "qwen2"
+                    elif "llama" in arch:
+                        model_info["model_type"] = "llama"
+        except:
+            pass
+
+    # Calculate total size
+    total_size = 0
+    for f in os.listdir(model_path):
+        if f.endswith('.pth'):
+            file_path = os.path.join(model_path, f)
+            total_size += os.path.getsize(file_path)
+
+    model_info["size"] = total_size / (1024 ** 3)  # Convert to GB
+
+    return model_info
+
+
+def get_model_dtype(checkpoints_dir: str):
+    """
+    Get the model dtype from config.json
+
+    Args:
+        checkpoints_dir: Path to model checkpoint directory
+
+    Returns:
+        torch.dtype or str: The dtype specified in config.json
+    """
+    config_path = os.path.join(checkpoints_dir, "config.json")
+
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+
+        torch_dtype_str = config.get("torch_dtype", "float16").lower()
+
+        # Map string to torch dtype or string identifiers for quantized formats
+        dtype_mapping = {
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float32": torch.float32,
+            "float": torch.float32,
+            "int8": torch.int8,
+            "int4": "int4",  # Placeholder, since PyTorch doesn't natively support int4
+        }
+
+        dtype = dtype_mapping.get(torch_dtype_str, torch.float16)
+        print(f"Detected model dtype from config: {torch_dtype_str} -> {dtype}")
+
+        return dtype
+
+    except Exception as e:
+        print(f"Warning: Could not read dtype from config.json: {e}")
+        print("Defaulting to torch.float16")
+        return torch.float16
+
+
+@contextmanager
+def quantization(mode: str = None):
+    quantized_linear_cls = None
+    if mode == 'gptq.int4':
+        from ..kernels.gptq_linear import GPTQLinear
+        quantized_linear_cls = functools.partial(GPTQLinear, bits=4, tile_cols=-1)
+    elif mode is not None:
+        raise ValueError(f"Unknown quantization mode: {mode}")
+
+    enabled = mode is not None
+    torch_linear_cls = torch.nn.Linear
+    if enabled:
+        torch.nn.Linear = quantized_linear_cls
+    yield
+    if enabled:
+        torch.nn.Linear = torch_linear_cls
+

@@ -241,11 +241,11 @@ def convert(checkpoints_dir: Path,
     new_sd: Dict[str, torch.Tensor] = {}
 
     # ---------- 1. 重映射 ----------
-    for k, v in tqdm(hf_state.items(), desc=f"[{model_type}] 权重重映射"):
+    for k, v in tqdm(hf_state.items(), desc=f"[{model_type}] Weight mapping"):
         if (ck := mapping.get(k)) is not None:
             new_sd[ck] = v
         else:
-            logger.debug("忽略未映射参数 %s", k)
+            logger.debug("Ignore unmapped parameters %s", k)
 
     # ---------- 2. 仅对 *Qwen* 系列执行 KV 合并 ----------
     if model_type.startswith("qwen") or model_type.startswith("llama"):              # 只处理 Qwen-2 / Qwen-3 等
@@ -259,7 +259,7 @@ def convert(checkpoints_dir: Path,
     save_state_dict(out_dir, checkpoints_dir.name, new_sd)
     copy_metadata(checkpoints_dir, out_dir)
 
-    logger.info("🎉 转换完成，共 %d 个参数", len(new_sd))
+    logger.info("🎉 Convert Complete，There are %d parameters in total", len(new_sd))
     return new_sd
 
 
@@ -313,8 +313,8 @@ def get_num_layers(checkpoints_dir: Path, model_type: str) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Convert HF / bin checkpoints into Lite-LLaMA format.")
-    parser.add_argument("checkpoints_dir", type=Path, help="模型权重目录")
-    parser.add_argument("--model-type",
+    parser.add_argument("--checkpoints_dir", type=Path, help="模型权重目录")
+    parser.add_argument("--model_type",
                         choices=_SPEC.keys(),
                         help="显式指定模型类型；默认根据目录名猜测")
     parser.add_argument("--device", default="cuda",
@@ -325,11 +325,11 @@ def main() -> None:
     
     # 1️⃣ **直接从 config.json 读取 model_type** ↓
     model_type = detect_model_type(ckpt_dir)
-    logger.info("检测到 model_type = %s", model_type)
+    logger.info("Model Type is: %s", model_type)
 
     # 2️⃣ 获取层数
     num_layers = get_num_layers(ckpt_dir, model_type)
-    logger.info("Transformer 层数 %d", num_layers)
+    logger.info("Transformer Number of layers %d", num_layers)
 
     # 3️⃣ 加载权重并执行转换
     hf_sd = load_hf_state(ckpt_dir, model_type, device=args.device)
