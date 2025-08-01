@@ -303,4 +303,4 @@ def indexs_convert(indexs: torch.tensor, batch_size: int):
     prefill 阶段分配的kv cache 索引和 decode 阶段分配的索引合并在一起需要做变换
     TODO: 支持连续批处理开发时用上.
     """
-    pass
+    passcuda
