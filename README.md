@@ -18,7 +18,7 @@
 
 - Up to `4x` speedup over transformers, llama3 1B and 3B models.
 - Supports the latest `llama3`, `Qwen2.5`, `Qwen3`, `Llava1.5` model inference, `top-p` sampling, streaming output.
-- Supports GQA, ~~cuda graph optimization (with limitations)~~.
+- Supports GQA, decode stage support cuda graph optimization (with batch_size limitations).
 - Supports `flashattention1`, `flashattention2`, `flashdecoding` (supports `NopadAttention`).
 - Support efficient dynamic management of kv cache (`auto tokenattnetion`).
 - Support fusion of operators, e.g. fusion of `*` and `silu` for element-by-element multiplication, k v linear layer fusion, fusion of `skip` and `rmsnorm`.
@@ -99,7 +99,6 @@ python test_weight_convert.py # model weight transformation
 python generate.py --prompt "What is large language model" --checkpoint_path /path/to/model/Llama-3.2-1B-Instruct/ # Run on the basis that the model has been downloaded and placed in the specified directory
 ```
 
-
 ## Evaluation
 
 After `cli.py` runs successfully, the terminal displays the interface as shown below, and you can enter your question in the terminal.
@@ -124,7 +123,6 @@ lite_llama per token latency: 1.369015 ms/token
 Transformers per token latency: 5.436221 ms/token
 ```
 
-
 ## TODO
 - [x] Optimized for decode phase using cuda graph
 - [x] Use flashattention instead of standard attention
@@ -140,7 +138,6 @@ Transformers per token latency: 5.436221 ms/token
 - [ ] Code refactoring and fix for cuda graph not working properly after optimization with AutoTokenAttention.
 
 Detailed information can be found in [performance optimization](docs/performance_optimization.md)
-
 
 ## Acknowledgement
 
