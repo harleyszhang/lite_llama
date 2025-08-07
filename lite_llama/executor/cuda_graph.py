@@ -121,10 +121,10 @@ class ModelRunner:
         atten_info.b_seq_len = torch.ones(
             batch_size, dtype=torch.int32, device="cuda"
         )  # torch.Tensor
-        (atten_info.cur_select_index,) = self.kv_mem_manager.alloc_kvcache_index(
+        atten_info.cur_select_index,_ = self.kv_mem_manager.alloc_kvcache_index(
             batch_size
         )  # torch.Tensor
-
+        atten_info.max_actual_seq_len = self.start_pos + 1  # decode阶段的序列长度
         return atten_info
 
     def capture_decode_graph(
