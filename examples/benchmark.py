@@ -261,57 +261,9 @@ def main():
         "Please introduce Qwen2.5 model structure and give cuda implement code.",
     ]
 
-    # prompts: list[str] = [
-    #     "How to learn cnn, please introduce resnet architecture and give code ",
-    #     "How to learn cuda programming, give me some code example.",
-    # ]
-
-    # prompts: list[str] = [
-    #     "How to learn cnn, please introduce resnet architecture and give code.",
-    #     "How to learn cuda programming, give me some code example.",
-    #     "How to learn rust, give me some code examples.",
-    #     "How to learn c++, give me some code examples.",
-    # ]
-
-    # prompts: list[str] = [
-    #     "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person to person. However, I believe that the simple things can bring a sense of joy and fulfillment to our lives.",
-    #     "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
-    #     "A Complete Introduction to the History of the American Civil War",
-    #     "Roosevelt was the first president of the United States, he has a lot of information on the early history of the United States. He was born in 1883,",
-    #     "How to learn c++, give me some code example.",
-    #     "How to learn python, give me some code examples.",
-    #     "How to learn llm, please introduce transformer architecture ",
-    #     "How to learn cnn, please introduce resnet architecture and give code ",
-    # ]
-
-    # prompts: list[str] = [
-    #     "I believe the meaning of life is to find happiness in the simple things. This is a very subjective and personal perspective, and it may vary from person ",
-    #     "Simply put, the theory of relativity states that 3D space is not fixed, but is relative to the observer's frame of reference. Time is also relative, and it appears to ",
-    #     """A brief message congratulating the team on the launch:
-
-    #     Hi everyone,
-
-    #     I just heard about the launch of the new product and I wanted to take a moment to express my """,
-    #     "Roosevelt was the 26th president of the United States, he has a lot of information on the early history of the ,",
-    # ]
-
-    # prompts: list[str] = [
-    #     "I believe the meaning of life is",
-    #     "Simply put, the theory of relativity states that 3D space",
-    #     """A brief message congratulating the team on the launch:
-
-    #     Hi everyone,
-
-    #     I just heard""",
-    #     "Roosevelt was the 26th president of the United States,",
-    # ]
-
-    hf_model_name = "/gemini/code/my_weight/Llama-3.2-1B-Instruct-hf"
-    custom_checkpoints_dir = (
-        "/gemini/code/my_weight/Llama-3.2-1B-Instruct"  # 根据实际情况修改
-    )
-    # hf_model_name = "/gemini/code/my_weight/Qwen-hf/Qwen2.5-1.5B-Instruct"
-    # custom_checkpoints_dir = "/gemini/code/my_weight/Qwen2.5-1.5B-Instruct"
+    # 根据实际情况修改
+    hf_model_name = "/gemini/code/my_weight/Qwen-hf/Qwen2.5-1.5B-Instruct"
+    custom_checkpoints_dir = "/gemini/code/my_weight/Qwen2.5-1.5B-Instruct"
     compare_inference_speed(
         prompts=prompts,
         temperature=0.7,

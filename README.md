@@ -18,7 +18,7 @@
 
 - Up to `4x` speedup over transformers, llama3 1B and 3B models.
 - Supports the latest `llama3`, `Qwen2.5`, `Qwen3`, `Llava1.5` model inference, `top-p` sampling, streaming output.
-- Supports GQA, decode stage support cuda graph optimization (with batch_size limitations).
+- Supports GQA, ~~decode stage support cuda graph optimization (with batch_size limitations)~~.
 - Supports `flashattention1`, `flashattention2`, `flashdecoding` (supports `NopadAttention`).
 - Support efficient dynamic management of kv cache (`auto tokenattnetion`).
 - Support fusion of operators, e.g. fusion of `*` and `silu` for element-by-element multiplication, k v linear layer fusion, fusion of `skip` and `rmsnorm`.

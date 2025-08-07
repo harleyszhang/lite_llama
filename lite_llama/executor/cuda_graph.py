@@ -114,7 +114,7 @@ class ModelRunner:
         """针对 decode 阶段, 构建 attention 输入信息结构体"""
         atten_info.kv_buffer = self.kv_mem_manager.gpu_kv_buffer  # torch.Tensor
         atten_info.b_req_tokens_table = (
-            self.req_tokens.manager.b_req_tokens_table
+            self.req_tokens_manager.b_req_tokens_table
         )  # torch.Tensor
 
         atten_info.b_req_idx = torch.arange(batch_size, device=device)  # torch.Tensor
@@ -152,10 +152,6 @@ class ModelRunner:
                 .expand(batch_size, -1)  # shape: [batch_size, seq_len], 不分配额外内存
             )
             atten_info = self.build_atten_info(batch_size, atten_info)
-            print(
-                "apply cuda grpah atten_info.decode_index shape ",
-                atten_info.decode_index.shape,
-            )
 
             graph_intput = (input_ids, position_ids, atten_info)
             graph_runner = CUDAGraphRunner(self.model)

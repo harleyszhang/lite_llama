@@ -209,7 +209,7 @@ class ModelExecutor:
         self.atten_info.b_req_tokens_table = self.req_tokens_manager.b_req_tokens_table
 
         # TODO apply_cuda_graph 新代码有 bug，已经删去，后续等待修复
-        self.compiled_model = True
+        self.compiled_model = False
         if self.compiled_model:
             self.apply_cuda_graph()  # 调用 cuda graph 优化
 
