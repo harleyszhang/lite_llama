@@ -67,7 +67,8 @@ def get_gpu_memory(gpu_type="amd", device_id="0"):
         elif gpu_type == "cpu":
             return None
     except Exception as e:
-        from utils.logger import log
+        from .logger import get_logger
+        log = get_logger(__name__)
 
         log.warning(f"Unable to fetch GPU memory: {e}")
         return None
@@ -82,7 +83,8 @@ def count_tokens(texts: List[str], tokenizer) -> int:
 
 
 def get_model_type(checkpoint_path: str) -> str | None:
-    from utils.logger import log
+    from .logger import get_logger
+    log = get_logger(__name__)
 
     model_type = ["llama", "falcon", "mpt", "qwen2", "llava"]
 
