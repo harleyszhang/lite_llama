@@ -274,6 +274,11 @@ class Qwen2Prompter(BasePrompter):
         #
         # 若不存在 system_inst，则跳过 system 块，但这里我们默认有 system_inst。
 
+        # 存储历史对话
+        self.dialogue_history = []
+
+
+
         if self.system_inst is None:
             self.template = self.role1 + "{prompt}\n" + "<|im_end|>\n" + self.role2
         else:
@@ -286,6 +291,29 @@ class Qwen2Prompter(BasePrompter):
                 + "<|im_end|>\n"
                 + self.role2
             )
+
+    def add_to_history(self,role:str, text:str):
+            """将对话片段加入历史"""
+            self.dialogue_history.append((role,text))
+
+    def build_full_prompt(self, new_prompt:str)->str: 
+            """构建包含历史的多轮提示模板"""
+            prompt_parts = []
+            if self.system_inst:
+                prompt_parts.append(f"<|im_start|>system\n{self.system_inst}<|im_end|>")
+
+            # 添加历史对话
+            for role,text in self.dialogue_history:
+                prompt_parts.append(f"<im_start>{role}\n{text}<|im_end|>")
+
+            # 添加当前的用户输入
+            prompt_parts.append(f"<im_start>user\n{new_prompt}<|im_end|>")
+
+            prompt_parts.append("<im_start>assistant\n")
+
+            return "\n".join(prompt_parts)
+        
+
 
     def update_template(self, outputs, chunk_prefilling=0):
         # 对于 Qwen2 来说，我们通常不需要频繁更新模板。
