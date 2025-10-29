@@ -360,11 +360,24 @@ class ModelExecutor:
 
         return self.atten_info.cur_select_index  # shape [batch_size,]
 
+    # def forward(self, input_ids, position_ids, image_tensor=None):
+    #     if self.model_type == "llava":
+    #         logits = self.model.forward(
+    #             input_ids, position_ids, self.atten_info, image_tensor
+    #         )
+    #     else:
+    #         logits = self.model.forward(input_ids, position_ids, self.atten_info)
+    #     return logits
+    
     def forward(self, input_ids, position_ids, image_tensor=None):
-        if self.model_type == "llava":
-            logits = self.model.forward(
-                input_ids, position_ids, self.atten_info, image_tensor
-            )
-        else:
-            logits = self.model.forward(input_ids, position_ids, self.atten_info)
-        return logits
+            if self.model_type == "llava":
+                logits = self.model.forward(
+                    input_ids, position_ids, self.atten_info, image_tensor
+                )
+                
+            # 如果compiled_model为True, 并且seq_len = 1则使用cuda graph优化
+            elif self.compiled_model and input_ids.shape[1] == 1:
+                logits = self.model_runner.decode(input_ids, position_ids, self.atten_info)
+            else:
+                logits = self.model.forward(input_ids, position_ids, self.atten_info)
+            return logits    

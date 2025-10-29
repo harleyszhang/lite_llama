@@ -56,6 +56,7 @@ class CUDAGraphRunner:
             "cur_select_index": atten_info.cur_select_index,
             "b_req_tokens_table": atten_info.b_req_tokens_table,
             "b_req_idx": atten_info.b_req_idx,
+            "b_seq_len": atten_info.b_seq_len,  # ← 新增这一行
         }
 
     def forward(
@@ -64,16 +65,17 @@ class CUDAGraphRunner:
         position_ids: torch.Tensor,
         atten_info: AttentionInfo,
     ):
-        del (
-            atten_info.kv_buffer
-        )  # kv_buffer are fixed tensors, so we don't need to copy them.
-        del atten_info.b_req_tokens_table
+        # del (
+        #     atten_info.kv_buffer
+        # )  # kv_buffer are fixed tensors, so we don't need to copy them.
+        # del atten_info.b_req_tokens_table
         # 更新输入缓冲区
         self._graph_inputs["input_ids"].copy_(input_ids)  # 据填充 graph 的输入内存
         self._graph_inputs["position_ids"].copy_(position_ids)
 
         self._graph_inputs["cur_select_index"].copy_(atten_info.cur_select_index)
         self._graph_inputs["b_req_idx"].copy_(atten_info.b_req_idx)
+        self._graph_inputs["b_seq_len"].copy_(atten_info.b_seq_len) 
 
         self._cuda_graph.replay()
 
@@ -124,7 +126,8 @@ class ModelRunner:
         atten_info.cur_select_index,_ = self.kv_mem_manager.alloc_kvcache_index(
             batch_size
         )  # torch.Tensor
-        atten_info.max_actual_seq_len = self.start_pos + 1  # decode阶段的序列长度
+        #atten_info.max_actual_seq_len = self.start_pos+1
+        atten_info.max_actual_seq_len = self.max_seq_len
         return atten_info
 
     def capture_decode_graph(
@@ -137,7 +140,7 @@ class ModelRunner:
         batch_size_capture_list = [
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= self.graph_max_batch_size
         ]
-        atten_info = AttentionInfo
+        
         print("cuda graph support batch list", batch_size_capture_list)
 
         # NOTE: Capturing the largest batch size first may help reduce the memory usage of CUDA graph.
@@ -151,7 +154,8 @@ class ModelRunner:
                 .unsqueeze(0)  # shape: [1, seq_len]
                 .expand(batch_size, -1)  # shape: [batch_size, seq_len], 不分配额外内存
             )
-            atten_info = self.build_atten_info(batch_size, atten_info)
+            #atten_info = self.build_atten_info(batch_size, atten_info)
+            atten_info = self.build_atten_info(batch_size, AttentionInfo(), device=input_ids.device)
             print(
                 "apply cuda grpah atten_info.decode_index shape ",
                 atten_info.decode_index.shape,
