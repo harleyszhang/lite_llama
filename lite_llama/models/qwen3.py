@@ -86,9 +86,14 @@ class Qwen3Attention(nn.Module):
         self.head_dim = config.head_dim
         self.rmsnorm_eps = config.rms_norm_eps
 
-        self.q_proj_weight = nn.Parameter(torch.rand(self.hidden_size, self.num_heads * self.head_dim, dtype=torch.float16))
-        self.kv_proj_weight = nn.Parameter(torch.rand(self.hidden_size, 2 * self.num_kv_heads * self.head_dim, dtype=torch.float16))
-        self.o_proj_weight = nn.Parameter(torch.rand(self.num_heads * self.head_dim, self.hidden_size, dtype=torch.float16))
+        # self.q_proj_weight = nn.Parameter(torch.rand(self.hidden_size, self.num_heads * self.head_dim, dtype=torch.float16))
+        # self.kv_proj_weight = nn.Parameter(torch.rand(self.hidden_size, 2 * self.num_kv_heads * self.head_dim, dtype=torch.float16))
+        # self.o_proj_weight = nn.Parameter(torch.rand(self.num_heads * self.head_dim, self.hidden_size, dtype=torch.float16))
+
+        #参考transformers中的实现
+        self.q_proj_weight = nn.Parameter(torch.rand(self.num_heads * self.head_dim, self.hidden_size, dtype=torch.float16))
+        self.kv_proj_weight = nn.Parameter(torch.rand(2 * self.num_kv_heads * self.head_dim, self.hidden_size, dtype=torch.float16))
+        self.o_proj_weight = nn.Parameter(torch.rand(self.hidden_size, self.num_heads * self.head_dim, dtype=torch.float16))
 
         self.q_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=torch.float16))
         self.k_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=torch.float16))
@@ -146,7 +151,7 @@ class Qwen3Attention(nn.Module):
                 qk_scale,
             )
             attn_output = attn_output.view(
-                batch_size, seq_len, self.hidden_size
+                batch_size, seq_len, self.num_heads * self.head_dim
             )  # 输出张量 seq_len = 1
             # if torch.isnan(attn_output).any(): # 检查 NaNs
             #     raise ValueError(f"NaNs detected in context_forward output at layer {layer_index}")
@@ -160,7 +165,7 @@ class Qwen3Attention(nn.Module):
                 qk_scale,
             )
             attn_output = attn_output.view(
-                batch_size, seq_len, self.hidden_size
+                batch_size, seq_len, self.num_heads * self.head_dim
             )  # 输出张量 seq_len = 1
             # if torch.isnan(attn_output).any(): # 检查 NaNs
             #     raise ValueError(f"NaNs detected in token_forward output at layer {layer_index}")

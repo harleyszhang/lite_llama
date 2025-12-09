@@ -214,7 +214,7 @@ class Qwen3Config(BaseConfig):
             self.intermediate_size = self.hidden_size * 4
         if self.head_dim is None:
             self.head_dim = self.hidden_size // self.num_heads
-        assert self.hidden_size == self.head_dim * self.num_heads
+        #assert self.hidden_size == self.head_dim * self.num_heads
 
 
 # ---------------------------------------------------------------------------- #
