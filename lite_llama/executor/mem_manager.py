@@ -1,6 +1,9 @@
 import torch
-import json, gc
+import json
+import gc
+import logging
 from pathlib import Path
+from typing import Optional, Tuple, List, Union
 
 from ..utils.dummy_data import DummyInputGenerator
 from .executor_struct import AttentionInfo, CONFIG_CLASS_MAP
@@ -8,245 +11,345 @@ from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-
 def get_dtype_size(dtype: torch.dtype) -> int:
     """Get the size of the data type in bytes."""
     return torch.tensor([], dtype=dtype).element_size()
 
 class ComputeMaxAvailableBlocks:
-    """A class that can execute a forward pass with dummy inputs to profile the memory usage of the model.
-    and  calculate the maximum possible number of GPU blocks that can be allocated with the remaining free memory.
-    if not execute dummy forward run, it should be run after cuda graph!
+    """
+    Executes a dummy forward pass to profile memory usage and calculates 
+    maximum possible KV blocks.
     """
     def __init__(
         self, 
-        num_layers, 
-        hidden_size, 
-        num_heads, 
-        num_kv_heads, 
-        head_dim, 
-        gpu_memory_utilization=0.9, 
-        block_size=1, 
-        dtype=torch.float16,
-        device="cuda"
+        num_layers: int, 
+        hidden_size: int, 
+        num_heads: int, 
+        num_kv_heads: int, 
+        head_dim: int, 
+        gpu_memory_utilization: float = 0.9, 
+        block_size: int = 1, 
+        dtype: torch.dtype = torch.float16,
+        device: str = "cuda"
     ):
+        self.num_layers = num_layers
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
-        self.num_layers = num_layers
         self.head_dim = head_dim
 
         self.gpu_memory_utilization = gpu_memory_utilization
-        self.block_size = block_size # 一个 block 表示多少个 tokens
+        self.block_size = block_size 
         self.dtype = dtype
         self.device = device
         self.dtype_size = get_dtype_size(dtype)
         
-    def compute_cache_block_size_bytes(self):
-        """Get the size of the KV cache block size in bytes.
-        """
-
+    def compute_cache_block_size_bytes(self) -> int:
+        """Calculate bytes required for one KV block across all layers."""
+        # KV Cache shape per layer: [2, num_kv_heads, head_dim] * dtype_size
+        # The '2' stands for K and V.
         kv_cache_token_bytes_per_layer = (self.num_kv_heads * self.head_dim) * 2 * self.dtype_size
         transformer_kv_cache_token_bytes = kv_cache_token_bytes_per_layer * self.num_layers
-
         transformer_kv_cache_blocks_bytes = transformer_kv_cache_token_bytes * self.block_size
-
         return transformer_kv_cache_blocks_bytes
 
-    def compute_num_available_blocks(self, model, model_path=None):
-        """
-        评估模型的峰值内存使用情况，以确定在不发生内存溢出的情况下可以分配的 KV（键值）缓存块的数量。
+    def _infer_vocab_size(self, model_path: str | None, model_type: str | None, 
+                         model_config, llm_config) -> int:
+        """Helper to infer vocab size safely."""
+        # 1. Try llm_config / model_config objects
+        for cfg in [llm_config, model_config]:
+            if cfg is None: continue
+            if hasattr(cfg, "vocab_size"): return int(cfg.vocab_size)
+            if hasattr(cfg, "text_config") and hasattr(cfg.text_config, "vocab_size"):
+                return int(cfg.text_config.vocab_size)
 
-        该方法首先清理 CUDA 缓存，然后使用虚拟输入执行一次前向传播，以评估模型的内存使用情况。
-        接着，计算在剩余可用内存下，最多可以分配的 GPU 和 CPU 缓存块数量。
+        # 2. Try loading from config.json manually
+        if model_path:
+            params_path = Path(model_path) / "config.json"
+            if params_path.exists():
+                try:
+                    with open(params_path, "r") as f:
+                        params = json.load(f)
+                    # Check direct key
+                    if "vocab_size" in params:
+                        return int(params["vocab_size"])
+                    
+                    # Try via Config Class
+                    m_type = (model_type or params.get("model_type", "")).lower()
+                    cfg_cls = CONFIG_CLASS_MAP.get(m_type)
+                    if cfg_cls:
+                        cfg_obj = cfg_cls.from_dict(params)
+                        if hasattr(cfg_obj, "vocab_size"): return int(cfg_obj.vocab_size)
+                        if hasattr(cfg_obj, "text_config"): return int(cfg_obj.text_config.vocab_size)
+                except Exception as e:
+                    logger.warning(f"Failed to infer vocab_size from json: {e}")
+        
+        # 3. Fallback
+        logger.warning("Could not infer vocab_size, defaulting to 32000 (Llama default)")
+        return 32000
 
-        提示：
-            可以通过调整 `gpu_memory_utilization` 参数来限制 GPU 内存的使用。
-        """
-        # 清理 CUDA 缓存，以确保获取准确的内存使用信息
-        # NOTE: torch.cuda.empty_cache() 用于释放 GPU 上由缓存分配器持有的未占用内存。
-        # NOTE: torch.cuda.reset_peak_memory_stats() 用于重置 CUDA 内存分配器所跟踪的“峰值”统计数据。
+    def compute_num_available_blocks(
+        self,
+        model,
+        model_path: str | None = None,
+        model_type: str | None = None,
+        model_config=None,
+        llm_config=None,
+    ) -> int:
+        
+        # Cleanup before profiling
+        gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
-        # 获取当前 GPU 的空闲内存和总内存（单位：字节）# free_memory_pre_profile=9178578944
-        free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
-        # 使用虚拟输入执行一次前向传播，以评估模型的内存使用情况        
-        params_path = Path(model_path) / "config.json"
-        if params_path.exists():
-            with open(params_path, "r") as f:
-                params = json.load(f)
-                model_config = CONFIG_CLASS_MAP.get(params["model_type"].lower())
-                    
-                # 创建虚拟输入 
-                batch_size = 1
-                seq_len = 32  # 使用较小的序列长度进行内存评估
-                dummy_generator = DummyInputGenerator(device="cuda")
-                dummy_input, dummy_position_ids = dummy_generator.generate_dummy_input(model_config, batch_size, seq_len)
-                    
-                # 创建虚拟的 atten_info 对象
-                dummy_atten_info = AttentionInfo()
-                
-                dummy_atten_info.kv_buffer = [
-                    torch.empty((seq_len, 2 * self.num_kv_heads, self.head_dim), dtype=self.dtype, device=self.device) for _ in range(self.num_layers)
-                ]
-                
-                dummy_atten_info.cur_select_index = torch.arange(seq_len, dtype=torch.int32, device="cuda")
-                dummy_atten_info.b_start_loc = torch.tensor([0], dtype=torch.int32, device="cuda")
-                dummy_atten_info.b_seq_len = torch.tensor([1], device="cuda")
-                dummy_atten_info.max_actual_seq_len=seq_len
-                # 执行前向传播
-                with torch.no_grad():
-                    _ = model(dummy_input, dummy_position_ids, dummy_atten_info)
-
-        logger.info(f"模型加载后可用内存: {torch.cuda.mem_get_info()[0] / (1024**3):.2f} GB")
-        # 同步 CUDA 操作，确保内存信息准确
-        torch.cuda.synchronize()
-        # 计算模型加载后的峰值内存使用量. Get the peak memory allocation recorded by torch
-        peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
-        # 清理未使用的缓存，计算非 Torch 分配的内存. 检查是否有任何剩余内存可能已在“torch”之外的 gpu 上分配。例如，NCCL 操作在前向传递期间可能会使用几 GB
-        torch.cuda.empty_cache()
-        torch_allocated_bytes = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         
-        total_allocated_bytes = torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]
-        non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
+        free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
+
+        # 1. Infer Vocab Size
+        vocab_size = self._infer_vocab_size(model_path, model_type, model_config, llm_config)
+
+        # 2. Prepare Dummy Inputs
+        batch_size = 1
+        seq_len = 32 # Short sequence enough to trigger lazy loading
+        
+        dummy_input = torch.randint(
+            0, vocab_size, (batch_size, seq_len), device=self.device, dtype=torch.long
+        )
+        dummy_position_ids = (
+            torch.arange(0, seq_len, dtype=torch.long, device=self.device)
+            .unsqueeze(0)
+            .expand(batch_size, -1)
+        )
+
+        dummy_atten_info = AttentionInfo()
+        # Allocate small dummy buffer for the forward pass
+        dummy_atten_info.kv_buffer = [
+            torch.empty(
+                (seq_len, 2 * self.num_kv_heads, self.head_dim),
+                dtype=self.dtype,
+                device=self.device,
+            )
+            for _ in range(self.num_layers)
+        ]
+        dummy_atten_info.cur_select_index = torch.arange(seq_len, dtype=torch.int32, device=self.device)
+        dummy_atten_info.b_start_loc = torch.tensor([0], dtype=torch.int32, device=self.device)
+        dummy_atten_info.b_seq_len = torch.tensor([seq_len], dtype=torch.int32, device=self.device)
+        dummy_atten_info.max_actual_seq_len = seq_len
+
+        # 3. Execute Dummy Forward
+        try:
+            # Use inference_mode for better performance simulation than no_grad
+            with torch.inference_mode():
+                if (model_type or "").lower() == "llava" and hasattr(model, "language_model"):
+                    model.language_model(dummy_input, dummy_position_ids, dummy_atten_info)
+                else:
+                    model(dummy_input, dummy_position_ids, dummy_atten_info)
+        except RuntimeError as e:
+            if "sentencepiece" in str(e).lower():
+                logger.error("🚨 Error: 'sentencepiece' library is missing. Please run `pip install sentencepiece`.")
+                # We can't proceed accurately if the model crashed, but we can try to estimate purely based on weights
+                # For now, re-raise to stop execution or handle gracefully.
+                raise e
+            else:
+                logger.warning(f"Dummy forward pass failed: {e}. Memory estimation might be inaccurate.")
+        except Exception as e:
+             logger.warning(f"Dummy forward pass failed with unknown error: {e}")
+
+        torch.cuda.synchronize()
+        
+        # 4. Calculate Memory
+        peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+        
+        # Clean up dummy tensors
+        del dummy_input, dummy_position_ids, dummy_atten_info
+        torch.cuda.empty_cache()
+        
+        # Check for non-torch allocations (fragmentation or drivers)
+        current_allocated = torch.cuda.memory_stats()["allocated_bytes.all.current"]
+        info_free, info_total = torch.cuda.mem_get_info()
+        real_used = info_total - info_free
+        non_torch_allocations = real_used - current_allocated
         
         if non_torch_allocations > 0:
             peak_memory += non_torch_allocations
 
-        available_kv_cache_memory = (
-            total_gpu_memory * self.gpu_memory_utilization -
-            peak_memory)
-        
-        # 计算每个缓存块的大小
+        available_bytes = (total_gpu_memory * self.gpu_memory_utilization) - peak_memory
         cache_block_size = self.compute_cache_block_size_bytes()
-        # 计算在剩余可用内存下，最多可以分配的 GPU 缓存块数量
-        num_gpu_blocks = int(
-            (total_gpu_memory * self.gpu_memory_utilization -
-            peak_memory) // cache_block_size
-        )
         
-        num_gpu_blocks = max(num_gpu_blocks, 0) # 确保缓存块数量不为负数
+        if available_bytes < 0:
+            logger.error("❌ Not enough GPU memory to load model weights!")
+            return 0
+
+        num_gpu_blocks = int(available_bytes // cache_block_size)
+        num_gpu_blocks = max(num_gpu_blocks, 0)
 
         logger.info(
-            f" Memory profiling results: total_gpu_memory = {total_gpu_memory / (1024**3):.2f} GB \n"
-            f"    initial_memory_usage = {(total_gpu_memory - free_memory_pre_profile) / (1024**3):.2f} GB "
-            f"peak_torch_memory = {(peak_memory - non_torch_allocations) / (1024**3):.2f} GB \n"
-            f"    memory_usage_post_profile = {total_allocated_bytes / (1024**3):.2f} GB \n"
-            f"    non_torch_memory = {non_torch_allocations / (1024**3):.2f} GB, "
-            f"kv_cache_size = {available_kv_cache_memory / (1024**3):.2f} GB \n"
-            f"    gpu_memory_utilization = {self.gpu_memory_utilization:.2f}"
+            f"Memory Profiling:\n"
+            f"  Total GPU Mem: {total_gpu_memory / (1024**3):.2f} GB\n"
+            f"  Peak Torch Mem: {peak_memory / (1024**3):.2f} GB\n"
+            f"  Available for KV: {available_bytes / (1024**3):.2f} GB\n"
+            f"  Block Size: {cache_block_size} bytes\n"
+            f"  Max Blocks: {num_gpu_blocks}"
         )
 
-        gc.collect() # 进行垃圾回收，释放未使用的内存
-        torch.cuda.empty_cache() # 再次清理 CUDA 缓存
+        gc.collect()
+        torch.cuda.empty_cache()
         
-        return num_gpu_blocks # 返回可分配的 GPU 和 CPU 缓存块数量（此处 CPU 块数量为 0）
-    
+        return num_gpu_blocks
+
 
 class KVCacheMemoryManager:
     """
-        param:
-        num_layers: int, 模型的 Transformer 层数
-        num_kv_heads: int, 每层的 KV 头数
-        head_dim: int, 每个头的维度
-        gpu_num_blocks: int, 用户自行设置的最大可用 blocks(tokens), 如果设置该值， kv cache 内存管理器的最大可用内存-tokens 由该值决定。
-        block_size: int, 每个 block 的大小，默认为 1
+    Manages the allocation of KV Cache blocks.
+    Optimized with a stack-based allocator for O(1) non-contiguous allocation.
     """
     def __init__(self, num_layers, num_kv_heads, head_dim, gpu_num_blocks, block_size=1, dtype=torch.float16, device="cuda"):
         self.num_layers = num_layers
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
-        self.gpu_num_blocks = gpu_num_blocks # 手动设定的给kv cache 内存管理分配的可用 blocks 数目:gpu_num_blocks
+        self.gpu_num_blocks = gpu_num_blocks
         self.block_size = block_size
         self.max_num_tokens = gpu_num_blocks * block_size
 
         self.dtype = dtype
         self.device = device
-        self.can_use_mem_size = gpu_num_blocks # 可用的 kv cache tokens 数量
-
-        # 定义 kv 内存位置索引和内存使用状态变量
-        self.kv_mem_pos_indexs = torch.arange(0, self.max_num_tokens, dtype=torch.long, device="cuda")
-        self.kv_mem_use_state = torch.zeros(self.max_num_tokens, dtype = torch.int32, device="cuda")
-
-        # Initialize the gpu_kv_buffer
-        self.init_kv_buffers(
-            self.max_num_tokens,
-            head_dim, num_kv_heads, num_layers, 
-            dtype, device
-        )
-
-    def init_kv_buffers(self,    # 为每一层预先分配KV缓存的GPU内存， shape = [max_num_tokens, 2 * num_kv_heads, head_dim]  2 表示 kv 两个缓存d的拼接
-        max_num_tokens,
-        head_dim, num_kv_heads, num_layers,
-        dtype,
-        device: str="cuda"
-    )-> list[torch.Tensor]:
-        # kv cache shape: config.max_batch_size, config.max_seq_len, self.num_kv_heads, self.head_dim
-        # max_num_tokens = max_num_blocks * self.block_size
-        # TODO 修改 kv buffer 形状支持 PagedAttention
-        self.gpu_kv_buffer = [
-            torch.empty((max_num_tokens, 2 * num_kv_heads, head_dim), dtype=dtype, device=device) for _ in range(num_layers)
-        ]
-        logger.debug(f"gpu_kv_buffer per layer shape: {self.gpu_kv_buffer[0].shape}")
         
+        # Tracking usage
+        self.can_use_mem_size = gpu_num_blocks 
         
-    #=========================判断是否可以分配连续的或者不连续的kv cache=================================
-    @torch.no_grad()
-    def alloc_kvcache(self, need_size):
+        # Reference counting state: 0 = free, >0 = used (shared count)
+        self.kv_mem_use_state = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
+        
+        # === Optimization: Free Block Stack ===
+        # Instead of searching for zeros, we keep a stack of free indices.
+        # This makes allocation O(1).
+        # Initialize with all indices [0, 1, ..., max-1] reversed (so we pop from 0 upwards roughly)
+        self.free_indices_stack = torch.arange(self.max_num_tokens - 1, -1, -1, dtype=torch.long, device=device)
+        self.free_stack_top = self.max_num_tokens # Pointer to the top of the stack (size)
+
+        self.gpu_kv_buffer: List[torch.Tensor] | None = None
+        self.init_kv_buffers(self.max_num_tokens, head_dim, num_kv_heads, num_layers, dtype, device)
+
+    def init_kv_buffers(self, max_num_tokens, head_dim, num_kv_heads, num_layers, dtype, device):
+        # Shape: [max_num_tokens, 2 * num_kv_heads, head_dim]
+        # Using 2 * num_kv_heads allows storing K and V contiguously in the last dimension or head dim
+        try:
+            self.gpu_kv_buffer = [
+                torch.empty((max_num_tokens, 2 * num_kv_heads, head_dim), dtype=dtype, device=device) 
+                for _ in range(num_layers)
+            ]
+            logger.info(f"Initialized KV Cache: {max_num_tokens} tokens, Shape: {self.gpu_kv_buffer[0].shape}")
+        except torch.cuda.OutOfMemoryError:
+            logger.error("OOM when allocating KV Buffer. Try reducing gpu_memory_utilization.")
+            raise
+
+    @torch.inference_mode()
+    def alloc_kvcache(self, need_size: int) -> Optional[torch.Tensor]:
+        """
+        Allocate non-contiguous memory blocks.
+        Time Complexity: O(1) (Amortized) using stack pop.
+        """
         if need_size > self.can_use_mem_size:
-            logger.warning(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
+            logger.warning(f"KV Cache OOM: Need {need_size}, Left {self.can_use_mem_size}")
             return None
         
-        can_use_pos_index = torch.nonzero(self.kv_mem_use_state == 0).view(-1)
-        select_index = can_use_pos_index[0:need_size]
-        self.add_ref(select_index)
+        # Pop from the free stack
+        # self.free_indices_stack is pre-allocated. We slice the top `need_size`.
+        current_top = self.free_stack_top
+        new_top = current_top - need_size
+        
+        if new_top < 0:
+            # Should not happen if can_use_mem_size check passes, but for safety
+            logger.error("Inconsistency in KV Memory Manager state.")
+            return None
+
+        # Get indices
+        select_index = self.free_indices_stack[new_top:current_top]
+        self.free_stack_top = new_top
+        
+        # Update Ref Count & Available Size
+        self.add_ref(select_index, update_stack=False) # Don't update stack inside add_ref, we handled it
         
         return select_index
-    
-    @torch.no_grad()
-    def alloc_contiguous_kvcache(self, need_size):
+
+    @torch.inference_mode()
+    def alloc_contiguous_kvcache(self, need_size: int) -> Optional[Tuple[torch.Tensor, int, int]]:
+        """
+        Allocate contiguous memory.
+        Note: This is expensive (O(N)) because we must scan for holes.
+        Use alloc_kvcache (PagedAttention style) whenever possible.
+        """
         if need_size > self.can_use_mem_size:
-            logger.warning(f"warn no enough contiguous cache need_size {need_size} left_size {self.can_use_mem_size}")
             return None
 
-        # 获取未使用的内存块索引
-        can_use_pos_index = torch.nonzero(self.kv_mem_use_state == 0).view(-1)
-        N = can_use_pos_index.numel()
-        if N >= need_size:
-            # 正确地计算 start_indexs 和 end_indexs. 
-            # NOTE: 起始索引不能大于 N - need_size, 又因为 [: index] 切片操作是不包含 index 的, 所以需要将 N - need_size 加 1
-            start_indexs = can_use_pos_index[:N - need_size + 1]
-            # NOTE: can_use_pos_index[3:], 将获取索引为 3 到 9 的元素。
-            end_indexs = can_use_pos_index[need_size - 1:]
-            diff = end_indexs - start_indexs
+        # Fallback to scanning kv_mem_use_state because the stack is random order
+        # Finding contiguous zeros
+        zero_indices = torch.nonzero(self.kv_mem_use_state == 0).view(-1)
+        
+        if zero_indices.numel() < need_size:
+            return None
 
-            # 寻找连续的块，差值应为 need_size - 1
-            contiguous_blocks = (diff == need_size - 1).nonzero(as_tuple=True)[0]
-
-            if contiguous_blocks.numel() > 0:
-                # 取出第一个连续块的起始索引
-                # NOTE: contiguous_blocks[0] 是第一个连续块的索引
-                # NOTE: start_indexs[contiguous_blocks[0]] 获取第一个连续块
-                # 的起始索引
-                # NOTE: end_indexs[contiguous_blocks[0]] 获取第一个连续块
-                # 的结束索引
-                # NOTE: start_indexs[contiguous_blocks[0]] 是连续块的起
-                start_index = start_indexs[contiguous_blocks[0]].item()
-                end_index = start_index + need_size
-                select_index = self.kv_mem_pos_indexs[start_index:end_index]
-                self.add_ref(select_index)
-                return select_index, start_index, end_index
+        # Vectorized check for contiguous blocks
+        # We look for a sequence where index[i+need-1] - index[i] == need-1
+        # Optimization: Only scan if strictly needed
+        
+        # Prepare start and end candidates
+        start_candidates = zero_indices[: -need_size + 1]
+        end_candidates = zero_indices[need_size - 1 :]
+        
+        diff = end_candidates - start_candidates
+        
+        # Check where diff is exactly (need_size - 1)
+        valid_starts = (diff == (need_size - 1)).nonzero(as_tuple=True)[0]
+        
+        if valid_starts.numel() > 0:
+            # Pick the first valid block
+            idx_in_zeros = valid_starts[0].item()
+            start_index = start_candidates[idx_in_zeros].item()
+            end_index = start_index + need_size
+            
+            select_index = self.kv_mem_pos_indexs[start_index:end_index] # Assuming this attr exists or create it
+            
+            # Critical: We must remove these indices from the free_stack to keep sync
+            # This is slow, hence contiguous alloc is slow. 
+            # We reconstruct the stack mask-based or lazily. 
+            # For now, simplistic approach:
+            self.add_ref(select_index, update_stack=True) 
+            
+            return select_index, start_index, end_index
 
         return None
     
-    @torch.no_grad()
-    def alloc_kvcache_index(self, need_size):
+    @property
+    def kv_mem_pos_indexs(self):
+        # Lazy creation or stored
+        if not hasattr(self, "_kv_pos_idx"):
+            self._kv_pos_idx = torch.arange(0, self.max_num_tokens, dtype=torch.long, device=self.device)
+        return self._kv_pos_idx
+
+    @torch.inference_mode()
+    def alloc_kvcache_index(self, need_size: int):
+        """Wrapper to try contiguous first, then paged."""
+        # need_size==1 时 contiguous 扫描没有意义，且切片逻辑会产生空张量导致 shape mismatch
+        if need_size <= 1:
+            select_index = self.alloc_kvcache(need_size)
+            if select_index is None:
+                raise RuntimeError("KV Cache OOM")
+            kv_cache = torch.empty(
+                (need_size, self.num_kv_heads, self.head_dim),
+                dtype=self.dtype,
+                device=self.device,
+            )
+            return select_index.to(torch.int32), kv_cache
+
         alloc_mem = self.alloc_contiguous_kvcache(need_size)
         if alloc_mem is not None:
-            select_index, start_index, end_index = alloc_mem
-            kv_cache = None
+            select_index, _, _ = alloc_mem
+            kv_cache = None # Not returning tensor buffer, just indices
         else:
             select_index = self.alloc_kvcache(need_size)
+            if select_index is None:
+                raise RuntimeError("KV Cache OOM")
+            # Legacy return format support
             kv_cache = torch.empty(
                 (need_size, self.num_kv_heads, self.head_dim),
                 dtype=self.dtype,
@@ -255,52 +358,70 @@ class KVCacheMemoryManager:
         
         return select_index.to(torch.int32), kv_cache
     
-    # 增加引用计数
-    @torch.no_grad()
-    def add_ref(self, token_index: torch.Tensor):
-        state = self.kv_mem_use_state[token_index]
-        has_used_tokens = torch.count_nonzero(state).item()
-        all_tokens = len(state)
-        self.can_use_mem_size -= all_tokens - has_used_tokens
-  
+    @torch.inference_mode()
+    def add_ref(self, token_index: torch.Tensor, update_stack: bool = False):
+        """
+        Increase reference count. 
+        If update_stack is True, it means we manually picked indices (like contiguous) 
+        and need to remove them from the free stack.
+        """
+        # 1. Update Reference Count
         self.kv_mem_use_state[token_index] += 1
-        return
-    
-    # 减少引用计数
-    @torch.no_grad()
-    def release_ref(self, token_index: torch.Tensor):
-        # 使用 unique 方法获取 token_index 中唯一的 token 索引，并返回每个唯一索引在原始张量中出现的次数。
-        token_index, counts = token_index.unique(return_counts=True)
-        # 当引用计数减少到零时，意味着该缓存块可以被释放或重新分配。
-        self.kv_mem_use_state[token_index] -= counts
-        state = self.kv_mem_use_state[token_index]
-        used_tokens = torch.count_nonzero(state).item()
-        all_tokens = len(state)
-        self.can_use_mem_size += all_tokens - used_tokens
-        return
-    
-    # 释放键值缓存缓冲区
-    def _free_buffers(self):
-        self.gpu_kv_buffer = None
-    
-    # 释放指定的kv cache 内存块索引
-    @torch.no_grad()
-    def free(self, free_index):
-        free_index = free_index.long()
-        self.release_ref(free_index)
-        if self.can_use_mem_size == len(self.mem_state):
-            logger.debug(f"freed all gpu mem size {self.can_use_mem_size}")
-        return
-    
-    # 释放所有内存
-    @torch.no_grad()
-    def free_all(self,):
-        self.can_use_mem_size = len(self.kv_mem_use_state)
-        self.kv_mem_use_state[:] = 0
+        
+        # 2. Update Available Size Calculation
+        # Only decrease available size if it was previously 0 (free)
+        # Note: In PagedAttention with sharing, adding ref to already used block doesn't consume *new* physical memory
+        # But here logic implies 'can_use_mem_size' tracks raw free slots.
+        # Actually, standard logic: can_use_mem_size is just free slots.
+        # If token_index was already used, it's not in free slots.
+        
+        # Assuming token_index passed here are strictly newly allocated from free pool
+        # logic in alloc_kvcache guarantees they were free.
+        self.can_use_mem_size -= len(token_index)
+        
+        if update_stack:
+            # Expensive: Remove specific values from stack
+            # Usually only happens for contiguous alloc
+            mask = torch.isin(self.free_indices_stack[:self.free_stack_top], token_index, invert=True)
+            remaining = self.free_indices_stack[:self.free_stack_top][mask]
+            self.free_indices_stack[:len(remaining)] = remaining
+            self.free_stack_top = len(remaining)
 
-def indexs_convert(indexs: torch.tensor, batch_size: int):
-    """
-    prefill 阶段分配的kv cache 索引和 decode 阶段分配的索引合并在一起需要做变换
-    TODO: 支持连续批处理开发时用上.
-    """
-    passcuda
+    @torch.inference_mode()
+    def release_ref(self, token_index: torch.Tensor):
+        """
+        Decrease reference count. If count hits 0, return to free stack.
+        """
+        token_index, counts = token_index.unique(return_counts=True)
+        
+        # Decrease counts
+        self.kv_mem_use_state[token_index] -= counts.int()
+        
+        # Find which ones became free (count == 0)
+        # Note: We must clamp to 0 to avoid negative (bug safety)
+        self.kv_mem_use_state[token_index] = torch.clamp(self.kv_mem_use_state[token_index], min=0)
+        
+        freed_mask = (self.kv_mem_use_state[token_index] == 0)
+        freed_indices = token_index[freed_mask]
+        
+        num_freed = freed_indices.numel()
+        
+        if num_freed > 0:
+            # Push back to stack
+            current_top = self.free_stack_top
+            new_top = current_top + num_freed
+            
+            if new_top > self.max_num_tokens:
+                logger.error("Memory Manager Error: Free stack overflow.")
+                return
+
+            self.free_indices_stack[current_top:new_top] = freed_indices
+            self.free_stack_top = new_top
+            self.can_use_mem_size += num_freed
+
+    def free_all(self):
+        self.can_use_mem_size = self.max_num_tokens
+        self.kv_mem_use_state.zero_()
+        # Reset Stack
+        self.free_indices_stack = torch.arange(self.max_num_tokens - 1, -1, -1, dtype=torch.long, device=self.device)
+        self.free_stack_top = self.max_num_tokens

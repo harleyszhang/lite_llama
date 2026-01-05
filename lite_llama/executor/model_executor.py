@@ -15,6 +15,7 @@ from .executor_struct import AttentionInfo, CONFIG_CLASS_MAP
 from ..models.model_config import LlamaConfig
 from ..kernels import update_kv_index
 from ..utils.logger import get_logger
+from ..utils.constants import IMAGE_TOKEN_INDEX
 
 logger = get_logger(__name__)
 
@@ -53,7 +54,13 @@ class ModelExecutor:
         model = ModelExecutor._load_model_weight(model_config, checkpoints_dir, device=device)
     
         return ModelExecutor(
-            checkpoints_dir, model_config, model, max_gpu_num_blocks, compiled_model, device
+            checkpoints_dir,
+            model_config,
+            model,
+            max_gpu_num_blocks,
+            compiled_model,
+            device,
+            max_seq_len_override=max_seq_len,
         )
 
     @staticmethod
@@ -68,7 +75,22 @@ class ModelExecutor:
         if cfg_cls is None:
             raise ValueError(f"Unsupported model_type {params['model_type']!r}")
         
-        return cfg_cls.from_dict(params)
+        cfg = cfg_cls.from_dict(params)
+
+        # LLaVA: 强制让 text_config 具备足够的 vocab_size / max_position_embeddings
+        # 否则 <image> token id (通常为 32000) 会越界触发 embedding gather OOB。
+        if isinstance(cfg, LlavaConfig):
+            try:
+                # 1) vocab_size 至少覆盖 IMAGE_TOKEN_INDEX
+                desired_vocab = max(int(getattr(cfg.text_config, "vocab_size", 0) or 0), int(IMAGE_TOKEN_INDEX) + 1)
+                cfg.text_config.vocab_size = desired_vocab
+                # 2) max_position_embeddings 至少使用调用方传入的 max_seq_len
+                if hasattr(cfg.text_config, "max_position_embeddings"):
+                    cfg.text_config.max_position_embeddings = max(int(cfg.text_config.max_position_embeddings), int(max_seq_len))
+            except Exception:
+                pass
+
+        return cfg
     
     @staticmethod
     def _accelerate_load_weight(
@@ -116,6 +138,18 @@ class ModelExecutor:
         state_dict = torch.load(
             ckpt_path, mmap=True, weights_only=True, map_location=device
         )
+
+        # LLaVA: 若我们把 vocab_size 扩到覆盖 IMAGE_TOKEN_INDEX，需要同步 padding embedding/lm_head 权重以保证 strict load 通过。
+        if isinstance(model_config, LlavaConfig):
+            desired_vocab = int(getattr(model_config.text_config, "vocab_size", 0) or 0)
+            for key in ("language_model.embed_tokens.weight", "language_model.lm_head.weight"):
+                w = state_dict.get(key)
+                if w is None or w.ndim != 2:
+                    continue
+                cur_vocab = int(w.shape[0])
+                if desired_vocab > cur_vocab:
+                    pad = torch.zeros((desired_vocab - cur_vocab, w.shape[1]), dtype=w.dtype, device=w.device)
+                    state_dict[key] = torch.cat([w, pad], dim=0)
 
         model.load_state_dict(
             state_dict, strict=True, assign=True
@@ -173,16 +207,21 @@ class ModelExecutor:
         max_gpu_num_blocks=None,
         compiled_model=False,
         device="cuda",
+        max_seq_len_override: int | None = None,
     ):
         self.checkpoints_dir = checkpoints_dir
         self.model_config = model_config
         self.device = device
         if isinstance(model_config, LlavaConfig):
             self.llm_config = LlamaConfig.from_dict(model_config.text_config.to_dict())
-            print(f"self.llm_config.max_seq_len: {self.llm_config.max_seq_len}")
         else:
             self.llm_config = model_config
 
+        # CLI/调用方传入的 max_seq_len 必须优先生效（否则会出现 token table 长度过小，例如 20，导致图像 patch 后越界）
+        if max_seq_len_override is not None:
+            self.llm_config.max_seq_len = int(max_seq_len_override)
+
+        print(f"self.llm_config.max_seq_len: {self.llm_config.max_seq_len}")
         self.max_seq_len = self.llm_config.max_seq_len
         self.model_type = model_config.model_type
         self.model = model
@@ -223,7 +262,14 @@ class ModelExecutor:
             gpu_memory_utilization=gpu_memory_utilization,
             block_size=block_size,
         )
-        max_gpu_num_blocks = avaliable_blocks.compute_num_available_blocks(model, model_path=self.checkpoints_dir)
+        # 对 LLaVA：真实 vocab_size 在 text_config；dummy forward 也需要 image_tensor
+        max_gpu_num_blocks = avaliable_blocks.compute_num_available_blocks(
+            model,
+            model_path=self.checkpoints_dir,
+            model_type=str(self.model_type).lower() if self.model_type is not None else None,
+            model_config=self.model_config,
+            llm_config=self.llm_config,
+        )
         max_gpu_num_tokens = max_gpu_num_blocks * block_size
 
         return max_gpu_num_blocks, max_gpu_num_tokens

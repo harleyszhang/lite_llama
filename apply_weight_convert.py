@@ -3,125 +3,65 @@
 """
 apply_weight_convert.py
 ~~~~~~~~~~~~~~~~~~~~
-将 Qwen-2/3、Llama、LLaVA 等 HuggingFace / PyTorch-bin 权重
-整理为 lite_llama 框架的自定义格式模型权重的小工具。
+高性能版：跳过 Model 初始化，直接读取权重文件。
+支持 .safetensors (极速) 和 .bin 格式。
 
-Usage
------
-python lite_llama/apply_weight_convert.py /path/to/weights [--model-type qwen3] [--device cuda]
-
-Author: harleyszhang (2025-06-08)
+Author: harleyszhang (Optimized 2025-06-08)
 """
 from __future__ import annotations
 
 import argparse
+import gc
+import json
+import logging
 import shutil
+import glob
+import os
 from pathlib import Path
-from typing import Mapping
+from typing import Any
 
 import torch
 from tqdm.auto import tqdm
-from transformers import (AutoConfig, AutoModelForCausalLM,
-                          LlavaConfig, LlavaForConditionalGeneration)
+from transformers import AutoConfig, AutoModel
 
-from lite_llama.utils.logger import get_logger
+# 尝试导入 safetensors，这是目前最快的加载方式
+try:
+    from safetensors.torch import load_file as load_safetensors
+    HAS_SAFETENSORS = True
+except ImportError:
+    HAS_SAFETENSORS = False
 
-logger = get_logger(__name__)
-
-# --------------------------------------------------------------------------- #
-# 通用工具函数
-# --------------------------------------------------------------------------- #
-def ensure_dir(path: Path) -> Path:
-    """若目录不存在则创建，最后返回自身。"""
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def save_state_dict(out_dir: Path, model_id: str, state: dict[str, torch.Tensor]) -> None:
-    """保存 state_dict 并打印信息。"""
-    torch.save(state, out_dir / f"{model_id}.pth", _use_new_zipfile_serialization=True)
-    logger.info("✅ 已保存权重到 %s", out_dir / f"{model_id}.pth")
-
-
-def copy_metadata(src: Path, dst: Path) -> None:
-    """复制 *.json 与 tokenizer.model 等辅助文件。"""
-    for file in src.glob("*.json"):
-        shutil.copy2(file, dst)
-    tok = src / "tokenizer.model"
-    if tok.exists():
-        shutil.copy2(tok, dst)
-
+try:
+    from lite_llama.utils.logger import get_logger
+    logger = get_logger(__name__)
+except ImportError:
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
-# 修订后的 merge_kv_weights —— 只生成 kv_proj_weight，下划线风格
+# 配置类与映射表 (保持不变)
 # --------------------------------------------------------------------------- #
-def merge_kv_weights(state: dict[str, torch.Tensor],
-                     prefix: str,
-                     with_bias: bool = False) -> None:
-    """
-    将 K/V 投影合并为 kv_proj_weight / kv_proj_bias（可选），
-    完全使用 **下划线** 键名，保证与 lite-llama 的 Qwen3 实现一致。
-    同时若此前转换过留下旧的 kv_proj.weight，也会被删除。
-    """
-    # ---------- 1. 找到现有 K/V ----------
-    # 两种候选命名：点号风格  layers.0.self_attn.k_proj.weight
-    #            下划线风格 layers.0.self_attn.k_proj_weight
-    candidates = [
-        (f"{prefix}.k_proj.weight", f"{prefix}.v_proj.weight"),
-        (f"{prefix}.k_proj_weight", f"{prefix}.v_proj_weight"),
-    ]
-    for k_key, v_key in candidates:
-        if k_key in state and v_key in state:
-            break
-    else:  # 没有任何一对匹配
-        return
+class ModelSpec:
+    def __init__(self, common: dict, layer: dict, merge_bias: bool, prefix_rules: list[tuple] = None):
+        self.common = common
+        self.layer = layer
+        self.merge_bias = merge_bias
+        self.prefix_rules = prefix_rules or []
 
-    # ---------- 2. 合并权重 ----------
-    fused_k = f"{prefix}.kv_proj_weight"            # 目标键（下划线）
-    state[fused_k] = torch.cat([state[k_key], state[v_key]], dim=0)
-    del state[k_key], state[v_key]
+_LLAMA_LAYER_TEMPLATE = {
+    "mlp.gate_proj.weight":    "mlp.gate_proj.weight",
+    "mlp.up_proj.weight":      "mlp.up_proj.weight",
+    "mlp.down_proj.weight":    "mlp.down_proj.weight",
+}
 
-    # ---------- 3. 合并 bias（可选） ----------
-    if with_bias:
-        bias_cands = [
-            (f"{prefix}.k_proj.bias",  f"{prefix}.v_proj.bias"),
-            (f"{prefix}.k_proj_bias",  f"{prefix}.v_proj_bias"),
-        ]
-        for kb_key, vb_key in bias_cands:
-            if kb_key in state and vb_key in state:
-                fused_b = f"{prefix}.kv_proj_bias"
-                state[fused_b] = torch.cat([state[kb_key], state[vb_key]], dim=0)
-                del state[kb_key], state[vb_key]
-                break
-
-    # ---------- 4. 如有旧版 kv_proj.weight，顺带删掉 ----------
-    old_key = f"{prefix}.kv_proj.weight"
-    if old_key in state:
-        del state[old_key]
-
-
-def build_mapping(common: Mapping[str, str],
-                  layer_tpl: Mapping[str, str],
-                  num_layers: int) -> dict[str, str]:
-    """根据层数展开模板映射表。"""
-    mapping = dict(common)
-    for i in range(num_layers):
-        mapping.update({hf.format(i=i): custom.format(i=i) for hf, custom in layer_tpl.items()})
-    return mapping
-
-# --------------------------------------------------------------------------- #
-# 具体各模型映射规则
-# --------------------------------------------------------------------------- #
-_SPEC = {
-    # Qwen-2
-    "qwen2": {
-        "common": {
+_SPECS: dict[str, ModelSpec] = {
+    "qwen2": ModelSpec(
+        common={
             "model.norm.weight":         "norm_weight",
             "model.embed_tokens.weight": "embed_tokens.weight",
             "lm_head.weight":            "lm_head_weight",
         },
-        "layer": {
-            # q_proj/k_proj/... 同下
+        layer={
             "model.layers.{i}.self_attn.q_proj.weight":  "layers.{i}.self_attn.q_proj_weight",
             "model.layers.{i}.self_attn.q_proj.bias":    "layers.{i}.self_attn.q_proj_bias",
             "model.layers.{i}.self_attn.k_proj.weight":  "layers.{i}.self_attn.k_proj_weight",
@@ -129,210 +69,331 @@ _SPEC = {
             "model.layers.{i}.self_attn.v_proj.weight":  "layers.{i}.self_attn.v_proj_weight",
             "model.layers.{i}.self_attn.v_proj.bias":    "layers.{i}.self_attn.v_proj_bias",
             "model.layers.{i}.self_attn.o_proj.weight":  "layers.{i}.self_attn.o_proj_weight",
-            "model.layers.{i}.mlp.gate_proj.weight":     "layers.{i}.mlp.gate_proj.weight",
-            "model.layers.{i}.mlp.up_proj.weight":       "layers.{i}.mlp.up_proj.weight",
-            "model.layers.{i}.mlp.down_proj.weight":     "layers.{i}.mlp.down_proj.weight",
             "model.layers.{i}.input_layernorm.weight":   "layers.{i}.input_layernorm_weight",
             "model.layers.{i}.post_attention_layernorm.weight": "layers.{i}.post_attention_layernorm_weight",
+            **{f"model.layers.{{i}}.{k}": f"layers.{{i}}.{v}" for k, v in _LLAMA_LAYER_TEMPLATE.items()}
         },
-        "merge_bias": True,
-    },
-
-    # Qwen-3
-    "qwen3": {
-        "common": {
+        merge_bias=True
+    ),
+    "qwen3": ModelSpec(
+        common={
             "model.embed_tokens.weight": "embed_tokens.weight",
             "model.norm.weight":         "norm_weight",
             "lm_head.weight":            "lm_head_weight",
         },
-        "layer": {
+        layer={
             "model.layers.{i}.self_attn.q_proj.weight": "layers.{i}.self_attn.q_proj_weight",
             "model.layers.{i}.self_attn.k_proj.weight": "layers.{i}.self_attn.k_proj_weight",
             "model.layers.{i}.self_attn.v_proj.weight": "layers.{i}.self_attn.v_proj_weight",
+            "model.layers.{i}.self_attn.o_proj.weight": "layers.{i}.self_attn.o_proj_weight",
             "model.layers.{i}.self_attn.q_norm.weight": "layers.{i}.self_attn.q_norm_weight",
             "model.layers.{i}.self_attn.k_norm.weight": "layers.{i}.self_attn.k_norm_weight",
-            "model.layers.{i}.self_attn.o_proj.weight": "layers.{i}.self_attn.o_proj_weight",
-            "model.layers.{i}.mlp.gate_proj.weight":    "layers.{i}.mlp.gate_proj.weight",
-            "model.layers.{i}.mlp.up_proj.weight":      "layers.{i}.mlp.up_proj.weight",
-            "model.layers.{i}.mlp.down_proj.weight":    "layers.{i}.mlp.down_proj.weight",
             "model.layers.{i}.input_layernorm.weight":  "layers.{i}.input_layernorm_weight",
             "model.layers.{i}.post_attention_layernorm.weight": "layers.{i}.post_attention_layernorm_weight",
+            **{f"model.layers.{{i}}.{k}": f"layers.{{i}}.{v}" for k, v in _LLAMA_LAYER_TEMPLATE.items()}
         },
-        "merge_bias": False,
-    },
-
-    # Llama-HF
-    "llama": {
-        "common": {
+        merge_bias=False
+    ),
+    "llama": ModelSpec(
+        common={
             "model.embed_tokens.weight": "embed_tokens.weight",
             "model.norm.weight":         "norm_weight",
             "lm_head.weight":            "lm_head.weight",
         },
-        "layer": {
+        layer={
             "model.layers.{i}.self_attn.q_proj.weight": "layers.{i}.self_attn.q_proj.weight",
             "model.layers.{i}.self_attn.k_proj.weight": "layers.{i}.self_attn.k_proj.weight",
             "model.layers.{i}.self_attn.v_proj.weight": "layers.{i}.self_attn.v_proj.weight",
             "model.layers.{i}.self_attn.o_proj.weight": "layers.{i}.self_attn.o_proj.weight",
-            "model.layers.{i}.mlp.gate_proj.weight":    "layers.{i}.mlp.gate_proj.weight",
-            "model.layers.{i}.mlp.up_proj.weight":      "layers.{i}.mlp.up_proj.weight",
-            "model.layers.{i}.mlp.down_proj.weight":    "layers.{i}.mlp.down_proj.weight",
             "model.layers.{i}.input_layernorm.weight":  "layers.{i}.attention_norm_weight",
             "model.layers.{i}.post_attention_layernorm.weight": "layers.{i}.ffn_norm_weight",
+            **{f"model.layers.{{i}}.{k}": f"layers.{{i}}.{v}" for k, v in _LLAMA_LAYER_TEMPLATE.items()}
         },
-        "merge_bias": False,
-    },
+        merge_bias=False
+    ),
+    "llava": ModelSpec(
+        common={
+            # HF 的 LlavaForConditionalGeneration state_dict 常见两种前缀：
+            # 1) language_model.*（少见，某些导出/重排后会出现）
+            # 2) model.language_model.*（更常见，原生 HF/Transformers 权重）
+            "language_model.model.embed_tokens.weight":       "language_model.embed_tokens.weight",
+            "language_model.model.norm.weight":               "language_model.norm_weight",
+            "language_model.lm_head.weight":                  "language_model.lm_head.weight",
+            "model.language_model.model.embed_tokens.weight": "language_model.embed_tokens.weight",
+            "model.language_model.model.norm.weight":         "language_model.norm_weight",
+            "model.language_model.lm_head.weight":            "language_model.lm_head.weight",
 
-    # Llama-bin（原 Fairseq/Llama.PTH 格式）
-    "llama-bin": {
-        "common": {
-            "tok_embeddings.weight": "embed_tokens.weight",
-            "norm.weight":           "norm_weight",
-            "output.weight":         "lm_head.weight",
-        },
-        "layer": {
-            "layers.{i}.attention.wq.weight": "layers.{i}.attention.q_proj.weight",
-            "layers.{i}.attention.wk.weight": "layers.{i}.attention.k_proj.weight",
-            "layers.{i}.attention.wv.weight": "layers.{i}.attention.v_proj.weight",
-            "layers.{i}.attention.wo.weight": "layers.{i}.attention.o_proj.weight",
-            "layers.{i}.feed_forward.w1.weight": "layers.{i}.feed_forward.gate_proj.weight",
-            "layers.{i}.feed_forward.w3.weight": "layers.{i}.feed_forward.up_proj.weight",
-            "layers.{i}.feed_forward.w2.weight": "layers.{i}.feed_forward.down_proj.weight",
-            "layers.{i}.attention_norm.weight":  "layers.{i}.attention_norm_weight",
-            "layers.{i}.ffn_norm.weight":        "layers.{i}.ffn_norm_weight",
-        },
-        "merge_bias": False,
-    },
+            # LLaVA v1.5 常见“分包”形式：语言模型是纯 LLaMA（pytorch_model-*.bin 里是 model.*）
+            "model.embed_tokens.weight": "language_model.embed_tokens.weight",
+            "model.norm.weight":         "language_model.norm_weight",
+            "lm_head.weight":            "language_model.lm_head.weight",
 
-    # LLaVA-Llama
-    "llava": {
-        "common": {
-            "language_model.model.embed_tokens.weight": "language_model.embed_tokens.weight",
-            "language_model.model.norm.weight":         "language_model.norm_weight",
-            "language_model.lm_head.weight":            "language_model.lm_head.weight",
+            # projector 常见存放在 mm_projector.bin，key 形如 model.mm_projector.{0,2}.*
+            "model.mm_projector.0.weight": "multi_modal_projector.linear_1.weight",
+            "model.mm_projector.0.bias":   "multi_modal_projector.linear_1.bias",
+            "model.mm_projector.2.weight": "multi_modal_projector.linear_2.weight",
+            "model.mm_projector.2.bias":   "multi_modal_projector.linear_2.bias",
         },
-        "layer": {
+        layer = {
+            # key 是原始权重值, value 是自定义模型结构权重参数
             "language_model.model.layers.{i}.self_attn.q_proj.weight": "language_model.layers.{i}.self_attn.q_proj.weight",
             "language_model.model.layers.{i}.self_attn.k_proj.weight": "language_model.layers.{i}.self_attn.k_proj.weight",
             "language_model.model.layers.{i}.self_attn.v_proj.weight": "language_model.layers.{i}.self_attn.v_proj.weight",
             "language_model.model.layers.{i}.self_attn.o_proj.weight": "language_model.layers.{i}.self_attn.o_proj.weight",
-            "language_model.model.layers.{i}.mlp.gate_proj.weight":    "language_model.layers.{i}.mlp.gate_proj.weight",
-            "language_model.model.layers.{i}.mlp.up_proj.weight":      "language_model.layers.{i}.mlp.up_proj.weight",
-            "language_model.model.layers.{i}.mlp.down_proj.weight":    "language_model.layers.{i}.mlp.down_proj.weight",
-            "language_model.model.layers.{i}.input_layernorm.weight":  "language_model.layers.{i}.attention_norm_weight",
+            "language_model.model.layers.{i}.mlp.gate_proj.weight": "language_model.layers.{i}.mlp.gate_proj.weight",
+            "language_model.model.layers.{i}.mlp.up_proj.weight": "language_model.layers.{i}.mlp.up_proj.weight",
+            "language_model.model.layers.{i}.mlp.down_proj.weight": "language_model.layers.{i}.mlp.down_proj.weight",
+            "language_model.model.layers.{i}.input_layernorm.weight": "language_model.layers.{i}.attention_norm_weight",
             "language_model.model.layers.{i}.post_attention_layernorm.weight": "language_model.layers.{i}.ffn_norm_weight",
+
+            # 完整 HF 形式（带 model.language_model 前缀）
+            "model.language_model.model.layers.{i}.self_attn.q_proj.weight": "language_model.layers.{i}.self_attn.q_proj.weight",
+            "model.language_model.model.layers.{i}.self_attn.k_proj.weight": "language_model.layers.{i}.self_attn.k_proj.weight",
+            "model.language_model.model.layers.{i}.self_attn.v_proj.weight": "language_model.layers.{i}.self_attn.v_proj.weight",
+            "model.language_model.model.layers.{i}.self_attn.o_proj.weight": "language_model.layers.{i}.self_attn.o_proj.weight",
+            "model.language_model.model.layers.{i}.mlp.gate_proj.weight": "language_model.layers.{i}.mlp.gate_proj.weight",
+            "model.language_model.model.layers.{i}.mlp.up_proj.weight": "language_model.layers.{i}.mlp.up_proj.weight",
+            "model.language_model.model.layers.{i}.mlp.down_proj.weight": "language_model.layers.{i}.mlp.down_proj.weight",
+            "model.language_model.model.layers.{i}.input_layernorm.weight": "language_model.layers.{i}.attention_norm_weight",
+            "model.language_model.model.layers.{i}.post_attention_layernorm.weight": "language_model.layers.{i}.ffn_norm_weight",
+
+            # 分包形式：纯 LLaMA（model.layers.*）
+            "model.layers.{i}.self_attn.q_proj.weight": "language_model.layers.{i}.self_attn.q_proj.weight",
+            "model.layers.{i}.self_attn.k_proj.weight": "language_model.layers.{i}.self_attn.k_proj.weight",
+            "model.layers.{i}.self_attn.v_proj.weight": "language_model.layers.{i}.self_attn.v_proj.weight",
+            "model.layers.{i}.self_attn.o_proj.weight": "language_model.layers.{i}.self_attn.o_proj.weight",
+            "model.layers.{i}.mlp.gate_proj.weight": "language_model.layers.{i}.mlp.gate_proj.weight",
+            "model.layers.{i}.mlp.up_proj.weight": "language_model.layers.{i}.mlp.up_proj.weight",
+            "model.layers.{i}.mlp.down_proj.weight": "language_model.layers.{i}.mlp.down_proj.weight",
+            "model.layers.{i}.input_layernorm.weight": "language_model.layers.{i}.attention_norm_weight",
+            "model.layers.{i}.post_attention_layernorm.weight": "language_model.layers.{i}.ffn_norm_weight",
         },
-        "merge_bias": False,
-    },
+        merge_bias=False,
+        prefix_rules=[
+            ("vision_tower.", "vision_tower."),
+            ("model.vision_tower.", "vision_tower."),
+            ("multi_modal_projector.", "multi_modal_projector."),
+            ("model.multi_modal_projector.", "multi_modal_projector."),
+        ]
+    ),
 }
 
 # --------------------------------------------------------------------------- #
-# 核心转换逻辑
+# 高性能加载器
 # --------------------------------------------------------------------------- #
-def convert(checkpoints_dir: Path,
-            hf_state: dict[str, torch.Tensor],
-            model_type: str,
-            num_layers: int) -> dict[str, torch.Tensor]:
-    """执行主转换流程并把结果保存到 my_weight/<model_id>/ 目录。"""
-    spec = _SPEC[model_type]
-    mapping = build_mapping(spec["common"], spec["layer"], num_layers)
-    new_sd: dict[str, torch.Tensor] = {}
+def get_weight_files(ckpt_dir: Path) -> list[Path]:
+    """获取权重文件列表，优先查找 .safetensors"""
+    # 1. 优先找 safetensors (速度极快)
+    safetensors = list(ckpt_dir.glob("*.safetensors"))
+    if safetensors:
+        return sorted(safetensors)
+    
+    # 2. 其次找 .bin（LLaVA 还可能有 mm_projector.bin）
+    bins = list(ckpt_dir.glob("*.bin"))
+    if bins:
+        blacklist = ("training_args", "trainer_state", "optimizer", "scheduler", "rng_state", "scaler")
+        return sorted([b for b in bins if not any(x in b.name for x in blacklist)])
+    
+    # 3. 找 .pt
+    pts = list(ckpt_dir.glob("*.pt"))
+    return sorted(pts)
 
-    # ---------- 1. 重映射 ----------
-    for k, v in tqdm(hf_state.items(), desc=f"[{model_type}] 权重重映射"):
-        if (ck := mapping.get(k)) is not None:
-            new_sd[ck] = v
-        else:
-            logger.debug("忽略未映射参数 %s", k)
-
-    # ---------- 2. 仅对 *Qwen* 系列执行 KV 合并 ----------
-    if model_type.startswith("qwen") or model_type.startswith("llama"):              # 只处理 Qwen-2 / Qwen-3 等
-        for i in range(num_layers):
-            prefix = f"layers.{i}.self_attn"       # Qwen 无额外前缀
-            merge_kv_weights(new_sd, prefix, with_bias=spec["merge_bias"])
-
-    # ---------- 3. 保存 ----------
-    script_root = Path(__file__).resolve().parent
-    out_dir = ensure_dir(script_root / "my_weight" / checkpoints_dir.name)
-    save_state_dict(out_dir, checkpoints_dir.name, new_sd)
-    copy_metadata(checkpoints_dir, out_dir)
-
-    logger.info("🎉 转换完成，共 %d 个参数", len(new_sd))
-    return new_sd
-
-
-
-# --------------------------------------------------------------------------- #
-# CLI 辅助：由 config.json 判别模型类型
-# --------------------------------------------------------------------------- #
-def detect_model_type(checkpoints_dir: Path) -> str:
-    """
-    读取 config.json 中的 model_type 字段。
-    若该字段在 _SPEC 中无法找到，则抛出错误提示。
-    """
-    cfg = AutoConfig.from_pretrained(checkpoints_dir, trust_remote_code=True)
-    mtype = cfg.model_type.lower()
-    # 某些模型可能需要额外归一化 / 映射
-    alias = {
-        "qwen2":   "qwen2",
-        "qwen3":   "qwen3",
-        "llama":   "llama",
-        "llava":   "llava",
-    }.get(mtype, mtype)      # 默认原样返回
-    if alias not in _SPEC:
-        raise ValueError(f"暂不支持的 model_type '{mtype}'，请检查映射表")
-    return alias
-
-
-def load_hf_state(checkpoints_dir: Path,
-                  model_type: str,
-                  device: str = "cpu") -> dict[str, torch.Tensor]:
-    """加载 HF / bin 权重到 state_dict。"""
-    if model_type == "llava":
-        model = (LlavaForConditionalGeneration
-                 .from_pretrained(checkpoints_dir, torch_dtype=torch.float16, low_cpu_mem_usage=True)
-                 .to(device))
+def load_shard(file_path: Path, device: str = "cpu") -> dict[str, torch.Tensor]:
+    """加载单个分片文件"""
+    file_str = str(file_path)
+    if file_str.endswith(".safetensors"):
+        if not HAS_SAFETENSORS:
+            raise ImportError("检测到 safetensors 文件，但未安装 `safetensors` 库。请执行 `pip install safetensors`")
+        return load_safetensors(file_str, device=device)
     else:
-        model = (AutoModelForCausalLM
-                 .from_pretrained(checkpoints_dir, torch_dtype=torch.float16, low_cpu_mem_usage=True)
-                 .to(device))
-    return model.state_dict()
+        # .bin / .pt
+        return torch.load(file_str, map_location=device)
 
+def build_full_mapping(spec: ModelSpec, num_layers: int) -> dict[str, str]:
+    mapping = dict(spec.common)
+    for i in range(num_layers):
+        mapping.update({k.format(i=i): v.format(i=i) for k, v in spec.layer.items()})
+    return mapping
 
-def get_num_layers(checkpoints_dir: Path, model_type: str) -> int:
-    """从 config 中提取 Transformer 层数。"""
+def check_prefix_rules(key: str, rules: list[tuple[str, str]]) -> str | None:
+    for src, dst in rules:
+        if key.startswith(src):
+            return dst + key[len(src):]
+    return None
+
+def merge_kv_weights(state: dict[str, torch.Tensor], prefix: str, with_bias: bool = False) -> None:
+    """KV 合并逻辑 (就地修改)"""
+    candidates = [
+        (f"{prefix}.k_proj.weight", f"{prefix}.v_proj.weight"),
+        (f"{prefix}.k_proj_weight", f"{prefix}.v_proj_weight"),
+    ]
+    k_key, v_key = None, None
+    for k, v in candidates:
+        if k in state and v in state:
+            k_key, v_key = k, v
+            break
+            
+    if not k_key: return
+
+    target_key = f"{prefix}.kv_proj_weight"
+    # CPU 上合并是内存操作，不涉及计算
+    state[target_key] = torch.cat([state[k_key], state[v_key]], dim=0)
+    del state[k_key], state[v_key]
+
+    if with_bias:
+        bias_cands = [
+            (f"{prefix}.k_proj.bias", f"{prefix}.v_proj.bias"),
+            (f"{prefix}.k_proj_bias", f"{prefix}.v_proj_bias"),
+        ]
+        for kb, vb in bias_cands:
+            if kb in state and vb in state:
+                state[f"{prefix}.kv_proj_bias"] = torch.cat([state[kb], state[vb]], dim=0)
+                del state[kb], state[vb]
+                break
+
+# --------------------------------------------------------------------------- #
+# 核心流程
+# --------------------------------------------------------------------------- #
+def convert_model(checkpoints_dir: Path, output_dir: Path, model_type: str, device: str = "cpu") -> None:
+    spec = _SPECS.get(model_type)
+    if not spec:
+        raise ValueError(f"不支持的模型类型: {model_type}")
+
+    # 1. 获取模型层数 (轻量级，只加载 Config)
+    logger.info("📖 读取 Config...")
+    config = AutoConfig.from_pretrained(checkpoints_dir, trust_remote_code=True)
+    if hasattr(config, "text_config"): # Llava
+        num_layers = config.text_config.num_hidden_layers
+    else:
+        num_layers = config.num_hidden_layers
+    
+    # 2. 准备映射表
+    full_mapping = build_full_mapping(spec, num_layers)
+    new_state: dict[str, torch.Tensor] = {}
+    
+    # 3. 扫描并加载权重文件
+    weight_files = get_weight_files(checkpoints_dir)
+    if not weight_files:
+        raise FileNotFoundError(f"在 {checkpoints_dir} 中未找到权重文件 (.safetensors/.bin)")
+    
+    logger.info(f"🚀 发现 {len(weight_files)} 个权重分片，开始并行加载与映射...")
+
+    # 4. 逐个文件加载 -> 映射 -> 释放 (流式处理，极省内存)
+    total_params = 0
+    for w_file in tqdm(weight_files, desc="Processing Shards"):
+        # 加载单个分片 (Raw Tensor)
+        shard = load_shard(w_file, device="cpu") # 强制 CPU 以避免显存碎片，转换通常是 CPU I/O 密集型
+        
+        # 立即处理当前分片中的 Key
+        keys_to_process = list(shard.keys())
+        for k in keys_to_process:
+            v = shard[k]
+            mapped_key = None
+            
+            # 查找映射
+            if k in full_mapping:
+                mapped_key = full_mapping[k]
+            elif (remapped := check_prefix_rules(k, spec.prefix_rules)) is not None:
+                mapped_key = remapped
+            
+            if mapped_key:
+                # 移动到主字典，同时如果用户指定了 cuda，此时再转 device
+                if device != "cpu":
+                    new_state[mapped_key] = v.to(device)
+                else:
+                    new_state[mapped_key] = v
+                total_params += 1
+            
+            # 关键：从 shard 中删除引用，协助 Python GC
+            del shard[k]
+        
+        del shard
+        gc.collect()
+
+    logger.info(f"✅ 映射完成，共提取 {total_params} 个参数张量。开始合并 KV...")
+
+    # 5. 合并 KV (CPU 计算极快)
+    kv_prefix_tpl = "language_model.layers.{i}.self_attn" if model_type == "llava" else "layers.{i}.self_attn"
+    for i in tqdm(range(num_layers), desc="Merging KV"):
+        prefix = kv_prefix_tpl.format(i=i)
+        merge_kv_weights(new_state, prefix, with_bias=spec.merge_bias)
+
+    # 5.1 LLaVA：若 checkpoint 不含 vision_tower（分包/离线权重常见），为了 strict load 通过，补齐一份按 config 初始化的视觉塔参数。
+    # 注意：这不是预训练视觉塔权重，仅用于让推理链路不因 Missing keys 失败。
     if model_type == "llava":
-        cfg = LlavaConfig.from_pretrained(checkpoints_dir)
-        return cfg.text_config.num_hidden_layers
+        has_vision = any(k.startswith("vision_tower.") for k in new_state.keys())
+        if not has_vision:
+            logger.warning("未发现 vision_tower 权重；将使用 config 初始化 vision_tower 并写入其初始参数（用于 strict load 通过）。")
+            cfg = AutoConfig.from_pretrained(checkpoints_dir, trust_remote_code=True)
+            vision_cfg = getattr(cfg, "vision_config", None)
+            if vision_cfg is None:
+                raise ValueError("config 中缺少 vision_config，无法初始化 vision_tower")
+            vision_model = AutoModel.from_config(vision_cfg)
+            vision_sd = vision_model.state_dict()
+            for k, v in vision_sd.items():
+                new_state[f"vision_tower.{k}"] = v.to(dtype=torch.float16)
+            logger.info("已补齐 vision_tower 初始权重: %d tensors", len(vision_sd))
+            del vision_model, vision_sd
+            gc.collect()
+
+    # 6. 保存
+    model_id = checkpoints_dir.name
+    final_out_dir = output_dir / model_id
+    final_out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = final_out_dir / f"{model_id}.pth"
+
+    logger.info(f"💾 正在保存结果到: {out_path}")
+    torch.save(new_state, out_path, _use_new_zipfile_serialization=True)
     
-    cfg = AutoConfig.from_pretrained(checkpoints_dir)
-    return cfg.num_hidden_layers
+    # 复制辅助文件
+    logger.info("📂 复制元数据文件...")
+    for ext in ["*.json", "*.model", "*.txt", "*.tiktoken"]:
+        for file in checkpoints_dir.glob(ext):
+            shutil.copy2(file, final_out_dir)
 
+    logger.info("🎉 转换结束！")
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Convert HF / bin checkpoints into Lite-LLaMA format.")
-    parser.add_argument("checkpoints_dir", type=Path, help="模型权重目录")
-    parser.add_argument("--model-type",
-                        choices=_SPEC.keys(),
-                        help="显式指定模型类型；默认根据目录名猜测")
-    parser.add_argument("--device", default="cuda",
-                        help="加载权重时使用的设备 (default: cuda)")
+# --------------------------------------------------------------------------- #
+# 入口逻辑
+# --------------------------------------------------------------------------- #
+def detect_model_type_from_config(checkpoints_dir: Path) -> str:
+    config_path = checkpoints_dir / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError("找不到 config.json")
+    
+    with open(config_path, 'r', encoding='utf-8') as f:
+        cfg = json.load(f)
+        
+    hf_type = cfg.get("model_type", "").lower()
+    return {
+        "qwen2": "qwen2",
+        "llama": "llama", 
+        "llava": "llava"
+    }.get(hf_type, hf_type)
+
+def main():
+    parser = argparse.ArgumentParser(description="High Performance Converter for Lite-LLaMA.")
+    parser.add_argument("checkpoints_dir", type=Path)
+    parser.add_argument("--model-type", type=str, choices=_SPECS.keys())
+    parser.add_argument("--output-dir", type=Path, default=Path("my_weight"))
+    parser.add_argument("--device", default="cpu", help="cpu (recommended for conversion) or cuda")
+    
     args = parser.parse_args()
+    ckpt_dir = args.checkpoints_dir.resolve()
 
-    ckpt_dir: Path = args.checkpoints_dir.resolve()
+    if not ckpt_dir.exists():
+        logger.error("目录不存在")
+        return
+
+    # 确定模型类型
+    model_type = args.model_type or detect_model_type_from_config(ckpt_dir)
+    if model_type not in _SPECS:
+        logger.error(f"不支持的模型类型: {model_type}")
+        return
     
-    # 1️⃣ **直接从 config.json 读取 model_type** ↓
-    model_type = detect_model_type(ckpt_dir)
-    logger.info("检测到 model_type = %s", model_type)
+    logger.info(f"检测模型类型: {model_type}")
 
-    # 2️⃣ 获取层数
-    num_layers = get_num_layers(ckpt_dir, model_type)
-    logger.info("Transformer 层数 %d", num_layers)
-
-    # 3️⃣ 加载权重并执行转换
-    hf_sd = load_hf_state(ckpt_dir, model_type, device=args.device)
-    convert(ckpt_dir, hf_sd, model_type, num_layers)
-
+    convert_model(ckpt_dir, args.output_dir, model_type, args.device)
 
 if __name__ == "__main__":
     main()

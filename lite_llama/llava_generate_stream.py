@@ -1,4 +1,5 @@
 from typing import Optional
+from pathlib import Path
 import torch, logging, re
 from PIL import Image
 
@@ -7,7 +8,7 @@ from .executor.model_executor import ModelExecutor
 from .utils.constants import *
 from .utils.file_interface import get_model_name_from_path
 
-from transformers import AutoTokenizer, AutoProcessor
+from transformers import AutoTokenizer, AutoProcessor, CLIPImageProcessor
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
@@ -115,8 +116,50 @@ class LlavaGeneratorStream:
         return tokenizer
 
     def encode_images(self, image_items: list[Union[str, Image.Image]]):
-        processor = AutoProcessor.from_pretrained(self.checkpoints_dir)
-        self.image_processor = processor.image_processor
+        # 有些离线权重目录不带 preprocessor_config.json / image_processor_config.json，
+        # AutoProcessor 会直接报错；这里做一个鲁棒回退。
+        if not hasattr(self, "image_processor") or self.image_processor is None:
+            ckpt_dir = Path(self.checkpoints_dir)
+            has_processor_files = any(
+                (ckpt_dir / name).exists()
+                for name in (
+                    "preprocessor_config.json",
+                    "image_processor_config.json",
+                    "processor_config.json",
+                )
+            )
+            if has_processor_files:
+                try:
+                    processor = AutoProcessor.from_pretrained(self.checkpoints_dir)
+                    self.image_processor = processor.image_processor
+                except Exception as e:
+                    logger.warning(
+                        "AutoProcessor 加载失败，将回退到 CLIPImageProcessor 直配。错误: %s",
+                        str(e),
+                    )
+                    has_processor_files = False
+
+            if not has_processor_files:
+                image_size = 336
+                try:
+                    cfg = getattr(self.model_executor, "model_config", None)
+                    if cfg is not None and hasattr(cfg, "vision_config") and hasattr(cfg.vision_config, "image_size"):
+                        image_size = int(cfg.vision_config.image_size)
+                except Exception:
+                    pass
+                # LLaVA v1.5 默认使用 CLIP 的均值方差
+                self.image_processor = CLIPImageProcessor(
+                    do_resize=True,
+                    size={"shortest_edge": image_size},
+                    resample=3,  # PIL.Image.BICUBIC
+                    do_center_crop=True,
+                    crop_size={"height": image_size, "width": image_size},
+                    do_rescale=True,
+                    rescale_factor=1 / 255,
+                    do_normalize=True,
+                    image_mean=[0.48145466, 0.4578275, 0.40821073],
+                    image_std=[0.26862954, 0.26130258, 0.27577711],
+                )
         images = []
         for item in image_items:
             if isinstance(item, Image.Image):
