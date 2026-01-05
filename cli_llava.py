@@ -1,3 +1,17 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+cli_llava.py
+~~~~~~~~~~~~~~~~~~~~
+LLaVA 模型流式输出
+
+Usage
+-----
+python cli_llava.py /home/honggao/open_project/lite_llama/my_weight/llava-v1.5-7b
+
+Author: honggao (2026-01-05)
+"""
+
 import torch
 from typing import Optional
 
@@ -5,6 +19,7 @@ from rich.console import Console
 from rich.prompt import Prompt
 
 import sys, os
+import shutil
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
 
@@ -13,7 +28,7 @@ from lite_llama.utils.image_process import vis_images
 from lite_llama.utils.prompt_templates import get_prompter, get_image_token
 
 # 模型检查点目录，请根据实际情况修改
-checkpoints_dir = "/path/Qwen/llava-v1.5-7b"
+checkpoints_dir = "/home/honggao/open_project/lite_llama/my_weight/llava-v1.5-7b"
 
 def main(
     temperature: float = 0.6,
@@ -79,7 +94,12 @@ def main(
 
         image_items = [image_input]  # 准备image_items列表
         image_num = len(image_items)  # 计算输入图片数量
-        vis_images(image_items)  # 在终端中显示图片
+        # 在终端中显示图片（可选）。未安装 termvisage 时跳过，避免打印 "termvisage: not found"。
+        if shutil.which("termvisage") is not None:
+            try:
+                vis_images(image_items)
+            except Exception as e:
+                console.print(f"[yellow]提示：跳过图片预览（{e}）[/yellow]")
 
         # console.print("\n[bold blue]请输入提示词（输入 'exit' 退出）：[/bold blue]") # 获取用户的提示词
         input_prompt = Prompt.ask("[bold green]提示词[/bold green]").strip()
