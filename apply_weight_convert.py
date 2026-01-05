@@ -3,10 +3,12 @@
 """
 apply_weight_convert.py
 ~~~~~~~~~~~~~~~~~~~~
-高性能版：跳过 Model 初始化，直接读取权重文件。
-支持 .safetensors (极速) 和 .bin 格式。
+高性能兼容版：
+1. 跳过 Model 初始化，直接读取权重文件 (极速)。
+2. 兼容 LLaVA 多种命名格式 (model.layers / language_model.model.layers)。
+3. 自动处理缺失的 Vision Tower 权重 (尝试加载本地 CLIP 或随机初始化补位)。
 
-Author: harleyszhang (Optimized 2025-06-08)
+Author: harleyszhang (Optimized 2026-01-06)
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ from typing import Any
 
 import torch
 from tqdm.auto import tqdm
-from transformers import AutoConfig, AutoModel
+from transformers import AutoConfig, AutoModel, CLIPVisionModel
 
 # 尝试导入 safetensors，这是目前最快的加载方式
 try:
@@ -39,7 +41,7 @@ except ImportError:
     logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
-# 配置类与映射表 (保持不变)
+# 配置类与映射表
 # --------------------------------------------------------------------------- #
 class ModelSpec:
     def __init__(self, common: dict, layer: dict, merge_bias: bool, prefix_rules: list[tuple] = None):
@@ -323,18 +325,56 @@ def convert_model(checkpoints_dir: Path, output_dir: Path, model_type: str, devi
     if model_type == "llava":
         has_vision = any(k.startswith("vision_tower.") for k in new_state.keys())
         if not has_vision:
-            logger.warning("未发现 vision_tower 权重；将使用 config 初始化 vision_tower 并写入其初始参数（用于 strict load 通过）。")
-            cfg = AutoConfig.from_pretrained(checkpoints_dir, trust_remote_code=True)
-            vision_cfg = getattr(cfg, "vision_config", None)
-            if vision_cfg is None:
-                raise ValueError("config 中缺少 vision_config，无法初始化 vision_tower")
-            vision_model = AutoModel.from_config(vision_cfg)
-            vision_sd = vision_model.state_dict()
-            for k, v in vision_sd.items():
-                new_state[f"vision_tower.{k}"] = v.to(dtype=torch.float16)
-            logger.info("已补齐 vision_tower 初始权重: %d tensors", len(vision_sd))
-            del vision_model, vision_sd
-            gc.collect()
+            # 优先尝试从 config.json 的 mm_vision_tower 加载真实 CLIP 权重（需要本地缓存/本地目录）
+            mm_vision_tower = None
+            try:
+                cfg_json = json.loads((checkpoints_dir / "config.json").read_text())
+                mm_vision_tower = cfg_json.get("mm_vision_tower")
+            except Exception:
+                pass
+
+            if mm_vision_tower:
+                try:
+                    logger.info("检测到 mm_vision_tower=%s，尝试加载本地 CLIP 视觉塔权重...", mm_vision_tower)
+                    vision_model = CLIPVisionModel.from_pretrained(
+                        mm_vision_tower,
+                        local_files_only=True,
+                        torch_dtype=torch.float16,
+                    )
+                    vision_sd = vision_model.state_dict()
+                    for k, v in vision_sd.items():
+                        new_state[f"vision_tower.{k}"] = v
+                    logger.info("✅ 已从本地缓存加载 vision_tower 权重: %d tensors", len(vision_sd))
+                    del vision_model, vision_sd
+                    gc.collect()
+                    has_vision = True
+                except Exception as e:
+                    logger.warning(
+                        "无法从本地缓存加载 CLIP 视觉塔(%s)：%s",
+                        mm_vision_tower,
+                        str(e),
+                    )
+
+            if not has_vision:
+                logger.warning(
+                    "⚠️ 未发现 vision_tower 权重且无法加载本地 CLIP 权重：将使用 config 初始化 vision_tower（随机初始），"
+                    "因此图像理解将非常不可靠、回答可能明显错误。"
+                )
+                logger.warning(
+                    "解决方法：请先把 %r 下载到本机 HuggingFace cache，或提供本地目录后再重新运行转换。",
+                    mm_vision_tower or "openai/clip-vit-large-patch14-336",
+                )
+                cfg = AutoConfig.from_pretrained(checkpoints_dir, trust_remote_code=True)
+                vision_cfg = getattr(cfg, "vision_config", None)
+                if vision_cfg is None:
+                    raise ValueError("config 中缺少 vision_config，无法初始化 vision_tower")
+                vision_model = AutoModel.from_config(vision_cfg)
+                vision_sd = vision_model.state_dict()
+                for k, v in vision_sd.items():
+                    new_state[f"vision_tower.{k}"] = v.to(dtype=torch.float16)
+                logger.info("已补齐 vision_tower 初始权重: %d tensors", len(vision_sd))
+                del vision_model, vision_sd
+                gc.collect()
 
     # 6. 保存
     model_id = checkpoints_dir.name
