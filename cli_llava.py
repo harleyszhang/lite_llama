@@ -125,13 +125,13 @@ def main(
             console.print(f"[red]文本生成失败: {e}[/red]")
             continue
 
-        completion = ""  # 初始化生成结果
         console.print("ASSISTANT: ", end="")
 
         for batch_completions in stream:
-            next_text = batch_completions[0]["generation"][len(completion) :]
-            completion = batch_completions[0]["generation"]
-            print(f"\033[91m{next_text}\033[0m", end="", flush=True)  # 红色文本
+            # 使用增量文本，避免用字符串长度做 diff 导致断字/粘连（看起来像乱码）
+            delta = batch_completions[0].get("delta", "")
+            if delta:
+                print(delta, end="", flush=True)
 
         console.print("\n[bold green]==================================[/bold green]\n")
 

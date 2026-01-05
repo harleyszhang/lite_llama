@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 class CompletionPrediction(TypedDict, total=False):
     generation: str
+    delta: str  # incremental text chunk (streaming-friendly)
     tokens: list[str]  # not required
     logprobs: list[float]  # not required
 
@@ -114,6 +115,28 @@ class LlavaGeneratorStream:
             )
 
         return tokenizer
+
+    def _decode_token_ids_incremental(self, token_ids: list[int]) -> str:
+        """
+        以“token piece”为单位做增量解码，避免 SentencePiece 在单段 decode 时丢失前导空格，
+        导致拼接后出现 Theimage 这种“粘连/乱码”效果。
+        """
+        if not token_ids:
+            return ""
+        pieces = self.tokenizer.convert_ids_to_tokens(token_ids)
+        special = set(getattr(self.tokenizer, "all_special_tokens", []) or [])
+        out = []
+        for p in pieces:
+            if p in special:
+                continue
+            # SentencePiece: ▁ 表示空格；BPE: Ġ 表示空格
+            if p.startswith("▁") and len(p) > 1:
+                out.append(" " + p[1:])
+            elif p.startswith("Ġ") and len(p) > 1:
+                out.append(" " + p[1:])
+            else:
+                out.append(p)
+        return "".join(out)
 
     def encode_images(self, image_items: list[Union[str, Image.Image]]):
         # 有些离线权重目录不带 preprocessor_config.json / image_processor_config.json，
@@ -293,7 +316,7 @@ class LlavaGeneratorStream:
                 end = cur_pos + 1
                 if start < end:
                     token = tokens[i, start:end].tolist()
-                    text = self.tokenizer.decode(token, skip_special_tokens=True)
+                    text = self._decode_token_ids_incremental(token)
                     batch_outputs.append(text)
                     last_yielded_pos[i] = end
                 else:
@@ -344,10 +367,11 @@ class LlavaGeneratorStream:
         )
 
         # 初始化每个样本的生成结果
-        completions = [{"generation": "", "tokens": []} for _ in prompts]
+        completions = [{"generation": "", "delta": "", "tokens": []} for _ in prompts]
         for batch_outputs in stream:
             for i, text in enumerate(batch_outputs):
                 completions[i]["generation"] += text
+                completions[i]["delta"] = text
             yield completions.copy()
 
 
