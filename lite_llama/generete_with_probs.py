@@ -1,11 +1,12 @@
-from typing import Optional
-import torch
 from typing import Literal, Optional, TypedDict
+
+import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer
 
 from .executor.model_executor import ModelExecutor
 from .utils.file_interface import get_model_name_from_path
+from .utils.sampling import sample_top_p
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -36,22 +37,6 @@ B_INST, E_INST = "[INST]", "[/INST]"
 B_SYS, E_SYS = "<<SYS>>\n", "\n<</SYS>>\n\n"
 SPECIAL_TAGS = [B_INST, E_INST, "<<SYS>>", "<</SYS>>"]
 UNSAFE_ERROR = "Error: special tags are not allowed as part of the prompt."
-
-
-@torch.inference_mode()
-def sample_top_p(probs, p: float):
-    # 使用 in-place 操作减少内存分配
-    probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
-    probs_sum = torch.cumsum(probs_sort, dim=-1)
-    # mask 记录累积概率超过 p 的位置
-    mask = probs_sum - probs_sort > p
-    # 将超过 p 的概率置 0
-    probs_sort[mask] = 0.0
-    # 原地归一化
-    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
-    next_token_sorted_idx = torch.multinomial(probs_sort, num_samples=1)
-    next_token = torch.gather(probs_idx, -1, next_token_sorted_idx)
-    return next_token
 
 
 class GenerateText:

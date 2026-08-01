@@ -1,6 +1,3 @@
-import os
-
-
 def get_model_name_from_path(model_path):
     model_path = model_path.strip("/")
     model_paths = model_path.split("/")

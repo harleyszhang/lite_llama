@@ -4,7 +4,7 @@ import torch
 class DummyInputGenerator:
     """A class to generate dummy inputs for memory profiling."""
     
-    def __init__(self, device="cuda:5"):
+    def __init__(self, device="cuda"):
         self.device = device
 
     

@@ -385,7 +385,7 @@ def get_prompter(model_type, model_path="", short_prompt=False, empty_prompt=Fal
         # return FalconPrompter()
         return FalconSimplePrompter()
     elif model_type.lower() == "mpt":
-        if "mpt" and "chat" in model_path.lower():
+        if "chat" in model_path.lower():
             return MPTChatPrompter()
         else:
             return MPTPrompter()
@@ -406,7 +406,7 @@ def get_stop_token_ids(model_type, model_path=""):
     elif model_type.lower() == "falcon":
         return [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     elif model_type.lower() == "mpt":
-        if "mpt" and "chat" in model_path:
+        if "chat" in model_path:
             return [50278, 0]
         else:
             return []

@@ -1,12 +1,12 @@
 import torch
 from typing import Optional
 from lite_llama.utils.prompt_templates import get_prompter
-from lite_llama.generate_stream import GenerateStreamText  # 导入 GenerateText 类
+from lite_llama.generate_stream import GenerateStreamText
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
 
-checkpoints_dir = "/home/honggao/lite_llama/my_weight/Qwen3-1.7B"
+checkpoints_dir = "/home/honggao/projects/open_source/lite_llama/my_weight/Qwen2.5-0.5B"
 
 def main(
     temperature: float = 0.6,
