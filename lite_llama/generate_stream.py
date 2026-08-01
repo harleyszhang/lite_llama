@@ -1,8 +1,9 @@
-from typing import Optional
-import torch
 from typing import Optional, TypedDict, Generator
+
+import torch
 from .executor.model_executor import ModelExecutor
 from .utils.file_interface import get_model_name_from_path
+from .utils.sampling import sample_top_p
 from .kernels.softmax_split import softmax_split
 
 from transformers import AutoTokenizer
@@ -12,41 +13,6 @@ class CompletionPrediction(TypedDict, total=False):
     generation: str
     tokens: list[str]  # not required
     logprobs: list[float]  # not required
-
-
-@torch.inference_mode()
-def sample_top_p(probs, p):
-    """
-    执行 Top-p (Nucleus) 采样, 从概率分布中采样下一个词。
-
-    参数：
-        probs (torch.Tensor): 概率分布张量，形状为 `[batch_size, vocab_size]`。
-        p (float): 累积概率阈值，取值范围在 0 到 1 之间。
-    返回：
-        torch.Tensor: 采样得到的词索引，形状为 `[batch_size, 1]`。
-
-    说明：
-        Top-p 采样算法: 选择概率累积和超过阈值 p 的最小集合，将这些词的概率重新归一化后进行采样。
-    """
-    # 对概率分布进行降序排序。probs_sort: 排序后的概率值，形状与 probs 相同。probs_idx: 排序后的索引，用于映射回原始词汇表。
-    probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
-    # 计算排序后概率的累积和. 返回的 probs_sum 是累积概率分布。
-    probs_sum = torch.cumsum(probs_sort, dim=-1)
-    # 保留累积概率未超过阈值 p 的词汇的概率，其余词汇的概率被置为 0.0。
-    mask = (
-        probs_sum - probs_sort > p
-    )  # 创建掩码，对于每个位置，计算累积概率（不包括当前词）是否超过阈值 p。
-    probs_sort[mask] = 0.0  # 将累积概率超过阈值 p 的词的概率置零。
-
-    # 对剩余的概率重新归一化, 确保总和为 1。
-    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
-    # 从重新归一化的概率分布中采样下一个词. 返回的 next_token 是采样得到的词在排序后概率分布中的索引。
-    next_token_sorted_idx = torch.multinomial(probs_sort, num_samples=1)
-    # 在 probs_idx 的最后一维（dim=-1）中，使用 next_token_sorted_idx 作为索引，提取对应的值。沿着 dim=1（列）进行索引提取
-    # NOTE: torch.gather 函数按照给定的索引张量 index，从输入张量中收集 (获取) 数据，并返回一个与索引张量形状一致的张量。
-    next_token = torch.gather(probs_idx, -1, index=next_token_sorted_idx)
-
-    return next_token  # 返回采样得到的下一个词的索引
 
 
 class GenerateStreamText:
@@ -131,9 +97,9 @@ class GenerateStreamText:
         )
 
         # 预分配tokens张量
-        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
+        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device=device)
         input_text_mask = tokens != pad_id
-        eos_reached = torch.tensor([False] * bsz, device="cuda")
+        eos_reached = torch.tensor([False] * bsz, device=device)
         prev_pos = 0
         last_yielded_pos = [
             len(prompt_tokens[i]) if not echo else 0 for i in range(bsz)
@@ -141,7 +107,7 @@ class GenerateStreamText:
 
         # 填充提示词到 tokens 张量
         for k, t in enumerate(prompt_tokens):
-            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device=device)
 
         b_req_idx = torch.arange(bsz, device=self.device)
         all_select_index_list = []
@@ -171,7 +137,7 @@ class GenerateStreamText:
                 # NOTE: 使用核采样方法，从高概率的候选 token 中选择下一个 token 索引. top_p 控制采样范围（候选 token 的概率累积值）。
                 next_token = sample_top_p(probs, top_p)
             else:
-                next_token = torch.argmax(logits[:, -1], dim=-1)
+                next_token = torch.argmax(logits[:, -1], dim=-1, keepdim=True)
 
             input_ids = next_token  # [batch_size, 1]
 

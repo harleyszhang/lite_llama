@@ -288,7 +288,7 @@ class KVCacheMemoryManager:
     def free(self, free_index):
         free_index = free_index.long()
         self.release_ref(free_index)
-        if self.can_use_mem_size == len(self.mem_state):
+        if self.can_use_mem_size == len(self.kv_mem_use_state):
             logger.debug(f"freed all gpu mem size {self.can_use_mem_size}")
         return
     
@@ -303,4 +303,4 @@ def indexs_convert(indexs: torch.tensor, batch_size: int):
     prefill 阶段分配的kv cache 索引和 decode 阶段分配的索引合并在一起需要做变换
     TODO: 支持连续批处理开发时用上.
     """
-    passcuda
+    pass

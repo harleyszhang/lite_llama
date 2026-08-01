@@ -1,6 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import torch
-from typing import Type
+from typing import Optional, Type
 from ..models.model_config import LlamaConfig, Qwen2Config, Qwen3Config
 from transformers import LlavaConfig
 
@@ -11,19 +11,21 @@ CONFIG_CLASS_MAP: dict[str, Type] = {
     "llava": LlavaConfig,
 }
 
+
 @dataclass
 class ModelRunnerConfig:
-    block_size = 1
-    checkpoints_dir = "/gemini/code/Llama-3.2-1B-Instruct"
-    max_batch_size = 16
-    gpu_memory_utilization = 0.9
+    block_size: int = 1
+    checkpoints_dir: str = "/gemini/code/Llama-3.2-1B-Instruct"
+    max_batch_size: int = 16
+    gpu_memory_utilization: float = 0.9
 
 
 @dataclass
 class AttentionInfo:
-    # kv_cache = None # prefill 阶段的 context kv cache
-    kv_buffer = list[torch.tensor([])]
-    cur_select_index = torch.empty((0,), dtype=torch.int32)
-    b_req_tokens_table = None
-    b_start_loc = None
-    b_req_idx = None
+    kv_buffer: list = field(default_factory=list)
+    cur_select_index: Optional[torch.Tensor] = None
+    b_req_tokens_table: Optional[torch.Tensor] = None
+    b_start_loc: Optional[torch.Tensor] = None
+    b_req_idx: Optional[torch.Tensor] = None
+    b_seq_len: Optional[torch.Tensor] = None
+    max_actual_seq_len: int = 0

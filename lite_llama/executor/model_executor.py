@@ -3,6 +3,7 @@ import torch.nn as nn
 
 import json, time
 from pathlib import Path
+from typing import Optional
 
 from transformers import LlavaConfig
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
@@ -19,21 +20,22 @@ from ..utils.logger import get_logger
 logger = get_logger(__name__)
 
 # -----------------------------------------------------------------------------
-# Registry helpers (avoid long if/elif chains)
+# Model Registry (avoid long if/elif chains)
 # -----------------------------------------------------------------------------
+_MODEL_REGISTRY: dict[str, str] = {
+    "llama": "..models.llama.LlamaModel",
+    "qwen2": "..models.qwen2.Qwen2Model",
+    "qwen3": "..models.qwen3.Qwen3Model",
+    "llava": "..models.llava.LlavaLlama",
+}
 
 class ModelExecutor:
-    # 定义类属性
-    model_config = None
-    model = None
-    atten_info = AttentionInfo
 
-    # 通过静态方法 build 将类属性当作默认配置使用
     @staticmethod
     def build(
         checkpoints_dir: str,
         max_seq_len: int,
-        max_gpu_num_blocks: None,
+        max_gpu_num_blocks: Optional[int] = None,
         compiled_model: bool = False,
         device: str = "cuda",
     ):
@@ -137,30 +139,31 @@ class ModelExecutor:
         根据配置初始化模型并将其移动到指定设备。
 
         参数:
-            model_config (LlamaConfig): 自定义模型的配置参数。
+            model_config: 自定义模型的配置参数。
             device (str): 设备类型（'cuda'或'cpu'）。
 
         返回:
             nn.Module: 初始化后的模型。
         """
+        import importlib
+
         model_type = model_config.model_type.lower()
         logger.info(
             f"Initializing model of type '{model_type}' and moving it to device '{device}'..."
         )
-        if model_type == "llama":
-            from ..models.llama import LlamaModel
-            model = LlamaModel(model_config)
-        elif model_type == "qwen2":
-            from ..models.qwen2 import Qwen2Model
-            model = Qwen2Model(model_config)
-        elif model_type == "qwen3":
-            from ..models.qwen3 import Qwen3Model
-            model = Qwen3Model(model_config)
-        elif model_type == "llava":
-            from ..models.llava import LlavaLlama
-            model = LlavaLlama(model_config)
-        else:
+
+        model_path = _MODEL_REGISTRY.get(model_type)
+        if model_path is None:
             raise ValueError(f"Unsupported model type: {model_type}")
+
+        # 解析 "..models.qwen3.Qwen3Model" 格式
+        module_path, class_name = model_path.rsplit(".", 1)
+        # 将相对导入转为绝对导入
+        abs_module = module_path.lstrip(".")
+        abs_module = "lite_llama." + abs_module.replace("..", ".").lstrip(".")
+        module = importlib.import_module(abs_module)
+        model_cls = getattr(module, class_name)
+        model = model_cls(model_config)
 
         logger.info(f"The model has been initialized and moved to the device. '{device}'")
         return model
