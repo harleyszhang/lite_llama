@@ -51,9 +51,8 @@ class Attention(nn.Module):
         xv: torch.Tensor,
         atten_info,
         layer_index: int,
-        qk_scale=None,  # 计算 attention 分数缩放的系数
+        qk_scale=None,
     ) -> torch.Tensor:
-        # xq = xq.to(torch.float16)
         # 1. 先获取 kv 缓冲向量再更新 kv_buffer, atten_info.kv_buffer[layer_index]
         combined_kv = torch.cat([xk, xv], dim=-2)  # (B*L, 2*num_kv_heads, head_dim)
         update_kv_buffer(
@@ -158,9 +157,7 @@ class Qwen2Attention(nn.Module):
             )
             attn_output = attn_output.view(
                 batch_size, seq_len, self.hidden_size
-            )  # 输出张量 seq_len = 1
-            # if torch.isnan(attn_output).any(): # 检查 NaNs
-            #     raise ValueError(f"NaNs detected in context_forward output at layer {layer_index}")
+            )
         else:
             attn_output = self.attn.token_forward(
                 xq,
@@ -172,9 +169,7 @@ class Qwen2Attention(nn.Module):
             )
             attn_output = attn_output.view(
                 batch_size, seq_len, self.hidden_size
-            )  # 输出张量 seq_len = 1
-            # if torch.isnan(attn_output).any(): # 检查 NaNs
-            #     raise ValueError(f"NaNs detected in token_forward output at layer {layer_index}")
+            )
 
         # 进行张量矩阵乘法, 需要对原始的 o_proj_weight 权重进行转置, attn_output shape is [batch_size, seq_len, hidden_size]
         output = F.linear(attn_output, self.o_proj_weight.data)
@@ -295,8 +290,6 @@ class Qwen2Model(nn.Module):
             [Qwen2DecoderLayer(config) for _ in range(num_layers)]
         )
 
-        # self.hidden_states = []
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -304,7 +297,6 @@ class Qwen2Model(nn.Module):
         atten_info,
         inputs_embeds: Optional[torch.Tensor] = None,
     ):
-        # self.hidden_states = []
         batch_size, seq_len = input_ids.shape
         residual = None
 
@@ -322,10 +314,9 @@ class Qwen2Model(nn.Module):
 
         # Consecutively apply all the encoder layers
         for i, layer in enumerate(self.layers):
-            # self.hidden_states.append(h)
             h, residual = layer(
                 h, atten_info, i, position_embeddings, qk_scale, residual
-            )  # h.shape [batch_size, seq_len, hidden_dim]
+            )
 
         h, _ = skip_rmsnorm(h, residual, self.norm_weight.data, self.rmsnorm_eps)
         output = F.linear(h, self.lm_head_weight.data)
