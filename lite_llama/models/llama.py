@@ -84,7 +84,6 @@ class FusedAttention(nn.Module):
             seq_len,
         )
 
-        # output = output.view(batch_size*seq_len, self.hidden_size)
         output = output.view(batch_size, seq_len, self.hidden_size)
         # 4. attention 输出做线性变换
         output = self.o_proj(output)
@@ -238,8 +237,6 @@ class LlamaModel(nn.Module):
         self.qk_scale = 1.0 / (self.head_dim**0.5)
         self.rmsnorm_eps = config.rms_norm_eps
 
-        # self.hidden_states = []
-
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.embed_tokens = nn.Embedding(
             self.vocab_size, config.hidden_size, dtype=torch.float16
@@ -267,7 +264,6 @@ class LlamaModel(nn.Module):
         atten_info,
         inputs_embeds: Optional[torch.Tensor] = None,
     ):
-        # self.hidden_states = []
         batch_size, seq_len = input_ids.shape
         residual = None
 
@@ -288,13 +284,11 @@ class LlamaModel(nn.Module):
         for i, layer in enumerate(
             self.layers
         ):  # Consecutively apply all the encoder layers
-            # self.hidden_states.append(h)
             h, residual = layer(
                 h, atten_info, i, position_embeddings, qk_scale, residual
-            )  # h.shape [batch_size, seq_len, hidden_dim]
+            )
 
         h, _ = skip_rmsnorm(h, residual, self.norm_weight.data, self.rmsnorm_eps)
-        # self.hidden_states.append(h)
         output = self.lm_head(h)
 
         return output

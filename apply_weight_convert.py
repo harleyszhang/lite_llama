@@ -23,6 +23,7 @@ import torch
 from tqdm.auto import tqdm
 from transformers import (AutoConfig, AutoModelForCausalLM,
                           LlavaConfig, LlavaForConditionalGeneration)
+from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 
 from lite_llama.utils.logger import get_logger
 
@@ -211,10 +212,10 @@ _SPEC = {
             "language_model.lm_head.weight":            "language_model.lm_head.weight",
         },
         "layer": {
-            "language_model.model.layers.{i}.self_attn.q_proj.weight": "language_model.layers.{i}.self_attn.q_proj.weight",
-            "language_model.model.layers.{i}.self_attn.k_proj.weight": "language_model.layers.{i}.self_attn.k_proj.weight",
-            "language_model.model.layers.{i}.self_attn.v_proj.weight": "language_model.layers.{i}.self_attn.v_proj.weight",
-            "language_model.model.layers.{i}.self_attn.o_proj.weight": "language_model.layers.{i}.self_attn.o_proj.weight",
+            "language_model.model.layers.{i}.self_attn.q_proj.weight": "language_model.layers.{i}.self_attn.q_proj_weight",
+            "language_model.model.layers.{i}.self_attn.k_proj.weight": "language_model.layers.{i}.self_attn.k_proj_weight",
+            "language_model.model.layers.{i}.self_attn.v_proj.weight": "language_model.layers.{i}.self_attn.v_proj_weight",
+            "language_model.model.layers.{i}.self_attn.o_proj.weight": "language_model.layers.{i}.self_attn.o_proj_weight",
             "language_model.model.layers.{i}.mlp.gate_proj.weight":    "language_model.layers.{i}.mlp.gate_proj.weight",
             "language_model.model.layers.{i}.mlp.up_proj.weight":      "language_model.layers.{i}.mlp.up_proj.weight",
             "language_model.model.layers.{i}.mlp.down_proj.weight":    "language_model.layers.{i}.mlp.down_proj.weight",
@@ -222,6 +223,31 @@ _SPEC = {
             "language_model.model.layers.{i}.post_attention_layernorm.weight": "language_model.layers.{i}.ffn_norm_weight",
         },
         "merge_bias": False,
+    },
+
+    # Qwen3-VL (Vision-Language)
+    "qwen3_vl": {
+        "common": {
+            "model.language_model.embed_tokens.weight": "language_model.embed_tokens.weight",
+            "model.language_model.norm.weight":         "language_model.norm_weight",
+            "lm_head.weight":                           "lm_head_weight",
+        },
+        "layer": {
+            "model.language_model.layers.{i}.self_attn.q_proj.weight": "language_model.layers.{i}.self_attn.q_proj_weight",
+            "model.language_model.layers.{i}.self_attn.k_proj.weight": "language_model.layers.{i}.self_attn.k_proj_weight",
+            "model.language_model.layers.{i}.self_attn.v_proj.weight": "language_model.layers.{i}.self_attn.v_proj_weight",
+            "model.language_model.layers.{i}.self_attn.q_norm.weight": "language_model.layers.{i}.self_attn.q_norm_weight",
+            "model.language_model.layers.{i}.self_attn.k_norm.weight": "language_model.layers.{i}.self_attn.k_norm_weight",
+            "model.language_model.layers.{i}.self_attn.o_proj.weight": "language_model.layers.{i}.self_attn.o_proj_weight",
+            "model.language_model.layers.{i}.mlp.gate_proj.weight":    "language_model.layers.{i}.mlp.gate_proj.weight",
+            "model.language_model.layers.{i}.mlp.up_proj.weight":      "language_model.layers.{i}.mlp.up_proj.weight",
+            "model.language_model.layers.{i}.mlp.down_proj.weight":    "language_model.layers.{i}.mlp.down_proj.weight",
+            "model.language_model.layers.{i}.input_layernorm.weight":  "language_model.layers.{i}.input_layernorm_weight",
+            "model.language_model.layers.{i}.post_attention_layernorm.weight": "language_model.layers.{i}.post_attention_layernorm_weight",
+        },
+        "merge_bias": False,
+        "kv_prefix": "language_model.layers.{i}.self_attn",
+        "passthrough_prefix": "model.visual.",
     },
 }
 
@@ -237,17 +263,25 @@ def convert(checkpoints_dir: Path,
     mapping = build_mapping(spec["common"], spec["layer"], num_layers)
     new_sd: dict[str, torch.Tensor] = {}
 
+    # 对于多模态模型，某些前缀的参数直接透传（如视觉编码器）
+    passthrough_prefix = spec.get("passthrough_prefix", "")
+
     # ---------- 1. 重映射 ----------
     for k, v in tqdm(hf_state.items(), desc=f"[{model_type}] 权重重映射"):
-        if (ck := mapping.get(k)) is not None:
+        if passthrough_prefix and k.startswith(passthrough_prefix):
+            # 视觉编码器权重：去掉 "model." 前缀，保留 "vision_tower." 前缀
+            new_key = k.replace("model.visual.", "vision_tower.", 1)
+            new_sd[new_key] = v
+        elif (ck := mapping.get(k)) is not None:
             new_sd[ck] = v
         else:
             logger.debug("忽略未映射参数 %s", k)
 
-    # ---------- 2. 仅对 *Qwen* 系列执行 KV 合并 ----------
-    if model_type.startswith("qwen") or model_type.startswith("llama"):              # 只处理 Qwen-2 / Qwen-3 等
+    # ---------- 2. KV 合并 ----------
+    kv_prefix_tpl = spec.get("kv_prefix", "layers.{i}.self_attn")
+    if model_type.startswith("qwen") or model_type.startswith("llama"):
         for i in range(num_layers):
-            prefix = f"layers.{i}.self_attn"       # Qwen 无额外前缀
+            prefix = kv_prefix_tpl.format(i=i)
             merge_kv_weights(new_sd, prefix, with_bias=spec["merge_bias"])
 
     # ---------- 3. 保存 ----------
@@ -273,10 +307,11 @@ def detect_model_type(checkpoints_dir: Path) -> str:
     mtype = cfg.model_type.lower()
     # 某些模型可能需要额外归一化 / 映射
     alias = {
-        "qwen2":   "qwen2",
-        "qwen3":   "qwen3",
-        "llama":   "llama",
-        "llava":   "llava",
+        "qwen2":    "qwen2",
+        "qwen3":    "qwen3",
+        "qwen3_vl": "qwen3_vl",
+        "llama":    "llama",
+        "llava":    "llava",
     }.get(mtype, mtype)      # 默认原样返回
     if alias not in _SPEC:
         raise ValueError(f"暂不支持的 model_type '{mtype}'，请检查映射表")
@@ -291,6 +326,10 @@ def load_hf_state(checkpoints_dir: Path,
         model = (LlavaForConditionalGeneration
                  .from_pretrained(checkpoints_dir, torch_dtype=torch.float16, low_cpu_mem_usage=True)
                  .to(device))
+    elif model_type == "qwen3_vl":
+        model = (Qwen3VLForConditionalGeneration
+                 .from_pretrained(checkpoints_dir, torch_dtype=torch.float16, low_cpu_mem_usage=True)
+                 .to(device))
     else:
         model = (AutoModelForCausalLM
                  .from_pretrained(checkpoints_dir, torch_dtype=torch.float16, low_cpu_mem_usage=True)
@@ -303,7 +342,10 @@ def get_num_layers(checkpoints_dir: Path, model_type: str) -> int:
     if model_type == "llava":
         cfg = LlavaConfig.from_pretrained(checkpoints_dir)
         return cfg.text_config.num_hidden_layers
-    
+    if model_type == "qwen3_vl":
+        cfg = AutoConfig.from_pretrained(checkpoints_dir, trust_remote_code=True)
+        return cfg.text_config.num_hidden_layers
+
     cfg = AutoConfig.from_pretrained(checkpoints_dir)
     return cfg.num_hidden_layers
 

@@ -12,8 +12,9 @@ from lite_llama.llava_generate_stream import LlavaGeneratorStream
 from lite_llama.utils.image_process import vis_images
 from lite_llama.utils.prompt_templates import get_prompter, get_image_token
 
+
 # 模型检查点目录，请根据实际情况修改
-checkpoints_dir = "/path/Qwen/llava-v1.5-7b"
+checkpoints_dir = "/data/shared/llm_weights/llava/llava-v1.5-7b/"
 
 def main(
     temperature: float = 0.6,

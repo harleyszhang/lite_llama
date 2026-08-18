@@ -7,7 +7,6 @@ import torch.nn.functional as F
 from transformers import AutoModel, LlavaConfig
 from .llama import LlamaModel
 from .model_config import LlamaConfig
-from ..kernels import gelu
 from .utils import merge_input_ids_with_image_features
 
 
@@ -100,8 +99,6 @@ class LlavaLlama(nn.Module):
             input_ids
         )  # torch.Size([1, 22]) --> torch.Size([1, 22, 4096])
 
-        # torch.Size([1, 576, 4096]) torch.Size([1, 22, 4096]) torch.Size([1, 22])
-        # print("self.llava_config.image_token_index is ", self.llava_config.image_token_index)
         if vision_embeddings is not None:
             inputs_embeds, position_ids = merge_input_ids_with_image_features(
                 input_ids,
@@ -110,10 +107,13 @@ class LlavaLlama(nn.Module):
                 self.llava_config.pad_token_id,
                 self.llava_config.image_token_index,
             )
-
-        assert not torch.isnan(inputs_embeds).any(), (
-            f"After merge inputs_embeds tensor contains NaN values!"
-        )
+            assert not torch.isnan(inputs_embeds).any(), (
+                "After merge inputs_embeds tensor contains NaN values!"
+            )
+        else:
+            inputs_embeds = llm_inputs_embeds
+            batch_size, seq_len = input_ids.shape
+            position_ids = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
 
         return inputs_embeds, position_ids
 

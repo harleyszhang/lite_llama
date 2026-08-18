@@ -3,11 +3,13 @@ import torch
 from typing import Optional, Type
 from ..models.model_config import LlamaConfig, Qwen2Config, Qwen3Config
 from transformers import LlavaConfig
+from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
 
 CONFIG_CLASS_MAP: dict[str, Type] = {
     "llama": LlamaConfig,
     "qwen2": Qwen2Config,
     "qwen3": Qwen3Config,
+    "qwen3_vl": Qwen3VLConfig,
     "llava": LlavaConfig,
 }
 

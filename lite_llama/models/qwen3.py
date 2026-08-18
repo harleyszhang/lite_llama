@@ -53,7 +53,6 @@ class Attention(nn.Module):
         layer_index: int,
         qk_scale=None,  # 计算 attention 分数缩放的系数
     ) -> torch.Tensor:
-        # xq = xq.to(torch.float16)
         # 1. 先获取 kv 缓冲向量再更新 kv_buffer, atten_info.kv_buffer[layer_index]
         combined_kv = torch.cat([xk, xv], dim=-2)  # (B*L, 2*num_kv_heads, head_dim)
         update_kv_buffer(
@@ -86,9 +85,9 @@ class Qwen3Attention(nn.Module):
         self.head_dim = config.head_dim
         self.rmsnorm_eps = config.rms_norm_eps
 
-        self.q_proj_weight = nn.Parameter(torch.rand(self.hidden_size, self.num_heads * self.head_dim, dtype=torch.float16))
-        self.kv_proj_weight = nn.Parameter(torch.rand(self.hidden_size, 2 * self.num_kv_heads * self.head_dim, dtype=torch.float16))
-        self.o_proj_weight = nn.Parameter(torch.rand(self.num_heads * self.head_dim, self.hidden_size, dtype=torch.float16))
+        self.q_proj_weight = nn.Parameter(torch.rand(self.num_heads * self.head_dim, self.hidden_size, dtype=torch.float16))
+        self.kv_proj_weight = nn.Parameter(torch.rand(2 * self.num_kv_heads * self.head_dim, self.hidden_size, dtype=torch.float16))
+        self.o_proj_weight = nn.Parameter(torch.rand(self.hidden_size, self.num_heads * self.head_dim, dtype=torch.float16))
 
         self.q_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=torch.float16))
         self.k_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=torch.float16))

@@ -13,6 +13,7 @@ def get_dtype_size(dtype: torch.dtype) -> int:
     """Get the size of the data type in bytes."""
     return torch.tensor([], dtype=dtype).element_size()
 
+
 class ComputeMaxAvailableBlocks:
     """A class that can execute a forward pass with dummy inputs to profile the memory usage of the model.
     and  calculate the maximum possible number of GPU blocks that can be allocated with the remaining free memory.

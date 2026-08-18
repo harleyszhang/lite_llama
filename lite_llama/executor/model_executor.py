@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from transformers import LlavaConfig
+from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 
 from .mem_manager import ComputeMaxAvailableBlocks, KVCacheMemoryManager
@@ -26,6 +27,7 @@ _MODEL_REGISTRY: dict[str, str] = {
     "llama": "..models.llama.LlamaModel",
     "qwen2": "..models.qwen2.Qwen2Model",
     "qwen3": "..models.qwen3.Qwen3Model",
+    "qwen3_vl": "..models.qwen3_vl.Qwen3VLForCausalLM",
     "llava": "..models.llava.LlavaLlama",
 }
 
@@ -182,7 +184,9 @@ class ModelExecutor:
         self.device = device
         if isinstance(model_config, LlavaConfig):
             self.llm_config = LlamaConfig.from_dict(model_config.text_config.to_dict())
-            print(f"self.llm_config.max_seq_len: {self.llm_config.max_seq_len}")
+        elif isinstance(model_config, Qwen3VLConfig):
+            from ..models.model_config import Qwen3Config
+            self.llm_config = Qwen3Config.from_dict(model_config.text_config.to_dict())
         else:
             self.llm_config = model_config
 
@@ -363,10 +367,10 @@ class ModelExecutor:
 
         return self.atten_info.cur_select_index  # shape [batch_size,]
 
-    def forward(self, input_ids, position_ids, image_tensor=None):
-        if self.model_type == "llava":
+    def forward(self, input_ids, position_ids, image_tensor=None, **kwargs):
+        if self.model_type in ("llava", "qwen3_vl"):
             logits = self.model.forward(
-                input_ids, position_ids, self.atten_info, image_tensor
+                input_ids, position_ids, self.atten_info, image_tensor, **kwargs
             )
         else:
             logits = self.model.forward(input_ids, position_ids, self.atten_info)
