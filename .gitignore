@@ -1,15 +1,36 @@
-__pycache__
-.pytest_cache
-lite_llama/kernels/__pycache__
-lite_llama/models/__pycache__
-lite_llama/executor/__pycache__
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
-lite_llama/__pycache__
-**/__pycache__**
-images/tmp
-test/tmp
-test/debug
-my_weight
-.idea
-logs
-lite_llama/logs
+# Virtual environments
+.venv/
+venv/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local model weights and logs (never commit checkpoints)
+my_weight/
+*.pth
+*.safetensors
+logs/
+lite_llama/logs/
+
+# Scratch output
+images/tmp/
+tests/tmp/
+tests/debug/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+.DS_Store

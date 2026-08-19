@@ -12,16 +12,15 @@ Modifications made by Yanning Chen, 2024.
 
 import functools
 import importlib
-import operator
-from typing import Callable
+from collections.abc import Callable
 
 import torch
 import triton
 import triton.language as tl
 from packaging.version import Version
 
-
 MAX_FUSED_SIZE = 65536
+
 
 def is_hip() -> bool:
     return torch.version.hip is not None
@@ -30,9 +29,7 @@ def is_hip() -> bool:
 def keep(conf):
     BLOCK_M = conf.kwargs["BLOCK_M"]
     BLOCK_N = conf.kwargs["BLOCK_N"]
-    if BLOCK_M * BLOCK_N < 128 * 128 and conf.num_warps == 8:
-        return False
-    return True
+    return not (BLOCK_M * BLOCK_N < 128 * 128 and conf.num_warps == 8)
 
 
 def ensure_contiguous(fn):

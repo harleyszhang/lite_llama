@@ -1,6 +1,5 @@
 # Modified from https://github.com/mit-han-lab/llm-awq/blob/main/tinychat/utils/prompt_templates.py
 
-from typing import List
 
 IGNORE_INDEX = -100
 IMAGE_TOKEN_INDEX = 32000
@@ -28,7 +27,7 @@ class BasePrompter:
         sen_spliter="\n",
         qa_spliter="\n",
         colon=":",
-        decorator: List[str] = None,
+        decorator: list[str] | None = None,
     ):
         self.system_inst = system_inst  # System Instruction
         self.role1 = role1  # The name of USER
@@ -38,13 +37,13 @@ class BasePrompter:
         self.decorator = decorator
         self.colon = colon
 
-        if self.decorator == None:
+        if self.decorator is None:
             self.starter = ""
             self.stopper = ""
         else:
             self.starter = self.decorator[0]
             self.stopper = self.decorator[1]
-        if self.system_inst == None:
+        if self.system_inst is None:
             self.template = (
                 self.starter
                 + self.role1
@@ -110,13 +109,13 @@ class BasePrompter:
 class OneShotBasePrompter(BasePrompter):
     def __init__(
         self,
-        oneshot_example: List[str],  # User prompt + Assistant responce
+        oneshot_example: list[str],  # User prompt + Assistant responce
         system_inst,
         role1,
         role2,
         sen_spliter="\n",
         qa_spliter="\n",
-        decorator: List[str] = None,
+        decorator: list[str] | None = None,
     ):
         super().__init__(system_inst, role1, role2, sen_spliter, qa_spliter)
         assert len(oneshot_example) == 2, "One-shot example must be a List of 2 strs."
@@ -175,9 +174,7 @@ class Llama2Prompter(OneShotBasePrompter):
                 + "Remember to tailor the activities to the birthday child's interests and preferences. Have a great celebration!"
             )
         oneshot_example = [user_example, assistant_example]
-        super().__init__(
-            oneshot_example, system_inst, role1, role2, sen_spliter, qa_spliter
-        )
+        super().__init__(oneshot_example, system_inst, role1, role2, sen_spliter, qa_spliter)
 
 
 class Llama3Prompter(BasePrompter):
@@ -198,9 +195,7 @@ class Llama3Prompter(BasePrompter):
         sen_spliter = "<|eot_id|>"
         qa_spliter = ""
         colon = ""
-        super().__init__(
-            system_inst, role1, role2, sen_spliter, qa_spliter, colon=colon
-        )
+        super().__init__(system_inst, role1, role2, sen_spliter, qa_spliter, colon=colon)
 
 
 class LlavaLlamaPrompter(BasePrompter):
@@ -235,17 +230,13 @@ class LlavaLlama3Prompter(BasePrompter):
         sen_spliter = "<|end_of_text|>"
         qa_spliter = ""
         colon = ""
-        super().__init__(
-            system_inst, role1, role2, sen_spliter, qa_spliter, colon=colon
-        )
+        super().__init__(system_inst, role1, role2, sen_spliter, qa_spliter, colon=colon)
 
 
 class Qwen2Prompter(BasePrompter):
     def __init__(self):
         # 在 Qwen2 的提示格式下，system_inst 将包含系统信息（如角色设定）
-        system_inst = (
-            "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
-        )
+        system_inst = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
 
         # role1 用作 user 信息块的起始标记，这里不需要额外标记，只需在模板中插入即可
         # role2 用作 assistant 起始标记
@@ -258,9 +249,7 @@ class Qwen2Prompter(BasePrompter):
         colon = ""  # 这里不再需要冒号
 
         # 调用父类构造函数
-        super().__init__(
-            system_inst, role1, role2, sen_spliter, qa_spliter, colon=colon
-        )
+        super().__init__(system_inst, role1, role2, sen_spliter, qa_spliter, colon=colon)
 
         # 重写模板:
         # 若存在 system_inst，则模板为：
@@ -389,7 +378,8 @@ def get_prompter(model_type, model_path="", short_prompt=False, empty_prompt=Fal
             return MPTChatPrompter()
         else:
             return MPTPrompter()
-    elif model_type.lower() == "qwen2":
+    elif model_type.lower() in ("qwen2", "qwen3"):
+        # Qwen2 and Qwen3 share the ChatML-based prompt (<|im_start|> / <|im_end|>).
         return Qwen2Prompter()
     else:
         raise ValueError(f"model type {model_type} is not supported")

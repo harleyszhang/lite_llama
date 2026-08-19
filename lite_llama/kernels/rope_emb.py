@@ -1,4 +1,3 @@
-import torch
 import triton
 import triton.language as tl
 
@@ -43,12 +42,8 @@ def _triton_rope_emb(
     sin_row = tl.load(sin_ptr + cos_offsets, mask=cos_mask, other=0)
 
     # 计算 head 和 dim 偏移
-    first_half_q_offsets = (
-        tl.arange(0, pad_n_qh)[:, None] * hd + tl.arange(0, pad_hd // 2)[None, :]
-    )
-    first_half_k_offsets = (
-        tl.arange(0, pad_n_kh)[:, None] * hd + tl.arange(0, pad_hd // 2)[None, :]
-    )
+    first_half_q_offsets = tl.arange(0, pad_n_qh)[:, None] * hd + tl.arange(0, pad_hd // 2)[None, :]
+    first_half_k_offsets = tl.arange(0, pad_n_kh)[:, None] * hd + tl.arange(0, pad_hd // 2)[None, :]
 
     first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (
         tl.arange(0, pad_hd // 2)[None, :] < hd // 2
@@ -57,24 +52,16 @@ def _triton_rope_emb(
         tl.arange(0, pad_hd // 2)[None, :] < hd // 2
     )
 
-    q_tile_1 = tl.load(q_ptr + first_half_q_offsets, mask=first_q_mask, other=0).to(
-        sin_row.dtype
-    )
-    k_tile_1 = tl.load(k_ptr + first_half_k_offsets, mask=first_k_mask, other=0).to(
-        sin_row.dtype
-    )
+    q_tile_1 = tl.load(q_ptr + first_half_q_offsets, mask=first_q_mask, other=0).to(sin_row.dtype)
+    k_tile_1 = tl.load(k_ptr + first_half_k_offsets, mask=first_k_mask, other=0).to(sin_row.dtype)
 
     second_half_q_offsets = first_half_q_offsets + (hd // 2)
     second_half_k_offsets = first_half_k_offsets + (hd // 2)
     second_q_mask = first_q_mask
     second_k_mask = first_k_mask
 
-    q_tile_2 = tl.load(q_ptr + second_half_q_offsets, mask=second_q_mask, other=0).to(
-        sin_row.dtype
-    )
-    k_tile_2 = tl.load(k_ptr + second_half_k_offsets, mask=second_k_mask, other=0).to(
-        sin_row.dtype
-    )
+    q_tile_2 = tl.load(q_ptr + second_half_q_offsets, mask=second_q_mask, other=0).to(sin_row.dtype)
+    k_tile_2 = tl.load(k_ptr + second_half_k_offsets, mask=second_k_mask, other=0).to(sin_row.dtype)
 
     new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
     tl.store(q_ptr + first_half_q_offsets, new_q_tile_1, mask=first_q_mask)
@@ -95,7 +82,7 @@ def rope_emb_forward(q, k, cos, sin, batch_size, seq_len):
     """
     N, n_qh, HEAD_DIM = q.shape
     _, n_kh, _ = k.shape
-    assert N == batch_size * seq_len
+    assert batch_size * seq_len == N
 
     pad_hd = triton.next_power_of_2(HEAD_DIM)
     pad_n_qh = triton.next_power_of_2(n_qh)

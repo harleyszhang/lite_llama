@@ -1,5 +1,4 @@
 import torch
-
 import triton
 import triton.language as tl
 
@@ -57,10 +56,7 @@ def update_kv_buffer(KV_Values, Select_Index, KV_Buffer):
     seq_len = Select_Index.shape[0]  # number_tokens
     head_num = KV_Values.shape[1]  # num_kv_head * 2
     head_dim = KV_Values.shape[2]
-    assert (
-        KV_Values.shape[1] == KV_Buffer.shape[1]
-        and KV_Values.shape[2] == KV_Buffer.shape[2]
-    )
+    assert KV_Values.shape[1] == KV_Buffer.shape[1] and KV_Values.shape[2] == KV_Buffer.shape[2]
     BLOCK_HEAD = triton.next_power_of_2(head_num)
     grid = (seq_len,)
     num_warps = 1
@@ -82,39 +78,3 @@ def update_kv_buffer(KV_Values, Select_Index, KV_Buffer):
         num_stages=1,
     )
     return
-
-
-def test1():
-    import time
-
-    num_of_times = 1000
-
-    B, Seq_Len, H, D = 32, 1024, 12, 128
-    dest = torch.randn((B * Seq_Len, H, D), dtype=torch.float16).cuda()
-    src = torch.randn((B * Seq_Len, H, D), dtype=torch.float16).cuda()
-    dest_loc = torch.arange(0, B * Seq_Len, dtype=torch.int32, device="cuda")
-
-    for _ in range(10):  # Warm up
-        update_kv_buffer(src, dest_loc, dest)
-    torch.cuda.synchronize()
-
-    t1 = time.time()
-    for _ in range(num_of_times):
-        update_kv_buffer(src, dest_loc, dest)
-    torch.cuda.synchronize()
-    t2 = time.time()
-
-    for _ in range(num_of_times):
-        dest[dest_loc] = src
-    torch.cuda.synchronize()
-    t3 = time.time()
-
-    print("Triton Time cost ", t2 - t1)
-    print("Torch Time cost ", t3 - t2)
-    print("max ", torch.max(torch.abs(dest - src)))
-    print("mean ", torch.mean(torch.abs(dest - src)))
-    assert torch.allclose(src, dest, atol=1e-2, rtol=0)
-
-
-if __name__ == "__main__":
-    test1()
