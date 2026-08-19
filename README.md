@@ -46,6 +46,35 @@ lite-llama-convert /path/to/llava-hf/llava-1.5-7b-hf
 lite-llama-convert /path/to/Qwen3-VL-4B-Instruct
 ```
 
+### Examples
+
+Qwen3-VL model, single pictures inference:
+
+```bash
+cd /home/honggao/projects/open_source/lite_llama
+python -m lite_llama.cli vl-chat \
+    --model-dir my_weight/Qwen3-VL-4B-Instruct \
+    --image images/llava_test/dog.jpeg \
+    --prompt "What animal is in this picture? Answer in one sentence." \
+    --temperature 0.0 --max-gen-len 48
+```
+
+Qwen3-VL-4B-Instruct, Multi-image + Sampling mode:
+
+```bash
+# 多图 + 采样模式
+python -m lite_llama.cli vl-chat \
+    --model-dir my_weight/Qwen3-VL-4B-Instruct \
+    --image images/llava_test/dog.jpeg images/llava_test/dog2.png \
+    --prompt "Compare the animals in these pictures." \
+    --temperature 0.7 --top-p 0.9
+
+# 默认 prompt(Describe this image.)
+python -m lite_llama.cli vl-chat \
+    --model-dir my_weight/Qwen3-VL-4B-Instruct \
+    --image images/llava_test/extreme_ironing.jpg
+```
+
 ### Text generation
 
 ```python
