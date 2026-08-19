@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -70,18 +70,79 @@ class ArchSpec:
         tied_lm_head: ``(lm_head_key, embed_tokens_key)`` in the *output* layout,
             used when the checkpoint omits ``lm_head`` because embeddings are tied
             (Qwen3-VL). ``None`` means the architecture always ships an lm_head.
+        post_rename: Optional hook ``(state_dict, num_layers) -> None`` run after
+            the rename pass (and before K/V fusion) for architectures that need
+            structural transforms, e.g. FP8 dequantisation + expert stacking.
     """
 
     common: dict[str, str]
     per_layer: dict[str, str]
     passthrough_rename: tuple[tuple[str, str], ...] = ()
     tied_lm_head: tuple[str, str] | None = None
+    post_rename: Callable[[dict[str, torch.Tensor], int], None] | None = None
 
     def build_map(self, num_layers: int) -> dict[str, str]:
         mapping = dict(self.common)
         for i in range(num_layers):
             mapping.update({hf.format(i=i): out.format(i=i) for hf, out in self.per_layer.items()})
         return mapping
+
+
+# --------------------------------------------------------------------------- #
+# FP8 dequantisation and MoE expert stacking (qwen3_moe)
+# --------------------------------------------------------------------------- #
+
+# Block size of the fine-grained FP8 format used by Qwen FP8 checkpoints:
+# ``weight`` is e4m3 and ``weight_scale_inv[i, j]`` scales the 128x128 block
+# starting at ``(i*128, j*128)``.
+_FP8_BLOCK = 128
+
+
+def _dequant_block_fp8(weight: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
+    """Dequantise a block-wise FP8 (e4m3) matrix: ``W[i,j] = w8[i,j] * s[i//B, j//B]``.
+
+    The multiply runs in fp32; casting the fp8 values first is exact (every
+    e4m3 value is representable in fp16/fp32), so accuracy is governed solely
+    by the final cast to fp16.
+    """
+    w = weight.to(torch.float32)
+    scale = scale_inv.to(torch.float32)
+    scale = scale.repeat_interleave(_FP8_BLOCK, dim=0).repeat_interleave(_FP8_BLOCK, dim=1)
+    # The last block may be partial when a dimension is not a multiple of 128.
+    scale = scale[: w.shape[0], : w.shape[1]]
+    return (w * scale).to(torch.float16)
+
+
+def _qwen3_moe_post_rename(state: dict[str, torch.Tensor], num_layers: int) -> None:
+    """Dequantise FP8 weights in place and stack per-expert matrices.
+
+    Runs on the *renamed* state dict: text-projection weights already carry
+    their lite_llama names (``q_proj_weight``) while expert weights kept the
+    passthrough ``.weight`` suffix, so the partner of each ``*_scale_inv`` key
+    is resolved by trying both endings.
+    """
+    for scale_key in [k for k in state if k.endswith(".weight_scale_inv")]:
+        scale = state.pop(scale_key)
+        base = scale_key[: -len(".weight_scale_inv")]
+        weight_key = base + "_weight" if base + "_weight" in state else base + ".weight"
+        state[weight_key] = _dequant_block_fp8(state[weight_key], scale)
+
+    for i in range(num_layers):
+        prefix = f"layers.{i}.mlp.experts"
+        if f"{prefix}.0.gate_proj.weight" not in state:
+            continue  # dense layer (mlp_only_layers)
+        gates, ups, downs = [], [], []
+        e = 0
+        while (key := f"{prefix}.{e}.gate_proj.weight") in state:
+            gates.append(state.pop(key))
+            ups.append(state.pop(f"{prefix}.{e}.up_proj.weight"))
+            downs.append(state.pop(f"{prefix}.{e}.down_proj.weight"))
+            e += 1
+        # [E, moe_inter, H] + [E, moe_inter, H] -> [E, 2*moe_inter, H]
+        state[f"{prefix}.gate_up_proj"] = torch.stack(
+            [torch.cat([g, u], dim=0) for g, u in zip(gates, ups)]
+        )
+        state[f"{prefix}.down_proj"] = torch.stack(downs)
 
 
 ARCHITECTURES: dict[str, ArchSpec] = {
@@ -111,6 +172,23 @@ ARCHITECTURES: dict[str, ArchSpec] = {
         },
         per_layer=_text_layer_renames("model.layers", "layers"),
         tied_lm_head=("lm_head_weight", "embed_tokens.weight"),
+    ),
+    "qwen3_moe": ArchSpec(
+        common={
+            "model.embed_tokens.weight": "embed_tokens.weight",
+            "model.norm.weight": "norm_weight",
+            "lm_head.weight": "lm_head_weight",
+        },
+        per_layer={
+            **_text_layer_renames("model.layers", "layers"),
+            "model.layers.{i}.mlp.gate.weight": "layers.{i}.mlp.gate_weight",
+        },
+        # Expert matrices and every FP8 ``weight_scale_inv`` keep their name
+        # apart from stripping ``model.``; the post hook turns them into the
+        # dequantised, stacked layout SparseMoeBlock expects.
+        passthrough_rename=(("model.", ""),),
+        tied_lm_head=("lm_head_weight", "embed_tokens.weight"),
+        post_rename=_qwen3_moe_post_rename,
     ),
     "llava": ArchSpec(
         common={
@@ -254,21 +332,31 @@ def _convert(
     out: dict[str, torch.Tensor] = {}
     dropped: list[str] = []
     for key, tensor in tqdm(_iter_state_dict(src_dir), desc=f"[{model_type}] rename"):
-        if dtype is not None and tensor.is_floating_point() and tensor.dtype != dtype:
+        # FP8 scale factors must stay fp32; everything else follows --dtype.
+        if (
+            dtype is not None
+            and not key.endswith(".weight_scale_inv")
+            and tensor.is_floating_point()
+            and tensor.dtype != dtype
+        ):
             tensor = tensor.to(dtype)
 
+        # Explicit rename rules win over blanket passthrough prefixes.
+        target = rename_map.get(key)
+        if target is not None:
+            out[target] = tensor
+            continue
         renamed = _rename_passthrough(key, spec.passthrough_rename)
         if renamed is not None:
             out[renamed] = tensor
             continue
-        target = rename_map.get(key)
-        if target is None:
-            dropped.append(key)
-            continue
-        out[target] = tensor
+        dropped.append(key)
 
     if dropped:
         logger.debug("dropped %d unmapped keys (first few: %s)", len(dropped), dropped[:5])
+
+    if spec.post_rename is not None:
+        spec.post_rename(out, num_layers)
 
     # Text and multimodal layouts both use ``[language_model.]layers.{i}.self_attn``.
     layer_prefix = (
