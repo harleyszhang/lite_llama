@@ -1,12 +1,14 @@
 import torch, triton, math, os, sys
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
-from lite_llama.lite_llama.kernels.others.fused_linear import fused_linear
-from lite_llama.lite_llama.kernels.others.rmsnorm_v1 import rmsnorm
-from lite_llama.lite_llama.kernels.others.rmsnorm_layer import rmsnorm_fwd
-from lite_llama.lite_llama.kernels.others.layernorm import layernorm
-from lite_llama.lite_llama.kernels.others.rope_orig import rope as rope_triton
-from lite_llama.lite_llama.kernels.rope_emb import apply_rotary_pos_emb
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+from lite_llama.kernels.others.fused_linear import fused_linear
+from lite_llama.kernels.others.rmsnorm_v1 import rmsnorm
+from lite_llama.kernels.others.rmsnorm_layer import rmsnorm_fwd
+from lite_llama.kernels.others.layernorm import layernorm
+from lite_llama.kernels.others.rope_orig import rope as rope_triton
+from lite_llama.kernels.rope_emb import rope_emb_forward
+from lite_llama.kernels.flashattention import flash_attention_v1
+from lite_llama.kernels.flashattentionv2 import flash_attention_v2
 from lite_llama.kernels.softmax_split import softmax_split
 
 from fused_mlp_silu import mlp_silu, torch_mlp_silu, triton_torch_mlp_silu, FusedMLP
@@ -26,7 +28,10 @@ def is_cuda():
     return torch.cuda.is_available()
 
 
-result_path = "/gemini/code/lite_llama/images/benchamrk_result"
+result_path = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../images/benchamrk_result")
+)
+os.makedirs(result_path, exist_ok=True)
 ref_lib = "cuBLAS" if is_cuda() else "rocBLAS"
 TORCH_HAS_FP8 = hasattr(torch, "float8_e5m2")
 ################################benchamrk matmul################################
@@ -345,30 +350,22 @@ gbps(max_ms) 和 gbps(min_ms)：这些值通常用于表示性能的波动范围
 # benchmark.run(show_plots=True, print_data=True, save_path=result_path)
 
 ################################benchamrk flashattention################################
-try:
-    from ..lite_llama.kernels.flashattention import flash_attention_v1
-    from ..lite_llama.kernels.flashattentionv2 import flash_attention_v2
-
-    HAS_FLASH = True
-except BaseException:
-    HAS_FLASH = False
-
+# flash_attention_v1 / flash_attention_v2 已在文件头部绝对导入
+HAS_FLASH = True
 print("HAS_FLASH", HAS_FLASH)
-FLASH_NEW = True
 
 BATCH, N_HEADS, HEAD_DIM = 8, 64, 64
 # vary seq length for fixed head and batch=4
 configs = []
 for mode in ["fwd"]:
-    for causal in [False]:
+    for causal in [True]:  # 恢复的 v1/v2 kernel 均为 causal 实现, FLOPS 按 causal 折算
         configs.append(
             triton.testing.Benchmark(
                 x_names=["N_CTX"],
                 x_vals=[2**i for i in range(4, 12)],
                 line_arg="provider",
-                line_vals=["triton-official"] + (["flash_me"] if FLASH_NEW else []),
-                line_names=["triton-official-fp16"]
-                + (["flash-me-fp16"] if FLASH_NEW else []),
+                line_vals=["flashattentionv1", "flashattentionv2"],
+                line_names=["flash-v1-fp16", "flash-v2-fp16"],
                 styles=[("red", "-"), ("blue", "-"), ("green", "-")],
                 ylabel="TFLOPS",
                 plot_name=f"fused-attention-batch{BATCH}-head{N_HEADS}-d{HEAD_DIM}-{mode}-causal={causal}",
@@ -394,8 +391,7 @@ def bench_flash_attention(
         k = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
         v = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
 
-        sm_scale = 1.3
-        fn = lambda: flash_attention_v2(q, k, v, causal, sm_scale)
+        fn = lambda: flash_attention_v2(q, k, v)
         if mode == "bwd":
             o = fn()
             do = torch.randn_like(o)
@@ -406,11 +402,8 @@ def bench_flash_attention(
         q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
         k = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
         v = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device)
-        batch, heads, m_size, head_dim = q.shape
-        sm_scale = 1 / math.sqrt(head_dim)
-        output = torch.empty_like(q)
 
-        fn = lambda: flash_attention_v1(q, k, v, sm_scale)
+        fn = lambda: flash_attention_v1(q, k, v)
         ms = triton.testing.do_bench(fn)
 
     flops_per_matmul = 2.0 * BATCH * H * N_CTX * N_CTX * HEAD_DIM

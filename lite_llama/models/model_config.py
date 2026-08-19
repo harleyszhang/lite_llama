@@ -191,3 +191,44 @@ class Qwen3Config(TextModelConfig):
         if not self.use_sliding_window:
             self.sliding_window = None
         super().__post_init__()
+
+
+@dataclass
+class Qwen3MoeConfig(Qwen3Config):
+    """Qwen3 MoE(A3B 系列):attention 与 Qwen3 相同,FFN 换成 top-k 路由专家。
+
+    层类型判定与 HF ``Qwen3MoeDecoderLayer`` 一致:``mlp_only_layers`` 中的层
+    保持 dense MLP;其余层每 ``decoder_sparse_step`` 步为 MoE。
+    Qwen3-30B-A3B 的配置为 ``mlp_only_layers=[]`` + ``decoder_sparse_step=1``,
+    即全部 48 层均为 MoE。
+    """
+
+    model_type: str = "qwen3_moe"
+    hidden_size: int = 2048
+    num_heads: int = 32
+    num_layers: int = 48
+    num_kv_heads: int | None = 4
+    intermediate_size: int | None = 6144  # dense 层(mlp_only_layers)的 FFN 宽度
+    rope_theta: float = 10_000_000.0
+    max_position_embeddings: int = 262_144
+
+    # ---- MoE ------------------------------------------------------------ #
+    num_experts: int = 128
+    num_experts_per_tok: int = 8
+    moe_intermediate_size: int = 768
+    norm_topk_prob: bool = True
+    decoder_sparse_step: int = 1
+    mlp_only_layers: list[int] | None = None
+
+    def __post_init__(self) -> None:
+        if self.mlp_only_layers is None:
+            self.mlp_only_layers = []
+        super().__post_init__()
+
+    def is_moe_layer(self, layer_index: int) -> bool:
+        """与 HF 一致的层类型判定:dense 名单之外、每 sparse_step 步为 MoE。"""
+        return (
+            self.num_experts > 0
+            and layer_index not in self.mlp_only_layers
+            and (layer_index + 1) % self.decoder_sparse_step == 0
+        )
