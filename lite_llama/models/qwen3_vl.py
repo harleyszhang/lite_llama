@@ -1,161 +1,198 @@
-"""Qwen3-VL: Vision-Language model combining Qwen3VLVisionModel with Qwen3Model.
+"""Qwen3-VL: SigLIP-style vision tower + Qwen3 language model with mrope and DeepStack.
 
-Architecture:
-    - Vision encoder: Qwen3VLVisionModel (from transformers, ViT + PatchMerger)
-    - Language model: Qwen3Model (custom Triton-kernel implementation)
-    - Merge strategy: replace image placeholder tokens with vision embeddings
+Two mechanisms make Qwen3-VL more than "encode image, scatter embeddings":
+
+**mrope.** Each vision token carries a ``(t, h, w)`` position instead of one index,
+and the rotary dimensions are split across those components in an interleaved
+layout. :class:`~lite_llama.models.rotary_embedding.MRotaryEmbedding` handles that;
+the ``[3, batch, seq_len]`` position ids are produced by the input processor.
+
+**DeepStack.** The vision tower emits, in addition to the merged patch embeddings,
+one extra feature map per entry of ``vision_config.deepstack_visual_indexes``. Those
+are *added into the language model's hidden states at the vision token positions*
+after the first few decoder layers (see arXiv:2406.04334). Skipping this does not
+crash — it silently degrades quality — so it is wired in through the
+:meth:`~lite_llama.models.base.CausalLM._after_layer` hook.
+
+Checkpoint key layout::
+
+    vision_tower.*        – Qwen3VLVisionModel parameters (HF names)
+    language_model.*      – Qwen3VLTextModel parameters (lite_llama names),
+                            including language_model.lm_head_weight
 """
-from typing import Optional
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
 
 import torch
-import torch.nn as nn
-
+from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
-from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig as HFQwen3VLConfig
 
-from .qwen3 import Qwen3Model
+from .base import CausalLM
 from .model_config import Qwen3Config
-from ..utils.logger import get_logger
+from .multimodal import MultiModalCausalLM
+from .rotary_embedding import MRotaryEmbedding
 
-logger = get_logger(__name__)
+
+class Qwen3VLTextModel(CausalLM):
+    """Qwen3 decoder stack with mrope and DeepStack feature injection."""
+
+    config_class = Qwen3Config
+    qkv_bias = False
+    use_qk_norm = True
+    rotary_class = MRotaryEmbedding
+
+    def _after_layer(
+        self,
+        hidden_states: torch.Tensor,
+        layer_index: int,
+        layer_context: dict[str, Any],
+    ) -> torch.Tensor:
+        """Add the DeepStack feature for this layer at the vision token positions."""
+        embeds = layer_context.get("deepstack_visual_embeds")
+        if embeds is None or layer_index >= len(embeds):
+            return hidden_states
+
+        mask = layer_context["visual_pos_mask"].to(hidden_states.device)
+        visual = embeds[layer_index].to(device=hidden_states.device, dtype=hidden_states.dtype)
+        hidden_states[mask] = hidden_states[mask] + visual
+        return hidden_states
 
 
-class Qwen3VLForCausalLM(nn.Module):
-    """Qwen3-VL model for multimodal inference (vision + language).
+class Qwen3VLForCausalLM(MultiModalCausalLM):
+    """Qwen3-VL for image/video conditioned generation.
 
-    State-dict key layout (after weight conversion):
-        vision_tower.*          – Qwen3VLVisionModel parameters (HF format)
-        language_model.*        – Qwen3Model parameters (lite_llama format)
-        lm_head_weight          – (vocab_size, hidden_size)
+    Args:
+        config: A HuggingFace :class:`Qwen3VLConfig`. ``max_seq_len`` may be attached
+            by the executor to bound the KV cache.
     """
 
-    def __init__(self, config: HFQwen3VLConfig):
+    def __init__(self, config: Qwen3VLConfig) -> None:
         super().__init__()
         self.config = config
-        self.device = "cuda"
 
-        # Vision encoder (use HF implementation – complex ViT + merger)
         self.vision_tower = Qwen3VLVisionModel(config.vision_config)
 
-        # Language model (custom Qwen3 with Triton kernels)
-        text_cfg_dict = config.text_config.to_dict()
-        self.qwen3_config = Qwen3Config.from_dict(text_cfg_dict)
-        self.language_model = Qwen3Model(self.qwen3_config)
+        self.text_config = self._text_config(config)
+        self.language_model = Qwen3VLTextModel(self.text_config)
 
-        # LM head (shared or separate)
-        self.lm_head_weight = nn.Parameter(
-            torch.rand(
-                self.qwen3_config.vocab_size,
-                self.qwen3_config.hidden_size,
-                dtype=torch.float16,
-            )
-        )
-
-        # Token IDs for vision placeholders
         self.image_token_id = config.image_token_id
         self.video_token_id = config.video_token_id
-        self.vision_start_token_id = config.vision_start_token_id
-        self.vision_end_token_id = config.vision_end_token_id
 
-    def vision_encode(
+        # Populated by encode_vision and consumed by forward in the same step.
+        self._deepstack_embeds: list[torch.Tensor] | None = None
+
+    @staticmethod
+    def _text_config(config: Qwen3VLConfig) -> Qwen3Config:
+        """Adapt the HF text config, tolerating the transformers 5.x rope rename.
+
+        transformers 5.x serialises the rope settings as ``rope_parameters`` (and
+        drops ``rope_scaling`` from ``to_dict()``); without the mapping below the
+        ``mrope_section`` would be lost and :class:`MRotaryEmbedding` would silently
+        fall back to plain RoPE, which misreads the ``[3, batch, seq]`` position ids.
+        """
+        data = config.text_config.to_dict()
+        rope_params = data.pop("rope_parameters", None)
+        if rope_params is not None and not data.get("rope_scaling"):
+            data["rope_scaling"] = rope_params
+        return Qwen3Config.from_dict(data, max_seq_len=getattr(config, "max_seq_len", 2048))
+
+    @property
+    def placeholder_token_ids(self) -> tuple[int, ...]:
+        return (self.image_token_id, self.video_token_id)
+
+    def encode_vision(
         self,
-        pixel_values: torch.Tensor,
-        grid_thw: torch.Tensor,
+        pixel_values: torch.Tensor | None = None,
+        image_grid_thw: torch.Tensor | None = None,
+        pixel_values_videos: torch.Tensor | None = None,
+        video_grid_thw: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Encode images/videos through the vision tower.
+        """Encode images and/or videos into language-model embedding space.
 
         Args:
-            pixel_values: (seq_len, channels * temporal_patch * patch * patch)
-            grid_thw: (num_images_or_videos, 3) – temporal, height, width grids
+            pixel_values: Flattened image patches ``[num_patches, patch_features]``.
+            image_grid_thw: ``[num_images, 3]`` temporal/height/width patch grid.
+            pixel_values_videos: Flattened video patches.
+            video_grid_thw: ``[num_videos, 3]`` patch grid for videos.
 
         Returns:
-            image_embeds: (num_merged_patches, text_hidden_size)
+            ``[num_vision_tokens, text_hidden_size]`` in prompt order (images first,
+            then videos, matching how the processor lays out the placeholders).
         """
-        pixel_values = pixel_values.to(dtype=torch.float16, device=self.device)
-        grid_thw = grid_thw.to(device=self.device)
+        target_dtype = next(self.vision_tower.parameters()).dtype
+        target_device = next(self.vision_tower.parameters()).device
 
-        # Qwen3VLVisionModel returns merged hidden states
-        vision_outputs = self.vision_tower(
-            hidden_states=pixel_values,
-            grid_thw=grid_thw,
-        )
-        # vision_outputs is a tuple; first element is hidden_states
-        if isinstance(vision_outputs, tuple):
-            image_embeds = vision_outputs[0]
-        else:
-            image_embeds = vision_outputs.last_hidden_state
+        embeds: list[torch.Tensor] = []
+        deepstack_parts: list[list[torch.Tensor]] = []
 
-        return image_embeds
-
-    def _merge_vision_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        inputs_embeds: torch.Tensor,
-        image_embeds: torch.Tensor,
-    ) -> torch.Tensor:
-        """Replace image/video placeholder positions with vision embeddings."""
-        # Find positions of image and video tokens
-        image_mask = (input_ids == self.image_token_id) | (input_ids == self.video_token_id)
-        image_mask = image_mask.to(inputs_embeds.device)
-
-        # Flatten and assign
-        num_vision_tokens = image_mask.sum().item()
-        if num_vision_tokens > 0:
-            vision_flat = image_embeds.view(-1, image_embeds.shape[-1])
-            if vision_flat.shape[0] >= num_vision_tokens:
-                inputs_embeds[image_mask] = vision_flat[:num_vision_tokens].to(inputs_embeds.dtype)
+        for patches, grid in (
+            (pixel_values, image_grid_thw),
+            (pixel_values_videos, video_grid_thw),
+        ):
+            if patches is None:
+                continue
+            patches = patches.to(device=target_device, dtype=target_dtype)
+            grid = grid.to(device=target_device)
+            # transformers < 5 returned a plain (merged, deepstack) tuple; newer
+            # versions wrap the same two tensors in a ModelOutput.
+            out = self.vision_tower(patches, grid_thw=grid)
+            if isinstance(out, Mapping):
+                merged, deepstack = out["pooler_output"], out["deepstack_features"]
             else:
-                logger.warning(
-                    f"Vision tokens ({num_vision_tokens}) > vision embeddings ({vision_flat.shape[0]}), padding with zeros"
-                )
-                inputs_embeds[image_mask] = torch.nn.functional.pad(
-                    vision_flat, (0, 0, 0, num_vision_tokens - vision_flat.shape[0])
-                ).to(inputs_embeds.dtype)
+                merged, deepstack = out
+            embeds.append(merged)
+            deepstack_parts.append(deepstack)
 
-        return inputs_embeds
+        if not embeds:
+            raise ValueError("encode_vision called without any pixel values")
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.language_model.get_input_embeddings(input_ids)
+        # Concatenate images and videos per DeepStack level so the level count stays
+        # equal to len(deepstack_visual_indexes).
+        self._deepstack_embeds = [
+            torch.cat(level, dim=0) if len(level) > 1 else level[0]
+            for level in zip(*deepstack_parts, strict=False)
+        ]
+        return torch.cat(embeds, dim=0) if len(embeds) > 1 else embeds[0]
 
     def forward(
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
         atten_info,
-        pixel_values: Optional[torch.Tensor] = None,
-        grid_thw: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ):
-        """Forward pass supporting both text-only and multimodal inputs.
+        multi_modal_inputs: dict[str, Any] | None = None,
+    ) -> torch.Tensor:
+        """Run one prefill or decode step, wiring DeepStack into the prefill pass."""
+        inputs_embeds = None
+        layer_context = None
+        is_prefill = input_ids.shape[1] > 1
 
-        For prefill with images: pixel_values and grid_thw must be provided.
-        For decode (seq_len=1): only input_ids are needed.
-        """
-        input_ids = input_ids.to(self.device)
-        if position_ids is not None:
-            position_ids = position_ids.to(self.device)
+        if is_prefill and multi_modal_inputs:
+            from .multimodal import merge_multimodal_embeddings
 
-        batch_size, seq_len = input_ids.shape
+            self._deepstack_embeds = None
+            vision_embeds = self.encode_vision(**multi_modal_inputs)
+            inputs_embeds = self.get_input_embeddings(input_ids)
 
-        if inputs_embeds is None:
-            if seq_len > 1 and pixel_values is not None:
-                # Prefill with vision: encode images and merge
-                image_embeds = self.vision_encode(pixel_values, grid_thw)
-                inputs_embeds = self.get_input_embeddings(input_ids)
-                inputs_embeds = self._merge_vision_embeddings(
-                    input_ids, inputs_embeds, image_embeds
-                )
-            else:
-                # Text-only or decode phase
-                inputs_embeds = None  # Let language_model handle embedding
+            visual_pos_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+            for token_id in self.placeholder_token_ids:
+                visual_pos_mask |= input_ids == token_id
 
-        # Use language model's lm_head_weight for output projection
-        # Temporarily set it if the language model uses its own
-        hidden_states = self.language_model(
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, vision_embeds, self.placeholder_token_ids
+            )
+            if self._deepstack_embeds is not None:
+                layer_context = {
+                    "visual_pos_mask": visual_pos_mask,
+                    "deepstack_visual_embeds": self._deepstack_embeds,
+                }
+
+        return self.language_model(
             input_ids=input_ids,
             position_ids=position_ids,
             atten_info=atten_info,
             inputs_embeds=inputs_embeds,
+            layer_context=layer_context,
         )
-
-        return hidden_states

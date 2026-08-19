@@ -1,55 +1,43 @@
+"""Single-image chat with :class:`~lite_llama.engine.generator.VisionGenerator`.
+
+Works for both LLaVA (``<image>`` marker in the prompt) and Qwen3-VL (plain
+prompt; the generator wraps it in the chat template and computes mrope ids).
+
+Run from the repository root:
+    python examples/example_llava.py
+"""
+from __future__ import annotations
+
 import torch
-from typing import Optional
+from PIL import Image
 
-import sys, os
+from lite_llama.engine import SamplingParams, VisionGenerator
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
-from lite_llama.llava_generate_stream import (
-    LlavaGeneratorStream,
-)  # 导入 GenerateText 类
-
-checkpoints_dir = "/gemini/code/lite_llama/my_weight/llava-1.5-7b-hf"
+checkpoints_dir = "my_weight/llava-1.5-7b-hf"  # 改成自己的存放模型路径
+image_path = "/path/to/your/image.jpg"  # 改成自己的图片路径
 
 
 def main(
     temperature: float = 0.6,
     top_p: float = 0.9,
     max_seq_len: int = 2048,
-    max_gpu_num_blocks=None,
-    max_gen_len: Optional[int] = 64,
-    load_model: bool = True,
-    compiled_model: bool = True,
-    triton_weight: bool = True,
-):
+    max_gen_len: int = 256,
+) -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    generator = LlavaGeneratorStream(
+    generator = VisionGenerator(
         checkpoints_dir=checkpoints_dir,
-        tokenizer_path=checkpoints_dir,
-        max_gpu_num_blocks=max_gpu_num_blocks,
         max_seq_len=max_seq_len,
-        compiled_model=compiled_model,
         device=device,
     )
+    params = SamplingParams(temperature=temperature, top_p=top_p, max_gen_len=max_gen_len)
 
-    # 调用生成函数，开始流式生成
-    prompts = ["USER: <image>\nWhat's the content of the image? ASSISTANT:"]
-    image_items = ["https://www.ilankelman.org/stopsigns/australia.jpg"]
+    image = Image.open(image_path).convert("RGB")
+    # LLaVA expects the <image> marker where the visual tokens should be
+    # inserted; Qwen3-VL takes a plain prompt instead.
+    prompt = "USER: <image>\nWhat's the content of the image? ASSISTANT:"
 
-    stream = generator.text_completion_stream(
-        prompts,
-        image_items,
-        temperature=temperature,
-        top_p=top_p,
-        max_gen_len=max_gen_len,
-    )
-
-    completion = ""  # 初始化生成结果
-    # NOTE: 创建了一个 generator 后，可以通过 for 循环来迭代它
-    for batch_completions in stream:
-        new_text = batch_completions[0]["generation"][len(completion) :]
-        completion = batch_completions[0]["generation"]
-        print(new_text, end=" ", flush=True)
+    for delta in generator.stream(prompt, [image], params):
+        print(delta, end="", flush=True)
     print("\n\n==================================\n")
 
 

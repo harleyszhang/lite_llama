@@ -1,0 +1,123 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lite-llama"
+version = "0.2.0"
+description = "A lightweight, Triton-kernel based LLM inference framework for LLaMA / Qwen / LLaVA / Qwen3-VL"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "harleyszhang", email = "zhg5200211@outlook.com" }]
+keywords = ["llm", "inference", "triton", "cuda", "transformer"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+  # torch/triton are validated up to torch 2.13 + triton 3.7 (the latest at the
+  # time of writing). The version floor is intentionally loose; the *hard*
+  # requirement is that the installed torch's CUDA build not exceed the local
+  # driver's CUDA version. On a driver that ships CUDA 12.x (e.g. NVIDIA 550.x on
+  # A10) install a cu12x wheel explicitly, otherwise pip may resolve a cu13x
+  # build that fails at runtime with torch.cuda.is_available() == False:
+  #   uv pip install torch --index-url https://download.pytorch.org/whl/cu129
+  "torch>=2.4",
+  "triton>=3.0; platform_system == 'Linux'",
+  "transformers>=4.51",
+  "numpy>=1.24",
+  "tqdm>=4.65",
+  "pillow>=10.0",
+  "requests>=2.31",
+  "rich>=13.0",
+]
+
+[project.optional-dependencies]
+# Accuracy evaluation harness under examples/evaluator.
+eval = ["sentence-transformers>=4.0"]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+  "ruff==0.14.0",
+  "pre-commit>=4.0",
+]
+
+[project.scripts]
+lite-llama = "lite_llama.cli:main"
+lite-llama-convert = "lite_llama.tools.convert_weights:main"
+
+[project.urls]
+Homepage = "https://github.com/harleyszhang/lite_llama"
+Repository = "https://github.com/harleyszhang/lite_llama"
+
+[tool.setuptools.packages.find]
+include = ["lite_llama*"]
+
+[tool.setuptools.package-data]
+lite_llama = ["py.typed"]
+
+# --------------------------------------------------------------------------- #
+# Ruff: linter + formatter (replaces black/isort/flake8)
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["docs", "images", "my_weight"]
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "W",   # pycodestyle warnings
+  "I",   # isort
+  "UP",  # pyupgrade
+  "B",   # flake8-bugbear
+  "C4",  # flake8-comprehensions
+  "SIM", # flake8-simplify
+  "RUF", # ruff-specific
+]
+ignore = [
+  "E501",   # line length is handled by the formatter
+  "E741",   # ambiguous names (l, I) are idiomatic inside Triton kernels
+  "B008",   # function call in argument default
+  "SIM108", # ternary instead of if-else is not always more readable
+  # This codebase preserves the original Chinese comments and docstrings.
+  # Rejecting fullwidth punctuation would force wholesale rewriting of the
+  # authors' original teaching material for no functional gain.
+  "RUF002",
+  "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Triton kernels take many positional pointer/stride arguments and shadow math
+# builtins; benchmark helpers intentionally use star-imports and prints.
+"lite_llama/kernels/*" = ["B905"]
+"tests/*" = ["B011"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.uv.pip]
+index-url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/"
+
+# --------------------------------------------------------------------------- #
+# Pytest
+# --------------------------------------------------------------------------- #
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+  "gpu: requires a CUDA device (skipped automatically on CPU-only machines)",
+  "weights: requires downloaded model weights",
+]
+filterwarnings = [
+  "ignore::FutureWarning:torch.*",
+]

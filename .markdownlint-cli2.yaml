@@ -1,0 +1,18 @@
+# markdownlint-cli2 configuration
+config:
+  # Long tables and code samples make a hard line-length limit impractical.
+  line-length: false
+  # Duplicate headings are fine across different sections of the benchmark docs.
+  no-duplicate-heading: false
+  # Inline HTML is used for image sizing in the README.
+  no-inline-html: false
+  # Bare URLs appear in reference lists.
+  no-bare-urls: false
+  # The first line does not have to be a top-level heading (docs use front matter).
+  first-line-heading: false
+globs:
+  - "**/*.md"
+ignores:
+  - "images/**"
+  - "my_weight/**"
+  - "**/node_modules/**"

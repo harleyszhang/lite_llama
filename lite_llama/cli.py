@@ -1,0 +1,407 @@
+"""``lite-llama`` command-line entry point.
+
+架构总览(自底向上四层):
+
+1. **声明式参数表** —— :class:`CliOption` + ``COMMON_OPTIONS``:
+   所有子命令共享的 argparse 参数集中为一张数据表,``register`` 负责
+   翻译成 ``add_argument`` 调用。新增公共参数只改一处。
+2. **配置对象 + 工厂** —— :class:`EngineOptions`(frozen dataclass):
+   把 ``argparse.Namespace`` 收敛为显式的引擎构造参数并完成校验,
+   同时充当 ``TextGenerator`` / ``VisionGenerator`` 的工厂(Builder),
+   命令类不再关心两种生成器构造签名的差异。
+3. **策略层** —— :class:`PrompterResolver`(Strategy):
+   封装 "base 模型直传 / instruct 模型套聊天模板" 的判定规则与
+   prompter 名称推断,与命令执行完全解耦,可独立测试。
+4. **命令层** —— :class:`CliCommand`(Command + Template Method):
+   ``register`` 固定 "建子 parser → 注册公共参数 → 注册特有参数 →
+   绑定 handler" 的骨架,子类只实现 ``add_arguments`` 与 ``run``。
+
+新增一个子命令 = 写一个 :class:`CliCommand` 子类并加入 ``COMMANDS``。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import warnings
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, ClassVar
+
+from PIL import Image
+
+from .engine import SamplingParams, TextGenerator, VisionGenerator
+from .utils.prompt_templates import BasePrompter, get_prompter
+
+
+# ---------------------------------------------------------------------------
+# 第一层:声明式 CLI 参数表
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CliOption:
+    """一条 CLI 参数声明;``register`` 将其翻译成一次 ``add_argument`` 调用。"""
+
+    flag: str
+    kwargs: dict[str, Any] = field(default_factory=dict)
+
+    def register(self, sub: argparse.ArgumentParser) -> None:
+        sub.add_argument(self.flag, **self.kwargs)
+
+
+# 所有子命令共享的参数。repetition_penalty 默认 1.1 而非 1.0:小参数 base
+# 模型在 fp16 argmax 平局(~0.02 logit gap)下极易滑入重复死循环,默认
+# 开启轻量惩罚是更安全的出厂行为,传 1.0 可显式关闭。
+COMMON_OPTIONS: tuple[CliOption, ...] = (
+    CliOption("--model-dir", {"help": "Checkpoint directory"}),
+    CliOption("--max-seq-len", {"type": int, "default": 2048}),
+    CliOption("--max-gpu-num-blocks", {"type": int, "default": None}),
+    CliOption("--device", {"default": "cuda"}),
+    CliOption("--temperature", {"type": float, "default": 0.6}),
+    CliOption("--top-p", {"type": float, "default": 0.9}),
+    CliOption("--max-gen-len", {"type": int, "default": None}),
+    CliOption(
+        "--repetition-penalty",
+        {
+            "type": float,
+            "default": 1.1,
+            "help": "Penalise logits of already-generated tokens (1.0 disables it; "
+            "1.1 is the default because small base models easily loop on repeats)",
+        },
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# 第二层:引擎构造参数(配置对象 + Builder)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EngineOptions:
+    """引擎构造参数;统一从 ``argparse.Namespace`` 显式提取、校验并持有。
+
+    充当 TextGenerator / VisionGenerator 的工厂:两条生成路径的构造签名
+    差异(如 CUDA Graph 只接入文本 decode 路径)在此消化,命令类只见
+    统一的 ``build_*`` 接口。
+    """
+
+    model_dir: str
+    max_seq_len: int = 2048
+    max_gpu_num_blocks: int | None = None
+    device: str = "cuda"
+    use_cuda_graph: bool = False
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> "EngineOptions":
+        # --model-dir 优先,其次环境变量 LITE_LLAMA_MODEL_DIR
+        model_dir = args.model_dir or os.environ.get("LITE_LLAMA_MODEL_DIR")
+        if not model_dir:
+            raise SystemExit(
+                "Model directory not provided. "
+                "Pass --model-dir <path> or set LITE_LLAMA_MODEL_DIR."
+            )
+        if not Path(model_dir).is_dir():
+            raise SystemExit(f"model directory {model_dir!r} does not exist")
+        return cls(
+            model_dir=model_dir,
+            max_seq_len=args.max_seq_len,
+            max_gpu_num_blocks=args.max_gpu_num_blocks,
+            device=args.device,
+            use_cuda_graph=getattr(args, "use_cuda_graph", False),
+        )
+
+    def build_text_generator(self) -> TextGenerator:
+        return TextGenerator(
+            checkpoints_dir=self.model_dir,
+            max_seq_len=self.max_seq_len,
+            max_gpu_num_blocks=self.max_gpu_num_blocks,
+            device=self.device,
+            use_cuda_graph=self.use_cuda_graph,
+        )
+
+    def build_vision_generator(self) -> VisionGenerator:
+        # CUDA Graph capture 只接了文本 decode 路径,vl-chat 不传该参数
+        return VisionGenerator(
+            checkpoints_dir=self.model_dir,
+            max_seq_len=self.max_seq_len,
+            max_gpu_num_blocks=self.max_gpu_num_blocks,
+            device=self.device,
+        )
+
+
+# ---------------------------------------------------------------------------
+# 第三层:Prompter 选择策略
+# ---------------------------------------------------------------------------
+
+
+class PrompterResolver:
+    """聊天模板选择策略:决定 checkpoint 该套哪个 prompter(或原样直传)。
+
+    背景:给 *base* 模型套 chat 模板是有害的——base Qwen2.5-0.5B 收到
+    ``<|im_start|>assistant`` 会回显 "Assistant" 然后退化成重复;反之给
+    *chat* 模型喂裸 prompt 同样糟糕。因此必须可靠区分两类 checkpoint。
+    """
+
+    # 名称中出现即判定为 instruct/chat 模型的标记
+    _INSTRUCT_NAME_HINTS: ClassVar[tuple[str, ...]] = ("instruct", "chat", "-it")
+    # 默认即 chat 模型的家族(config.json 的 model_type)
+    _CHAT_BY_DEFAULT_TYPES: ClassVar[tuple[str, ...]] = ("qwen3", "qwen3_vl")
+    # model_type -> prompter 注册名;Qwen2/Qwen3 同为 ChatML 模板,共用 "qwen2"
+    _PROMPTER_BY_TYPE: ClassVar[dict[str, str]] = {"qwen2": "qwen2", "qwen3": "qwen2"}
+    # config.json 无法表达 LLaMA 家族的细分模板(vicuna / llama3 / llava),
+    # 只能退回按路径名匹配
+    _NAME_CANDIDATES: ClassVar[tuple[str, ...]] = ("qwen2", "qwen3", "llama3", "llama")
+
+    @staticmethod
+    def read_model_type(model_dir: str) -> str:
+        """从 checkpoint 的 config.json 读 ``model_type``;读不到返回 ``""``。"""
+        try:
+            with open(Path(model_dir) / "config.json") as f:
+                return str(json.load(f).get("model_type", "")).lower()
+        except (OSError, json.JSONDecodeError):
+            return ""
+
+    @classmethod
+    def is_instruct(cls, model_dir: str) -> bool:
+        """该 checkpoint 是否经指令微调、适配 chat 模板。规则按序生效:
+
+        1. 名称显式带 ``base``(如 Qwen3-0.6B-Base)→ 不是 instruct;
+        2. 名称带 ``instruct`` / ``chat`` / ``-it`` → 是(LLaMA、Qwen2.5);
+        3. Qwen3 家族默认就是 chat 模型,只有 ``-Base`` 变体是裸补全模型——
+           规则 1 已拦截后者,这里只看 model_type。
+        """
+        name = Path(model_dir).name.lower()
+        if "base" in name:
+            return False
+        if any(hint in name for hint in cls._INSTRUCT_NAME_HINTS):
+            return True
+        return cls.read_model_type(model_dir) in cls._CHAT_BY_DEFAULT_TYPES
+
+    @classmethod
+    def resolve(cls, model_dir: str, explicit: str | None = None) -> str:
+        """推断 prompter 注册名;base 模型返回 ``"empty"``(原样直传)。"""
+        if explicit:
+            return explicit
+        if not cls.is_instruct(model_dir):
+            return "empty"
+        model_type = cls.read_model_type(model_dir)
+        if model_type in cls._PROMPTER_BY_TYPE:
+            return cls._PROMPTER_BY_TYPE[model_type]
+        name = Path(model_dir).name.lower()
+        for candidate in cls._NAME_CANDIDATES:
+            if candidate in name:
+                return candidate
+        return "empty"
+
+    @staticmethod
+    def build(style: str, model_dir: str, max_seq_len: int) -> BasePrompter | None:
+        """构造 prompter 实例;``"empty"`` 返回 ``None``。
+
+        ``EmptyPrompter`` 并非真正的空操作:它仍会用 BasePrompter 的角色
+        分隔符(``": <prompt>:"``)包裹文本,所以 base 模型必须完全绕过
+        prompter 体系,而不是指望它透明透传。
+        """
+        if style == "empty":
+            return None
+        return get_prompter(style, model_dir, short_prompt=max_seq_len <= 1024)
+
+
+# ---------------------------------------------------------------------------
+# 第四层:子命令(Command + Template Method)
+# ---------------------------------------------------------------------------
+
+
+class CliCommand(ABC):
+    """CLI 子命令基类。
+
+    ``register`` 是模板方法:建子 parser → 注册公共参数 → 注册命令特有
+    参数(``add_arguments`` 钩子)→ 绑定 handler。子类只补充差异部分。
+    """
+
+    name: ClassVar[str]
+    help: ClassVar[str]
+
+    def register(self, subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
+        sub = subparsers.add_parser(self.name, help=self.help)
+        for opt in COMMON_OPTIONS:
+            opt.register(sub)
+        self.add_arguments(sub)
+        sub.set_defaults(handler=self)
+        return sub
+
+    def add_arguments(self, sub: argparse.ArgumentParser) -> None:
+        """注册命令特有参数;默认无。"""
+
+    @staticmethod
+    def build_sampling_params(args: argparse.Namespace) -> SamplingParams:
+        return SamplingParams(
+            temperature=args.temperature,
+            top_p=args.top_p,
+            max_gen_len=args.max_gen_len,
+            repetition_penalty=args.repetition_penalty,
+        )
+
+    @abstractmethod
+    def run(self, args: argparse.Namespace) -> int:
+        """执行子命令,返回进程退出码。"""
+
+
+class ChatCommand(CliCommand):
+    """``chat``:交互式文本对话(REPL 循环,逐 token 流式输出)。"""
+
+    name = "chat"
+    help = "Interactive text chat"
+
+    def add_arguments(self, sub: argparse.ArgumentParser) -> None:
+        CliOption(
+            "--prompt-style", {"help": "Prompter name (auto-detected by default)"}
+        ).register(sub)
+        CliOption(
+            "--use-cuda-graph",
+            {
+                "action": "store_true",
+                "help": "Capture decode CUDA graphs for faster generation (text models only)",
+            },
+        ).register(sub)
+
+    def run(self, args: argparse.Namespace) -> int:
+        opts = EngineOptions.from_args(args)
+        style = PrompterResolver.resolve(opts.model_dir, args.prompt_style)
+        prompter = PrompterResolver.build(style, opts.model_dir, opts.max_seq_len)
+        generator = opts.build_text_generator()
+        params = self.build_sampling_params(args)
+
+        self._print_banner(opts.model_dir, style, params)
+        while True:
+            try:
+                user_input = input(">>> ").strip()
+            except (EOFError, KeyboardInterrupt):  # Ctrl-D / Ctrl-C 退出
+                print()
+                return 0
+            if not user_input:
+                continue
+            if user_input.lower() == "exit":
+                return 0
+            self._stream_reply(generator, prompter, params, user_input)
+
+    @staticmethod
+    def _print_banner(model_dir: str, style: str, params: SamplingParams) -> None:
+        print(f"Loaded {Path(model_dir).name}. Type 'exit' to quit.")
+        if style == "empty":
+            print("(base model detected: prompts are sent verbatim, no chat template)")
+        if params.is_greedy and params.repetition_penalty == 1.0:
+            # greedy + base 模型是经典的重复循环组合:fp16 argmax 平局翻转
+            # (~0.02 logit gap) 之后循环无法自我纠正,提前给用户提个醒
+            print(
+                "(greedy decoding without a repetition penalty can loop on repeats; "
+                "try --temperature 0.6 or --repetition-penalty 1.1)"
+            )
+        print()
+
+    @staticmethod
+    def _stream_reply(
+        generator: TextGenerator,
+        prompter: BasePrompter | None,
+        params: SamplingParams,
+        user_input: str,
+    ) -> None:
+        """单轮对话:套模板(若有)→ 流式打印 → 检查重复早停原因。"""
+        prompt_style_input = user_input
+        if prompter is not None:
+            prompter.insert_prompt(user_input)
+            prompt_style_input = prompter.model_input
+
+        for step in generator.stream([prompt_style_input], params):
+            print(step[0], end="", flush=True)
+        reasons = generator.engine.last_stop_reasons
+        if reasons and reasons[0] == "repeat":
+            print(
+                "\n[stopped early: degenerate repetition detected; try a higher "
+                "--repetition-penalty or --temperature]",
+                file=sys.stderr,
+            )
+        print("\n")
+
+
+class VlChatCommand(CliCommand):
+    """``vl-chat``:单轮图像条件对话(LLaVA / Qwen3-VL)。"""
+
+    name = "vl-chat"
+    help = "Single-turn image-conditioned chat"
+
+    def add_arguments(self, sub: argparse.ArgumentParser) -> None:
+        CliOption(
+            "--image",
+            {"nargs": "+", "required": True, "help": "One or more image paths"},
+        ).register(sub)
+        CliOption(
+            "--prompt",
+            {"help": "Prompt text; must contain '<image>' for LLaVA, plain text for Qwen3-VL"},
+        ).register(sub)
+
+    def run(self, args: argparse.Namespace) -> int:
+        opts = EngineOptions.from_args(args)
+        generator = opts.build_vision_generator()
+        params = self.build_sampling_params(args)
+
+        images = [Image.open(p).convert("RGB") for p in args.image]
+        # LLaVA 吃裸的 "USER: <image> ... ASSISTANT:" 字符串;Qwen3-VL 只要
+        # 一条纯 user 消息,由 VisionGenerator 自己套 chat template
+        default_prompt = (
+            "Describe this image."
+            if generator.is_qwen3_vl
+            else "USER: <image>\nDescribe this image. ASSISTANT:"
+        )
+        for delta in generator.stream(args.prompt or default_prompt, images, params):
+            print(delta, end="", flush=True)
+        print()
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# 装配层:命令注册表 + 入口
+# ---------------------------------------------------------------------------
+
+COMMANDS: tuple[CliCommand, ...] = (ChatCommand(), VlChatCommand())
+"""已注册子命令;新增命令 = 实现一个 :class:`CliCommand` 子类并加入此表。"""
+
+
+def build_parser() -> argparse.ArgumentParser:
+    # description 只取模块 docstring 首行;完整架构说明留在文档注释里
+    parser = argparse.ArgumentParser(
+        prog="lite-llama", description=__doc__.splitlines()[0] if __doc__ else None
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    for command in COMMANDS:
+        command.register(subparsers)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    # Silence a noisy but harmless warning from torch._utils.
+    warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
+    args = build_parser().parse_args(argv)
+    return args.handler.run(args)
+
+
+# ---------------------------------------------------------------------------
+# 向后兼容 facade:tests/test_repeat_detection.py 依赖的旧函数名,
+# 实现已迁入 PrompterResolver,此处仅保留委托。
+# ---------------------------------------------------------------------------
+
+
+def _is_instruct_checkpoint(model_dir: str) -> bool:
+    return PrompterResolver.is_instruct(model_dir)
+
+
+def _infer_prompter_type(model_dir: str) -> str:
+    return PrompterResolver.resolve(model_dir)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
