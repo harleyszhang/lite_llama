@@ -13,12 +13,13 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 
+import base64
+import os
+from io import BytesIO
+
+import requests
 import torch
 from PIL import Image
-from io import BytesIO
-import requests
-import os
-import base64
 
 
 def load_image_from_base64(image):
@@ -53,16 +54,12 @@ def vis_images(image_files):
         # Concat images
         system_inst = "convert "
         inst_template1 = " \\( {image} -background none -resize x{height} \\) "
-        inst_template2 = (
-            " \\( {image} -background none -resize x{height} -splice 50x0 \\) "
-        )
-        count = 0
-        for image in image_files:
+        inst_template2 = " \\( {image} -background none -resize x{height} -splice 50x0 \\) "
+        for count, image in enumerate(image_files, start=1):
             with Image.open(image) as img:
                 width, height = img.size  # 查看尺寸
                 print(f"{image} width and height is {width}, {height}")
 
-            count += 1
             if count == 1:
                 system_inst += inst_template1.format(image=image, height=height)
             else:
@@ -70,7 +67,7 @@ def vis_images(image_files):
         system_inst += " +append .vis.jpg"
         os.system(system_inst)
 
-        os.system(f"termvisage --query-timeout 1 .vis.jpg -H left")
+        os.system("termvisage --query-timeout 1 .vis.jpg -H left")
 
 
 def expand2square(pil_img, background_color):
@@ -98,12 +95,8 @@ def process_images(images, image_processor, model_cfg):
     new_images = []
     if image_aspect_ratio == "pad":
         for image in images:
-            image = expand2square(
-                image, tuple(int(x * 255) for x in image_processor.image_mean)
-            )
-            image = image_processor.preprocess(image, return_tensors="pt")[
-                "pixel_values"
-            ][0]
+            image = expand2square(image, tuple(int(x * 255) for x in image_processor.image_mean))
+            image = image_processor.preprocess(image, return_tensors="pt")["pixel_values"][0]
             if "intern" in image_processor.__class__.__name__.lower():
                 # special case
                 new_images.append(image.unsqueeze(0))

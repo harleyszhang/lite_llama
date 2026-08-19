@@ -55,8 +55,7 @@ def update_kv_index(req_to_token_indexs, b_req_idx, b_seq_len, select_index):
 
     # 确保所有输入张量在第一个维度上的大小相同
     assert (
-        b_seq_len.shape[0] == select_index.shape[0]
-        and b_req_idx.shape[0] == b_seq_len.shape[0]
+        b_seq_len.shape[0] == select_index.shape[0] and b_req_idx.shape[0] == b_seq_len.shape[0]
     ), "所有输入张量在第一个维度上的大小必须相同。"
 
     # 定义 Triton 内核的网格大小（1D 网格）

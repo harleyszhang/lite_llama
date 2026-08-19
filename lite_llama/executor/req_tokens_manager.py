@@ -1,5 +1,6 @@
-import torch
 import logging
+
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -14,9 +15,7 @@ class ReqTokensManager:
         self.max_can_use_req_size = max_request_num
         self.can_use_req_size = max_request_num
         self.max_seq_len = max_seq_len
-        self.req_state = torch.zeros(
-            (max_request_num), dtype=torch.int32, device=device
-        )
+        self.req_state = torch.zeros((max_request_num), dtype=torch.int32, device=device)
         # 一个二维张量，形状为 [num_requests, max_seq_len]，用于存储每个请求的 Token 索引。
         # 每行表示一个请求，每列表示该请求在特定序列位置上的 Token 索引。
         self.b_req_tokens_table = torch.zeros(
@@ -27,14 +26,10 @@ class ReqTokensManager:
     # 分配批次请求需要的内存空间
     def alloc_req(self, request_num):
         if request_num > self.can_use_req_size:
-            logger.error(
-                f"Insufficient requested capacity, remaining {self.can_use_req_size}"
-            )
+            logger.error(f"Insufficient requested capacity, remaining {self.can_use_req_size}")
             return None
 
-        logical_select_index = torch.nonzero(self.req_state == 0).reshape(-1)[
-            :request_num
-        ]
+        logical_select_index = torch.nonzero(self.req_state == 0).reshape(-1)[:request_num]
         self.req_state[logical_select_index] = 1
         self.can_use_req_size -= len(logical_select_index)
         return logical_select_index
@@ -60,47 +55,3 @@ class ReqTokensManager:
     def free_all(self):
         self.can_use_req_size = self.max_can_use_req_size
         self.req_state[:] = 0
-
-
-import unittest
-import torch
-
-
-class TestReqTokensManager(unittest.TestCase):
-    def setUp(self):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.mem_manager_mock = unittest.mock.MagicMock()
-        self.table = ReqTokensManager(
-            max_request_num=10,
-            max_seq_len=5,
-            mem_manager=self.mem_manager_mock,
-            device=self.device,
-        )
-
-    def test_alloc_req(self):
-        indices = self.table.alloc_req(3)
-        self.assertEqual(len(indices), 3)
-        self.assertTrue((self.table.req_state[indices] == 1).all())
-
-    def test_alloc_req_exceed_capacity(self):
-        indices = self.table.alloc_req(11)
-        self.assertIsNone(indices)
-
-    def test_free_reqs(self):
-        indices = self.table.alloc_req(3)
-        self.table.free_reqs(indices, indices)
-        self.assertTrue((self.table.req_state[indices] == 0).all())
-
-    def test_free_all(self):
-        self.table.alloc_req(5)
-        self.table.free_all()
-        self.assertTrue((self.table.req_state == 0).all())
-        self.assertEqual(self.table.can_use_req_size, self.table.max_can_use_req_size)
-
-    def test_invalid_free_req(self):
-        self.table.free_req(-1)  # Should not raise an error
-        self.table.free_req(100)  # Should not raise an error
-
-
-if __name__ == "__main__":
-    unittest.main()

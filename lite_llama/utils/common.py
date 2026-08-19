@@ -1,17 +1,17 @@
 import json
-import time, os
+import os
 import subprocess
-from typing import List, Optional
+import time
 
 
 def read_json(json_path):
-    with open(json_path, "r") as json_file:
+    with open(json_path) as json_file:
         data = json.load(json_file)
     return data
 
 
 def read_jsonl(jsonl_path):
-    with open(jsonl_path, "r", encoding="utf-8") as f:
+    with open(jsonl_path, encoding="utf-8") as f:
         data = [json.loads(line) for line in f]
     return data
 
@@ -20,11 +20,11 @@ def detect_device():
     try:
         subprocess.check_output(["nvidia-smi"], stderr=subprocess.DEVNULL)
         return "nvidia"
-    except:
+    except (FileNotFoundError, subprocess.CalledProcessError):
         try:
             subprocess.check_output(["rocm-smi"], stderr=subprocess.DEVNULL)
             return "amd"
-        except:
+        except (FileNotFoundError, subprocess.CalledProcessError):
             return "cpu"
 
 
@@ -42,8 +42,7 @@ def get_gpu_memory(gpu_type="amd", device_id="0"):
         if gpu_type == "amd":
             result = subprocess.run(
                 ["rocm-smi", "--showmeminfo", "vram", device_id],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
             )
             for line in result.stdout.splitlines():
@@ -59,8 +58,7 @@ def get_gpu_memory(gpu_type="amd", device_id="0"):
                     "-i",
                     device_id,
                 ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
             )
             return float(result.stdout.strip()) / 1024  # Convert MiB to GiB
@@ -73,7 +71,7 @@ def get_gpu_memory(gpu_type="amd", device_id="0"):
         return None
 
 
-def count_tokens(texts: List[str], tokenizer) -> int:
+def count_tokens(texts: list[str], tokenizer) -> int:
     total_tokens = 0
     for t in texts:
         ids = tokenizer(t, add_special_tokens=False)["input_ids"]

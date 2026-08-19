@@ -1,8 +1,8 @@
 # modified from https://github.com/iclementine/optimize_softmax/blob/master/softmax_split.py
 
+import torch
 import triton
 from triton import language as tl
-import torch
 
 
 @triton.jit
@@ -52,9 +52,7 @@ def softmax_kernel(out_ptr, in_ptr, logz_ptr, M, N, TILE_N: tl.constexpr):
     n_offsets = pid_n * TILE_N + tl.arange(0, TILE_N)
     offset = pid_m * N + n_offsets
     mask = n_offsets < N
-    inp = tl.load(in_ptr + offset, mask=mask, other=-float("inf")).to(
-        out_ptr.dtype.element_ty
-    )
+    inp = tl.load(in_ptr + offset, mask=mask, other=-float("inf")).to(out_ptr.dtype.element_ty)
     logz = tl.load(logz_ptr + pid_m).to(tl.float32)
     out = tl.exp(inp - logz)
     tl.store(out_ptr + offset, out, mask=mask)

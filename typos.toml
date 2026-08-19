@@ -1,0 +1,14 @@
+[files]
+extend-exclude = ["images/", "my_weight/", "*.svg", "docs/benchmark*.md"]
+
+[default.extend-words]
+# Domain terms and intentional abbreviations used throughout the codebase.
+nd = "nd"
+arange = "arange"
+kv = "kv"
+Ot = "Ot"
+
+[default.extend-identifiers]
+# Existing public API spellings kept for compatibility.
+atten_info = "atten_info"
+avaliable_blocks = "avaliable_blocks"

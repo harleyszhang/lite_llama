@@ -5,8 +5,8 @@ A light llama-like llm inference framework based on the triton kernel.
 ## 特性
 
 - 相比 transformers, llama3 1B 和 3B 模型加速比最高达 `4x` 倍。
-- 支持最新的 `llama3`、`Qwen2.5`、`Qwen3`、`Llava1.5` 模型推理，支持 `top-p` 采样, 支持流式输出。
-- 支持 GQA、~~decode 阶段支持 cuda graph 优化（有 batch_size 限制）~~。
+- 支持最新的 `llama3`、`Qwen2.5`、`Qwen3`、`Qwen3-VL`、`Llava1.5` 模型推理，支持 `top-p` 采样, 支持流式输出。
+- 支持 GQA、decode 阶段支持 cuda graph 优化（有 batch_size 限制）。
 - 支持 `flashattention1`、`flashattention2`、 `flashdecoding`(支持 `NopadAttention`)。
 - 支持 kv cache 的高效动态管理（`auto tokenattnetion`）。
 - 支持算子融合，如：逐元素相乘 `*` 和 `silu` 的融合, k v 线性层融合, `skip` 和 `rmsnorm` 融合。
@@ -80,6 +80,10 @@ llama3.2-1.5B-Instruct 模型流式输出结果测试：
     <td align="center"><img src="./images/llava_output1.gif" width="100%" alt="llava_output"></td>
   </tr>
 </table>
+
+`Qwen3-VL-4B-Instruct` 模型流式输出结果测试:
+
+![Qwen3-VL 模型流式输出](./images/qwen3_vl_output.gif)
 
 ## benchmark 性能测试
 

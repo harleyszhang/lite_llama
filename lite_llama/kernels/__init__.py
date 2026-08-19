@@ -1,13 +1,33 @@
-from .activations import gelu, relu, leaky_relu, tanh
+"""Triton kernels used by the lite_llama model implementations.
 
-from .flashattention import flash_attention_v1
+The public surface is intentionally small: exactly the kernels the model and
+engine layers call, plus the standalone activation kernels that are useful on
+their own. ``flash_attention2_no_pad`` serves the prefill (context) phase on
+variable-length batches, while ``flash_decoding`` serves the single-token decode
+phase against the paged KV buffer.
+"""
+
+from .activations import gelu, leaky_relu, relu, tanh
 from .flashattention2_nopad import flash_attention2_no_pad
-from .flashattentionv2 import flash_attention_v2
 from .flashdecoding import flash_decoding
-
-from .skip_rmsnorm import skip_rmsnorm
-from .swiglu import swiglu_forward
 from .rope_emb import rope_emb_forward
+from .skip_rmsnorm import skip_rmsnorm
 from .softmax_split import softmax_split
+from .swiglu import swiglu_forward
 from .update_kv_buffer import update_kv_buffer
 from .update_kv_index import update_kv_index
+
+__all__ = [
+    "flash_attention2_no_pad",
+    "flash_decoding",
+    "gelu",
+    "leaky_relu",
+    "relu",
+    "rope_emb_forward",
+    "skip_rmsnorm",
+    "softmax_split",
+    "swiglu_forward",
+    "tanh",
+    "update_kv_buffer",
+    "update_kv_index",
+]
