@@ -22,7 +22,7 @@ from typing import Any, ClassVar
 
 import torch.nn as nn
 
-from .model_config import LlamaConfig, Qwen2Config, Qwen3Config, TextModelConfig
+from .model_config import LlamaConfig, Qwen2Config, Qwen3Config, Qwen3MoeConfig, TextModelConfig
 
 
 def _text_config_loader(
@@ -130,6 +130,13 @@ ModelRegistry.register(
 )
 ModelRegistry.register(
     ModelSpec("qwen3", _text_config_loader(Qwen3Config), "lite_llama.models.qwen3:Qwen3Model")
+)
+ModelRegistry.register(
+    ModelSpec(
+        "qwen3_moe",
+        _text_config_loader(Qwen3MoeConfig),
+        "lite_llama.models.qwen3_moe:Qwen3MoeModel",
+    )
 )
 ModelRegistry.register(
     ModelSpec(

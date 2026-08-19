@@ -263,7 +263,12 @@ class DecoderLayer(nn.Module):
     """
 
     def __init__(
-        self, config: TextModelConfig, *, qkv_bias: bool = False, use_qk_norm: bool = False
+        self,
+        config: TextModelConfig,
+        *,
+        qkv_bias: bool = False,
+        use_qk_norm: bool = False,
+        mlp: nn.Module | None = None,
     ) -> None:
         super().__init__()
         self.rms_norm_eps = config.rms_norm_eps
@@ -274,7 +279,8 @@ class DecoderLayer(nn.Module):
             torch.ones(config.hidden_size, dtype=torch.float16)
         )
         self.self_attn = Attention(config, qkv_bias=qkv_bias, use_qk_norm=use_qk_norm)
-        self.mlp = FusedMLP(config)
+        # MoE 变体由 CausalLM._build_mlp 注入 SparseMoeBlock;默认 dense SwiGLU
+        self.mlp = mlp if mlp is not None else FusedMLP(config)
 
     def forward(
         self,
@@ -325,8 +331,13 @@ class CausalLM(nn.Module):
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, dtype=dtype)
         self.layers = nn.ModuleList(
-            DecoderLayer(config, qkv_bias=self.qkv_bias, use_qk_norm=self.use_qk_norm)
-            for _ in range(config.num_layers)
+            DecoderLayer(
+                config,
+                qkv_bias=self.qkv_bias,
+                use_qk_norm=self.use_qk_norm,
+                mlp=self._build_mlp(config, i),
+            )
+            for i in range(config.num_layers)
         )
         self.norm_weight = nn.Parameter(torch.ones(config.hidden_size, dtype=dtype))
         self.lm_head_weight = nn.Parameter(
@@ -335,6 +346,10 @@ class CausalLM(nn.Module):
 
         self.rotary_emb = self.rotary_class(config)
         self.rms_norm_eps = config.rms_norm_eps
+
+    def _build_mlp(self, config: TextModelConfig, layer_index: int) -> nn.Module:
+        """Per-layer MLP factory; MoE 变体覆盖它以按层返回 SparseMoeBlock。"""
+        return FusedMLP(config)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
