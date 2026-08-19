@@ -7,7 +7,7 @@ default_stages:
 exclude: '^(images/|docs/.*\.(svg|png)$|my_weight/)'
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.0
+    rev: v0.16.3
     hooks:
       - id: ruff-check
         args: [--output-format, github, --fix]
@@ -25,18 +25,18 @@ repos:
         args: [--fix=lf]
       - id: trailing-whitespace
   - repo: https://github.com/crate-ci/typos
-    rev: v1.43.5
+    rev: v1.49.0
     hooks:
       - id: typos
         args: [--force-exclude]
   - repo: https://github.com/DavidAnson/markdownlint-cli2
-    rev: v0.21.0
+    rev: v0.23.2
     hooks:
       - id: markdownlint-cli2
         language_version: lts
         args: [--fix]
   - repo: https://github.com/rhysd/actionlint
-    rev: v1.7.7
+    rev: v1.7.12
     hooks:
       - id: actionlint
   - repo: local

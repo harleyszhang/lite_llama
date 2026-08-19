@@ -46,7 +46,7 @@ eval = ["sentence-transformers>=4.0"]
 dev = [
   "pytest>=8.0",
   "pytest-cov>=5.0",
-  "ruff==0.14.0",
+  "ruff==0.16.3",
   "pre-commit>=4.0",
 ]
 
