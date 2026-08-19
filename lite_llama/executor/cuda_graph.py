@@ -1,181 +1,237 @@
-import torch
-from copy import deepcopy
-from typing import Dict
-from .executor_struct import AttentionInfo
-from .mem_manager import KVCacheMemoryManager
-from ..models.utils import weak_ref_tensor
+"""CUDA Graph capture and replay for the decode phase.
 
-_BATCH_SIZE_ALIGNMENT = 8
-_BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
-    _BATCH_SIZE_ALIGNMENT * i for i in range(1, 1025)
-]
+Why this file exists
+--------------------
+The previous implementation (deleted before this refactor) produced garbage output
+once a second decode step ran. Root cause: CUDA Graph records *tensor pointers*
+at capture time. The decode path in :class:`ModelExecutor` used to reassign
+
+    self.atten_info.cur_select_index = self.kv_mem_manager.alloc_kvcache_index(...)
+
+on every step, handing the model a freshly allocated tensor each time. The graph
+still held pointers into the *first-step* tensors, so subsequent replays read
+whatever the caching allocator had recycled into those addresses — random KV
+cache row indices, garbage attention output.
+
+The fix has three parts, implemented below:
+
+1. **Persistent buffers.** :class:`CUDAGraphRunner` owns its own ``input_ids`` /
+   ``position_ids`` / ``cur_select_index`` / ``b_seq_len`` / ``b_req_idx`` tensors
+   for the whole generation. Each replay ``.copy_()`` new values in place; the
+   graph's baked pointers stay valid because the underlying storage never moves.
+
+2. **Bucketing by ``max_actual_seq_len``.** The FlashDecoding kernel allocates
+   intermediate ``mid_o`` / ``mid_o_logexpsum`` tensors sized by
+   ``max_num_partitions = ceil(max_actual_seq_len / PARTITION_SIZE)``. Those
+   allocations are baked into the graph, so replay must fit within the captured
+   size. We capture one graph per ``(batch_size, seq_len_bucket)`` pair; at replay
+   we round the current ``max_actual_seq_len`` up to the nearest bucket ceiling.
+
+3. **Decode-only capture.** Prefill uses a different attention kernel and the
+   sequence length varies per prompt, so it is never graph-friendly. Graphs are
+   captured only for ``seq_len == 1``; prefill always falls through to eager.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import torch
+import torch.nn as nn
+
+from .executor_struct import AttentionInfo
+
+# Default buckets balance capture memory (each graph pins ~100 MB of workspace)
+# against replay coverage.  A prompt of a few hundred tokens fits in the 512
+# bucket; long contexts fall through to eager once past the largest bucket.
+DEFAULT_BATCH_SIZES: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 128)
+DEFAULT_SEQ_LEN_BUCKETS: tuple[int, ...] = (256, 512, 1024, 2048, 4096)
+
+
+@dataclass(frozen=True)
+class _GraphKey:
+    """Identifies one captured graph by its persistent shape."""
+
+    batch_size: int
+    seq_len_bucket: int
 
 
 class CUDAGraphRunner:
-    def __init__(self, model):
-        self.model = model
-        self._cuda_graph = None
-        self._graph_inputs: Dict[str, torch.Tensor] = {}
-        self._graph_output = None
+    """One captured decode step for a fixed ``(batch_size, seq_len_bucket)`` pair.
 
-    def capture(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        atten_info: AttentionInfo,
-    ):
-        assert self._cuda_graph is None, "Already compiled the model"
-        # 用于捕获的占位符输入
-        self._graph_inputs = [input_ids, position_ids, atten_info]
+    All tensors the graph reads or writes live inside the runner. Callers push
+    new values in via :meth:`replay` and receive the output logits back.
 
-        # Warm up
-        graph_capture_stream = torch.cuda.Stream()
-        graph_capture_stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(graph_capture_stream):
-            _ = self.model.forward(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                atten_info=atten_info,
-            )
-        torch.cuda.current_stream().wait_stream(graph_capture_stream)
+    Args:
+        model: The eager :class:`torch.nn.Module` to capture.
+        batch_size: Number of sequences the captured graph serves.
+        seq_len_bucket: Value used for ``max_actual_seq_len`` at capture time;
+            replay is only valid when the current context length is ``<=`` this.
+        kv_buffer: Layer-wise paged KV cache tensors (shared with the executor).
+        b_req_tokens_table: Request-to-cache-row mapping (shared with the executor).
+        device: Torch device string.
+    """
 
-        # Capture the graph
-        self._cuda_graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._cuda_graph):
-            self._graph_output = self.model.forward(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                atten_info=atten_info,
-            )
-
-        # Save the input and output buffers.
-        self._graph_inputs = {
-            "input_ids": input_ids,
-            "position_ids": position_ids,
-            "kv_buffer": atten_info.kv_buffer,
-            "cur_select_index": atten_info.cur_select_index,
-            "b_req_tokens_table": atten_info.b_req_tokens_table,
-            "b_req_idx": atten_info.b_req_idx,
-        }
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        atten_info: AttentionInfo,
-    ):
-        del (
-            atten_info.kv_buffer
-        )  # kv_buffer are fixed tensors, so we don't need to copy them.
-        del atten_info.b_req_tokens_table
-        # 更新输入缓冲区
-        self._graph_inputs["input_ids"].copy_(input_ids)  # 据填充 graph 的输入内存
-        self._graph_inputs["position_ids"].copy_(position_ids)
-
-        self._graph_inputs["cur_select_index"].copy_(atten_info.cur_select_index)
-        self._graph_inputs["b_req_idx"].copy_(atten_info.b_req_idx)
-
-        self._cuda_graph.replay()
-
-        return self._graph_output
-
-    def __call__(self, *args, **kwargs):
-        return self.forward(*args, **kwargs)
-
-
-class ModelRunner:
     def __init__(
         self,
-        model,
-        model_config,
-        max_gpu_num_blocks: int,
-        kv_mem_manager: KVCacheMemoryManager,
-        req_tokens_manager,
-        seq_len: int = 1,
-        start_pos=8,
-    ):
+        model: nn.Module,
+        *,
+        batch_size: int,
+        seq_len_bucket: int,
+        kv_buffer: list[torch.Tensor],
+        b_req_tokens_table: torch.Tensor,
+        device: str = "cuda",
+    ) -> None:
         self.model = model
-        self.model_config = model_config
-        self.max_gpu_num_blocks = max_gpu_num_blocks
-        self.kv_mem_manager = kv_mem_manager
-        self.req_tokens_manager = req_tokens_manager
+        self.batch_size = batch_size
+        self.seq_len_bucket = seq_len_bucket
+        self.device = device
 
-        self.vocab_size = self.model_config.vocab_size
-        self.graph_max_batch_size = self.model_config.max_batch_size
-        self.max_seq_len = model_config.max_seq_len
+        # Persistent input surface — everything the graph reads goes through these.
+        self.input_ids = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
+        self.position_ids = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
 
-        # 随机参数定义
-        self.seq_len = seq_len
-        self.start_pos = start_pos
+        self.atten_info = AttentionInfo()
+        self.atten_info.kv_buffer = kv_buffer  # shared list; storage is persistent
+        self.atten_info.b_req_tokens_table = b_req_tokens_table
+        self.atten_info.cur_select_index = torch.zeros(batch_size, dtype=torch.int32, device=device)
+        self.atten_info.b_seq_len = torch.zeros(batch_size, dtype=torch.long, device=device)
+        self.atten_info.b_req_idx = torch.arange(batch_size, dtype=torch.long, device=device)
+        # Python int, gets baked into the launched kernel: sets mid_o's shape.
+        self.atten_info.max_actual_seq_len = seq_len_bucket
 
-        self.graph_runners = {}
+        self._graph: torch.cuda.CUDAGraph | None = None
+        self._output: torch.Tensor | None = None
 
-    def build_atten_info(self, batch_size, atten_info, device="cuda"):
-        """针对 decode 阶段, 构建 attention 输入信息结构体"""
-        atten_info.kv_buffer = self.kv_mem_manager.gpu_kv_buffer  # torch.Tensor
-        atten_info.b_req_tokens_table = (
-            self.req_tokens_manager.b_req_tokens_table
-        )  # torch.Tensor
+    def capture(self) -> None:
+        """Warm up on a side stream, then record the graph on the current stream."""
+        # Seed b_seq_len with a plausible non-zero value so that the FlashDecoding
+        # kernel actually visits the K/V rows during capture — otherwise Triton's
+        # autotuner may cache a degenerate specialization keyed on zero-length work.
+        self.atten_info.b_seq_len.fill_(min(self.seq_len_bucket, 32))
 
-        atten_info.b_req_idx = torch.arange(batch_size, device=device)  # torch.Tensor
-        atten_info.b_seq_len = torch.ones(
-            batch_size, dtype=torch.int32, device="cuda"
-        )  # torch.Tensor
-        atten_info.cur_select_index,_ = self.kv_mem_manager.alloc_kvcache_index(
-            batch_size
-        )  # torch.Tensor
-        atten_info.max_actual_seq_len = self.start_pos + 1  # decode阶段的序列长度
-        return atten_info
+        warmup_stream = torch.cuda.Stream()
+        warmup_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup_stream):
+            for _ in range(3):
+                _ = self.model(self.input_ids, self.position_ids, self.atten_info)
+        torch.cuda.current_stream().wait_stream(warmup_stream)
 
-    def capture_decode_graph(
+        self._graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self._graph):
+            self._output = self.model(self.input_ids, self.position_ids, self.atten_info)
+
+    def replay(
         self,
-    ):
-        """
-        针对 decode 阶段捕获 CUDA 图
-        """
-        # 获取要捕获的批量大小列表，确保批量大小不超过最大批量大小
-        batch_size_capture_list = [
-            bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= self.graph_max_batch_size
-        ]
-        atten_info = AttentionInfo
-        print("cuda graph support batch list", batch_size_capture_list)
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        cur_select_index: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        b_req_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        """Push new inputs into the persistent buffers and replay the graph.
 
-        # NOTE: Capturing the largest batch size first may help reduce the memory usage of CUDA graph.
-        for batch_size in reversed(batch_size_capture_list):
-            # 构造输入 tokens id 张量
-            input_ids = torch.randint(0, self.vocab_size, (batch_size, 1)).cuda()
-            position_ids = (
-                torch.arange(
-                    self.start_pos, self.start_pos + 1, device=input_ids.device
+        The caller is responsible for keeping the current ``max_actual_seq_len``
+        no greater than this runner's :attr:`seq_len_bucket`; the executor
+        enforces that via bucket selection.
+        """
+        if self._graph is None or self._output is None:
+            raise RuntimeError("capture() must be called before replay()")
+
+        # ``.copy_()`` writes into the SAME storage the graph captured, so the
+        # graph's baked pointers keep pointing at valid values.
+        self.input_ids.copy_(input_ids.view(self.batch_size, 1))
+        self.position_ids.copy_(position_ids.view(self.batch_size, 1))
+        self.atten_info.cur_select_index.copy_(cur_select_index)
+        self.atten_info.b_seq_len.copy_(b_seq_len)
+        self.atten_info.b_req_idx.copy_(b_req_idx.to(self.atten_info.b_req_idx.dtype))
+
+        self._graph.replay()
+        return self._output
+
+
+class CUDAGraphManager:
+    """Holds one :class:`CUDAGraphRunner` per ``(batch_size, seq_len_bucket)``.
+
+    The manager also captures each layer's ``atten_info.b_req_tokens_table`` update
+    that decode performs *outside* the graph — ``update_kv_index`` writes into a
+    persistent tensor, so it stays out of the recorded region.
+
+    Args:
+        model: The eager model to capture.
+        kv_buffer: Layer-wise KV cache tensors owned by the executor.
+        b_req_tokens_table: Request-to-cache-row map owned by the executor.
+        batch_sizes: Batch sizes to capture; smaller decode batches fall back to eager.
+        seq_len_buckets: Ascending ``max_actual_seq_len`` ceilings to capture.
+        device: Torch device string.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        *,
+        kv_buffer: list[torch.Tensor],
+        b_req_tokens_table: torch.Tensor,
+        batch_sizes: tuple[int, ...] = DEFAULT_BATCH_SIZES,
+        seq_len_buckets: tuple[int, ...] = DEFAULT_SEQ_LEN_BUCKETS,
+        device: str = "cuda",
+    ) -> None:
+        self.model = model
+        self.kv_buffer = kv_buffer
+        self.b_req_tokens_table = b_req_tokens_table
+        self.batch_sizes = tuple(sorted(set(batch_sizes)))
+        self.seq_len_buckets = tuple(sorted(set(seq_len_buckets)))
+        self.device = device
+        self._runners: dict[_GraphKey, CUDAGraphRunner] = {}
+
+    def capture_all(self) -> None:
+        """Capture a graph for every ``(batch_size, seq_len_bucket)`` pair."""
+        for bs in self.batch_sizes:
+            for bucket in self.seq_len_buckets:
+                key = _GraphKey(bs, bucket)
+                runner = CUDAGraphRunner(
+                    self.model,
+                    batch_size=bs,
+                    seq_len_bucket=bucket,
+                    kv_buffer=self.kv_buffer,
+                    b_req_tokens_table=self.b_req_tokens_table,
+                    device=self.device,
                 )
-                .unsqueeze(0)  # shape: [1, seq_len]
-                .expand(batch_size, -1)  # shape: [batch_size, seq_len], 不分配额外内存
-            )
-            atten_info = self.build_atten_info(batch_size, atten_info)
+                runner.capture()
+                self._runners[key] = runner
 
-            graph_intput = (input_ids, position_ids, atten_info)
-            graph_runner = CUDAGraphRunner(self.model)
+    def _pick_bucket(self, current_max_seq_len: int) -> int | None:
+        """Smallest bucket ceiling that fits; ``None`` if the request is too long."""
+        for bucket in self.seq_len_buckets:
+            if bucket >= current_max_seq_len:
+                return bucket
+        return None
 
-            # graph 图捕捉输入
-            graph_runner.capture(*graph_intput)
-            self.graph_runners[batch_size] = graph_runner
-
-            self.kv_mem_manager.free_all()
-
-    def decode(
+    def try_replay(
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
         atten_info: AttentionInfo,
-    ):
-        batch_size = input_ids.shape[0]
-        if batch_size in self.graph_runners:
-            model_executable = self.graph_runners[batch_size]
-        else:
-            print(
-                "Warning: CUDA graph not captured for this batch size, falling back to original model."
-            )
-            model_executable = self.model
+    ) -> torch.Tensor | None:
+        """Run the matching captured graph if one exists, else return ``None``.
 
-        logits = model_executable(input_ids, position_ids, atten_info)
-        return logits
+        Only decode steps (``seq_len == 1``) with a supported batch size and a
+        max-sequence length that fits inside the largest bucket are eligible; the
+        caller must fall back to eager execution when this returns ``None``.
+        """
+        batch_size, seq_len = input_ids.shape
+        if seq_len != 1:
+            return None
+        bucket = self._pick_bucket(atten_info.max_actual_seq_len)
+        if bucket is None:
+            return None
+        runner = self._runners.get(_GraphKey(batch_size, bucket))
+        if runner is None:
+            return None
+        return runner.replay(
+            input_ids,
+            position_ids,
+            atten_info.cur_select_index,
+            atten_info.b_seq_len,
+            atten_info.b_req_idx,
+        )

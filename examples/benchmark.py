@@ -1,15 +1,20 @@
+"""Latency/throughput benchmark: lite_llama vs HuggingFace transformers.
+
+Runs the same prompt batch through both engines and prints wall-clock time,
+output token counts, throughput (tokens/s) and per-token latency for each.
+
+Run from the repository root (see README.zh.md "性能测试"):
+    python examples/benchmark.py
+"""
+from __future__ import annotations
+
+import time
 from typing import Optional
+
 import torch
-from transformers import (
-    AutoTokenizer,
-    AutoModelForCausalLM,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-import sys, os, time
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
-from lite_llama.generate import GenerateText
-from lite_llama.utils.prompt_templates import get_prompter
+from lite_llama.engine import SamplingParams, TextGenerator
 
 import warnings
 
@@ -19,21 +24,16 @@ warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
 def load_lite_llama_generator(
     checkpoints_dir: str,
     max_seq_len: int,
-    max_gpu_num_blocks=None,
+    max_gpu_num_blocks: Optional[int] = None,
     device: str = "cuda",
-) -> GenerateText:
-    """
-    初始化 lite-llama 的生成器
-    """
-    generator = GenerateText(
+) -> TextGenerator:
+    """初始化 lite-llama 的生成器"""
+    return TextGenerator(
         checkpoints_dir=checkpoints_dir,
-        tokenizer_path=checkpoints_dir,
         max_seq_len=max_seq_len,
         max_gpu_num_blocks=max_gpu_num_blocks,
-        compiled_model=True,
         device=device,
     )
-    return generator
 
 
 def count_tokens(texts: list[str], tokenizer) -> int:
@@ -46,33 +46,27 @@ def count_tokens(texts: list[str], tokenizer) -> int:
 
 
 def lite_llama_inference(
-    generator: GenerateText,
+    generator: TextGenerator,
     prompts: list[str],
     temperature: float,
     top_p: float,
     max_gen_len: Optional[int],
     device: str = "cuda",
 ):
-    """
-    使用 lite-llama 的 GenerateText 实例执行推理，并返回结果与耗时、输出 tokens 数量
-    """
+    """使用 lite-llama 的 TextGenerator 实例执行推理，并返回结果与耗时、输出 tokens 数量"""
 
     # 预热步骤：使用一个简短的假输入，让模型进行一次简单推理，以加载缓存/编译优化等
     warm_up_prompt = ["Hello World"] * 4
-    _ = generator.text_completion(
+    _ = generator.generate(
         warm_up_prompt,
-        temperature=temperature,
-        top_p=top_p,
-        max_gen_len=5,
+        SamplingParams(temperature=temperature, top_p=top_p, max_gen_len=5),
     )
 
-    start_time = time.time()
-    results = generator.text_completion(
-        prompts,
-        temperature=temperature,
-        top_p=top_p,
-        max_gen_len=max_gen_len,
+    params = SamplingParams(
+        temperature=temperature, top_p=top_p, max_gen_len=max_gen_len
     )
+    start_time = time.time()
+    results = generator.generate(prompts, params)
     end_time = time.time()
 
     total_tokens = count_tokens(results, generator.tokenizer)
@@ -88,10 +82,7 @@ def transformers_inference(
     max_gen_len: int,
     device: str = "cuda",
 ):
-    """
-    使用 Transformers 官方库对一组 prompts 进行批量推理, 返回结果与耗时、输出 tokens 数量。
-    """
-    # from accelerate import init_empty_weights, load_checkpoint_and_dispatch
+    """使用 Transformers 官方库对一组 prompts 进行批量推理, 返回结果与耗时、输出 tokens 数量。"""
     tokenizer = AutoTokenizer.from_pretrained(hf_model_name)
     # 确保分词器有 eos_token
     if tokenizer.pad_token is None:
@@ -139,14 +130,12 @@ def transformers_inference(
         )
 
     end_time = time.time()
-    results = [{"generation": text} for text in generated_texts]
-    texts = [res["generation"] for res in results]
-    total_tokens = count_tokens(texts, tokenizer)
+    total_tokens = count_tokens(generated_texts, tokenizer)
     total_time = end_time - start_time
     prompts_tokens = input_ids.numel()
     per_token_latency = total_time / total_tokens if total_tokens > 0 else float("inf")
 
-    return results, total_time, total_tokens, prompts_tokens, per_token_latency
+    return generated_texts, total_time, total_tokens, prompts_tokens, per_token_latency
 
 
 def compare_inference_speed(
@@ -157,26 +146,12 @@ def compare_inference_speed(
     max_gen_len: Optional[int],
     lite_llama_ckpt_dir: str,
     hf_model_name: str,
-    print_result=False,
+    print_result: bool = False,
     device: str = "cuda",
 ):
-    """
-    对比 lite-llama 与 transformers 官方模型在相同 prompts 下的推理速度和吞吐量。
-    """
-    if "qwen2" in lite_llama_ckpt_dir.lower():
-        model_type = "qwen2"
-    elif "llama" in lite_llama_ckpt_dir.lower():
-        model_type = "llama"
-    elif "llava" in lite_llama_ckpt_dir.lower():
-        model_type = "llava"
-    else:
-        print("Error! Unsupported model type!")
-
-    model_prompter = get_prompter(model_type, lite_llama_ckpt_dir)
-    update_prompts = []
-    for prompt in prompts:
-        model_prompter.insert_prompt(prompt)
-        update_prompts.append(model_prompter.model_input)
+    """对比 lite-llama 与 transformers 官方模型在相同 prompts 下的推理速度和吞吐量。"""
+    # 两边引擎吃完全相同的原始 prompt（不再套 chat 模板），保证公平对比。
+    update_prompts = list(prompts)
 
     # 1. lite-llama inference
     lite_llama_generator = load_lite_llama_generator(
@@ -232,10 +207,9 @@ def compare_inference_speed(
         for i, (prompt, litellama_res, hf_res) in enumerate(
             zip(prompts, lite_llama_results, hf_results)
         ):
-            # print(f"\n[Prompt {i}]:\n{prompt}")
             if i == 0:  # 省略部分打印
                 print("\n[lite_llama]: {}".format(litellama_res))
-                print("\n[Transformers]: {}".format(hf_res["generation"]))
+                print("\n[Transformers]: {}".format(hf_res))
                 print("\n" + "=" * 40 + "\n")
 
 
@@ -261,9 +235,9 @@ def main():
         "Please introduce Qwen2.5 model structure and give cuda implement code.",
     ]
 
-    # 根据实际情况修改
-    hf_model_name = "/gemini/code/my_weight/Qwen-hf/Qwen2.5-1.5B-Instruct"
-    custom_checkpoints_dir = "/gemini/code/my_weight/Qwen2.5-1.5B-Instruct"
+    # 根据实际情况修改:lite_llama checkpoint 目录与 transformers 模型名
+    hf_model_name = "my_weight/Qwen2.5-1.5B-Instruct"
+    custom_checkpoints_dir = "my_weight/Qwen2.5-1.5B-Instruct"
     compare_inference_speed(
         prompts=prompts,
         temperature=0.7,

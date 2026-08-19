@@ -1,148 +1,148 @@
-from typing import Optional
+"""LLaVA-1.5: CLIP vision tower + 2-layer MLP projector + LLaMA language model.
+
+The vision tower is HuggingFace's ``CLIPVisionModel`` (a faithful ViT is not what
+this project is about), while the language model is lite_llama's own Triton-kernel
+:class:`~lite_llama.models.llama.LlamaModel`.
+
+Checkpoint key layout::
+
+    vision_tower.vision_model.*        – CLIPVisionModel parameters (HF names)
+    multi_modal_projector.linear_{1,2}.{weight,bias}
+    language_model.*                   – LlamaModel parameters (lite_llama names)
+"""
+
+from __future__ import annotations
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers import CLIPVisionModel
+from transformers import LlavaConfig as HFLlavaConfig
 
-from transformers import AutoModel, LlavaConfig
 from .llama import LlamaModel
 from .model_config import LlamaConfig
-from .utils import merge_input_ids_with_image_features
+from .multimodal import MultiModalCausalLM
 
 
 class LlavaMultiModalProjector(nn.Module):
+    """Projects CLIP patch features into the language model's embedding space."""
+
     def __init__(
         self,
         vision_hidden_size: int,
         text_hidden_size: int,
         projector_hidden_act: str = "gelu",
-    ):
+    ) -> None:
         super().__init__()
-
         self.linear_1 = nn.Linear(vision_hidden_size, text_hidden_size, bias=True)
         self.linear_2 = nn.Linear(text_hidden_size, text_hidden_size, bias=True)
+        if projector_hidden_act != "gelu":
+            raise ValueError(
+                f"unsupported projector_hidden_act {projector_hidden_act!r}; "
+                "only 'gelu' is implemented"
+            )
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.linear_1(image_features)
-        hidden_states = F.gelu(hidden_states)  # GELU 激活函数
-        hidden_states = self.linear_2(hidden_states)
-        return hidden_states
+        return self.linear_2(F.gelu(self.linear_1(image_features)))
 
 
-class LlavaLlama(nn.Module):
-    def __init__(self, llava_config: LlavaConfig):
+class LlavaLlama(MultiModalCausalLM):
+    """LLaVA-1.5 for single-image (or multi-image) conditioned generation.
+
+    Args:
+        config: A HuggingFace :class:`~transformers.LlavaConfig`. ``max_seq_len`` may
+            be attached to it by the executor to bound the KV cache.
+    """
+
+    def __init__(self, config: HFLlavaConfig) -> None:
         super().__init__()
-        self.device = "cuda"
-        self.llava_config = llava_config
-        text_config = (
-            self.llava_config.text_config
-        )  # TODO: 将 text_config 转换成 LlamaConfig 类型
-        self.llama_config = LlamaConfig.from_dict(text_config.to_dict())
+        self.config = config
 
-        self.select_layer = llava_config.vision_feature_layer
-        self.select_feature = llava_config.vision_feature_select_strategy
+        self.select_layer = config.vision_feature_layer
+        self.select_feature = config.vision_feature_select_strategy
+        self.image_token_index = config.image_token_index
 
-        # 视觉处理模块（vision_tower）初始化
-        self.vision_tower = AutoModel.from_config(llava_config.vision_config)
-
-        # 多模态投影器（multi_modal_projector）初始化
+        self.vision_tower = CLIPVisionModel(config.vision_config)
         self.multi_modal_projector = LlavaMultiModalProjector(
-            vision_hidden_size=llava_config.vision_config.hidden_size,
-            text_hidden_size=llava_config.text_config.hidden_size,
-            projector_hidden_act=llava_config.projector_hidden_act,
+            vision_hidden_size=config.vision_config.hidden_size,
+            text_hidden_size=config.text_config.hidden_size,
+            projector_hidden_act=config.projector_hidden_act,
         )
 
-        # 语言模型初始化
-        self.language_model = LlamaModel(self.llama_config)
-
-        self.pad_token_id = (
-            self.llava_config.pad_token_id
-            if self.llava_config.pad_token_id is not None
-            else -1
+        self.text_config = LlamaConfig.from_dict(
+            config.text_config.to_dict(),
+            max_seq_len=getattr(config, "max_seq_len", 2048),
         )
+        self.language_model = LlamaModel(self.text_config)
 
-    def _select_image_features(
-        self, image_features: torch.Tensor, strategy: str
-    ) -> torch.Tensor:
-        """根据策略选择图像特征"""
-        # Copied from https://github.com/huggingface/transformers/blob/39c3c0a72af6fbda5614dde02ff236069bb79827/src/transformers/models/llava/modeling_llava.py#L421  # noqa
-        if strategy == "default" or strategy == "patch":
+    @property
+    def placeholder_token_ids(self) -> tuple[int, ...]:
+        return (self.image_token_index,)
+
+    def remap_checkpoint_keys(self, state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Reconcile the vision tower's key layout with the installed transformers.
+
+        ``CLIPVisionModel`` nests its encoder under a ``vision_model`` submodule in
+        transformers 4.x but exposes it directly in 5.x. A checkpoint converted
+        under one major version therefore fails ``load_state_dict`` under the other
+        with hundreds of missing/unexpected ``vision_tower.*`` keys. Rather than
+        pinning transformers, adapt the checkpoint to whatever layout the live
+        module tree actually has.
+        """
+        expects_nested = any(
+            key.startswith("vision_tower.vision_model.") for key in self.state_dict()
+        )
+        has_nested = any(key.startswith("vision_tower.vision_model.") for key in state_dict)
+        if expects_nested == has_nested:
+            return state_dict
+
+        remapped: dict[str, torch.Tensor] = {}
+        for key, value in state_dict.items():
+            if expects_nested and key.startswith("vision_tower."):
+                # 5.x-style checkpoint, 4.x-style module tree: insert vision_model.
+                suffix = key[len("vision_tower.") :]
+                remapped[f"vision_tower.vision_model.{suffix}"] = value
+            elif has_nested and key.startswith("vision_tower.vision_model."):
+                # 4.x-style checkpoint, 5.x-style module tree: drop vision_model.
+                suffix = key[len("vision_tower.vision_model.") :]
+                remapped[f"vision_tower.{suffix}"] = value
+            else:
+                remapped[key] = value
+        return remapped
+
+    def _select_image_features(self, image_features: torch.Tensor) -> torch.Tensor:
+        """Apply the configured patch-selection strategy.
+
+        ``default`` drops the leading CLS token (576 of 577 patches survive for
+        LLaVA-1.5), ``full`` keeps everything. The processor expands the ``<image>``
+        placeholder using the same rule, so the two must stay in sync.
+        """
+        if self.select_feature in ("default", "patch"):
             return image_features[:, 1:].contiguous()
-        elif strategy == "full":
+        if self.select_feature == "full":
             return image_features
+        raise ValueError(f"unexpected vision_feature_select_strategy: {self.select_feature}")
 
-        raise ValueError(f"Unexpected select feature strategy: {strategy}")
+    def encode_vision(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """Encode images into projected patch embeddings.
 
-    def vision_encode(self, image_tensor):
-        x = image_tensor.half().to(device=self.device)
+        Args:
+            pixel_values: ``[num_images, 3, H, W]`` preprocessed pixels.
 
-        # 1. 通过视觉处理模块提取图像特征
-        x = self.vision_tower(x, output_hidden_states=True)
-        x = x.hidden_states[self.select_layer]
-        x = self._select_image_features(x, self.select_feature)
+        Returns:
+            ``[num_images * num_patches, text_hidden_size]``.
+        """
+        target_dtype = self.multi_modal_projector.linear_1.weight.dtype
+        target_device = self.multi_modal_projector.linear_1.weight.device
+        pixel_values = pixel_values.to(device=target_device, dtype=target_dtype)
 
-        # 2. 通过多模态投影器将图像特征转换为多模态嵌入
-        image_features = self.multi_modal_projector(x)
+        outputs = self.vision_tower(pixel_values, output_hidden_states=True)
+        # `vision_feature_layer` is negative and indexes the hidden-state tuple,
+        # e.g. -2 picks the penultimate layer as LLaVA-1.5 does.
+        hidden_states = outputs.hidden_states[self.select_layer]
+        hidden_states = self._select_image_features(hidden_states)
 
-        assert not torch.isnan(image_features).any(), (
-            f"After vision_tower image_features tensor contains NaN values!"
-        )
+        image_features = self.multi_modal_projector(hidden_states)
+        if not torch.isfinite(image_features).all():
+            raise RuntimeError("vision tower produced non-finite image features")
         return image_features
-
-    def get_multi_modal_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        vision_embeddings=None,
-    ) -> torch.Tensor:
-        """获取输入嵌入，包括文本和视觉嵌入的合并。"""
-        llm_inputs_embeds = self.language_model.get_input_embeddings(
-            input_ids
-        )  # torch.Size([1, 22]) --> torch.Size([1, 22, 4096])
-
-        if vision_embeddings is not None:
-            inputs_embeds, position_ids = merge_input_ids_with_image_features(
-                input_ids,
-                llm_inputs_embeds,
-                vision_embeddings,
-                self.llava_config.pad_token_id,
-                self.llava_config.image_token_index,
-            )
-            assert not torch.isnan(inputs_embeds).any(), (
-                "After merge inputs_embeds tensor contains NaN values!"
-            )
-        else:
-            inputs_embeds = llm_inputs_embeds
-            batch_size, seq_len = input_ids.shape
-            position_ids = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
-
-        return inputs_embeds, position_ids
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        atten_info,
-        image_tensor: Optional[torch.FloatTensor] = None,
-    ):
-        input_ids = input_ids.to(self.device)  # 将 input_ids 移动到设备
-        if position_ids is not None:  # 如果提供了 position_ids，将其移动到设备
-            position_ids = position_ids.to(self.device)
-
-        if input_ids.shape[1] != 1:  # 判断是不是首次 token 输出
-            vision_embeddings = self.vision_encode(
-                image_tensor
-            )  #  torch.Size([1, 3, 336, 336]) --> torch.Size([1, 576, 4096])
-            inputs_embeds, position_ids = self.get_multi_modal_input_embeddings(
-                input_ids, vision_embeddings
-            )
-        else:  # 进入 decode 阶段, 无需再做视觉编码
-            inputs_embeds = None
-
-        hidden_states = self.language_model(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            atten_info=atten_info,
-            inputs_embeds=inputs_embeds,
-        )
-
-        return hidden_states

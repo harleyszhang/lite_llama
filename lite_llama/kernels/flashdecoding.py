@@ -1,6 +1,6 @@
-import triton, torch
+import torch
+import triton
 import triton.language as tl
-from torch.cuda.amp import custom_fwd
 
 
 @triton.jit
@@ -45,7 +45,7 @@ def _flash_decoding_stage1_kernel(
 
     # 计算当前批次的起始位置
     cur_batch_seq_len = tl.load(B_Seqlen + batch_pid)
-    cur_req_start_loc = tl.load(b_req_tokens_table + stride_req_to_tokens_b * batch_pid)
+    tl.load(b_req_tokens_table + stride_req_to_tokens_b * batch_pid)
 
     # 计算当前分区的起始和结束索引
     cur_batch_partition_start_index = seq_block_pid * BLOCK_SEQ
@@ -57,8 +57,7 @@ def _flash_decoding_stage1_kernel(
     num_blocks = tl.where(
         cur_batch_partition_end_index - cur_batch_partition_start_index <= 0,
         0,
-        (cur_batch_partition_end_index - cur_batch_partition_start_index + BLOCK_N - 1)
-        // BLOCK_N,
+        (cur_batch_partition_end_index - cur_batch_partition_start_index + BLOCK_N - 1) // BLOCK_N,
     )
 
     # 初始化偏移向量
@@ -93,8 +92,11 @@ def _flash_decoding_stage1_kernel(
         k = tl.load(K + k_ptrs, mask=k_mask[:, None], other=0.0)
         v = tl.load(V + k_ptrs, mask=k_mask[:, None], other=0.0)
 
-        # 计算 qk^T
-        qk = tl.sum(q[None, :] * k, axis=1)  # [BLOCK_N]
+        # 计算 qk^T。逐元素乘积必须升到 fp32 再累加: prefill 路径走
+        # ``tl.dot`` 的 fp32 累加器, 若这里保持 fp16 乘积, 64 项点积的舍入误差
+        # (~1e-2) 会逐层放大成 logits 的 ~5e-2 噪声, 足以让 greedy argmax 在
+        # 边缘 token 上翻转并滑入重复吸引子。
+        qk = tl.sum(q[None, :].to(tl.float32) * k.to(tl.float32), axis=1)  # [BLOCK_N]
         qk *= qk_scale
         qk = tl.where(k_mask, qk, float("-inf"))  # [BLOCK_N]
 
@@ -107,8 +109,8 @@ def _flash_decoding_stage1_kernel(
         alpha = tl.exp(m_i - m_ij)
         d_i = alpha * d_i + tl.sum(p, axis=0)
 
-        # 更新 attention 输出累加器
-        acc = alpha * acc + tl.sum(p[:, None] * v, axis=0)  # [BLOCK_DMODEL]
+        # 更新 attention 输出累加器 (p 已是 fp32, v 升 fp32 与 qk 同理)
+        acc = alpha * acc + tl.sum(p[:, None] * v.to(tl.float32), axis=0)  # [BLOCK_DMODEL]
         # acc = acc * alpha + tl.dot(p, v)  # [BLOCK_DMODEL]
 
         # 更新归一化器
@@ -148,19 +150,17 @@ def flash_decode_stage1(
     b_seq_len,
     max_actual_seq_len,  # 最大的实际序列长度
     mid_o,
-    mid_o_logexpsum,  
+    mid_o_logexpsum,
     PARTITION_SIZE,
 ):
     """
-    # Mid_O: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE), head_dim], 
+    # Mid_O: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE), head_dim],
     # Mid_O_LogExpSum: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE)]
     """
     BLOCK_N_SIZE = 16
 
     # BLOCK_DMODEL = q.shape[-1]
-    assert PARTITION_SIZE % BLOCK_N_SIZE == 0, (
-        "PARTITION_SIZE 必须是 BLOCK_N_SIZE 的倍数"
-    )
+    assert PARTITION_SIZE % BLOCK_N_SIZE == 0, "PARTITION_SIZE 必须是 BLOCK_N_SIZE 的倍数"
 
     batchs, num_heads, head_dim = (
         q.shape
@@ -200,7 +200,6 @@ def flash_decode_stage1(
 
 @triton.jit
 def _flash_decoding_stage2_kernel(
-
     Mid_O,  # [batch, head, seq_block_num, head_dim]
     Mid_O_LogExpSum,  # [batch, head, seq_block_num]
     Ouput,  # attention 输出首地址
@@ -243,9 +242,7 @@ def _flash_decoding_stage2_kernel(
 
     for block_seq_n in range(0, num_partitions, 1):  # TODO 有 bug 需要修复
         part_v = tl.load(part_v_ptrs + block_seq_n * mido_partitions_stride)
-        part_max = tl.load(
-            part_max_ptrs + block_seq_n
-        )  # mido_les_partitions_stride = 1
+        part_max = tl.load(part_max_ptrs + block_seq_n)  # mido_les_partitions_stride = 1
 
         # -- 更新局部最大值 -- #
         m_ij = tl.maximum(part_max, m_i)
@@ -263,9 +260,7 @@ def _flash_decoding_stage2_kernel(
         m_i = m_ij
 
     # -- 更新 attention 输出累加器 -- #
-    offs_out = (
-        batch_pid * o_bs_stride + head_pid * o_heads_stride + offs_d * o_dim_stride
-    )
+    offs_out = batch_pid * o_bs_stride + head_pid * o_heads_stride + offs_d * o_dim_stride
     tl.store(Ouput + offs_out, acc / d_i)
 
 
@@ -344,191 +339,3 @@ def flash_decoding(
     flash_decode_stage2(mid_o, mid_o_logexpsum, atten_output, b_seq_len, PARTITION_SIZE)
 
     return atten_output
-
-
-# --------------------------------------
-# 标准 Attention Decode 实现（纯 PyTorch版）
-# --------------------------------------
-def _naive_attention(q, k, v):
-    import math
-
-    head_dim = q.shape[-1]
-    q = q.transpose(0, 1)  # (nhead, 1, head_dim)
-    k = k.transpose(0, 1)  # (nhead, seqlen, head_dim)
-    v = v.transpose(0, 1)  # (nhead, seqlen, head_dim)
-    scores = torch.matmul(q, k.transpose(1, 2)) / math.sqrt(head_dim)
-    scores = torch.nn.functional.softmax(scores.float(), dim=-1).to(q.dtype)
-    output = (
-        torch.matmul(scores, v).transpose(0, 1).contiguous()
-    )  # (1, nhead, head_dim)
-    return output
-
-
-def torch_attention_with_kvcache(q, k_cache, v_cache, b_start_loc, b_seq_len):
-    out = torch.empty_like(q)
-    Z = q.shape[0]
-    for i in range(Z):
-        start = b_start_loc[i]
-        end = start + b_seq_len[i]
-        q_i = q[i : i + 1]  # (1, nhead, head_dim)
-        k_i = k_cache[start:end]  # (seqlen, nhead, head_dim)
-        v_i = v_cache[start:end]  # (seqlen, nhead, head_dim)
-        o_i = _naive_attention(q_i, k_i, v_i)
-        out[i : i + 1] = o_i
-    return out
-
-
-# ----------------------------------
-# 性能对比及曲线绘制函数封装（含 Warm up）
-# ----------------------------------
-def plot_performance_comparison(token_sizes, warmup_iterations=10, test_iterations=50):
-    """
-    对不同 token size 下的 Flash Decoding 与标准 Attention 的性能进行测试，
-    并绘制性能对比曲线。
-
-    参数:
-      token_sizes: list[int]，不同的 kv cache 长度
-      warmup_iterations: int, 预热迭代次数
-      test_iterations: int, 正式测试迭代次数
-    """
-    import matplotlib.pyplot as plt
-
-    device = torch.device("cuda")
-    batch = 4
-    num_heads = 32
-    head_dim = 64
-    qk_scale = 1.0 / (head_dim**0.5)
-    q = torch.randn(batch * 1, num_heads, head_dim, device=device)
-
-    flash_times = []
-    standard_times = []
-
-    for tokens in token_sizes:
-        print(f"\n测试 token size: {tokens}")
-        k_cache = torch.randn(batch * tokens, num_heads, head_dim, device=device)
-        v_cache = torch.randn(batch * tokens, num_heads, head_dim, device=device)
-        b_req_tokens_table = torch.arange(
-            0, tokens, device=device, dtype=torch.int32
-        ).repeat(batch, 1)
-        b_start_loc = torch.tensor(
-            [0, tokens, 2 * tokens, 3 * tokens], dtype=torch.int32, device="cuda"
-        )  # batch = 4
-        b_seq_len = torch.full((batch,), tokens, device=device, dtype=torch.int32)
-        max_actual_seq_len = tokens
-
-        # Warm up Flash Decoding 内核
-        for _ in range(warmup_iterations):
-            _ = flash_decoding(
-                q,
-                k_cache,
-                v_cache,
-                qk_scale,
-                b_req_tokens_table,
-                b_seq_len,
-                max_actual_seq_len,
-            )
-        # 测试 Flash Decoding
-        torch.cuda.synchronize()
-        flash_start = torch.cuda.Event(enable_timing=True)
-        flash_end = torch.cuda.Event(enable_timing=True)
-        flash_start.record()
-        for _ in range(test_iterations):
-            _ = flash_decoding(
-                q,
-                k_cache,
-                v_cache,
-                qk_scale,
-                b_req_tokens_table,
-                b_seq_len,
-                max_actual_seq_len,
-            )
-        flash_end.record()
-        torch.cuda.synchronize()
-        flash_avg = flash_start.elapsed_time(flash_end) / test_iterations
-        flash_times.append(flash_avg)
-        print(f"Flash Decoding 平均时间: {flash_avg:.3f} ms")
-
-        # Warm up 标准 Attention
-        for _ in range(warmup_iterations):
-            _ = torch_attention_with_kvcache(
-                q, k_cache, v_cache, b_start_loc, b_seq_len
-            )
-        # 测试标准 Attention
-        torch.cuda.synchronize()
-        std_start = torch.cuda.Event(enable_timing=True)
-        std_end = torch.cuda.Event(enable_timing=True)
-        std_start.record()
-        for _ in range(test_iterations):
-            _ = torch_attention_with_kvcache(
-                q, k_cache, v_cache, b_start_loc, b_seq_len
-            )
-        std_end.record()
-        torch.cuda.synchronize()
-        std_avg = std_start.elapsed_time(std_end) / test_iterations
-        standard_times.append(std_avg)
-        print(f"Standard Attention 平均时间: {std_avg:.3f} ms")
-
-    # 绘制性能对比曲线
-    plt.figure(figsize=(8, 6))
-    plt.plot(token_sizes, flash_times, marker="o", label="Flash Decoding")
-    plt.plot(token_sizes, standard_times, marker="o", label="Standard Attention")
-    plt.xlabel("Token Size (kv cache length)")
-    plt.ylabel("Average Time (ms)")
-    plt.title("Performance Comparison: Flash Decoding vs Standard Attention")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig("./flashdecoding_benchamrk.png")
-
-
-# -------------------------------
-# 验证输出和调用性能对比函数
-# -------------------------------
-def main():
-    torch.manual_seed(0)
-    device = torch.device("cuda")
-
-    # 测试参数
-    batch = 4
-    num_heads = 32
-    head_dim = 64
-    max_tokens = 2048  # 每个请求序列的最大 tokens 长度
-    qk_scale = 1.0 / (head_dim**0.5)
-
-    # 构造测试数据：固定 q，k_cache, v_cache, b_req_tokens_table, b_seq_len
-    # 输入张量 q/k/v 的形状为 [batch * seq_len, num_heads, head_dim], 形状是三维的，为了兼容 flash_decoding 内核
-    q = torch.randn(batch * 1, num_heads, head_dim, device=device)
-    k_cache = torch.randn(batch * max_tokens, num_heads, head_dim, device=device)
-    v_cache = torch.randn(batch * max_tokens, num_heads, head_dim, device=device)
-    # 构造每个请求的 kv tokens 分配的显存空间对应的显存块索引
-    b_req_tokens_table = torch.arange(
-        0, max_tokens * batch, device=device, dtype=torch.int32
-    ).view(batch, max_tokens)
-    b_seq_len = torch.full((batch,), max_tokens, device=device, dtype=torch.int32)
-    b_start_loc = torch.tensor(
-        [0, max_tokens, 2 * max_tokens, 3 * max_tokens],
-        dtype=torch.int32,
-        device="cuda",
-    )  # batch = 4
-
-    # 单次验证 flash_decoding 输出形状及数值（与标准 Attention 接近）
-    flash_out = flash_decoding(
-        q, k_cache, v_cache, qk_scale, b_req_tokens_table, b_seq_len, max_tokens
-    )
-    standard_out = torch_attention_with_kvcache(
-        q, k_cache, v_cache, b_start_loc, b_seq_len
-    )
-    print("Flash Decoding output shape:", flash_out.shape)
-    print("Standard Attention output shape:", standard_out.shape)
-    if torch.allclose(flash_out, standard_out, atol=1e-3, rtol=1e-3):
-        print("验证通过: Flash Decoding 输出与标准 Attention 接近。")
-    else:
-        diff = (flash_out - standard_out).abs().max().item()
-        print(f"验证失败：最大误差为 {diff:.4f}")
-
-    # 封装的性能对比曲线函数
-    token_numbers = [64, 128, 256, 512, 1024, max_tokens]
-    plot_performance_comparison(token_numbers, warmup_iterations=10, test_iterations=50)
-
-
-if __name__ == "__main__":
-    main()

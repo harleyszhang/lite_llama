@@ -1,0 +1,63 @@
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+default_stages:
+  - pre-commit # Run locally
+  - manual # Run in CI
+exclude: '^(images/|docs/.*\.(svg|png)$|my_weight/)'
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.0
+    hooks:
+      - id: ruff-check
+        args: [--output-format, github, --fix]
+      - id: ruff-format
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: trailing-whitespace
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.43.5
+    hooks:
+      - id: typos
+        args: [--force-exclude]
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.21.0
+    hooks:
+      - id: markdownlint-cli2
+        language_version: lts
+        args: [--fix]
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.7
+    hooks:
+      - id: actionlint
+  - repo: local
+    hooks:
+      - id: check-filenames
+        name: Check for spaces in all filenames
+        entry: bash
+        args:
+          - -c
+          - 'git ls-files | grep " " && echo "Filenames should not contain spaces!" && exit 1 || exit 0'
+        language: system
+        always_run: true
+        pass_filenames: false
+      - id: no-hardcoded-weight-paths
+        name: Reject hard-coded absolute weight paths in library code
+        entry: python tools/pre_commit/check_hardcoded_paths.py
+        language: python
+        types: [python]
+      - id: suggestion
+        name: Suggestion
+        entry: bash -c 'echo "To bypass all pre-commit hooks, add --no-verify to git commit. To skip one hook, prefix the command with SKIP=<hook-id>."'
+        language: system
+        verbose: true
+        pass_filenames: false

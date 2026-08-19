@@ -1,61 +1,66 @@
 import logging
+from typing import ClassVar
+
 
 class ColoredFormatter(logging.Formatter):
-    """
-    A logging formatter that outputs colored log messages
-    based on the log level.
+    """Legacy-style formatter: ``04-24 09:30:45 [I] model_executor.py:145 msg``.
+
+    Level names are shortened to their one-letter form (``[I]``/``[W]``/``[E]``)
+    and the record's file name *and line number* are included, matching the
+    log output the original ``utils/logger.py`` produced.
     """
 
-    COLORS = {
+    COLORS: ClassVar[dict[str, str]] = {
         "DEBUG": "\033[36m",  # blue
         "INFO": "\033[32m",  # green
         "WARNING": "\033[33m",  # yellow
         "ERROR": "\033[31m",  # red
         "CRITICAL": "\033[41m",  # red background
     }
+    LEVEL_SIM: ClassVar[dict[str, str]] = {
+        "DEBUG": "[D]",
+        "INFO": "[I]",
+        "WARNING": "[W]",
+        "ERROR": "[E]",
+        "CRITICAL": "[C]",
+    }
     RESET = "\033[0m"
 
     def format(self, record):
-        """
-        Format the specified record as text.
-        """
+        """Shorten the level, colour the line, keep ``file.py:lineno``."""
         # Get the color corresponding to the log level. If not, use RESET
         color = self.COLORS.get(record.levelname, self.RESET)
-        # Call the parent class to format the log message
-        message = super().format(record)
+        # Temporarily swap the level name for its [I]/[W]/[E] short form.
+        original_level = record.levelname
+        record.levelname = self.LEVEL_SIM.get(record.levelname, original_level)
+        try:
+            message = super().format(record)
+        finally:
+            record.levelname = original_level
 
         return f"{color}{message}{self.RESET}"
 
+
 class SmartLogger:
-    """Wrapper around logger with enhanced formatting support"""
-    
+    """Deprecated pass-through kept for API compatibility.
+
+    Wrapping the logger used to swallow the caller's file/line — ``%(filename)s``
+    and ``%(lineno)d`` resolved to this module instead of the code that logged.
+    The methods below are kept so any external reference still works, but they
+    delegate straight to the underlying logger.
+    """
+
     def __init__(self, logger):
         self._logger = logger
-    
-    def debug(self, msg, *args, **kwargs):
-        if self._logger.isEnabledFor(logging.DEBUG):
-            self._logger.debug(msg, *args, **kwargs)
-    
-    def info(self, msg, *args, **kwargs):
-        if self._logger.isEnabledFor(logging.INFO):
-            self._logger.info(msg, *args, **kwargs)
-    
-    def warning(self, msg, *args, **kwargs):
-        if self._logger.isEnabledFor(logging.WARNING):
-            self._logger.warning(msg, *args, **kwargs)
-    
-    def error(self, msg, *args, **kwargs):
-        if self._logger.isEnabledFor(logging.ERROR):
-            self._logger.error(msg, *args, **kwargs)
-    
-    def critical(self, msg, *args, **kwargs):
-        if self._logger.isEnabledFor(logging.CRITICAL):
-            self._logger.critical(msg, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._logger, name)
+
 
 def get_logger(name):
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
-    
+
     # Prevent duplicate logging by not propagating to parent loggers
     logger.propagate = False
 
@@ -63,9 +68,14 @@ def get_logger(name):
     if not logger.handlers:
         handler = logging.StreamHandler()
         formatter = ColoredFormatter(
-            fmt="[%(asctime)s] [%(levelname)s] [%(filename)s] %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S")
+            fmt="%(asctime)s %(levelname)s %(filename)s:%(lineno)d %(message)s",
+            datefmt="%m-%d %H:%M:%S",
+        )
         handler.setFormatter(formatter)
         logger.addHandler(handler)
 
-    return SmartLogger(logger)
+    # Return the bare logger: the extra wrapper layer would make
+    # %(filename)s / %(lineno)d resolve to logger.py instead of the caller.
+    # (logging.Logger.info already short-circuits on isEnabledFor, so the
+    # wrapper added nothing but the wrong file name in the legacy format.)
+    return logger
