@@ -139,25 +139,25 @@ def test_route_matches_hf():
 # Full-model logits parity vs HuggingFace (needs CUDA for the Triton kernels)
 # --------------------------------------------------------------------------- #
 
-_TINY_HF_CONFIG = dict(
-    vocab_size=512,
-    hidden_size=128,
-    intermediate_size=256,
-    num_hidden_layers=2,
-    num_attention_heads=4,
-    num_key_value_heads=2,
-    head_dim=32,
-    num_experts=8,
-    num_experts_per_tok=2,
-    moe_intermediate_size=64,
-    norm_topk_prob=True,
-    decoder_sparse_step=1,
-    mlp_only_layers=[],
-    max_position_embeddings=256,
-    rope_theta=10000.0,
-    rms_norm_eps=1e-6,
-    tie_word_embeddings=False,
-)
+_TINY_HF_CONFIG = {
+    "vocab_size": 512,
+    "hidden_size": 128,
+    "intermediate_size": 256,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 32,
+    "num_experts": 8,
+    "num_experts_per_tok": 2,
+    "moe_intermediate_size": 64,
+    "norm_topk_prob": True,
+    "decoder_sparse_step": 1,
+    "mlp_only_layers": [],
+    "max_position_embeddings": 256,
+    "rope_theta": 10000.0,
+    "rms_norm_eps": 1e-6,
+    "tie_word_embeddings": False,
+}
 
 
 def _convert_hf_model(hf_model, tmp_path):

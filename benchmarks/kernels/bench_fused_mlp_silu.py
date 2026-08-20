@@ -1,5 +1,4 @@
 import torch
-
 import triton
 import triton.language as tl
 
@@ -300,8 +299,10 @@ def triton_torch_mlp_silu(x, w1, w2, w3):
     return mlp_silu_out
 
 
+import os
+import sys
+
 import torch.nn as nn
-import sys, os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from lite_llama.kernels.swiglu import swiglu_forward
@@ -347,24 +348,9 @@ if __name__ == "__main__":
     hidden_size = 3584
     intermediate_size = 18944
     x = torch.randn(B, seq_len, hidden_size, device="cuda", dtype=torch.float16)
-    w1 = (
-        torch.randn(
-            (intermediate_size, hidden_size), device="cuda", dtype=torch.float16
-        )
-        * 0.01
-    )
-    w2 = (
-        torch.randn(
-            (intermediate_size, hidden_size), device="cuda", dtype=torch.float16
-        )
-        * 0.01
-    )
-    w3 = (
-        torch.randn(
-            (hidden_size, intermediate_size), device="cuda", dtype=torch.float16
-        )
-        * 0.01
-    )
+    w1 = torch.randn((intermediate_size, hidden_size), device="cuda", dtype=torch.float16) * 0.01
+    w2 = torch.randn((intermediate_size, hidden_size), device="cuda", dtype=torch.float16) * 0.01
+    w3 = torch.randn((hidden_size, intermediate_size), device="cuda", dtype=torch.float16) * 0.01
 
     w1_t = w1.t().contiguous()
     w2_t = w2.t().contiguous()
@@ -388,9 +374,7 @@ if __name__ == "__main__":
         f"Max diff: {torch.max(torch.abs(torch_output - torch_fused_mlp_out))}"
     )  # assert(torch.amax(Y - Y2).item() <= 0.05)
 
-    print(
-        "torch:", triton.testing.do_bench(lambda: torch_mlp_silu(x, w1_t, w2_t, w3_t))
-    )
+    print("torch:", triton.testing.do_bench(lambda: torch_mlp_silu(x, w1_t, w2_t, w3_t)))
     print("triton:", triton.testing.do_bench(lambda: mlp_silu(x, w1_t, w2_t, w3_t)))
     print(
         "triton_torch:",
