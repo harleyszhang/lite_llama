@@ -1,5 +1,19 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM
+"""教学示例:用 HuggingFace 的 ``model.forward`` 手写逐 token 解码循环。
+
+展示 lite_llama 引擎内部替你做掉的那些步骤——维护 ``past_key_values``、
+每步只喂新 token、top-p 过滤后采样。与 ``lite_llama.engine`` 的实现对照阅读,
+可以看出后者省掉了哪些主机侧开销。
+
+用法::
+
+    python examples/teaching/hf_gpt2_manual_decode.py --model-dir /path/to/gpt2
+"""
+
+import argparse
+import os
+
 import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 def generate_text(
@@ -31,18 +45,14 @@ def generate_text(
 
     for _ in range(max_length):
         # 调用模型的 forward 方法
-        outputs = model(
-            input_ids=input_ids, past_key_values=past_key_values, use_cache=True
-        )
+        outputs = model(input_ids=input_ids, past_key_values=past_key_values, use_cache=True)
 
         # 获取 logits，并仅关注最后一个 token 的 logits
         logits = outputs.logits  # [1, 1, V]
         next_token_logits = logits[:, -1, :] / temperature  # [1, V]
 
         # 应用 top-p 过滤
-        sorted_logits, sorted_indices = torch.sort(
-            next_token_logits, dim=-1, descending=True
-        )
+        sorted_logits, sorted_indices = torch.sort(next_token_logits, dim=-1, descending=True)
         cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
 
         # 创建 mask
@@ -77,8 +87,17 @@ def generate_text(
 
 
 if __name__ == "__main__":
-    # 使用标准的 GPT-2 模型名称，确保模型和 tokenizer 匹配
-    model_name = "/gemini/code/llm_weights/gpt2"  # 修改为您的模型路径或名称
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--model-dir",
+        default=os.environ.get("LITE_LLAMA_MODEL_DIR", "gpt2"),
+        help="本地权重目录或 HuggingFace 模型名(默认 'gpt2',直接从 hub 拉取)",
+    )
+    parser.add_argument("--prompt", default="Once upon a time in a distant land,")
+    parser.add_argument("--max-length", type=int, default=100)
+    args = parser.parse_args()
+
+    model_name = args.model_dir
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name)
 
@@ -87,15 +106,12 @@ if __name__ == "__main__":
     model.to(device)
     model.eval()
 
-    # 定义 prompt
-    prompt = "Once upon a time in a distant land,"
-
     # 生成文本
     generated = generate_text(
         model,
         tokenizer,
-        prompt,
-        max_length=500,
+        args.prompt,
+        max_length=args.max_length,
         temperature=1.0,
         top_p=0.9,
         device=device,

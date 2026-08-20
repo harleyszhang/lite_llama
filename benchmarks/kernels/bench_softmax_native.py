@@ -1,4 +1,5 @@
-import triton, torch
+import torch
+import triton
 import triton.language as tl
 
 
@@ -21,7 +22,7 @@ def naive_softmax(x: torch.Tensor) -> torch.Tensor:
 def online_softmax(x: torch.Tensor) -> torch.tensor:
     """Iterative calculation and 2.5x faster than native softmax"""
     row_cont, col_count = x.shape
-    assert x.ndim == 2, f"only accepts 2D tensor now"
+    assert x.ndim == 2, "only accepts 2D tensor now"
     output = torch.zeros_like(x)
 
     for r in range(row_cont):
@@ -33,9 +34,7 @@ def online_softmax(x: torch.Tensor) -> torch.tensor:
             row_max = max(pre_max, cur)
             # if cur > pre_max:
             #     print(f"Update row max now is {row_max}, row = {r}")
-            normalizer = normalizer * torch.exp(pre_max - row_max) + torch.exp(
-                cur - row_max
-            )
+            normalizer = normalizer * torch.exp(pre_max - row_max) + torch.exp(cur - row_max)
         output[r, :] = torch.exp(x[r, :] - row_max) / normalizer
 
     return output
@@ -77,7 +76,7 @@ def _softmax_kernel_fwd(
 def softmax_native_fwd(x: torch.Tensor) -> torch.Tensor:
     """Triton impl of Softmax, onlay support 2D tensor in fwd"""
     rows, cols = x.shape
-    assert x.ndim == 2, f"only accepts 2D tensor now"
+    assert x.ndim == 2, "only accepts 2D tensor now"
     BLOCK_SIZE = triton.next_power_of_2(cols)
     num_warps = 4
     if BLOCK_SIZE >= 32768:

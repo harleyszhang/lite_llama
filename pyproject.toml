@@ -101,6 +101,14 @@ ignore = [
 # builtins; benchmark helpers intentionally use star-imports and prints.
 "lite_llama/kernels/*" = ["B905"]
 "tests/*" = ["B011"]
+# Preserved teaching material: the authors' Chinese labels use fullwidth
+# punctuation inside string literals, same rationale as the global RUF002/RUF003
+# exemption. Benchmark scripts print and star-import on purpose.
+"examples/teaching/*" = ["RUF001"]
+# Benchmarks: `lambda: kernel(...)` is the shape triton.testing.do_bench wants,
+# `import apex` is an availability probe, and unused locals document the tuning
+# knobs a reader may want to switch on.
+"benchmarks/kernels/*" = ["E402", "E731", "F401", "F403", "F405", "F841", "RUF001"]
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -113,11 +121,35 @@ index-url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/"
 # --------------------------------------------------------------------------- #
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+# --import-mode=importlib keeps ``tests`` importable as a package so tests can
+# share tests/reference.py and tests/golden/cases.py instead of copy-pasting
+# reference implementations into each file.
+addopts = "-ra --strict-markers --strict-config"
 markers = [
-  "gpu: requires a CUDA device (skipped automatically on CPU-only machines)",
-  "weights: requires downloaded model weights",
+  "gpu: requires a CUDA device (auto-skipped on CPU-only machines; applied automatically to tests/kernels/)",
+  "weights: requires a converted checkpoint (auto-skipped when none is found; override the location with LITE_LLAMA_TEST_MODEL_DIR)",
+  "slow: takes seconds rather than milliseconds (golden regression); excluded by `make test-fast`",
 ]
 filterwarnings = [
   "ignore::FutureWarning:torch.*",
+  # Triton's code generator builds ast.AnnAssign without `simple`; nothing we control.
+  "ignore:AnnAssign.__init__ missing:DeprecationWarning",
+  # tqdm calls datetime.utcfromtimestamp internally.
+  "ignore:datetime.datetime.utcfromtimestamp:DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["lite_llama"]
+branch = true
+omit = [
+  # Kernels kept for reference/teaching but not wired into the shipped model path.
+  "lite_llama/kernels/others/*",
+]
+
+[tool.coverage.report]
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+  "@(abc\\.)?abstractmethod",
 ]
