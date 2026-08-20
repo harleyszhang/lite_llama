@@ -10,6 +10,7 @@ phase against the paged KV buffer.
 from .activations import gelu, leaky_relu, relu, tanh
 from .flashattention2_nopad import flash_attention2_no_pad
 from .flashdecoding import flash_decoding
+from .fused_moe import fused_moe, moe_align_block_size
 from .rope_emb import rope_emb_forward
 from .skip_rmsnorm import skip_rmsnorm
 from .softmax_split import softmax_split
@@ -20,8 +21,10 @@ from .update_kv_index import update_kv_index
 __all__ = [
     "flash_attention2_no_pad",
     "flash_decoding",
+    "fused_moe",
     "gelu",
     "leaky_relu",
+    "moe_align_block_size",
     "relu",
     "rope_emb_forward",
     "skip_rmsnorm",
