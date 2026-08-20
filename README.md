@@ -45,6 +45,7 @@ lite-llama-convert /path/to/Qwen2.5-0.5B
 lite-llama-convert /path/to/Qwen3-0.6B
 lite-llama-convert /path/to/llava-hf/llava-1.5-7b-hf
 lite-llama-convert /path/to/Qwen3-VL-4B-Instruct
+lite-llama-convert /path/to/Qwen3-30B-A3B-Instruct-2507-FP8
 ```
 
 ### Examples
@@ -55,7 +56,7 @@ Qwen3-VL model, single pictures inference:
 cd /home/honggao/projects/open_source/lite_llama
 python -m lite_llama.cli vl-chat \
     --model-dir my_weight/Qwen3-VL-4B-Instruct \
-    --image images/llava_test/dog.jpeg \
+    --image docs/images/llava_test/dog.jpeg \
     --prompt "What animal is in this picture? Answer in one sentence." \
     --temperature 0.0 --max-gen-len 48
 ```
@@ -66,14 +67,14 @@ Qwen3-VL-4B-Instruct, Multi-image + Sampling mode:
 # 多图 + 采样模式
 python -m lite_llama.cli vl-chat \
     --model-dir my_weight/Qwen3-VL-4B-Instruct \
-    --image images/llava_test/dog.jpeg images/llava_test/dog2.png \
+    --image docs/images/llava_test/dog.jpeg docs/images/llava_test/dog2.png \
     --prompt "Compare the animals in these pictures." \
     --temperature 0.7 --top-p 0.9
 
 # 默认 prompt(Describe this image.)
 python -m lite_llama.cli vl-chat \
     --model-dir my_weight/Qwen3-VL-4B-Instruct \
-    --image images/llava_test/extreme_ironing.jpg
+    --image docs/images/llava_test/extreme_ironing.jpg
 ```
 
 ### Text generation
@@ -100,19 +101,27 @@ from PIL import Image
 from lite_llama import VisionGenerator, SamplingParams
 
 gen = VisionGenerator(checkpoints_dir="my_weight/llava-1.5-7b-hf")
-img = Image.open("images/llava_test/dog.jpeg").convert("RGB")
+img = Image.open("docs/images/llava_test/dog.jpeg").convert("RGB")
 prompt = "USER: <image>\nDescribe the animal in one sentence. ASSISTANT:"
 print(gen.generate(prompt, [img], SamplingParams(temperature=0.0, max_gen_len=48)))
 ```
 
 ### CLI
 
+llava-1.5-7b-hf default inference:
+
 ```bash
 export LITE_LLAMA_MODEL_DIR=my_weight/Qwen2.5-0.5B
 lite-llama chat                              # interactive text chat
 lite-llama vl-chat --model-dir my_weight/llava-1.5-7b-hf \
-                   --image images/dog.jpeg \
+                   --image docs/images/dog.jpeg \
                    --prompt "USER: <image>\nWhat animal is this? ASSISTANT:"
+```
+
+llava-1.5-7b-hf default inference:
+
+```bash
+python -m lite_llama.cli chat --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8
 ```
 
 ## Architecture
