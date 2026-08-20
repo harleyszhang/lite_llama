@@ -104,7 +104,7 @@ def test_qwen3_moe_config_from_hf_dict():
 
 def test_route_matches_hf():
     """``_route`` must reproduce HF's softmax-all -> top-k -> renormalise order."""
-    from lite_llama.models.qwen3_moe import SparseMoeBlock
+    from lite_llama.models.qwen3_moe import Qwen3MoeSparseMoeBlock
 
     torch.manual_seed(0)
     cfg = Qwen3MoeConfig(
@@ -119,7 +119,7 @@ def test_route_matches_hf():
         max_position_embeddings=64,
         max_seq_len=64,
     )
-    block = SparseMoeBlock(cfg)
+    block = Qwen3MoeSparseMoeBlock(cfg)
     gate = torch.randn(cfg.num_experts, cfg.hidden_size)
     block.gate_weight.data.copy_(gate)
 

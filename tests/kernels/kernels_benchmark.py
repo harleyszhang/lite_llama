@@ -34,6 +34,8 @@ result_path = os.path.abspath(
 os.makedirs(result_path, exist_ok=True)
 ref_lib = "cuBLAS" if is_cuda() else "rocBLAS"
 TORCH_HAS_FP8 = hasattr(torch, "float8_e5m2")
+
+
 ################################benchamrk matmul################################
 configs = []
 for fp8_inputs in [False, True]:
@@ -418,6 +420,7 @@ def bench_flash_attention(
 if __name__ == "__main__":
     # only works on post-Ampere GPUs right now
     bench_flash_attention.run(save_path=result_path, print_data=True)
+
 
 ################################ benchamrk rope ################################
 """
