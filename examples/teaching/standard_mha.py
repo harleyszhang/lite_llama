@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, embed_dim, num_heads):
-        super(MultiHeadAttention, self).__init__()
+        super().__init__()
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
 
         self.embed_dim = embed_dim
@@ -30,11 +30,7 @@ class MultiHeadAttention(nn.Module):
             .view(batch_size, seq_length, self.num_heads, self.head_dim)
             .transpose(1, 2)
         )  # (batch, heads, seq, head_dim)
-        K = (
-            self.key(x)
-            .view(batch_size, seq_length, self.num_heads, self.head_dim)
-            .transpose(1, 2)
-        )
+        K = self.key(x).view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
         V = (
             self.value(x)
             .view(batch_size, seq_length, self.num_heads, self.head_dim)
@@ -53,9 +49,7 @@ class MultiHeadAttention(nn.Module):
         # 加权求和 (batch, heads, seq, head_dim)
         context = torch.matmul(attn_scores, V)
 
-        context = (
-            context.transpose(1, 2).contiguous().view(batch_size, seq_length, embed_dim)
-        )
+        context = context.transpose(1, 2).contiguous().view(batch_size, seq_length, embed_dim)
         out = self.out(context)  # 最后的线性变换(batch, seq_length, embed_dim)
 
         print(
@@ -63,9 +57,7 @@ class MultiHeadAttention(nn.Module):
         )  # 使用 torch.squeeze() 函数来移除张量中所有大小为 1 的维度
         print(f"原始的注意力分数矩阵:\n {scores.squeeze()} \n")
         print(f"应用 mask 后的注意力分数矩阵:\n {masked_scores.squeeze()} \n")
-        print(
-            f"使用 softmax 归一化后的掩码注意力分数矩阵:\n {attn_scores.squeeze()} \n"
-        )
+        print(f"使用 softmax 归一化后的掩码注意力分数矩阵:\n {attn_scores.squeeze()} \n")
         return out
 
 
@@ -78,12 +70,8 @@ def generate_causal_mask(seq_length):
 
 
 # 单元测试代码
-def test_multihead_attention(
-    vocab_size=1000, batch_size=1, seq_length=4, embed_dim=6, num_heads=2
-):
-    embedding_layer = nn.Embedding(
-        vocab_size, embed_dim
-    )  # 将 input_ids 转为 embedding 向量
+def test_multihead_attention(vocab_size=1000, batch_size=1, seq_length=4, embed_dim=6, num_heads=2):
+    embedding_layer = nn.Embedding(vocab_size, embed_dim)  # 将 input_ids 转为 embedding 向量
     mha_layer = MultiHeadAttention(embed_dim, num_heads)  # 构建 MHA 模块
 
     torch.manual_seed(0)

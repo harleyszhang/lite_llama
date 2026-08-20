@@ -6,9 +6,11 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-
 from lite_llama.kernels.fused_moe import fused_moe, moe_align_block_size
+
+# Redundant with the automatic `gpu` mark applied to tests/kernels/ by
+# tests/conftest.py, but harmless and keeps the file self-describing.
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
 def _torch_moe_reference(
@@ -24,9 +26,7 @@ def _torch_moe_reference(
     out = torch.zeros_like(x)
     flat_ids = topk_ids.reshape(-1)
     flat_weights = topk_weights.reshape(-1).float()
-    token_of_slot = torch.arange(x.shape[0], device=x.device).repeat_interleave(
-        topk_ids.shape[1]
-    )
+    token_of_slot = torch.arange(x.shape[0], device=x.device).repeat_interleave(topk_ids.shape[1])
     for e in flat_ids.unique():
         sel = flat_ids == e
         rows = token_of_slot[sel]

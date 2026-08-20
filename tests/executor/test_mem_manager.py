@@ -1,198 +1,219 @@
-# 代码可直接运行，用于测试 KVCacheMemoryManager 的结果
+"""Tests for :class:`KVCacheMemoryManager`.
 
-import unittest
-import torch, os, sys
+The manager hands out cache rows and tracks refcounts. Two things make it worth
+testing carefully:
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
+* **The bump-allocator fast path.** ``alloc_kvcache_index`` normally answers from
+  a cursor with no device reads, because ``generate()`` opens with ``free_all``
+  and the cache is then append-only. The cursor is only valid while that holds:
+  any partial free leaves holes, so it must fall back to searching and must not
+  resume until ``free_all``. A cursor that stayed "exact" after a partial free
+  would hand out rows that are still in use -- two sequences sharing KV, which
+  shows up as garbled text far from here.
+* **Accounting.** ``can_use_mem_size`` drives the "can I admit this request?"
+  decision. If it drifts from the real occupancy the engine either OOMs or
+  refuses work it could do.
+
+These run on CPU when no GPU is present: the manager allocates real KV buffers,
+so the tiny sizes here keep it cheap either way.
+"""
+
+from __future__ import annotations
+
+import pytest
+import torch
+
 from lite_llama.executor.mem_manager import KVCacheMemoryManager
 
-
-class TestKVCacheMemoryManager(unittest.TestCase):
-    def setUp(self):
-        # 使用较小的参数值以便于测试
-        self.head_dim = 64
-        self.num_kv_heads = 4
-        self.num_layers = 2
-        self.gpu_num_blocks = 9
-        self.dtype = torch.float32
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.manager = KVCacheMemoryManager(
-            head_dim=self.head_dim,
-            num_kv_heads=self.num_kv_heads,
-            num_layers=self.num_layers,
-            gpu_num_blocks=self.gpu_num_blocks,
-            dtype=self.dtype,
-            device=self.device,
-        )
-
-    def test_initialization(self):
-        """测试初始化状态"""
-        self.assertEqual(self.manager.can_use_mem_size, self.gpu_num_blocks)
-        self.assertEqual(self.manager.kv_mem_use_state.numel(), self.gpu_num_blocks)
-        self.assertTrue(torch.all(self.manager.kv_mem_use_state == 0))
-
-    def test_alloc_kvcache_success(self):
-        """成功分配 3 个非连续块"""
-        need_size = 3
-        select_index = self.manager.alloc_kvcache(need_size)
-        self.assertIsNotNone(select_index)
-        self.assertEqual(select_index.numel(), need_size)
-        # 检查分配的索引是否被标记为使用
-        used_state = self.manager.kv_mem_use_state[select_index]
-        print(
-            "After alloc_kvcache(3) alloc_kvcache kv_mem_use_state ",
-            self.manager.kv_mem_use_state,
-        )
-        self.assertTrue(torch.all(used_state == 1))
-        # 检查可用内存大小是否更新
-        self.assertEqual(self.manager.can_use_mem_size, self.gpu_num_blocks - need_size)
-
-        self.manager.release_ref(select_index)
-        print("after release_ref kv_mem_use_state ", self.manager.kv_mem_use_state)
-
-    def test_alloc_kvcache_failure(self):
-        """尝试分配超过可用块数量的内存"""
-        need_size = self.gpu_num_blocks + 1
-        self.assertIsNone(self.manager.alloc_kvcache(need_size))
-        # 确保内存状态未改变
-        self.assertTrue(torch.all(self.manager.kv_mem_use_state == 0))
-        self.assertEqual(self.manager.can_use_mem_size, self.gpu_num_blocks)
-
-    def test_alloc_contiguous_kvcache_success(self):
-        """成功分配 4 个连续块"""
-        need_size = 4
-        result = self.manager.alloc_contiguous_kvcache(need_size)
-        self.assertIsNotNone(result)
-        select_index, start, end = result
-        self.assertEqual(select_index.numel(), need_size)
-        self.assertEqual(end - start, need_size)
-
-        # 检查分配的索引是否被标记为使用
-        used_state = self.manager.kv_mem_use_state[select_index]
-        self.assertTrue(torch.all(used_state == 1))
-        # 检查可用内存大小是否更新
-        self.assertEqual(self.manager.can_use_mem_size, self.gpu_num_blocks - need_size)
-        self.manager.release_ref(select_index)
-
-    def test_alloc_contiguous_kvcache_failure(self):
-        # 先分配所有块，然后尝试分配更多
-        need_size = self.gpu_num_blocks
-        print("self.can_use_mem_size ", self.manager.can_use_mem_size)
-        result = self.manager.alloc_contiguous_kvcache(need_size)
-
-        print("result and need_size ", result, need_size)
-        select_index, _, _ = result
-
-        self.assertIsNotNone(result)
-
-        # 可用内存大小应为0
-        self.assertEqual(self.manager.can_use_mem_size, 0)
-
-        self.manager.release_ref(select_index)
-
-    def test_add_ref(self):
-        # 分配 2 个块
-        need_size = 2
-        select_index = self.manager.alloc_kvcache(need_size)
-        self.assertIsNotNone(select_index)
-
-        # 检查引用计数是否为2
-        used_state = self.manager.kv_mem_use_state[select_index]  # tensor([1, 1])
-        self.assertTrue(
-            torch.sum(used_state != 0) == 2,
-            "The number of non-zero elements is not equal to 2",
-        )
-        # 检查可用内存大小是否正确
-        self.assertEqual(self.manager.can_use_mem_size, self.gpu_num_blocks - need_size)
-        self.manager.release_ref(select_index)
-
-    def test_release_ref(self):
-        # 分配 3 个块
-        need_size = 3
-        select_index = self.manager.alloc_kvcache(need_size)
-        self.assertIsNotNone(select_index)
-        # 减少引用计数
-        self.manager.release_ref(select_index)
-        # 检查引用计数是否为0
-        used_state = self.manager.kv_mem_use_state[select_index]
-        self.assertTrue(torch.all(used_state == 0))
-        # 检查可用内存大小是否增加
-        self.assertEqual(self.manager.can_use_mem_size, self.gpu_num_blocks)
-
-    def test_free_all(self):
-        # 分配一些块
-        need_size = 5
-        select_index = self.manager.alloc_kvcache(need_size)
-        self.assertIsNotNone(select_index)
-        # 释放所有内存
-        self.manager.free_all()
-        # 检查所有块是否标记为未使用
-        self.assertTrue(torch.all(self.manager.kv_mem_use_state == 0))
-        # 检查可用内存大小是否重置
-        self.assertEqual(self.manager.can_use_mem_size, self.gpu_num_blocks)
-
-        self.manager.release_ref(select_index)
-
-    def test_alloc_contiguous_kvcache_with_insufficient_memory(self):
-        # 分配 8 个块
-        need_size = 8
-        result = self.manager.alloc_contiguous_kvcache(need_size)
-        self.assertIsNotNone(result)
-        # 现在尝试分配 3 个连续块，应失败
-        result2 = self.manager.alloc_contiguous_kvcache(3)
-        self.assertIsNone(result2)
-        # 可用内存大小应为2
-        self.assertEqual(self.manager.can_use_mem_size, self.gpu_num_blocks - need_size)
-
-        self.manager.release_ref(result[0])
-
-    def test_alloc_contiguous_kvcache_after_release_ref(self):
-        # 分配 4 个连续块
-        need_size = 4
-        result = self.manager.alloc_contiguous_kvcache(need_size)
-        self.assertIsNotNone(result)
-        select_index, _, _ = result
-        # 减少引用计数以释放部分块
-        self.manager.release_ref(select_index[:2])  # 释放前2个块
-        # 现在尝试分配2个连续块，应成功
-        new_result = self.manager.alloc_contiguous_kvcache(2)
-        self.assertIsNotNone(new_result)
-        new_select_index, new_start, new_end = new_result
-        self.assertEqual(new_select_index.numel(), 2)
-        # 可用内存大小应为 gpu_num_blocks - 2
-        self.assertEqual(self.manager.can_use_mem_size, self.gpu_num_blocks - 4)
-
-        self.manager.release_ref(new_select_index)  # 释放
-
-    def test_in_alloc_contiguous_kvcache(self):
-        # 分配一些块以创建非连续场景
-        need_size = 5
-        select_index = self.manager.alloc_kvcache(need_size)
-        self.assertIsNotNone(select_index)
-        # 手动设置块8为已使用以打破连续性
-        self.manager.kv_mem_use_state[7] = 1
-        self.manager.can_use_mem_size -= 1
-        # 现在尝试分配 3 个连续块，应失败
-        contiguous_result = self.manager.alloc_contiguous_kvcache(3)
-        self.assertIsNone(contiguous_result)
-
-        self.manager.release_ref(select_index)  # 释放
+_BLOCKS = 9
 
 
-if __name__ == "__main__":
-    suite = unittest.TestSuite()
-    tests = [
-        "test_initialization",
-        "test_add_ref",
-        "test_alloc_kvcache_success",
-        "test_alloc_kvcache_failure",
-        "test_alloc_contiguous_kvcache_success",
-        "test_alloc_contiguous_kvcache_failure",
-        "test_release_ref",
-        "test_free_all",
-        "test_alloc_contiguous_kvcache_after_release_ref",
-        "test_alloc_contiguous_kvcache_with_insufficient_memory",
-        "test_in_alloc_contiguous_kvcache",
-    ]
-    suite.addTests(unittest.TestLoader().loadTestsFromNames(tests, TestKVCacheMemoryManager))
-    unittest.TextTestRunner().run(suite)
+@pytest.fixture
+def manager() -> KVCacheMemoryManager:
+    """A 9-row pool; small enough that exhaustion cases are easy to express."""
+    return KVCacheMemoryManager(
+        num_layers=2,
+        num_kv_heads=4,
+        head_dim=64,
+        gpu_num_blocks=_BLOCKS,
+        dtype=torch.float32,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Initial state and buffers
+# --------------------------------------------------------------------------- #
+def test_starts_empty(manager):
+    assert manager.can_use_mem_size == _BLOCKS
+    assert manager.kv_mem_use_state.numel() == _BLOCKS
+    assert not manager.kv_mem_use_state.any()
+
+
+def test_allocates_one_kv_buffer_per_layer(manager):
+    """Layers must not share a buffer, or layer N would read layer N-1's K/V."""
+    assert len(manager.gpu_kv_buffer) == 2
+    # 2x heads: K heads then V heads live in one tensor.
+    assert manager.gpu_kv_buffer[0].shape == (_BLOCKS, 8, 64)
+    assert manager.gpu_kv_buffer[0].data_ptr() != manager.gpu_kv_buffer[1].data_ptr()
+
+
+# --------------------------------------------------------------------------- #
+# alloc_kvcache / alloc_contiguous_kvcache
+# --------------------------------------------------------------------------- #
+def test_alloc_marks_rows_used_and_debits_the_counter(manager):
+    index = manager.alloc_kvcache(3)
+    assert index is not None
+    assert index.numel() == 3
+    assert (manager.kv_mem_use_state[index] == 1).all()
+    assert manager.can_use_mem_size == _BLOCKS - 3
+
+
+def test_alloc_beyond_capacity_returns_none_and_changes_nothing(manager):
+    """Refusal must be total: a partial allocation would leak rows."""
+    assert manager.alloc_kvcache(_BLOCKS + 1) is None
+    assert not manager.kv_mem_use_state.any()
+    assert manager.can_use_mem_size == _BLOCKS
+
+
+def test_alloc_contiguous_returns_a_consecutive_run(manager):
+    result = manager.alloc_contiguous_kvcache(4)
+    assert result is not None
+    index, start, end = result
+    assert index.numel() == 4
+    assert end - start == 4
+    assert index.tolist() == list(range(start, end))
+    assert manager.can_use_mem_size == _BLOCKS - 4
+
+
+def test_alloc_contiguous_fails_when_the_pool_is_fragmented(manager):
+    """Enough free rows, but no run long enough: the request must be refused.
+
+    Distinguishes a real contiguity search from a plain free-count check.
+    """
+    manager.alloc_kvcache(5)  # takes rows 0-4
+    manager.kv_mem_use_state[7] = 1  # hole at 7 leaves runs of length 2 and 1
+    manager.can_use_mem_size -= 1
+
+    assert manager.alloc_contiguous_kvcache(3) is None
+
+
+def test_alloc_contiguous_reuses_rows_after_a_partial_release(manager):
+    index, _, _ = manager.alloc_contiguous_kvcache(4)
+    manager.release_ref(index[:2])  # free the first two rows
+
+    reused = manager.alloc_contiguous_kvcache(2)
+    assert reused is not None
+    assert reused[0].numel() == 2
+    assert manager.can_use_mem_size == _BLOCKS - 4
+
+
+# --------------------------------------------------------------------------- #
+# Refcounting
+# --------------------------------------------------------------------------- #
+def test_release_frees_rows_and_credits_the_counter(manager):
+    index = manager.alloc_kvcache(3)
+    manager.release_ref(index)
+    assert not manager.kv_mem_use_state[index].any()
+    assert manager.can_use_mem_size == _BLOCKS
+
+
+def test_second_reference_keeps_the_row_alive(manager):
+    """A row shared by two owners must survive the first release.
+
+    This is what makes prefix sharing safe; freeing on the first release would
+    hand a live row to the next request.
+    """
+    index = manager.alloc_kvcache(2)
+    manager.add_ref(index)
+    assert (manager.kv_mem_use_state[index] == 2).all()
+
+    manager.release_ref(index)
+    assert (manager.kv_mem_use_state[index] == 1).all()
+    assert manager.can_use_mem_size == _BLOCKS - 2
+
+    manager.release_ref(index)
+    assert not manager.kv_mem_use_state[index].any()
+    assert manager.can_use_mem_size == _BLOCKS
+
+
+def test_free_all_resets_every_row(manager):
+    manager.alloc_kvcache(5)
+    manager.free_all()
+    assert not manager.kv_mem_use_state.any()
+    assert manager.can_use_mem_size == _BLOCKS
+
+
+# --------------------------------------------------------------------------- #
+# Bump allocator (alloc_kvcache_index)
+# --------------------------------------------------------------------------- #
+def test_bump_hands_out_consecutive_rows_from_zero(manager):
+    """The fast path is append-only, so successive calls must not overlap."""
+    first = manager.alloc_kvcache_index(3)
+    second = manager.alloc_kvcache_index(2)
+
+    assert first.tolist() == [0, 1, 2]
+    assert second.tolist() == [3, 4]
+    assert manager.can_use_mem_size == _BLOCKS - 5
+
+
+def test_bump_returns_int32_rows(manager):
+    """Callers index the cache with int32; a silent int64 would break the kernels."""
+    assert manager.alloc_kvcache_index(2).dtype == torch.int32
+
+
+def test_bump_marks_rows_used(manager):
+    index = manager.alloc_kvcache_index(4)
+    assert (manager.kv_mem_use_state[index.long()] == 1).all()
+
+
+def test_partial_free_disables_the_bump_fast_path(manager):
+    """After a hole appears the cursor is no longer the free list.
+
+    Continuing to bump would re-hand rows that are still referenced. The
+    fallback search must reuse the freed rows instead.
+    """
+    first = manager.alloc_kvcache_index(4)  # rows 0-3
+    manager.release_ref(first[:2].long())  # free rows 0-1
+    assert manager._bump_is_exact is False
+
+    reused = manager.alloc_kvcache_index(2)
+    assert sorted(reused.tolist()) == [0, 1]
+
+
+def test_free_all_restores_the_bump_fast_path(manager):
+    """``generate()`` opens with ``free_all``, which is what makes bumping valid."""
+    manager.alloc_kvcache_index(3)
+    manager.release_ref(torch.tensor([0], device=manager.device))
+    assert manager._bump_is_exact is False
+
+    manager.free_all()
+    assert manager._bump_is_exact is True
+    assert manager._bump_cursor == 0
+    assert manager.alloc_kvcache_index(2).tolist() == [0, 1]
+
+
+def test_bump_falls_back_when_the_cursor_reaches_the_end(manager):
+    """Exhausting the cursor must fall back to searching, not run off the end."""
+    manager.alloc_kvcache_index(_BLOCKS)  # cursor now at capacity
+    manager.free_all()
+    manager.alloc_kvcache_index(_BLOCKS - 2)
+
+    # Two rows remain and the cursor cannot serve three, so the search path runs.
+    assert manager.alloc_kvcache_index(2).numel() == 2
+
+
+def test_repeated_generate_cycles_do_not_leak(manager):
+    """Ten free_all/alloc rounds must return the pool to its initial state.
+
+    Mirrors what ten ``generate()`` calls do, which is the leak the end-to-end
+    test can only detect as an eventual OOM.
+    """
+    for _ in range(10):
+        manager.free_all()
+        index = manager.alloc_kvcache_index(4)
+        assert index.numel() == 4
+
+    manager.free_all()
+    assert manager.can_use_mem_size == _BLOCKS
+    assert not manager.kv_mem_use_state.any()

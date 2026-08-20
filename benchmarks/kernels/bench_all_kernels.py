@@ -1,18 +1,14 @@
-import torch, triton, math, os, sys
+import os
+import sys
+
+import torch
+import triton
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
-from lite_llama.kernels.others.fused_linear import fused_linear
-from lite_llama.kernels.others.rmsnorm_v1 import rmsnorm
-from lite_llama.kernels.others.rmsnorm_layer import rmsnorm_fwd
-from lite_llama.kernels.others.layernorm import layernorm
-from lite_llama.kernels.others.rope_orig import rope as rope_triton
-from lite_llama.kernels.rope_emb import rope_emb_forward
+from fused_mlp_silu import FusedMLP, mlp_silu, torch_mlp_silu, triton_torch_mlp_silu
+
 from lite_llama.kernels.flashattention import flash_attention_v1
 from lite_llama.kernels.flashattentionv2 import flash_attention_v2
-from lite_llama.kernels.softmax_split import softmax_split
-
-from fused_mlp_silu import mlp_silu, torch_mlp_silu, triton_torch_mlp_silu, FusedMLP
-from softmax_native import softmax_native_fwd
 
 try:
     # This is https://github.com/NVIDIA/apex, NOT the apex on PyPi, so it
@@ -44,9 +40,7 @@ for fp8_inputs in [False, True]:
     configs.append(
         triton.testing.Benchmark(
             x_names=["M", "N", "K"],  # Argument names to use as an x-axis for the plot
-            x_vals=[
-                128 * i for i in range(2, 33)
-            ],  # Different possible values for `x_name`
+            x_vals=[128 * i for i in range(2, 33)],  # Different possible values for `x_name`
             line_arg="provider",  # Argument name whose value corresponds to a different line in the plot
             # Possible values for `line_arg`
             # Don't compare to cublas for fp8 cases as torch.matmul doesn't support fp8 at the moment.
@@ -127,15 +121,15 @@ for fp8_inputs in [False, True]:
 
 #     def y_fwd():
 #         if provider == "triton_rmsnorm":
-#             return rmsnorm(x, weight, eps=1e-6)  # noqa: F811, E704
+#             return rmsnorm(x, weight, eps=1e-6)
 
 #         if provider == "torch":
 #             rmsnorm_pytorch = RMSNorm(x_shape[-1]).to(device)
 #             return rmsnorm_pytorch(x)
-#             # return torch.nn.functional.rms_norm(x, w_shape, weight, bias, eps)  # noqa: F811, E704
+#             # return torch.nn.functional.rms_norm(x, w_shape, weight, bias, eps)
 
 #         if provider == "triton_rmsnorm_fwd":
-#             return rmsnorm_fwd(x, weight, 1e-6)  # noqa: F811, E704
+#             return rmsnorm_fwd(x, weight, 1e-6)
 
 #     # forward pass
 #     if mode == 'forward':
@@ -174,14 +168,14 @@ for fp8_inputs in [False, True]:
 #     def y_fwd():
 
 #         if provider == "triton":
-#             return layernorm(x, weight, bias, eps)  # noqa: F811, E704
+#             return layernorm(x, weight, bias, eps)
 
 #         if provider == "torch":
-#             return torch.nn.functional.layer_norm(x, w_shape, weight, bias, eps)  # noqa: F811, E704
+#             return torch.nn.functional.layer_norm(x, w_shape, weight, bias, eps)
 
 #         if provider == "apex":
 #             apex_layer_norm = (apex.normalization.FusedLayerNorm(w_shape).to(x.device).to(x.dtype))
-#             return apex_layer_norm(x)  # noqa: F811, E704
+#             return apex_layer_norm(x)
 
 #     # forward pass
 #     if mode == 'forward':
@@ -246,9 +240,7 @@ for fp8_inputs in [False, True]:
 @triton.testing.perf_report(  # 一个装饰器，用于测试和记录函数性能
     triton.testing.Benchmark(  # 定义了性能测试的不同维度，包括 x 轴参数、线条配置等
         x_names=["N"],  # argument names to use as an x-axis for the plot
-        x_vals=[
-            32 * i for i in range(1, 60, 8)
-        ],  # different possible values for `x_name`
+        x_vals=[32 * i for i in range(1, 60, 8)],  # different possible values for `x_name`
         line_arg="provider",  # argument name whose value corresponds to a different line in the plot
         line_vals=[
             "torch_mlp_silu",
@@ -270,9 +262,7 @@ for fp8_inputs in [False, True]:
         ],  # line styles
         ylabel="GB/s",  # label name for the y-axis
         plot_name="mlp-silu-performance",  # name for the plot. Used also as a file name for saving the plot.
-        args={
-            "M": 3584
-        },  # 设置除 x_names 和 line_arg 外的固定参数值，这里 M 表示批量大小。
+        args={"M": 3584},  # 设置除 x_names 和 line_arg 外的固定参数值，这里 M 表示批量大小。
     )
 )
 def bench_mlp_silu(M, N, provider, mode="forward", eps=1e-5, device="cuda"):
@@ -289,24 +279,9 @@ def bench_mlp_silu(M, N, provider, mode="forward", eps=1e-5, device="cuda"):
     hidden_size = 3584
     intermediate_size = 18944
     x = torch.randn(B, N, hidden_size, device="cuda", dtype=torch.float16)
-    w1 = (
-        torch.randn(
-            (intermediate_size, hidden_size), device="cuda", dtype=torch.float16
-        )
-        * 0.01
-    )
-    w2 = (
-        torch.randn(
-            (intermediate_size, hidden_size), device="cuda", dtype=torch.float16
-        )
-        * 0.01
-    )
-    w3 = (
-        torch.randn(
-            (hidden_size, intermediate_size), device="cuda", dtype=torch.float16
-        )
-        * 0.01
-    )
+    w1 = torch.randn((intermediate_size, hidden_size), device="cuda", dtype=torch.float16) * 0.01
+    w2 = torch.randn((intermediate_size, hidden_size), device="cuda", dtype=torch.float16) * 0.01
+    w3 = torch.randn((hidden_size, intermediate_size), device="cuda", dtype=torch.float16) * 0.01
 
     w1_t = w1.t().contiguous()
     w2_t = w2.t().contiguous()
@@ -383,9 +358,7 @@ for mode in ["fwd"]:
 
 
 @triton.testing.perf_report(configs)
-def bench_flash_attention(
-    BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider, device="cuda"
-):
+def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider, device="cuda"):
     assert mode in ["fwd"]
     dtype = torch.float16
     if "flashattentionv2" in provider:

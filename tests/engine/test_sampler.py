@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.engine.sampler import Sampler, SamplingParams, sample_top_p
+from lite_llama.engine.sampler import (
+    GeneratedSpan,
+    Sampler,
+    SamplingParams,
+    apply_repetition_penalty,
+    sample_top_p,
+)
 
 
 def test_sampling_params_rejects_negative_temperature():
@@ -56,3 +62,119 @@ def test_sampled_temperature_stays_within_vocab():
     assert tokens.shape == (4, 1)
     assert tokens.min() >= 0
     assert tokens.max() < 100
+
+
+# --------------------------------------------------------------------------- #
+# apply_repetition_penalty
+#
+# The vectorised implementation replaced a per-row ``torch.unique`` loop, so
+# these tests pin the semantics it has to reproduce: HuggingFace's
+# ``RepetitionPenaltyLogitsProcessor`` (divide positive logits, multiply
+# negative ones), applied only to *generated* tokens, idempotent for repeats,
+# and correct in the presence of padding.
+# --------------------------------------------------------------------------- #
+def _span(token_ids: list[list[int]], mask: list[list[bool]]) -> GeneratedSpan:
+    return GeneratedSpan(
+        token_ids=torch.tensor(token_ids), mask=torch.tensor(mask, dtype=torch.bool)
+    )
+
+
+def test_penalty_of_one_is_a_no_op():
+    logits = torch.tensor([[1.0, -2.0, 3.0]])
+    out = apply_repetition_penalty(logits.clone(), _span([[0, 2]], [[True, True]]), 1.0)
+    torch.testing.assert_close(out, logits)
+
+
+def test_positive_logits_are_divided_and_negative_multiplied():
+    """HF's asymmetric rule: both directions must move the logit *down*.
+
+    Dividing a negative logit would raise it, i.e. reward the repetition, which
+    is why the sign branch exists at all.
+    """
+    logits = torch.tensor([[4.0, -4.0, 1.0]])
+    out = apply_repetition_penalty(logits, _span([[0, 1]], [[True, True]]), 2.0)
+    assert out[0, 0].item() == pytest.approx(2.0)  # 4 / 2
+    assert out[0, 1].item() == pytest.approx(-8.0)  # -4 * 2
+    assert out[0, 2].item() == pytest.approx(1.0)  # untouched
+
+
+def test_only_listed_tokens_are_penalised():
+    logits = torch.tensor([[2.0, 2.0, 2.0, 2.0]])
+    out = apply_repetition_penalty(logits, _span([[1]], [[True]]), 2.0)
+    assert out[0].tolist() == pytest.approx([2.0, 1.0, 2.0, 2.0])
+
+
+def test_repeated_token_is_penalised_once():
+    """Idempotence: matching ``torch.unique`` semantics, not a per-occurrence loop.
+
+    Applying the penalty twice for a token seen twice would compound to 1.0 here
+    instead of 2.0 and would make the penalty depend on span length.
+    """
+    logits = torch.tensor([[4.0, 0.0]])
+    out = apply_repetition_penalty(logits, _span([[0, 0, 0]], [[True, True, True]]), 2.0)
+    assert out[0, 0].item() == pytest.approx(2.0)
+
+
+def test_padded_positions_are_ignored():
+    """Masked-out slots must not penalise the token id they happen to hold."""
+    logits = torch.tensor([[4.0, 4.0]])
+    out = apply_repetition_penalty(logits, _span([[0, 1]], [[True, False]]), 2.0)
+    assert out[0, 0].item() == pytest.approx(2.0)
+    assert out[0, 1].item() == pytest.approx(4.0)
+
+
+def test_padding_does_not_cancel_a_real_hit_of_the_same_id():
+    """A padded slot holding an id that also occurs for real must not clear it.
+
+    This is why padding is redirected to a scratch column rather than scattered
+    as ``False``: a plain scatter would overwrite the real ``True`` and silently
+    drop that token's penalty.
+    """
+    logits = torch.tensor([[4.0, 1.0]])
+    span = _span([[0, 0]], [[True, False]])  # same id, one real one padded
+    out = apply_repetition_penalty(logits, span, 2.0)
+    assert out[0, 0].item() == pytest.approx(2.0)
+
+
+def test_rows_are_penalised_independently():
+    """Sequence 0's history must not affect sequence 1's logits."""
+    logits = torch.tensor([[4.0, 4.0], [4.0, 4.0]])
+    span = _span([[0], [1]], [[True], [True]])
+    out = apply_repetition_penalty(logits, span, 2.0)
+    assert out[0].tolist() == pytest.approx([2.0, 4.0])
+    assert out[1].tolist() == pytest.approx([4.0, 2.0])
+
+
+def test_matches_a_naive_per_row_reference():
+    """Cross-check the vectorised path against the obvious loop it replaced."""
+    torch.manual_seed(0)
+    batch, vocab, span_len = 4, 50, 6
+    logits = torch.randn(batch, vocab)
+    ids = torch.randint(0, vocab, (batch, span_len))
+    mask = torch.rand(batch, span_len) > 0.3
+
+    expected = logits.clone()
+    for row in range(batch):
+        for tid in ids[row][mask[row]].unique():
+            value = expected[row, tid]
+            expected[row, tid] = value / 1.5 if value > 0 else value * 1.5
+
+    out = apply_repetition_penalty(logits.clone(), GeneratedSpan(token_ids=ids, mask=mask), 1.5)
+    torch.testing.assert_close(out, expected)
+
+
+def test_sampler_applies_penalty_before_choosing():
+    """Greedy must pick a different token once the leader is penalised.
+
+    End-to-end through ``Sampler.sample``: this is what verifies the penalty is
+    actually wired into the decision rather than computed and discarded.
+    """
+    sampler = Sampler()
+    logits = torch.tensor([[10.0, 9.0]])
+    params = SamplingParams(temperature=0.0, repetition_penalty=5.0)
+    span = GeneratedSpan(token_ids=torch.tensor([[0]]), mask=torch.tensor([[True]]))
+
+    # Without a span there is nothing to penalise: the raw leader wins.
+    assert sampler.sample(logits.clone(), params, generated=None).item() == 0
+    # 10 / 5 = 2 now loses to the untouched 9, so the choice must flip.
+    assert sampler.sample(logits.clone(), params, generated=span).item() == 1
