@@ -16,9 +16,6 @@ parameters with the real tensors mmap-loaded from disk.
 
 from __future__ import annotations
 
-import contextlib
-import time
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -34,36 +31,10 @@ from .cuda_graph import (
     estimate_capture_workspace,
 )
 from .executor_struct import AttentionInfo
+from .loader import DefaultModelLoader, ModelLoader
 from .mem_manager import KVCacheMemoryManager, MemoryProfiler
 
 logger = get_logger(__name__)
-
-
-@contextlib.contextmanager
-def _init_empty_parameters():
-    """Skeleton context: parameters allocate on the meta device, buffers do not.
-
-    Mirrors ``accelerate.init_empty_weights(include_buffers=False)``. Buffers must
-    keep real storage because non-persistent buffers such as
-    :attr:`~lite_llama.models.rotary_embedding.RotaryEmbedding.inv_freq` are absent
-    from checkpoints and therefore cannot be materialised by ``load_state_dict``.
-    """
-    original = nn.Module.register_parameter
-
-    def register_meta_parameter(module: nn.Module, name: str, param) -> None:
-        original(module, name, param)
-        if module._parameters.get(name) is None:
-            return
-        # Preserve the Parameter subclass and its attributes (e.g. `requires_grad`).
-        existing = module._parameters[name]
-        kwargs = existing.__dict__
-        module._parameters[name] = type(existing)(existing.to(torch.device("meta")), **kwargs)
-
-    try:
-        nn.Module.register_parameter = register_meta_parameter
-        yield
-    finally:
-        nn.Module.register_parameter = original
 
 
 def _text_config(config: Any) -> Any:
@@ -112,7 +83,7 @@ class ModelExecutor:
         )
         hidden_size = _text_field(text_config, "hidden_size")
         self.head_dim = getattr(text_config, "head_dim", None) or (hidden_size // num_heads)
-        vocab_size = _text_field(text_config, "vocab_size")
+        self.vocab_size = _text_field(text_config, "vocab_size")
         self.max_seq_len = getattr(text_config, "max_seq_len", None) or getattr(
             config, "max_seq_len", 2048
         )
@@ -132,7 +103,7 @@ class ModelExecutor:
                 device=device,
                 reserved_bytes=reserved,
             )
-            max_gpu_num_blocks = profiler.available_kv_blocks(model, vocab_size)
+            max_gpu_num_blocks = profiler.available_kv_blocks(model, self.vocab_size)
 
         self.kv_mem_manager = KVCacheMemoryManager(
             num_layers=self.num_layers,
@@ -166,6 +137,7 @@ class ModelExecutor:
         max_gpu_num_blocks: int | None = None,
         device: str = "cuda",
         use_cuda_graph: bool = False,
+        loader: ModelLoader | None = None,
     ) -> ModelExecutor:
         """Load config + weights and return a ready-to-run executor.
 
@@ -176,67 +148,13 @@ class ModelExecutor:
             device: Torch device string.
             use_cuda_graph: Reserve capture workspace when profiling the KV cache,
                 so a later :meth:`enable_cuda_graph` does not OOM.
+            loader: Weight-loading strategy; defaults to :class:`DefaultModelLoader`
+                (meta-device skeleton + mmap assign). Inject a fake in tests to
+                build an executor without real weights.
         """
         config, spec = ModelRegistry.load_config(checkpoints_dir, max_seq_len)
-        model = cls._load_weights(config, spec, checkpoints_dir, device)
+        model = (loader or DefaultModelLoader()).load_model(config, spec, checkpoints_dir, device)
         return cls(checkpoints_dir, config, spec, model, max_gpu_num_blocks, device, use_cuda_graph)
-
-    @staticmethod
-    def _load_weights(config: Any, spec: ModelSpec, checkpoints_dir: str, device: str) -> nn.Module:
-        """Instantiate on meta, then assign real fp16 weights from the checkpoint."""
-        start = time.time()
-
-        if device.startswith("cuda") and not torch.cuda.is_available():
-            # ``torch.load(..., map_location="cuda")`` would otherwise fail deep
-            # inside pickle with a message that says nothing about drivers.
-            raise RuntimeError(
-                "device='cuda' was requested but torch.cuda.is_available() is False. "
-                "This usually means the installed torch build targets a newer CUDA "
-                f"than the NVIDIA driver on this machine. Installed: torch=={torch.__version__} "
-                f"(cuda={torch.version.cuda}). Fix by installing a torch build that matches "
-                "the local driver, e.g. `uv pip install torch --index-url "
-                "https://download.pytorch.org/whl/cu124`."
-            )
-
-        # Build the skeleton without allocating parameter storage.
-        logger.info(
-            "Initializing model of type '%s' and moving it to device '%s'...",
-            spec.model_type,
-            device,
-        )
-        with _init_empty_parameters():
-            model = ModelRegistry.build_model(config, spec)
-        logger.info("The model has been initialized and moved to the device. '%s'", device)
-
-        checkpoints = sorted(Path(checkpoints_dir).glob("*.pth"))
-        if not checkpoints:
-            raise FileNotFoundError(
-                f"no *.pth checkpoint found in {checkpoints_dir}; run "
-                "`lite-llama-convert` on the HuggingFace weights first"
-            )
-        logger.info('Loading checkpoint "%s"', checkpoints[0])
-        state_dict = torch.load(checkpoints[0], mmap=True, weights_only=True, map_location=device)
-        # Models whose submodule layout depends on the installed transformers version
-        # (e.g. LLaVA's CLIP vision tower) normalise the checkpoint keys here.
-        remap = getattr(model, "remap_checkpoint_keys", None)
-        if callable(remap):
-            state_dict = remap(state_dict)
-        # assign=True swaps the meta params for the loaded tensors instead of copying.
-        model.load_state_dict(state_dict, strict=True, assign=True)
-
-        model.eval().to(device)
-        for name, param in model.named_parameters():
-            if param.is_meta:
-                raise RuntimeError(f"parameter {name!r} was not materialised from the checkpoint")
-        logger.info("Loaded state dict in %.2fs", time.time() - start)
-
-        # The converter stores fp16 weights; half() is a no-op that verifies it.
-        model.half()
-        for param in model.parameters():
-            if param.dtype != torch.float16:
-                raise RuntimeError(f"expected fp16 parameters after half(), got {param.dtype}")
-        logger.info("Converted model to half precision (FP16)")
-        return model
 
     # --------------------------------------------------------- kv allocation #
     def _init_req_tokens_table(

@@ -145,49 +145,43 @@ def _qwen3_moe_post_rename(state: dict[str, torch.Tensor], num_layers: int) -> N
         state[f"{prefix}.down_proj"] = torch.stack(downs)
 
 
+# Canonical HF text-model layout shared by llama / qwen2 / qwen3 / qwen3_moe:
+# ``model.{embed_tokens,norm}`` + ``lm_head`` at the top level, transformer blocks
+# under ``model.layers``. Only multimodal wrappers deviate from it.
+_TEXT_COMMON_RENAMES = {
+    "model.embed_tokens.weight": "embed_tokens.weight",
+    "model.norm.weight": "norm_weight",
+    "lm_head.weight": "lm_head_weight",
+}
+_TEXT_TIED_LM_HEAD = ("lm_head_weight", "embed_tokens.weight")
+
+
+def _text_arch_spec(
+    extra_layer: dict[str, str] | None = None,
+    passthrough_rename: tuple[tuple[str, str], ...] = (),
+    post_rename=None,
+) -> ArchSpec:
+    """Build the :class:`ArchSpec` for the canonical text layout (Factory).
+
+    ``extra_layer`` entries merge into (and may override) the standard per-layer
+    renames — e.g. the MoE router ``mlp.gate`` -> ``mlp.gate_weight``.
+    """
+    return ArchSpec(
+        common=dict(_TEXT_COMMON_RENAMES),
+        per_layer={**_text_layer_renames("model.layers", "layers"), **(extra_layer or {})},
+        passthrough_rename=passthrough_rename,
+        tied_lm_head=_TEXT_TIED_LM_HEAD,
+        post_rename=post_rename,
+    )
+
+
 ARCHITECTURES: dict[str, ArchSpec] = {
-    "llama": ArchSpec(
-        common={
-            "model.embed_tokens.weight": "embed_tokens.weight",
-            "model.norm.weight": "norm_weight",
-            "lm_head.weight": "lm_head_weight",
-        },
-        per_layer=_text_layer_renames("model.layers", "layers"),
-        tied_lm_head=("lm_head_weight", "embed_tokens.weight"),
-    ),
-    "qwen2": ArchSpec(
-        common={
-            "model.embed_tokens.weight": "embed_tokens.weight",
-            "model.norm.weight": "norm_weight",
-            "lm_head.weight": "lm_head_weight",
-        },
-        per_layer=_text_layer_renames("model.layers", "layers"),
-        tied_lm_head=("lm_head_weight", "embed_tokens.weight"),
-    ),
-    "qwen3": ArchSpec(
-        common={
-            "model.embed_tokens.weight": "embed_tokens.weight",
-            "model.norm.weight": "norm_weight",
-            "lm_head.weight": "lm_head_weight",
-        },
-        per_layer=_text_layer_renames("model.layers", "layers"),
-        tied_lm_head=("lm_head_weight", "embed_tokens.weight"),
-    ),
-    "qwen3_moe": ArchSpec(
-        common={
-            "model.embed_tokens.weight": "embed_tokens.weight",
-            "model.norm.weight": "norm_weight",
-            "lm_head.weight": "lm_head_weight",
-        },
-        per_layer={
-            **_text_layer_renames("model.layers", "layers"),
-            "model.layers.{i}.mlp.gate.weight": "layers.{i}.mlp.gate_weight",
-        },
-        # Expert matrices and every FP8 ``weight_scale_inv`` keep their name
-        # apart from stripping ``model.``; the post hook turns them into the
-        # dequantised, stacked layout SparseMoeBlock expects.
+    "llama": _text_arch_spec(),
+    "qwen2": _text_arch_spec(),
+    "qwen3": _text_arch_spec(),
+    "qwen3_moe": _text_arch_spec(
+        extra_layer={"model.layers.{i}.mlp.gate.weight": "layers.{i}.mlp.gate_weight"},
         passthrough_rename=(("model.", ""),),
-        tied_lm_head=("lm_head_weight", "embed_tokens.weight"),
         post_rename=_qwen3_moe_post_rename,
     ),
     "llava": ArchSpec(
