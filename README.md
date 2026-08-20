@@ -17,6 +17,7 @@ LLaVA / Qwen3-VL, refactored for a small, testable and readable codebase.
 | LLaMA     |  ✅  |                                | HF `LlamaForCausalLM` layout             |
 | Qwen2     |  ✅  |                                | q/k/v projections carry a bias           |
 | Qwen3     |  ✅  |                                | per-head RMSNorm on q/k, wide q_size     |
+| Qwen3-MoE |  ✅  |                                | top-k routed experts; FP8 block-quantised checkpoints are dequantised to fp16 at convert time |
 | LLaVA-1.5 |      |               ✅               | CLIP vision tower + MLP projector        |
 | Qwen3-VL  |      |               ✅               | mrope + DeepStack visual feature merge   |
 

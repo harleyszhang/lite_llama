@@ -4,7 +4,7 @@
 import torch, math
 import triton
 import triton.language as tl
-from torch.cuda.amp import custom_fwd
+from torch.amp import custom_fwd
 from typing import List, Optional, Union
 import torch.nn.functional as F
 
@@ -69,28 +69,19 @@ def flash_attention_v1_kernel(
     k_offs = (
         cur_batch_idx * k_batch_stride
         + cur_kv_head_idx * k_heads_stride
-        + (
-            n_range_offs[:, None] * k_seq_stride
-            + dhead_range_offs[None, :] * k_dim_stride
-        )
+        + (n_range_offs[:, None] * k_seq_stride + dhead_range_offs[None, :] * k_dim_stride)
     )
 
     v_offs = (
         cur_batch_idx * v_batch_stride
         + cur_kv_head_idx * v_heads_stride
-        + (
-            n_range_offs[:, None] * v_seq_stride
-            + dhead_range_offs[None, :] * v_dim_stride
-        )
+        + (n_range_offs[:, None] * v_seq_stride + dhead_range_offs[None, :] * v_dim_stride)
     )
 
     o_offs = (
         cur_batch_idx * out_batch_stride
         + cur_head_idx * out_heads_stride
-        + (
-            m_offs[:, None] * out_seq_stride
-            + dhead_range_offs[None, :] * out_dim_stride
-        )
+        + (m_offs[:, None] * out_seq_stride + dhead_range_offs[None, :] * out_dim_stride)
     )
 
     q_ptrs = q_ptr + q_offs
@@ -156,7 +147,7 @@ def flash_attention_v1_kernel(
 
 
 @torch.no_grad()
-@custom_fwd(cast_inputs=torch.float16)
+@custom_fwd(cast_inputs=torch.float16, device_type="cuda")
 def flash_attention_v1(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -259,15 +250,9 @@ def test_prefill_stage():
 
     # 生成固定的输入张量（使用固定随机种子以确保可重复性）
     torch.manual_seed(0)
-    q = torch.randn(
-        batch_size, num_heads, seq_length, head_dim, device="cuda", dtype=torch.float32
-    )
-    k = torch.randn(
-        batch_size, num_heads, seq_length, head_dim, device="cuda", dtype=torch.float32
-    )
-    v = torch.randn(
-        batch_size, num_heads, seq_length, head_dim, device="cuda", dtype=torch.float32
-    )
+    q = torch.randn(batch_size, num_heads, seq_length, head_dim, device="cuda", dtype=torch.float32)
+    k = torch.randn(batch_size, num_heads, seq_length, head_dim, device="cuda", dtype=torch.float32)
+    v = torch.randn(batch_size, num_heads, seq_length, head_dim, device="cuda", dtype=torch.float32)
 
     # 计算 Softmax 缩放因子
     sm_scale = 1.0 / math.sqrt(head_dim)  # 1 / sqrt(d_k) * 1/log(2)
@@ -278,18 +263,13 @@ def test_prefill_stage():
     # 使用标准 PyTorch 实现计算注意力输出
     # 创建下三角矩阵
     mask = (
-        torch.tril(torch.ones((seq_length, seq_length)))
-        .unsqueeze(0)
-        .unsqueeze(0)
-        .type_as(q)
+        torch.tril(torch.ones((seq_length, seq_length))).unsqueeze(0).unsqueeze(0).type_as(q)
     )  # (1, 1, seq, seq)
     standard_o = standard_attention(q, k, v, sm_scale, mask)
 
     # 比较 Triton 内核输出与标准实现的输出
     if torch.allclose(out, standard_o, atol=1e-2):
-        print(
-            "Prefill Stage Test Passed: Triton output matches PyTorch standard implementation."
-        )
+        print("Prefill Stage Test Passed: Triton output matches PyTorch standard implementation.")
     else:
         max_diff = (out - standard_o).abs().max()
         print(f"Prefill Stage Test Failed: Maximum difference {max_diff}")
@@ -359,9 +339,7 @@ def test_decode_stage():
         sm_scale_extended = 1.0 / math.sqrt(head_dim)
 
         # 计算 Triton 内核输出
-        triton_new_token_q = flash_attention_v1(
-            new_token_q, triton_k_extended, triton_v_extended
-        )
+        triton_new_token_q = flash_attention_v1(new_token_q, triton_k_extended, triton_v_extended)
 
         # 使用标准 PyTorch 实现计算扩展后的注意力输出
         torch_new_token_q = standard_attention(
@@ -375,9 +353,7 @@ def test_decode_stage():
             )
         else:
             max_diff = (triton_new_token_q - torch_new_token_q).abs().max()
-            print(
-                f"Decode Stage Step {step} Test Failed: Maximum difference {max_diff}"
-            )
+            print(f"Decode Stage Step {step} Test Failed: Maximum difference {max_diff}")
             # 可选择打印更多信息进行调试
             break  # 根据需要是否停止测试
 

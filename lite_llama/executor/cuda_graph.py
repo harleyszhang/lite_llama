@@ -41,11 +41,27 @@ import torch.nn as nn
 
 from .executor_struct import AttentionInfo
 
-# Default buckets balance capture memory (each graph pins ~100 MB of workspace)
-# against replay coverage.  A prompt of a few hundred tokens fits in the 512
-# bucket; long contexts fall through to eager once past the largest bucket.
+# Default buckets balance capture memory (each graph pins tens of MB of
+# workspace) against replay coverage.  A prompt of a few hundred tokens fits
+# in the 512 bucket; long contexts fall through to eager once past the
+# largest bucket.
 DEFAULT_BATCH_SIZES: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 128)
 DEFAULT_SEQ_LEN_BUCKETS: tuple[int, ...] = (256, 512, 1024, 2048, 4096)
+
+# Measured on a 0.5B fp16 model: ~38 MB per captured graph. Reserve 64 MB per
+# graph so the KV-cache profiler leaves headroom for capture; the OOM fallback
+# in ``ModelExecutor.enable_cuda_graph`` covers models that exceed the estimate.
+WORKSPACE_BYTES_PER_GRAPH: int = 64 * 1024**2
+
+
+def estimate_capture_workspace(max_seq_len: int) -> int:
+    """Upper-bound bytes the default capture grid will pin on this model.
+
+    The KV profiler runs before any request index bound is known, so the
+    estimate conservatively assumes every default batch size survives clamping.
+    """
+    n_buckets = sum(1 for b in DEFAULT_SEQ_LEN_BUCKETS if b <= max_seq_len)
+    return len(DEFAULT_BATCH_SIZES) * max(n_buckets, 1) * WORKSPACE_BYTES_PER_GRAPH
 
 
 @dataclass(frozen=True)
