@@ -5,7 +5,7 @@ Prints a small table comparing decode throughput. The comparison isolates the
 decode phase (where graphs help) by using a short prompt and a longer generation.
 
 Usage:
-    python scripts/bench_cuda_graph.py --model-dir my_weight/Qwen2.5-0.5B
+    python benchmarks/bench_cuda_graph.py --model-dir my_weight/Qwen2.5-0.5B
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ import argparse
 import time
 
 import torch
+
+from common import LiteBackend
 
 from lite_llama import SamplingParams, TextGenerator
 
@@ -44,22 +46,17 @@ def main() -> int:
     prompt = "The capital of France is"
     params = SamplingParams(temperature=0.0, max_gen_len=args.max_gen_len)
 
-    eager = TextGenerator(
-        checkpoints_dir=args.model_dir, max_seq_len=args.max_seq_len, device="cuda"
-    )
+    eager_be = LiteBackend(args.model_dir, use_cuda_graph=False, max_seq_len=args.max_seq_len, device="cuda")
+    eager = eager_be.generator
     eager_out = eager.generate([prompt], params)[0]
     eager_dt = _run(eager, prompt, params, args.iters)
-    del eager
-    torch.cuda.empty_cache()
+    eager_be.close()
 
-    graph = TextGenerator(
-        checkpoints_dir=args.model_dir,
-        max_seq_len=args.max_seq_len,
-        device="cuda",
-        use_cuda_graph=True,
-    )
+    graph_be = LiteBackend(args.model_dir, use_cuda_graph=True, max_seq_len=args.max_seq_len, device="cuda")
+    graph = graph_be.generator
     graph_out = graph.generate([prompt], params)[0]
     graph_dt = _run(graph, prompt, params, args.iters)
+    graph_be.close()
 
     tokens = args.max_gen_len
     print("\n" + "=" * 68)
