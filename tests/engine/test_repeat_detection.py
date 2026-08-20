@@ -6,8 +6,7 @@ import json
 from pathlib import Path
 
 from lite_llama.cli import _infer_prompter_type, _is_instruct_checkpoint
-from lite_llama.engine.llm_engine import LLMEngine, detect_repetition
-
+from lite_llama.engine.stop_criteria import detect_repetition, load_stop_token_ids
 
 # --------------------------------------------------------------------- #
 # detect_repetition
@@ -54,7 +53,7 @@ def test_custom_window_and_reps():
 
 
 # --------------------------------------------------------------------- #
-# _load_stop_token_ids
+# load_stop_token_ids
 # --------------------------------------------------------------------- #
 
 
@@ -66,25 +65,25 @@ class _FakeTokenizer:
 def test_stop_ids_merge_tokenizer_and_generation_config(tmp_path: Path):
     gen_cfg = tmp_path / "generation_config.json"
     gen_cfg.write_text(json.dumps({"eos_token_id": [151645, 151643]}))
-    ids = LLMEngine._load_stop_token_ids(str(tmp_path), _FakeTokenizer(151643))
+    ids = load_stop_token_ids(str(tmp_path), _FakeTokenizer(151643))
     # The list adds <|im_end|> (151645) on top of the tokenizer's <|endoftext|>.
     assert ids == {151643, 151645}
 
 
 def test_stop_ids_fall_back_to_tokenizer_without_generation_config(tmp_path: Path):
-    ids = LLMEngine._load_stop_token_ids(str(tmp_path), _FakeTokenizer(2))
+    ids = load_stop_token_ids(str(tmp_path), _FakeTokenizer(2))
     assert ids == {2}
 
 
 def test_stop_ids_survive_broken_generation_config(tmp_path: Path):
     (tmp_path / "generation_config.json").write_text("{not json")
-    ids = LLMEngine._load_stop_token_ids(str(tmp_path), _FakeTokenizer(2))
+    ids = load_stop_token_ids(str(tmp_path), _FakeTokenizer(2))
     assert ids == {2}
 
 
 def test_stop_ids_handle_scalar_eos_in_generation_config(tmp_path: Path):
     (tmp_path / "generation_config.json").write_text(json.dumps({"eos_token_id": 13}))
-    ids = LLMEngine._load_stop_token_ids(str(tmp_path), _FakeTokenizer(None))
+    ids = load_stop_token_ids(str(tmp_path), _FakeTokenizer(None))
     assert ids == {13}
 
 
