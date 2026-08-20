@@ -39,8 +39,13 @@ jobs:
 
       # GitHub-hosted runners have no GPU, so the Triton kernel and end-to-end
       # tests are deselected here; they run in the self-hosted `gpu-tests` job.
+      # The floor is set just under the current CPU-tier number: it exists to
+      # catch a tier going dark (as the weights tier silently did), not to chase
+      # a percentage.
       - name: Run CPU test subset
-        run: uv run pytest -m "not gpu and not weights" --cov=lite_llama --cov-report=term-missing
+        run: >
+          uv run pytest -m "not gpu and not weights"
+          --cov=lite_llama --cov-report=term-missing --cov-fail-under=48
 
   gpu-tests:
     name: GPU tests
@@ -62,5 +67,8 @@ jobs:
       - name: Show GPU
         run: nvidia-smi
 
+      # No marker filter: `gpu` needs the CUDA this runner has, and `weights`
+      # auto-skips (with a reason) when the runner has no converted checkpoint.
+      # Mount one at my_weight/ and the end-to-end plus golden tiers run too.
       - name: Run GPU tests
-        run: uv run pytest -m "not weights"
+        run: uv run pytest

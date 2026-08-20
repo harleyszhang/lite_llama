@@ -1,21 +1,20 @@
 """Tests for the vLLM-style :class:`LLM` entry point.
 
-Covers the contract that ``examples/basic.py`` relies on:
+Covers the contract ``examples/basic.py`` relies on:
 
-* ``LLM(model=...)`` builds a working engine (and disables CUDA graphs for
+* ``LLM(model=...)`` builds a working engine (disabling CUDA graphs for
   multimodal checkpoints automatically),
-* ``generate`` accepts a single string or a batch and returns one
-  :class:`RequestOutput` per prompt with prompt echo and a finish reason,
-* passing ``images`` to a text-only model is a clear error,
-* the legacy ``TextGenerator`` wrapper keeps its old return type.
+* ``generate`` takes a single string or a batch and returns one
+  :class:`RequestOutput` per prompt, with the prompt echoed and a finish reason,
+* passing ``images`` to a text-only model is a clear error rather than a crash
+  deep in the vision path,
+* the legacy ``TextGenerator`` wrapper keeps its old ``list[str]`` return type.
 
-Marked ``gpu``+``weights``; set ``LITE_LLAMA_TEST_MODEL_DIR`` to override the
-checkpoint location.
+The checkpoint comes from the ``model_dir`` fixture in ``tests/conftest.py``.
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -25,23 +24,9 @@ from lite_llama import LLM, RequestOutput, SamplingParams, TextGenerator
 
 pytestmark = [pytest.mark.gpu, pytest.mark.weights]
 
-_DEFAULT_MODEL_DIR = "my_weight/Qwen2.5-0.5B"
+# Small KV reservation so several generators can coexist within one GPU during
+# the module's lifetime.
 _KV_TOKENS = 2048
-
-def _resolve_model_dir() -> Path:
-    candidate = Path(os.environ.get("LITE_LLAMA_TEST_MODEL_DIR", _DEFAULT_MODEL_DIR))
-    if not candidate.is_absolute():
-        candidate = Path(__file__).resolve().parents[1] / candidate
-    if not (candidate / "config.json").is_file() or not any(candidate.glob("*.pth")):
-        pytest.skip(f"no lite_llama-format checkpoint at {candidate}")
-    return candidate
-
-
-@pytest.fixture(scope="module")
-def model_dir() -> Path:
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required")
-    return _resolve_model_dir()
 
 
 @pytest.fixture(scope="module")
@@ -64,9 +49,11 @@ def test_generate_batch_returns_request_outputs(llm: LLM):
 
 
 def test_generate_accepts_a_single_string(llm: LLM):
-    outputs = llm.generate("The capital of France is", SamplingParams(temperature=0.0, max_gen_len=4))
+    """A bare string must not be iterated into one request per character."""
+    prompt = "The capital of France is"
+    outputs = llm.generate(prompt, SamplingParams(temperature=0.0, max_gen_len=4))
     assert len(outputs) == 1
-    assert outputs[0].prompt == "The capital of France is"
+    assert outputs[0].prompt == prompt
 
 
 def test_generate_is_deterministic_greedy(llm: LLM):
@@ -76,12 +63,22 @@ def test_generate_is_deterministic_greedy(llm: LLM):
     assert a == b
 
 
+def test_finish_reason_is_length_when_capped(llm: LLM):
+    """A 4-token cap on a continuation prompt stops on length, not EOS."""
+    out = llm.generate(
+        ["Count upward: one two three"], SamplingParams(temperature=0.0, max_gen_len=4)
+    )[0]
+    assert out.outputs[0].finish_reason == "length"
+
+
 def test_images_rejected_on_text_model(llm: LLM):
     with pytest.raises(ValueError, match="text-only"):
         llm.generate(["hi"], SamplingParams(), images=[object()])  # type: ignore[list-item]
 
 
-def test_parallel_size_placeholders(llm: LLM, model_dir: Path):
+def test_parallel_size_placeholders(model_dir: Path):
+    """TP/DP are declared but unimplemented; they must fail loudly, not silently
+    fall back to single-GPU and report bogus scaling."""
     with pytest.raises(NotImplementedError, match="tensor_parallel"):
         LLM(model=str(model_dir), tensor_parallel_size=2)
     with pytest.raises(NotImplementedError, match="data_parallel"):
@@ -89,11 +86,16 @@ def test_parallel_size_placeholders(llm: LLM, model_dir: Path):
 
 
 def test_legacy_text_generator_delegates(model_dir: Path):
-    """TextGenerator keeps its old ``list[str]`` return shape over the new LLM."""
+    """TextGenerator keeps its ``list[str]`` shape on top of the new LLM."""
     gen = TextGenerator(
-        checkpoints_dir=str(model_dir), max_seq_len=512, max_gpu_num_blocks=_KV_TOKENS, device="cuda"
+        checkpoints_dir=str(model_dir),
+        max_seq_len=512,
+        max_gpu_num_blocks=_KV_TOKENS,
+        device="cuda",
     )
     out = gen.generate(["The capital of France is"], SamplingParams(temperature=0.0, max_gen_len=8))
-    assert isinstance(out, list) and isinstance(out[0], str) and out[0]
+    assert isinstance(out, list)
+    assert isinstance(out[0], str)
+    assert out[0]
     del gen  # release its KV reservation for later tests
     torch.cuda.empty_cache()
