@@ -16,6 +16,7 @@ benchmarks/ 下的脚本测量同一组 prompts,指标口径对齐 vLLM/TensorRT
 
 from __future__ import annotations
 
+import itertools
 import statistics
 import time
 from dataclasses import asdict, dataclass
@@ -123,7 +124,7 @@ class LiteBackend:
         total = time.perf_counter() - t_start
 
         steps = len(step_ends)
-        deltas = [b - a for a, b in zip(step_ends, step_ends[1:])]
+        deltas = [b - a for a, b in itertools.pairwise(step_ends)]
         return BenchResult(
             ttft_ms=(ttft or 0.0) * 1000,
             tpot_ms=(statistics.mean(deltas) * 1000) if deltas else 0.0,
@@ -136,7 +137,12 @@ class LiteBackend:
         )
 
     def close(self) -> None:
+        # TextGenerator 内部引擎/执行器/KV 管理器存在互引用,显式 gc 才能
+        # 真正释放显存;否则同进程再建第二个后端时 KV profiling 会拿到 0 tokens。
+        import gc
+
         del self._gen
+        gc.collect()
         torch.cuda.empty_cache()
 
 
@@ -176,8 +182,11 @@ class HFBackend:
         # Warm up cudnn/autotune so the measured run is steady state.
         for _ in range(2):
             self.model.generate(
-                **inputs, min_new_tokens=8, max_new_tokens=8,
-                do_sample=False, pad_token_id=self.tokenizer.pad_token_id,
+                **inputs,
+                min_new_tokens=8,
+                max_new_tokens=8,
+                do_sample=False,
+                pad_token_id=self.tokenizer.pad_token_id,
             )
 
         # TTFT: one-token run, prefill + first sampled token.

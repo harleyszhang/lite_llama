@@ -14,7 +14,6 @@ import argparse
 import time
 
 import torch
-
 from common import LiteBackend
 
 from lite_llama import SamplingParams, TextGenerator
@@ -46,13 +45,29 @@ def main() -> int:
     prompt = "The capital of France is"
     params = SamplingParams(temperature=0.0, max_gen_len=args.max_gen_len)
 
-    eager_be = LiteBackend(args.model_dir, use_cuda_graph=False, max_seq_len=args.max_seq_len, device="cuda")
+    # 同进程先后建两个后端:必须显式限制 KV blocks。自动预算会吃到 90% 显存,
+    # 且第一个生成器销毁后显存不被引擎回收,第二个生成器会拿不到 KV 空间。
+    # 单 prompt + max_seq_len 的场景 8192 个 token block 绰绰有余。
+    kv_blocks = 8192
+    eager_be = LiteBackend(
+        args.model_dir,
+        use_cuda_graph=False,
+        max_seq_len=args.max_seq_len,
+        max_gpu_num_blocks=kv_blocks,
+        device="cuda",
+    )
     eager = eager_be.generator
     eager_out = eager.generate([prompt], params)[0]
     eager_dt = _run(eager, prompt, params, args.iters)
     eager_be.close()
 
-    graph_be = LiteBackend(args.model_dir, use_cuda_graph=True, max_seq_len=args.max_seq_len, device="cuda")
+    graph_be = LiteBackend(
+        args.model_dir,
+        use_cuda_graph=True,
+        max_seq_len=args.max_seq_len,
+        max_gpu_num_blocks=kv_blocks,
+        device="cuda",
+    )
     graph = graph_be.generator
     graph_out = graph.generate([prompt], params)[0]
     graph_dt = _run(graph, prompt, params, args.iters)
