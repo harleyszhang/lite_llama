@@ -41,22 +41,6 @@ class ColoredFormatter(logging.Formatter):
         return f"{color}{message}{self.RESET}"
 
 
-class SmartLogger:
-    """Deprecated pass-through kept for API compatibility.
-
-    Wrapping the logger used to swallow the caller's file/line — ``%(filename)s``
-    and ``%(lineno)d`` resolved to this module instead of the code that logged.
-    The methods below are kept so any external reference still works, but they
-    delegate straight to the underlying logger.
-    """
-
-    def __init__(self, logger):
-        self._logger = logger
-
-    def __getattr__(self, name):
-        return getattr(self._logger, name)
-
-
 def get_logger(name):
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)

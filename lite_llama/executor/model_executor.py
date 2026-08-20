@@ -31,10 +31,10 @@ from .cuda_graph import (
     DEFAULT_BATCH_SIZES,
     DEFAULT_SEQ_LEN_BUCKETS,
     CUDAGraphManager,
+    estimate_capture_workspace,
 )
 from .executor_struct import AttentionInfo
 from .mem_manager import KVCacheMemoryManager, MemoryProfiler
-from .req_tokens_manager import ReqTokensManager
 
 logger = get_logger(__name__)
 
@@ -96,6 +96,7 @@ class ModelExecutor:
         model: nn.Module,
         max_gpu_num_blocks: int | None = None,
         device: str = "cuda",
+        use_cuda_graph: bool = False,
     ) -> None:
         self.checkpoints_dir = checkpoints_dir
         self.config = config
@@ -117,11 +118,19 @@ class ModelExecutor:
         )
 
         if max_gpu_num_blocks is None:
+            # When decode graphs will be captured later, withhold their workspace
+            # from the KV budget — capture OOMs once the cache fills the card.
+            reserved = (
+                estimate_capture_workspace(self.max_seq_len)
+                if use_cuda_graph and not spec.is_multimodal
+                else 0
+            )
             profiler = MemoryProfiler(
                 num_layers=self.num_layers,
                 num_kv_heads=self.num_kv_heads,
                 head_dim=self.head_dim,
                 device=device,
+                reserved_bytes=reserved,
             )
             max_gpu_num_blocks = profiler.available_kv_blocks(model, vocab_size)
 
@@ -133,11 +142,16 @@ class ModelExecutor:
             device=device,
         )
         self.max_request_num = max(1, max_gpu_num_blocks // self.max_seq_len)
-        self.req_tokens_manager = ReqTokensManager(self.max_request_num, self.max_seq_len)
+        # Request -> KV-cache-row mapping; row i holds the cache rows of the
+        # request with ``b_req_idx == i``. Written by ``_init_req_tokens_table``
+        # at prefill and extended by ``update_kv_index`` at every decode step.
+        self.b_req_tokens_table = torch.zeros(
+            (self.max_request_num, self.max_seq_len), dtype=torch.int32, device=device
+        )
 
         self.atten_info = AttentionInfo()
         self.atten_info.kv_buffer = self.kv_mem_manager.gpu_kv_buffer
-        self.atten_info.b_req_tokens_table = self.req_tokens_manager.b_req_tokens_table
+        self.atten_info.b_req_tokens_table = self.b_req_tokens_table
 
         # Populated by :meth:`enable_cuda_graph`; when non-None, :meth:`forward`
         # dispatches eligible decode steps to a captured graph.
@@ -151,6 +165,7 @@ class ModelExecutor:
         max_seq_len: int,
         max_gpu_num_blocks: int | None = None,
         device: str = "cuda",
+        use_cuda_graph: bool = False,
     ) -> ModelExecutor:
         """Load config + weights and return a ready-to-run executor.
 
@@ -159,10 +174,12 @@ class ModelExecutor:
             max_seq_len: Upper bound on sequence length; also bounds the KV cache.
             max_gpu_num_blocks: Manual KV-cache size in tokens; profiled when ``None``.
             device: Torch device string.
+            use_cuda_graph: Reserve capture workspace when profiling the KV cache,
+                so a later :meth:`enable_cuda_graph` does not OOM.
         """
         config, spec = ModelRegistry.load_config(checkpoints_dir, max_seq_len)
         model = cls._load_weights(config, spec, checkpoints_dir, device)
-        return cls(checkpoints_dir, config, spec, model, max_gpu_num_blocks, device)
+        return cls(checkpoints_dir, config, spec, model, max_gpu_num_blocks, device, use_cuda_graph)
 
     @staticmethod
     def _load_weights(config: Any, spec: ModelSpec, checkpoints_dir: str, device: str) -> nn.Module:
@@ -217,15 +234,23 @@ class ModelExecutor:
         model.half()
         for param in model.parameters():
             if param.dtype != torch.float16:
-                raise RuntimeError(
-                    f"expected fp16 parameters after half(), got {param.dtype}"
-                )
+                raise RuntimeError(f"expected fp16 parameters after half(), got {param.dtype}")
         logger.info("Converted model to half precision (FP16)")
         return model
 
     # --------------------------------------------------------- kv allocation #
-    def _init_req_tokens_table(self, b_req_idx, b_seq_len, alloc_index) -> torch.Tensor:
+    def _init_req_tokens_table(
+        self, b_req_idx, b_seq_len, alloc_index, max_prompt_len
+    ) -> torch.Tensor:
         """Record which cache rows each prefill sequence occupies.
+
+        The model flattens the padded ``[batch, max_prompt_len]`` token grid
+        row-major, so sequence ``i``'s ``j``-th token lives at flattened index
+        ``i * max_prompt_len + j`` and its K/V land in ``alloc_index`` at the
+        same offset. The table must use that same padded layout — a packed
+        (sum-of-lengths) layout would point sequence ``i`` at rows written by
+        the tail of sequence ``i - 1``, silently corrupting every sequence
+        after the first in a mixed-length batch.
 
         Returns:
             ``b_start_loc``: start offset of each sequence in the flattened batch.
@@ -234,13 +259,12 @@ class ModelExecutor:
         b_req_idx_list = b_req_idx.cpu().tolist()
         b_start_loc = torch.zeros(len(b_seq_len_list), dtype=torch.int32, device=self.device)
 
-        start = 0
         for i, seq_len in enumerate(b_seq_len_list):
+            start = i * max_prompt_len
             b_start_loc[i] = start
             self.atten_info.b_req_tokens_table[b_req_idx_list[i], :seq_len] = alloc_index[
                 start : start + seq_len
             ]
-            start += seq_len
         return b_start_loc
 
     def prefill_alloc_kv_cache(self, max_prompt_len, actual_prompt_lens, b_req_idx) -> torch.Tensor:
@@ -252,13 +276,13 @@ class ModelExecutor:
         """
         batch_size = len(actual_prompt_lens)
         self.atten_info.b_req_idx = b_req_idx
-        self.atten_info.cur_select_index, _ = self.kv_mem_manager.alloc_kvcache_index(
+        self.atten_info.cur_select_index = self.kv_mem_manager.alloc_kvcache_index(
             max_prompt_len * batch_size
         )
         self.atten_info.b_seq_len = actual_prompt_lens
         self.atten_info.max_actual_seq_len = max_prompt_len
         self.atten_info.b_start_loc = self._init_req_tokens_table(
-            b_req_idx, actual_prompt_lens, self.atten_info.cur_select_index
+            b_req_idx, actual_prompt_lens, self.atten_info.cur_select_index, max_prompt_len
         )
         return self.atten_info.cur_select_index
 
@@ -271,7 +295,7 @@ class ModelExecutor:
         silently produced non-deterministic completions once a second request was
         served on the same executor.
         """
-        self.atten_info.cur_select_index, _ = self.kv_mem_manager.alloc_kvcache_index(batch_size)
+        self.atten_info.cur_select_index = self.kv_mem_manager.alloc_kvcache_index(batch_size)
         self.atten_info.b_seq_len += 1
         self.atten_info.max_actual_seq_len += 1
         update_kv_index(
@@ -308,6 +332,16 @@ class ModelExecutor:
             )
             return
 
+        # b_req_tokens_table only has max_request_num rows; capturing a larger
+        # batch would index past the table and corrupt the CUDA context.
+        batch_sizes = tuple(b for b in batch_sizes if b <= self.max_request_num)
+        if not batch_sizes:
+            logger.warning(
+                "max_request_num=%d is smaller than every requested batch size; skipping capture",
+                self.max_request_num,
+            )
+            return
+
         logger.info(
             "Capturing CUDA graphs for batch_sizes=%s seq_len_buckets=%s",
             batch_sizes,
@@ -316,12 +350,18 @@ class ModelExecutor:
         manager = CUDAGraphManager(
             self.model,
             kv_buffer=self.kv_mem_manager.gpu_kv_buffer,
-            b_req_tokens_table=self.req_tokens_manager.b_req_tokens_table,
+            b_req_tokens_table=self.b_req_tokens_table,
             batch_sizes=batch_sizes,
             seq_len_buckets=seq_len_buckets,
             device=self.device,
         )
-        manager.capture_all()
+        try:
+            manager.capture_all()
+        except torch.cuda.OutOfMemoryError:
+            # A failed capture may leave a half-open graph; dropping the manager
+            # is safe because replay state is only installed on success.
+            logger.warning("CUDA graph capture ran out of memory; falling back to eager decode")
+            return
         self._graph_manager = manager
 
     def forward(

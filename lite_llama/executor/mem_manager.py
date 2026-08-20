@@ -29,6 +29,8 @@ class MemoryProfiler:
         gpu_memory_utilization: Fraction of total GPU memory the cache may occupy.
         dtype: KV-cache dtype.
         device: Torch device string.
+        reserved_bytes: Extra budget to withhold from the cache (e.g. CUDA graph
+            capture workspace), so a later allocation does not OOM.
     """
 
     def __init__(
@@ -39,6 +41,7 @@ class MemoryProfiler:
         gpu_memory_utilization: float = 0.9,
         dtype: torch.dtype = torch.float16,
         device: str = "cuda",
+        reserved_bytes: int = 0,
     ) -> None:
         self.num_layers = num_layers
         self.num_kv_heads = num_kv_heads
@@ -46,6 +49,7 @@ class MemoryProfiler:
         self.gpu_memory_utilization = gpu_memory_utilization
         self.dtype = dtype
         self.device = device
+        self.reserved_bytes = reserved_bytes
 
     def _kv_bytes_per_token(self) -> int:
         # Both K and V for every layer: factor of 2 for K+V.
@@ -103,7 +107,7 @@ class MemoryProfiler:
         if non_torch > 0:
             peak_memory += non_torch
 
-        budget = total_gpu_memory * self.gpu_memory_utilization - peak_memory
+        budget = total_gpu_memory * self.gpu_memory_utilization - peak_memory - self.reserved_bytes
         num_blocks = max(int(budget // self._kv_bytes_per_token()), 0)
 
         logger.info(
@@ -154,9 +158,11 @@ class KVCacheMemoryManager:
 
         # 定义 kv 内存位置索引和内存使用状态变量
         self.kv_mem_pos_indexs = torch.arange(
-            0, self.max_num_tokens, dtype=torch.long, device="cuda"
+            0, self.max_num_tokens, dtype=torch.long, device=self.device
         )
-        self.kv_mem_use_state = torch.zeros(self.max_num_tokens, dtype=torch.int32, device="cuda")
+        self.kv_mem_use_state = torch.zeros(
+            self.max_num_tokens, dtype=torch.int32, device=self.device
+        )
 
         # Initialize the gpu_kv_buffer
         self.init_kv_buffers(self.max_num_tokens, head_dim, num_kv_heads, num_layers, dtype, device)
@@ -169,7 +175,7 @@ class KVCacheMemoryManager:
         num_layers,
         dtype,
         device: str = "cuda",
-    ) -> list[torch.Tensor]:
+    ) -> None:
         # kv cache shape: config.max_batch_size, config.max_seq_len, self.num_kv_heads, self.head_dim
         # max_num_tokens = max_num_blocks * self.block_size
         # TODO 修改 kv buffer 形状支持 PagedAttention
@@ -234,19 +240,13 @@ class KVCacheMemoryManager:
 
     @torch.no_grad()
     def alloc_kvcache_index(self, need_size):
+        """Reserve ``need_size`` cache rows, preferring a contiguous run."""
         alloc_mem = self.alloc_contiguous_kvcache(need_size)
         if alloc_mem is not None:
             select_index, _start_index, _end_index = alloc_mem
-            kv_cache = None
         else:
             select_index = self.alloc_kvcache(need_size)
-            kv_cache = torch.empty(
-                (need_size, self.num_kv_heads, self.head_dim),
-                dtype=self.dtype,
-                device=self.device,
-            )
-
-        return select_index.to(torch.int32), kv_cache
+        return select_index.to(torch.int32)
 
     # 增加引用计数
     @torch.no_grad()
@@ -271,10 +271,6 @@ class KVCacheMemoryManager:
         all_tokens = len(state)
         self.can_use_mem_size += all_tokens - used_tokens
         return
-
-    # 释放键值缓存缓冲区
-    def _free_buffers(self):
-        self.gpu_kv_buffer = None
 
     # 释放指定的kv cache 内存块索引
     @torch.no_grad()

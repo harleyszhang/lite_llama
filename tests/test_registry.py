@@ -16,6 +16,7 @@ def test_supported_types_covers_every_supported_model():
         "llama",
         "qwen2",
         "qwen3",
+        "qwen3_moe",
         "llava",
         "qwen3_vl",
     }

@@ -6,7 +6,7 @@
 import torch
 import triton
 import triton.language as tl
-from torch.cuda.amp import custom_fwd
+from torch.amp import custom_fwd
 
 configs_tma = [
     triton.Config({"BLOCK_M_SIZE": BM, "BLOCK_N_SIZE": BN}, num_stages=stages, num_warps=warps)
@@ -163,7 +163,7 @@ def flash_attention2_nopad_kernel(
 # Flashattention NoPad 实现（Triton 内核）
 # --------------------------------------
 @torch.no_grad()
-@custom_fwd(cast_inputs=torch.float16)
+@custom_fwd(cast_inputs=torch.float16, device_type="cuda")
 def flash_attention2_no_pad(
     q: torch.Tensor,
     k: torch.Tensor,

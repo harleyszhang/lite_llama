@@ -81,6 +81,7 @@ class LLMEngine:
             max_seq_len=max_seq_len,
             max_gpu_num_blocks=max_gpu_num_blocks,
             device=device,
+            use_cuda_graph=use_cuda_graph,
         )
         if use_cuda_graph:
             self.executor.enable_cuda_graph()
@@ -156,6 +157,10 @@ class LLMEngine:
         Yields:
             A list (one entry per sequence) of the text produced *this* step.
         """
+        # Each generate() call is an independent batch: reset the paged-KV
+        # allocator so a long-lived engine does not leak cache rows.
+        self.executor.kv_mem_manager.free_all()
+
         batch_size = len(prompt_token_ids)
         prompt_lens = [len(ids) for ids in prompt_token_ids]
         max_prompt_len = max(prompt_lens)
@@ -177,9 +182,6 @@ class LLMEngine:
         # Number of characters already emitted per sequence, so streaming yields
         # deltas of the *decoded string* rather than of the token span.
         emitted_upto = [0] * batch_size
-        # Consumed by _decode_step to know where each sequence's generation starts.
-        self._prompt_lens = prompt_lens
-
         b_req_idx = torch.arange(batch_size, device=self.device)
         prompt_len_tensor = torch.tensor(prompt_lens, dtype=torch.long, device=self.device)
         allocated_indices = [
@@ -267,7 +269,7 @@ class LLMEngine:
                         eos_reached[i] = True
                         stop_reasons[i] = "repeat"
 
-            yield self._decode_step(tokens, emitted_upto, cur_pos, eos_reached)
+            yield self._decode_step(tokens, prompt_lens, emitted_upto, cur_pos, eos_reached)
 
             step += 1
             prev_pos = cur_pos
@@ -321,6 +323,7 @@ class LLMEngine:
     def _decode_step(
         self,
         tokens: torch.Tensor,
+        prompt_lens: list[int],
         emitted_upto: list[int],
         cur_pos: int,
         finished: torch.Tensor,
@@ -340,7 +343,7 @@ class LLMEngine:
         keep appending the tokens it no longer meaningfully generates.
         """
         outputs = []
-        for i, prompt_len in enumerate(self._prompt_lens):
+        for i, prompt_len in enumerate(prompt_lens):
             if bool(finished[i]):
                 outputs.append("")
                 continue

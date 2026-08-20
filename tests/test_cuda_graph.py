@@ -86,3 +86,25 @@ def test_graph_survives_repeat_calls(model_dir: Path):
     second = gen.generate(["Once upon a time"], params)
     third = gen.generate(["Once upon a time"], params)
     assert first == second == third
+
+
+def test_capture_clamps_batch_sizes_to_request_table(model_dir: Path):
+    """Batch sizes above ``max_request_num`` index past ``b_req_tokens_table``.
+
+    Capturing them read out-of-bounds memory and killed the CUDA context with
+    delayed CUBLAS errors. With a tiny KV pool the manager must skip those
+    batch sizes instead of crashing.
+    """
+    gen = TextGenerator(
+        checkpoints_dir=str(model_dir),
+        max_seq_len=512,
+        device="cuda",
+        use_cuda_graph=True,
+        max_gpu_num_blocks=1024,  # max_request_num = 1024 // 512 = 2
+    )
+    manager = gen.engine.executor._graph_manager
+    assert manager is not None, "expected at least the small batch sizes to capture"
+    assert all(key.batch_size <= 2 for key in manager._runners)
+
+    out = gen.generate(["The capital of France is"], SamplingParams(temperature=0.0, max_gen_len=6))
+    assert out[0]
