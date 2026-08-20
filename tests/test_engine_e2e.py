@@ -79,3 +79,18 @@ def test_multiple_calls_reuse_kv_cache_without_leaks(generator: TextGenerator):
     params = SamplingParams(temperature=0.0, max_gen_len=4)
     for _ in range(10):
         generator.generate(["Once upon a time"], params)
+
+
+def test_mixed_length_batch_matches_individual(generator: TextGenerator):
+    """Regression: prefill flattens the padded [batch, max_len] grid row-major.
+
+    A packed (sum-of-lengths) tokens table pointed every sequence after the
+    first at the previous sequence's tail rows, silently corrupting mixed-length
+    batches. The token-length gap here must be large enough that the two layouts
+    diverge.
+    """
+    prompts = ["Hi", "The history of the Roman Empire spans many centuries, and"]
+    params = SamplingParams(temperature=0.0, max_gen_len=6)
+    batched = generator.generate(prompts, params)
+    individual = [generator.generate([p], params)[0] for p in prompts]
+    assert batched == individual

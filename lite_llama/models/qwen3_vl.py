@@ -32,7 +32,7 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 
 from .base import CausalLM
 from .model_config import Qwen3Config
-from .multimodal import MultiModalCausalLM
+from .multimodal import MultiModalCausalLM, merge_multimodal_embeddings
 from .rotary_embedding import MRotaryEmbedding
 
 
@@ -170,8 +170,6 @@ class Qwen3VLForCausalLM(MultiModalCausalLM):
         is_prefill = input_ids.shape[1] > 1
 
         if is_prefill and multi_modal_inputs:
-            from .multimodal import merge_multimodal_embeddings
-
             self._deepstack_embeds = None
             vision_embeds = self.encode_vision(**multi_modal_inputs)
             inputs_embeds = self.get_input_embeddings(input_ids)

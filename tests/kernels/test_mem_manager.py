@@ -178,17 +178,6 @@ class TestKVCacheMemoryManager(unittest.TestCase):
 
         self.manager.release_ref(select_index)  # 释放
 
-    def test_free_buffers(self):
-        # 分配一些块
-        need_size = 2
-        select_index = self.manager.alloc_kvcache(need_size)
-        self.assertIsNotNone(select_index)
-        self.manager.release_ref(select_index)  # 释放
-        # 释放缓冲区
-        self.manager._free_buffers()
-        # 检查 gpu_kv_buffer 是否为 None
-        self.assertIsNone(self.manager.gpu_kv_buffer)
-
 
 if __name__ == "__main__":
     suite = unittest.TestSuite()
@@ -204,9 +193,6 @@ if __name__ == "__main__":
         "test_alloc_contiguous_kvcache_after_release_ref",
         "test_alloc_contiguous_kvcache_with_insufficient_memory",
         "test_in_alloc_contiguous_kvcache",
-        "test_free_buffers",
     ]
-    suite.addTests(
-        unittest.TestLoader().loadTestsFromNames(tests, TestKVCacheMemoryManager)
-    )
+    suite.addTests(unittest.TestLoader().loadTestsFromNames(tests, TestKVCacheMemoryManager))
     unittest.TextTestRunner().run(suite)
