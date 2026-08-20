@@ -22,7 +22,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import warnings
@@ -34,8 +33,8 @@ from typing import Any, ClassVar
 from PIL import Image
 
 from .engine import SamplingParams, TextGenerator, VisionGenerator
+from .models.registry import ModelRegistry
 from .utils.prompt_templates import BasePrompter, get_prompter
-
 
 # ---------------------------------------------------------------------------
 # 第一层:声明式 CLI 参数表
@@ -159,11 +158,14 @@ class PrompterResolver:
 
     @staticmethod
     def read_model_type(model_dir: str) -> str:
-        """从 checkpoint 的 config.json 读 ``model_type``;读不到返回 ``""``。"""
+        """从 checkpoint 的 config.json 读 ``model_type``;读不到返回 ``""``。
+
+        读取本身委托 :meth:`ModelRegistry.read_model_type`(config SSOT);
+        CLI 侧只对缺失/损坏的配置做容错,降级为按目录名推断模板。
+        """
         try:
-            with open(Path(model_dir) / "config.json") as f:
-                return str(json.load(f).get("model_type", "")).lower()
-        except (OSError, json.JSONDecodeError):
+            return ModelRegistry.read_model_type(model_dir).lower()
+        except (OSError, ValueError):
             return ""
 
     @classmethod

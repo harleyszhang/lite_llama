@@ -52,8 +52,22 @@ class SamplingParams:
         return self.temperature == 0.0
 
 
+@dataclass(frozen=True)
+class GeneratedSpan:
+    """The tokens each sequence has generated so far, as one padded tensor.
+
+    Attributes:
+        token_ids: ``[batch, span]`` ids; entries where ``mask`` is ``False``
+            are padding and must not influence sampling.
+        mask: ``[batch, span]`` ``True`` at real generated positions.
+    """
+
+    token_ids: torch.Tensor
+    mask: torch.Tensor
+
+
 def apply_repetition_penalty(
-    logits: torch.Tensor, token_ids: list[torch.Tensor], penalty: float
+    logits: torch.Tensor, generated: GeneratedSpan, penalty: float
 ) -> torch.Tensor:
     """HuggingFace-style repetition penalty over the generated span.
 
@@ -62,22 +76,31 @@ def apply_repetition_penalty(
     ``transformers``' ``RepetitionPenaltyLogitsProcessor``. Only the *generated*
     tokens are penalised — the prompt is user-supplied context.
 
+    The whole batch is handled by one scatter plus two selects. The obvious
+    alternative — looping over rows and calling ``torch.unique`` — launches a
+    handful of kernels per sequence per decode step, which at batch 8 costs more
+    than the penalty itself. Marking hits in a boolean table also makes the
+    penalty idempotent for repeated tokens, matching ``unique`` semantics.
+
+    Padded positions are redirected to a scratch column instead of being
+    scattered with ``False``: two positions can carry the *same* token id, one
+    padded and one real, and the ``False`` write would then clear the real hit
+    and silently drop that token's penalty.
+
     Args:
         logits: ``[batch, vocab]``.
-        token_ids: One 1-D tensor of generated token ids per batch row.
+        generated: Padded generated-token view for the batch.
         penalty: Penalty factor; ``1.0`` is a no-op.
 
     Returns:
         New ``[batch, vocab]`` logits (input is left untouched).
     """
-    out = logits.clone()
-    for i, ids in enumerate(token_ids):
-        if ids.numel() == 0:
-            continue
-        seen = torch.unique(ids)
-        scores = out[i, seen]
-        out[i, seen] = torch.where(scores < 0, scores * penalty, scores / penalty)
-    return out
+    batch, vocab = logits.shape
+    seen = torch.zeros(batch, vocab + 1, dtype=torch.bool, device=logits.device)
+    columns = torch.where(generated.mask, generated.token_ids, vocab)
+    seen.scatter_(1, columns, True)
+    penalised = torch.where(logits < 0, logits * penalty, logits / penalty)
+    return torch.where(seen[:, :vocab], penalised, logits)
 
 
 def sample_top_p(probs: torch.Tensor, top_p: float) -> torch.Tensor:
@@ -111,7 +134,7 @@ class Sampler:
         self,
         logits: torch.Tensor,
         params: SamplingParams,
-        generated_tokens: list[torch.Tensor] | None = None,
+        generated: GeneratedSpan | None = None,
     ) -> torch.Tensor:
         """Select the next token for each sequence.
 
@@ -119,7 +142,7 @@ class Sampler:
             logits: ``[batch, seq_len, vocab]`` or ``[batch, vocab]``. When a sequence
                 dimension is present, only the last position is used.
             params: Sampling configuration.
-            generated_tokens: Optional per-sequence generated token ids used by
+            generated: Optional padded generated-token view used by
                 ``repetition_penalty``; pass ``None`` when the penalty is off.
 
         Returns:
@@ -128,8 +151,8 @@ class Sampler:
         if logits.dim() == 3:
             logits = logits[:, -1, :]
 
-        if params.repetition_penalty != 1.0 and generated_tokens is not None:
-            logits = apply_repetition_penalty(logits, generated_tokens, params.repetition_penalty)
+        if params.repetition_penalty != 1.0 and generated is not None:
+            logits = apply_repetition_penalty(logits, generated, params.repetition_penalty)
 
         if params.is_greedy:
             return torch.argmax(logits, dim=-1, keepdim=True)

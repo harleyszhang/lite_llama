@@ -163,6 +163,13 @@ class KVCacheMemoryManager:
         self.kv_mem_use_state = torch.zeros(
             self.max_num_tokens, dtype=torch.int32, device=self.device
         )
+        # Callers need int32 row indices; keeping a pre-cast copy lets the
+        # bump-allocator fast path return a view instead of casting per step.
+        self.kv_mem_pos_indexs_int32 = self.kv_mem_pos_indexs.to(torch.int32)
+        # Cursor for the append-only fast path, and whether it is still exact
+        # (invalidated by any partial free, restored by ``free_all``).
+        self._bump_cursor = 0
+        self._bump_is_exact = True
 
         # Initialize the gpu_kv_buffer
         self.init_kv_buffers(self.max_num_tokens, head_dim, num_kv_heads, num_layers, dtype, device)
@@ -240,7 +247,29 @@ class KVCacheMemoryManager:
 
     @torch.no_grad()
     def alloc_kvcache_index(self, need_size):
-        """Reserve ``need_size`` cache rows, preferring a contiguous run."""
+        """Reserve ``need_size`` cache rows, preferring a contiguous run.
+
+        A decode step reserves one row per sequence, so this runs on the hot
+        path. The search in :meth:`alloc_contiguous_kvcache` costs a
+        ``nonzero`` over the whole cache plus two ``.item()`` reads, i.e. three
+        device synchronisations per decode step, which stalls the launch
+        pipeline far longer than the allocation itself.
+
+        While the cache is only ever appended to — the state every
+        ``generate()`` call starts from, because it opens with
+        :meth:`free_all` — the answer that search returns is exactly the next
+        ``need_size`` rows after the previous allocation. The bump cursor below
+        returns those rows directly, with no device reads at all, and any
+        partial free falls back to the general search.
+        """
+        if self._bump_is_exact and self._bump_cursor + need_size <= self.max_num_tokens:
+            start = self._bump_cursor
+            select_index = self.kv_mem_pos_indexs_int32[start : start + need_size]
+            self.kv_mem_use_state[start : start + need_size] += 1
+            self._bump_cursor += need_size
+            self.can_use_mem_size -= need_size
+            return select_index
+
         alloc_mem = self.alloc_contiguous_kvcache(need_size)
         if alloc_mem is not None:
             select_index, _start_index, _end_index = alloc_mem
@@ -262,6 +291,9 @@ class KVCacheMemoryManager:
     # 减少引用计数
     @torch.no_grad()
     def release_ref(self, token_index: torch.Tensor):
+        # Freeing rows leaves holes, so the append-only cursor no longer
+        # describes the free list; fall back to searching until ``free_all``.
+        self._bump_is_exact = False
         # 使用 unique 方法获取 token_index 中唯一的 token 索引，并返回每个唯一索引在原始张量中出现的次数。
         token_index, counts = token_index.unique(return_counts=True)
         # 当引用计数减少到零时，意味着该缓存块可以被释放或重新分配。
@@ -288,3 +320,6 @@ class KVCacheMemoryManager:
     ):
         self.can_use_mem_size = len(self.kv_mem_use_state)
         self.kv_mem_use_state[:] = 0
+        # The cache is empty again, so appending from row 0 is exact once more.
+        self._bump_cursor = 0
+        self._bump_is_exact = True
