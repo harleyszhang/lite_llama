@@ -25,6 +25,26 @@ import torch.nn as nn
 from .model_config import LlamaConfig, Qwen2Config, Qwen3Config, Qwen3MoeConfig, TextModelConfig
 
 
+def _read_config_params(checkpoints_dir: str | Path) -> dict[str, Any]:
+    """Return the raw ``config.json`` mapping of a checkpoint directory.
+
+    The only place ``config.json`` is opened: :meth:`ModelRegistry.load_config`
+    and :meth:`ModelRegistry.read_model_type` both build on it.
+    """
+    config_path = Path(checkpoints_dir) / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"{config_path} not found")
+    return json.loads(config_path.read_text(encoding="utf-8"))
+
+
+def _model_type_of(params: Mapping[str, Any], checkpoints_dir: str | Path) -> str:
+    if "model_type" not in params:
+        raise ValueError(
+            f"{Path(checkpoints_dir) / 'config.json'} has no 'model_type' field"
+        )
+    return str(params["model_type"])
+
+
 def _text_config_loader(
     config_cls: type[TextModelConfig],
 ) -> Callable[[Mapping[str, Any], int], Any]:
@@ -100,21 +120,25 @@ class ModelRegistry:
         return spec
 
     @classmethod
+    def read_model_type(cls, checkpoints_dir: str | Path) -> str:
+        """Read just the ``model_type`` key from a checkpoint's ``config.json``.
+
+        Lightweight counterpart to :meth:`load_config` for callers that must
+        know the architecture *before* building anything (CUDA-graph safety,
+        prompter selection). Raises ``FileNotFoundError``/``ValueError`` on a
+        missing or malformed config; callers wanting a fallback must catch.
+        """
+        return _model_type_of(_read_config_params(checkpoints_dir), checkpoints_dir)
+
+    @classmethod
     def load_config(cls, checkpoints_dir: str | Path, max_seq_len: int) -> tuple[Any, ModelSpec]:
         """Read ``config.json`` from a checkpoint directory and build its config.
 
         Returns:
             ``(config, spec)``.
         """
-        config_path = Path(checkpoints_dir) / "config.json"
-        if not config_path.exists():
-            raise FileNotFoundError(f"{config_path} not found")
-
-        params = json.loads(config_path.read_text(encoding="utf-8"))
-        if "model_type" not in params:
-            raise ValueError(f"{config_path} has no 'model_type' field")
-
-        spec = cls.resolve(params["model_type"])
+        params = _read_config_params(checkpoints_dir)
+        spec = cls.resolve(_model_type_of(params, checkpoints_dir))
         return spec.config_loader(params, max_seq_len), spec
 
     @classmethod

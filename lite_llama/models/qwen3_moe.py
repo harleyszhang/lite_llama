@@ -1,20 +1,31 @@
 """Qwen3 MoE (A3B series): Qwen3 attention + top-k routed expert FFN.
 
-The attention stack, q/k norm and RoPE are identical to dense Qwen3, so the model
-reuses :class:`~lite_llama.models.base.CausalLM` wholesale and only injects a
-:class:`SparseMoeBlock` per layer through the ``_build_mlp`` factory hook.
+Organisation mirrors vLLM's ``qwen3_moe.py``: a ``Qwen3MoeSparseMoeBlock``
+per decoder layer holds the router (``gate``) and the stacked expert weights,
+and its forward is ``route -> fused_moe``. The attention stack, q/k norm and
+RoPE are identical to dense Qwen3, so the model reuses
+:class:`~lite_llama.models.base.CausalLM` wholesale and only injects the MoE
+block through the ``_build_mlp`` factory hook.
 
 Checkpoint layout produced by the converter (experts are stacked along a new
-leading dim so the whole layer is three tensors instead of ``3 * num_experts``)::
+leading dim so the whole layer is three tensors instead of
+``3 * num_experts``)::
 
     layers.{i}.mlp.gate_weight              [num_experts, hidden]            router
     layers.{i}.mlp.experts.gate_up_proj     [num_experts, 2*moe_inter, hidden]
     layers.{i}.mlp.experts.down_proj        [num_experts, hidden, moe_inter]
 
 Routing follows HF ``Qwen3MoeSparseMoeBlock`` exactly: fp32 softmax over *all*
-experts first, then top-k, then (``norm_topk_prob=True``) renormalisation of the
-k surviving weights. Softmax-then-topk is not the same as topk-then-softmax —
-the renormalised weights differ — so the order must not be "optimised".
+experts first, then top-k, then (``norm_topk_prob=True``) renormalisation of
+the k surviving weights. Softmax-then-topk is not the same as topk-then-
+softmax — the renormalised weights differ — so the order must not be
+"optimised".
+
+The expert FFN itself runs as two grouped GEMMs
+(:func:`lite_llama.kernels.fused_moe.fused_moe`) rather than a Python loop
+over experts: tokens are sorted by expert id once, each expert's share of
+rows is then processed as dense tiles on the tensor cores, and the routing
+weight is folded into the second GEMM's fp32 accumulator.
 """
 
 from __future__ import annotations
@@ -23,12 +34,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..kernels import swiglu_forward
+from ..kernels import fused_moe
 from .base import CausalLM, FusedMLP
 from .model_config import Qwen3MoeConfig
 
 
-class SparseMoeBlock(nn.Module):
+class Qwen3MoeSparseMoeBlock(nn.Module):
     """Top-k routed MoE FFN with stacked expert weights.
 
     Args:
@@ -95,27 +106,13 @@ class SparseMoeBlock(nn.Module):
         x = x.reshape(-1, self.hidden_size)
 
         weights, ids = self._route(x)
-        out = torch.zeros_like(x)
-
-        # Group selected (token, slot) pairs by expert so each expert runs one
-        # GEMM on its share of tokens, then scatter-add the weighted results.
-        flat_ids = ids.reshape(-1)                                  # [tokens*k]
-        flat_weights = weights.reshape(-1)                          # [tokens*k]
-        token_of_slot = torch.arange(x.shape[0], device=x.device).repeat_interleave(self.top_k)
-
-        inter = self.moe_intermediate_size
-        gate_up_proj = self.experts["gate_up_proj"]
-        down_proj = self.experts["down_proj"]
-        for expert_id in flat_ids.unique():
-            sel = flat_ids == expert_id
-            rows = token_of_slot[sel]
-            gate_up = F.linear(x[rows], gate_up_proj[expert_id])  # [n, 2*inter]
-            expert_out = F.linear(
-                swiglu_forward(gate_up[:, :inter], gate_up[:, inter:]),
-                down_proj[expert_id],
-            )
-            out.index_add_(0, rows, expert_out * flat_weights[sel].unsqueeze(-1))
-
+        out = fused_moe(
+            x,
+            self.experts["gate_up_proj"],
+            self.experts["down_proj"],
+            weights,
+            ids,
+        )
         return out.reshape(*leading_shape, self.hidden_size)
 
 
@@ -129,5 +126,5 @@ class Qwen3MoeModel(CausalLM):
     def _build_mlp(self, config: Qwen3MoeConfig, layer_index: int) -> nn.Module:
         # ``mlp_only_layers`` keep the dense SwiGLU; everything else is routed.
         if config.is_moe_layer(layer_index):
-            return SparseMoeBlock(config)
+            return Qwen3MoeSparseMoeBlock(config)
         return FusedMLP(config)

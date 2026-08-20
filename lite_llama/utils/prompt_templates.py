@@ -347,61 +347,83 @@ class MPTChatPrompter(BasePrompter):
         sen_spliter = "\n"
         qa_spliter = "\n"
         decorator = ["<|im_start|>", "<|im_end|>"]
-        super().__init__(system_inst, role1, role2, sen_spliter, qa_spliter, decorator)
+        # decorator 必须按关键字传:位置参数第 6 位是 colon,位置传参会把它
+        # 塞进 colon 使模板拼接崩溃(历史遗留 bug,该类从未成功实例化)。
+        super().__init__(system_inst, role1, role2, sen_spliter, qa_spliter, decorator=decorator)
+
+
+# ---------------------------------------------------------------------------
+# 注册表:model_type -> (prompter 工厂, stop-token 规则)
+#
+# 工厂签名 ``(model_path, short_prompt) -> BasePrompter``;规则签名
+# ``(model_path) -> list[int]``。新增模型家族只需一次 register 调用,
+# 不再改动 if-elif 链(Open/Closed)。
+# ---------------------------------------------------------------------------
+
+_PROMPTER_FACTORIES = {}
+_STOP_TOKEN_RULES = {}
+
+
+def register_prompter(model_type, factory, stop_rule=None):
+    """注册一个模型家族的 prompter 工厂,可选附带 stop-token 规则。"""
+    _PROMPTER_FACTORIES[model_type.lower()] = factory
+    if stop_rule is not None:
+        _STOP_TOKEN_RULES[model_type.lower()] = stop_rule
 
 
 def get_prompter(model_type, model_path="", short_prompt=False, empty_prompt=False):
     if empty_prompt:
         return EmptyPrompter()
-    if model_type.lower() == "llama":
-        if "vicuna" in model_path.lower():
-            return VicunaPrompter()
-        elif (
-            "llama-3" in model_path.lower()
-            or "llama3" in model_path.lower()
-            or "llama-3.2" in model_path.lower()
-        ) and "30b" not in model_path.lower():
-            if "vila" in model_path.lower():
-                # with system prompt by default
-                return LlavaLlama3Prompter()
-            else:
-                return Llama3Prompter()
-        elif "llava" in model_path.lower() or "vila" in model_path.lower():
-            return LlavaLlamaPrompter()
-        else:
-            return Llama2Prompter(short_prompt)
-    elif model_type.lower() == "falcon":
-        # return FalconPrompter()
-        return FalconSimplePrompter()
-    elif model_type.lower() == "mpt":
-        if "chat" in model_path.lower():
-            return MPTChatPrompter()
-        else:
-            return MPTPrompter()
-    elif model_type.lower() in ("qwen2", "qwen3"):
-        # Qwen2 and Qwen3 share the ChatML-based prompt (<|im_start|> / <|im_end|>).
-        return Qwen2Prompter()
-    else:
+    factory = _PROMPTER_FACTORIES.get(model_type.lower())
+    if factory is None:
         raise ValueError(f"model type {model_type} is not supported")
+    return factory(model_path, short_prompt)
 
 
 def get_stop_token_ids(model_type, model_path=""):
-    if model_type.lower() == "llama":
-        if (
-            "llama-3" in model_path.lower() or "llama3" in model_path.lower()
-        ) and "30b" not in model_path.lower():
-            # llama3
-            return [128001, 128009]
-        return []
-    elif model_type.lower() == "falcon":
-        return [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-    elif model_type.lower() == "mpt":
-        if "chat" in model_path:
-            return [50278, 0]
-        else:
-            return []
-    else:
+    rule = _STOP_TOKEN_RULES.get(model_type.lower())
+    if rule is None:
         raise ValueError(f"model type {model_type} is not supported")
+    return rule(model_path)
+
+
+def _is_llama3_name(path_lower):
+    # "llama-3" 前缀已涵盖 "llama-3.2";30B 变体用的是 llama2 模板
+    return ("llama-3" in path_lower or "llama3" in path_lower) and "30b" not in path_lower
+
+
+def _llama_prompter(model_path, short_prompt):
+    path = model_path.lower()
+    if "vicuna" in path:
+        return VicunaPrompter()
+    if _is_llama3_name(path):
+        # vila 变体默认带 system prompt
+        return LlavaLlama3Prompter() if "vila" in path else Llama3Prompter()
+    if "llava" in path or "vila" in path:
+        return LlavaLlamaPrompter()
+    return Llama2Prompter(short_prompt)
+
+
+def _llama_stop_tokens(model_path):
+    return [128001, 128009] if _is_llama3_name(model_path.lower()) else []
+
+
+def _mpt_prompter(model_path, short_prompt):
+    return MPTChatPrompter() if "chat" in model_path.lower() else MPTPrompter()
+
+
+def _mpt_stop_tokens(model_path):
+    return [50278, 0] if "chat" in model_path.lower() else []
+
+
+register_prompter("llama", _llama_prompter, stop_rule=_llama_stop_tokens)
+register_prompter(
+    "falcon", lambda path, short: FalconSimplePrompter(), stop_rule=lambda path: list(range(12))
+)
+register_prompter("mpt", _mpt_prompter, stop_rule=_mpt_stop_tokens)
+# Qwen2 与 Qwen3 共用 ChatML 模板(<|im_start|> / <|im_end|>)
+register_prompter("qwen2", lambda path, short: Qwen2Prompter())
+register_prompter("qwen3", lambda path, short: Qwen2Prompter())
 
 
 if __name__ == "__main__":
