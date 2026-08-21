@@ -3,7 +3,7 @@ from typing import ClassVar
 
 
 class ColoredFormatter(logging.Formatter):
-    """Legacy-style formatter: ``04-24 09:30:45 [I] model_executor.py:145 msg``.
+    """Legacy-style formatter: ``04-24 09:30:45 [I] model_runner.py:145 msg``.
 
     Level names are shortened to their one-letter form (``[I]``/``[W]``/``[E]``)
     and the record's file name *and line number* are included, matching the

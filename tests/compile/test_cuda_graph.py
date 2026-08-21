@@ -100,7 +100,7 @@ def test_capture_clamps_batch_sizes_to_request_table(model_dir: Path):
         max_gpu_num_blocks=1024,  # max_request_num = 1024 // 512 = 2
     )
     try:
-        manager = gen.engine.executor._graph_manager
+        manager = gen.engine.model_runner._graph_manager
         assert manager is not None, "expected at least the small batch sizes to capture"
         assert all(key.batch_size <= 2 for key in manager._runners)
 

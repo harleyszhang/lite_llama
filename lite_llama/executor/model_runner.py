@@ -1,17 +1,14 @@
-"""Model executor: builds the model, sizes the KV cache, and runs each forward step.
+"""Model runner: builds the model, sizes the KV cache, and runs each forward step.
 
 Responsibilities:
 
-* :meth:`ModelExecutor.build` — resolve the architecture from ``config.json`` via the
-  :class:`~lite_llama.models.registry.ModelRegistry`, instantiate it on the meta
-  device, and stream the checkpoint in.
+* :meth:`ModelRunner.build` — parse ``config.json`` through
+  :class:`~lite_llama.models.config.ModelConfig`, resolve the architecture via the
+  :class:`~lite_llama.models.registry.ModelRegistry`, and hand both to a
+  :class:`~lite_llama.executor.loader.ModelLoader`.
 * :meth:`prefill_alloc_kv_cache` / :meth:`decode_alloc_kv_cache` — reserve cache rows.
 * :meth:`forward` — dispatch to the model, passing multimodal inputs only when the
   resolved :class:`~lite_llama.models.registry.ModelSpec` says the model wants them.
-
-Weight loading uses ``torch.device("meta")`` for the empty skeleton (no ``accelerate``
-dependency) and relies on ``load_state_dict(assign=True)`` to replace the meta
-parameters with the real tensors mmap-loaded from disk.
 """
 
 from __future__ import annotations
@@ -22,47 +19,29 @@ import torch
 import torch.nn as nn
 
 from ..kernels import update_kv_index
+from ..models.config import ModelConfig
 from ..models.registry import ModelRegistry, ModelSpec
 from ..utils.logger import get_logger
+from .attention_metadata import AttentionMetadata
 from .cuda_graph import (
     DEFAULT_BATCH_SIZES,
     DEFAULT_SEQ_LEN_BUCKETS,
     CUDAGraphManager,
     estimate_capture_workspace,
 )
-from .executor_struct import AttentionInfo
+from .kv_cache_manager import KVCacheManager, MemoryProfiler
 from .loader import DefaultModelLoader, ModelLoader
-from .mem_manager import KVCacheMemoryManager, MemoryProfiler
 
 logger = get_logger(__name__)
 
 
-def _text_config(config: Any) -> Any:
-    """Return the text/language sub-config, unwrapping multimodal wrappers."""
-    return getattr(config, "text_config", config)
-
-
-def _text_field(config: Any, *names: str) -> Any:
-    """Return the first attribute from ``names`` that exists on ``config``.
-
-    lite_llama configs use short names (``num_layers``, ``num_kv_heads``) whereas
-    HuggingFace configs use ``num_hidden_layers`` / ``num_key_value_heads`` — this
-    helper hides the mismatch when the executor unwraps a nested text config from a
-    multimodal wrapper.
-    """
-    for name in names:
-        if hasattr(config, name):
-            return getattr(config, name)
-    raise AttributeError(f"{type(config).__name__} has none of {names}")
-
-
-class ModelExecutor:
+class ModelRunner:
     """Owns the model, the KV-cache memory manager, and the per-step attention state."""
 
     def __init__(
         self,
         checkpoints_dir: str,
-        config: Any,
+        config: ModelConfig,
         spec: ModelSpec,
         model: nn.Module,
         max_gpu_num_blocks: int | None = None,
@@ -75,18 +54,13 @@ class ModelExecutor:
         self.model = model
         self.device = device
 
-        text_config = _text_config(config)
-        self.num_layers = _text_field(text_config, "num_layers", "num_hidden_layers")
-        num_heads = _text_field(text_config, "num_heads", "num_attention_heads")
-        self.num_kv_heads = getattr(text_config, "num_kv_heads", None) or getattr(
-            text_config, "num_key_value_heads", num_heads
-        )
-        hidden_size = _text_field(text_config, "hidden_size")
-        self.head_dim = getattr(text_config, "head_dim", None) or (hidden_size // num_heads)
-        self.vocab_size = _text_field(text_config, "vocab_size")
-        self.max_seq_len = getattr(text_config, "max_seq_len", None) or getattr(
-            config, "max_seq_len", 2048
-        )
+        # ModelConfig already normalises the geometry across HF field names and
+        # unwraps the nested text config of a vision-language checkpoint.
+        self.num_layers = config.num_layers
+        self.num_kv_heads = config.num_kv_heads
+        self.head_dim = config.head_dim
+        self.vocab_size = config.vocab_size
+        self.max_seq_len = config.max_seq_len
 
         if max_gpu_num_blocks is None:
             # When decode graphs will be captured later, withhold their workspace
@@ -105,7 +79,7 @@ class ModelExecutor:
             )
             max_gpu_num_blocks = profiler.available_kv_blocks(model, self.vocab_size)
 
-        self.kv_mem_manager = KVCacheMemoryManager(
+        self.kv_cache_manager = KVCacheManager(
             num_layers=self.num_layers,
             num_kv_heads=self.num_kv_heads,
             head_dim=self.head_dim,
@@ -120,8 +94,8 @@ class ModelExecutor:
             (self.max_request_num, self.max_seq_len), dtype=torch.int32, device=device
         )
 
-        self.atten_info = AttentionInfo()
-        self.atten_info.kv_buffer = self.kv_mem_manager.gpu_kv_buffer
+        self.atten_info = AttentionMetadata()
+        self.atten_info.kv_buffer = self.kv_cache_manager.gpu_kv_buffer
         self.atten_info.b_req_tokens_table = self.b_req_tokens_table
 
         # Populated by :meth:`enable_cuda_graph`; when non-None, :meth:`forward`
@@ -138,22 +112,26 @@ class ModelExecutor:
         device: str = "cuda",
         use_cuda_graph: bool = False,
         loader: ModelLoader | None = None,
-    ) -> ModelExecutor:
-        """Load config + weights and return a ready-to-run executor.
+    ) -> ModelRunner:
+        """Load config + weights and return a ready-to-run runner.
 
         Args:
-            checkpoints_dir: Directory holding ``config.json`` and a ``*.pth`` checkpoint.
+            checkpoints_dir: HuggingFace checkpoint directory — ``config.json`` plus
+                ``*.safetensors``, exactly as downloaded.
             max_seq_len: Upper bound on sequence length; also bounds the KV cache.
             max_gpu_num_blocks: Manual KV-cache size in tokens; profiled when ``None``.
             device: Torch device string.
             use_cuda_graph: Reserve capture workspace when profiling the KV cache,
                 so a later :meth:`enable_cuda_graph` does not OOM.
-            loader: Weight-loading strategy; defaults to :class:`DefaultModelLoader`
-                (meta-device skeleton + mmap assign). Inject a fake in tests to
-                build an executor without real weights.
+            loader: Weight-loading strategy; defaults to
+                :class:`~lite_llama.executor.loader.DefaultModelLoader`. Inject a
+                fake in tests to build a runner without real weights.
         """
-        config, spec = ModelRegistry.load_config(checkpoints_dir, max_seq_len)
-        model = (loader or DefaultModelLoader()).load_model(config, spec, checkpoints_dir, device)
+        config = ModelConfig.from_pretrained(checkpoints_dir, max_seq_len)
+        spec = ModelRegistry.resolve(config.model_type)
+        model = (loader or DefaultModelLoader()).load_model(
+            config, spec.load_class(), checkpoints_dir, device
+        )
         return cls(checkpoints_dir, config, spec, model, max_gpu_num_blocks, device, use_cuda_graph)
 
     # --------------------------------------------------------- kv allocation #
@@ -194,7 +172,7 @@ class ModelExecutor:
         """
         batch_size = len(actual_prompt_lens)
         self.atten_info.b_req_idx = b_req_idx
-        self.atten_info.cur_select_index = self.kv_mem_manager.alloc_kvcache_index(
+        self.atten_info.cur_select_index = self.kv_cache_manager.alloc_kvcache_index(
             max_prompt_len * batch_size
         )
         self.atten_info.b_seq_len = actual_prompt_lens
@@ -211,9 +189,9 @@ class ModelExecutor:
         must be incremented *before* the kernel is launched. The legacy code did
         the opposite, which overwrote the mapping of the last prompt token and
         silently produced non-deterministic completions once a second request was
-        served on the same executor.
+        served on the same runner.
         """
-        self.atten_info.cur_select_index = self.kv_mem_manager.alloc_kvcache_index(batch_size)
+        self.atten_info.cur_select_index = self.kv_cache_manager.alloc_kvcache_index(batch_size)
         self.atten_info.b_seq_len += 1
         self.atten_info.max_actual_seq_len += 1
         update_kv_index(
@@ -267,7 +245,7 @@ class ModelExecutor:
         )
         manager = CUDAGraphManager(
             self.model,
-            kv_buffer=self.kv_mem_manager.gpu_kv_buffer,
+            kv_buffer=self.kv_cache_manager.gpu_kv_buffer,
             b_req_tokens_table=self.b_req_tokens_table,
             batch_sizes=batch_sizes,
             seq_len_buckets=seq_len_buckets,

@@ -7,28 +7,29 @@ KV-cache write, the prefill/decode kernel split, SwiGLU MLP, pre-norm residual
 wiring, the forward skeleton) is identical, so it lives here once and the concrete
 models only declare their differences.
 
-Checkpoint key layout produced by ``lite_llama.tools.convert_weights`` and expected
-by :class:`CausalLM`::
+Parameter layout, and the HuggingFace checkpoint keys it is filled from::
 
-    embed_tokens.weight
-    layers.{i}.input_layernorm_weight
+    embed_tokens.weight                     <- model.embed_tokens.weight
+    layers.{i}.input_layernorm_weight       <- ....input_layernorm.weight
     layers.{i}.post_attention_layernorm_weight
-    layers.{i}.self_attn.q_proj_weight          [+ .q_proj_bias  if qkv_bias]
-    layers.{i}.self_attn.kv_proj_weight         [+ .kv_proj_bias if qkv_bias]
+    layers.{i}.self_attn.q_proj_weight      <- ....self_attn.q_proj.weight
+    layers.{i}.self_attn.kv_proj_weight     <- ....self_attn.{k,v}_proj.weight
     layers.{i}.self_attn.o_proj_weight
-    layers.{i}.self_attn.q_norm_weight          [only if use_qk_norm]
-    layers.{i}.self_attn.k_norm_weight          [only if use_qk_norm]
-    layers.{i}.mlp.{gate,up,down}_proj.weight
-    norm_weight
-    lm_head_weight
+    layers.{i}.self_attn.q_norm_weight      [only if use_qk_norm]
+    layers.{i}.self_attn.k_norm_weight      [only if use_qk_norm]
+    layers.{i}.mlp.{gate,up,down}_proj.weight   (unchanged)
+    norm_weight                             <- model.norm.weight
+    lm_head_weight                          <- lm_head.weight, or the tied embedding
 
 K and V are stored fused as ``kv_proj_weight`` so the decode path can write both
-halves of the KV cache with a single kernel launch.
+halves of the KV cache with a single kernel launch;
+:mod:`lite_llama.models.weights` owns the resulting key translation.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from typing import Any, ClassVar
 
 import torch
@@ -43,7 +44,8 @@ from ..kernels import (
     swiglu_forward,
     update_kv_buffer,
 )
-from .model_config import TextModelConfig
+from . import weights
+from .config import ModelConfig
 from .rotary_embedding import RotaryEmbedding
 
 # The prefill kernel evaluates exp2 rather than exp, so its softmax scale has to
@@ -155,7 +157,7 @@ class Attention(nn.Module):
     """
 
     def __init__(
-        self, config: TextModelConfig, *, qkv_bias: bool = False, use_qk_norm: bool = False
+        self, config: ModelConfig, *, qkv_bias: bool = False, use_qk_norm: bool = False
     ) -> None:
         super().__init__()
         self.num_heads = config.num_heads
@@ -236,7 +238,7 @@ class Attention(nn.Module):
 class FusedMLP(nn.Module):
     """SwiGLU feed-forward block: ``down(silu(gate(x)) * up(x))``."""
 
-    def __init__(self, config: TextModelConfig) -> None:
+    def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         dtype = torch.float16
         self.gate_proj = nn.Linear(
@@ -264,7 +266,7 @@ class DecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: TextModelConfig,
+        config: ModelConfig,
         *,
         qkv_bias: bool = False,
         use_qk_norm: bool = False,
@@ -308,23 +310,24 @@ class DecoderLayer(nn.Module):
 class CausalLM(nn.Module):
     """Forward skeleton shared by every decoder-only text model.
 
-    Subclasses only set the class-level switches below; the token→logits pipeline
+    Subclasses only set the class-level switches below; the token->logits pipeline
     itself is fixed here (template method).
 
     Class attributes:
-        config_class: Config dataclass this model is built from.
         qkv_bias: Whether q/k/v projections carry a bias.
         use_qk_norm: Whether q and k are RMSNormed per head.
         rotary_class: RoPE implementation; multimodal variants swap in an
             mrope-aware subclass.
+        hf_prefix: Checkpoint prefix wrapping the decoder stack. HF text models
+            nest everything except ``lm_head`` under ``model.``.
     """
 
-    config_class: ClassVar[type[TextModelConfig]] = TextModelConfig
     qkv_bias: ClassVar[bool] = False
     use_qk_norm: ClassVar[bool] = False
     rotary_class: ClassVar[type[RotaryEmbedding]] = RotaryEmbedding
+    hf_prefix: ClassVar[str] = "model."
 
-    def __init__(self, config: TextModelConfig) -> None:
+    def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.config = config
         dtype = torch.float16
@@ -344,12 +347,37 @@ class CausalLM(nn.Module):
             torch.empty(config.vocab_size, config.hidden_size, dtype=dtype)
         )
 
-        self.rotary_emb = self.rotary_class(config)
+        self.rotary_emb = self.rotary_class(config.rope_config)
         self.rms_norm_eps = config.rms_norm_eps
 
-    def _build_mlp(self, config: TextModelConfig, layer_index: int) -> nn.Module:
+    def _build_mlp(self, config: ModelConfig, layer_index: int) -> nn.Module:
         """Per-layer MLP factory; MoE 变体覆盖它以按层返回 SparseMoeBlock。"""
         return FusedMLP(config)
+
+    # ---- weight loading --------------------------------------------------- #
+    def translate_weight_key(self, key: str) -> weights.Target:
+        """Map a checkpoint key onto this model's parameters.
+
+        Strips :attr:`hf_prefix` (``lm_head.weight`` sits outside it) and defers
+        the rest to :func:`lite_llama.models.weights.translate_text_key`.
+        """
+        return weights.translate_text_key(key.removeprefix(self.hf_prefix))
+
+    def load_weights(self, checkpoint: Iterable[tuple[str, torch.Tensor]]) -> None:
+        """Fill every parameter from a HuggingFace checkpoint stream.
+
+        Args:
+            checkpoint: ``(key, tensor)`` pairs as produced by
+                :func:`lite_llama.executor.weight_utils.hf_weights_iterator`.
+        """
+        weights.load_weights(
+            self,
+            checkpoint,
+            self.translate_weight_key,
+            tied={"lm_head_weight": "embed_tokens.weight"}
+            if self.config.tie_word_embeddings
+            else None,
+        )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

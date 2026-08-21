@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from lite_llama.utils.file_interface import get_model_name_from_path
+from lite_llama.utils.path_utils import get_model_name_from_path
 
 
 @pytest.mark.parametrize(

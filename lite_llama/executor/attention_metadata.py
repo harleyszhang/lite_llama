@@ -8,10 +8,10 @@ import torch
 
 
 @dataclass
-class AttentionInfo:
-    """Per-step KV-cache state shared by the executor and the attention kernels.
+class AttentionMetadata:
+    """Per-step KV-cache state shared by the model runner and the attention kernels.
 
-    A single instance is reused across prefill and every decode step; the executor
+    A single instance is reused across prefill and every decode step; the runner
     mutates the index/length fields in place before each ``forward``.
 
     Attributes:
