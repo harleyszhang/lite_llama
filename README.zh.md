@@ -14,6 +14,23 @@ A light llama-like llm inference framework based on the triton kernel.
 - 支持 Triton grouped GEMM kernel。
 - 部分自定义算子如：`rmsnorm`、`rope`、`softmax`、`逐元素相乘` 等采用高效 `triton` 内核实现。
 
+## 支持的模型
+
+下面每一个架构都直接加载官方原始 HuggingFace checkpoint：`config.json` 走 `AutoConfig`，权重从
+`*.safetensors` 流式读入。最后一列是**实际跑出结果所用的 checkpoint**（参考机器：NVIDIA
+A10 23 GB、torch 2.13 + cu129、transformers 5.15）。
+
+| 系列 | `model_type` | 模态 | 说明 | 实测 checkpoint |
+| --- | --- | :---: | --- | --- |
+| LLaMA | `llama` | 文本 | HF `LlamaForCausalLM` 布局 | Llama-3.1-8B-Instruct |
+| Qwen2 | `qwen2` | 文本 | q/k/v 投影带 bias | Qwen2.5-3B |
+| Qwen3 | `qwen3` | 文本 | q/k 逐头 RMSNorm，`q_size` 与 hidden 解耦 | Qwen3-1.7B |
+| Qwen3-MoE | `qwen3_moe` | 文本 | top-k 路由专家；block-FP8 权重在加载时反量化为 fp16 | Qwen3-MoE-Tiny |
+| LLaVA-1.5 | `llava` | 图像 | CLIP vision tower + MLP projector | llava-1.5-7b-hf |
+| Qwen3-VL | `qwen3_vl` | 图像/视频 | mrope + DeepStack 视觉特征注入 | Qwen3-VL-4B-Instruct |
+
+唯一没跑端到端的是**大尺寸** MoE：Qwen3-30B-A3B 的 block-FP8 权重反量化成 fp16 后约 61 GB，23 GB 卡装不下；`Qwen3-MoE-Tiny` 以 2 层的规模跑通了同一条代码路径（逐专家 checkpoint key、`decoder_sparse_step` 导致的 dense/MoE 混合层、tied `lm_head`）。FP8 读取器则单独对真实 30B checkpoint 验证过：第 0 个分片含 5828 个 `F8_E4M3` 张量，加载器输出已反量化的 fp16，并将 `weight_scale_inv` 搭档就地消费掉。MoE 的数值保真由 `tests/models/test_qwen3_moe.py` 里与 HuggingFace 的 logits 对齐测试钉住。
+
 ## GPU Information
 
 [趋动云 GPU 开发环境](https://talent-holding.alibaba.com/campus-position/59900002212)，cuda 版本以及 torch、triton 版本：
@@ -120,6 +137,31 @@ Transformers per token latency: 5.436221 ms/token
 ## 如何使用
 
 推荐 cuda 版本 12.0 及以上。把 HuggingFace checkpoint 目录（含 `config.json` 与 `*.safetensors`）下载到本地，直接用 `--model-dir` 指向它即可，不需要任何权重转换步骤。
+
+六个架构各跑一遍的实际输出（A10、`temperature=0`，每个模型单独一个进程；load 为从`LLM(...)` 到模型就绪的时间，页缓存已热——冷读时 8B 需要 44s 而非 2.6s）：
+
+```text
+llama      Llama-3.1-8B-Instruct  load  2.59s  -> ' a city of romance, art, fashion and cuisine. Paris is famous for its iconic landmarks such as the Eiffel'
+qwen2      Qwen2.5-3B             load  1.15s  -> ' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid.'
+qwen3      Qwen3-1.7B             load  0.98s  -> ' Paris. The capital of the United States is Washington, D.C. The capital of Canada is Ottawa.'
+qwen3_moe  Qwen3-MoE-Tiny         load  0.59s  -> '\U0001f90d\U0001f90d\U0001f90d.".狝狝zeichnetavadavadavad<Class侮辱 Fitz Fitz'
+llava      llava-1.5-7b-hf        load  2.76s  -> 'A large black and brown dog is standing on a grassy field.'
+qwen3_vl   Qwen3-VL-4B-Instruct   load  2.14s  -> 'A Bernese Mountain Dog is in this picture.'
+```
+
+四行文本模型的 prompt 是 `"The capital of France is"`，两行视觉模型用的图是 `docs/images/llava_test/dog.jpeg`。`Qwen3-MoE-Tiny` 是 2 层的**未训练**测试模型，输出乱码是预期之中的——它证明的是一个真实的逐专家 MoE checkpoint 能加载并跑起来，而不是它能说出什么有意义的话。完整的一次 CLI 会话（原样输出）：
+
+```console
+$ python -m lite_llama.cli chat --model-dir my_weight/Qwen2.5-1.5B-Instruct \
+      --max-gen-len 40 --temperature 0
+[I] weight_utils.py:88 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct
+[I] loader.py:133 Loaded Qwen2Model onto cuda in 0.78s
+[I] kv_cache_manager.py:113 KV-cache profiling: total=21.98 GB peak=4.02 GB -> 590134 cache tokens (util=0.90)
+Loaded Qwen2.5-1.5B-Instruct. Type 'exit' to quit.
+
+>>> What is the capital of France?
+The capital of France is Paris.
+```
 
 ```bash
 apt update
