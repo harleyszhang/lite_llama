@@ -1,14 +1,15 @@
 """Numeric parity tests for the Qwen3-MoE support.
 
-Two layers of verification:
+Three layers of verification:
 
-1. :func:`test_block_fp8_dequant` — the FP8 (e4m3, 128x128 block) dequantisation
-   used by the converter, checked against a manual blockwise multiply, including
-   matrices whose dims are not multiples of the block size.
-2. :func:`test_qwen3_moe_logits_parity` — a randomly initialised tiny
-   ``Qwen3MoeForCausalLM`` is serialised to safetensors, converted through the
-   *real* :func:`lite_llama.tools.convert_weights._convert` path, loaded into
-   :class:`Qwen3MoeModel` and compared against the fp32 HuggingFace forward.
+1. :func:`test_block_fp8_dequant` — the FP8 (e4m3, 128x128 block) dequantisation the
+   loader applies to Qwen FP8 checkpoints, checked against a manual blockwise
+   multiply, including matrices whose dims are not multiples of the block size.
+2. :func:`test_route_matches_hf` — the router's softmax-then-topk ordering.
+3. :func:`test_qwen3_moe_logits_parity` — a randomly initialised tiny
+   ``Qwen3MoeForCausalLM`` is written out as safetensors, loaded through the *real*
+   :meth:`Qwen3MoeModel.load_weights` path (which is where the per-expert matrices
+   get stacked), and compared against the fp32 HuggingFace forward.
 """
 
 from __future__ import annotations
@@ -18,11 +19,12 @@ import json
 import pytest
 import torch
 
-from lite_llama.models.model_config import Qwen3MoeConfig
-from lite_llama.tools.convert_weights import _convert, _dequant_block_fp8
+from lite_llama.executor.weight_utils import dequant_block_fp8, hf_weights_iterator
+from lite_llama.models.config import ModelConfig
+from lite_llama.models.qwen3_moe import is_moe_layer
 
 # --------------------------------------------------------------------------- #
-# FP8 dequantisation (CPU only)
+# FP8 dequantisation
 # --------------------------------------------------------------------------- #
 
 
@@ -51,7 +53,7 @@ def test_block_fp8_dequant(shape):
     w = torch.randn(*shape, dtype=torch.float32)
     w8, scale_inv = _block_quantize_fp8(w)
 
-    deq = _dequant_block_fp8(w8, scale_inv)
+    deq = dequant_block_fp8(w8, scale_inv)
 
     assert deq.dtype == torch.float16
     assert deq.shape == w.shape
@@ -60,83 +62,43 @@ def test_block_fp8_dequant(shape):
     assert rel < 0.06
 
 
-# --------------------------------------------------------------------------- #
-# Config layer semantics (CPU only)
-# --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("cuda_available")
+def test_block_fp8_dequant_agrees_on_gpu():
+    """The loader dequantises on the target device; CPU and GPU must agree bit for bit.
+
+    Doing it on the CPU used to dominate load time for a 30B FP8 checkpoint, so the
+    op moved to the device — which only helps if it produces the same numbers.
+    """
+    torch.manual_seed(0)
+    w = torch.randn(300, 200, dtype=torch.float32)
+    w8, scale_inv = _block_quantize_fp8(w)
+
+    on_cpu = dequant_block_fp8(w8, scale_inv)
+    on_gpu = dequant_block_fp8(w8.cuda(), scale_inv.cuda())
+    assert torch.equal(on_cpu, on_gpu.cpu())
 
 
-def test_qwen3_moe_config_from_hf_dict():
-    cfg = Qwen3MoeConfig.from_dict(
-        {
-            "model_type": "qwen3_moe",
-            "num_hidden_layers": 48,
-            "num_attention_heads": 32,
-            "num_key_value_heads": 4,
-            "hidden_size": 2048,
-            "intermediate_size": 6144,
-            "moe_intermediate_size": 768,
-            "num_experts": 128,
-            "num_experts_per_tok": 8,
-            "norm_topk_prob": True,
-            "decoder_sparse_step": 1,
-            "mlp_only_layers": [],
-            "head_dim": 128,
-            "max_position_embeddings": 262144,
-            # Unknown keys from the FP8 checkpoint must be ignored.
-            "quantization_config": {"quant_method": "fp8"},
-            "router_aux_loss_coef": 0.001,
-        },
-        max_seq_len=2048,
-    )
-    assert cfg.num_layers == 48 and cfg.num_experts == 128 and cfg.num_kv_heads == 4
-    assert all(cfg.is_moe_layer(i) for i in range(48))
-
-    dense_cfg = Qwen3MoeConfig(mlp_only_layers=[0, 5], decoder_sparse_step=1)
-    assert not dense_cfg.is_moe_layer(0)
-    assert not dense_cfg.is_moe_layer(5)
-    assert dense_cfg.is_moe_layer(1)
-
-
-# --------------------------------------------------------------------------- #
-# Router semantics vs HuggingFace (CPU only, no Triton kernels involved)
-# --------------------------------------------------------------------------- #
-
-
-def test_route_matches_hf():
-    """``_route`` must reproduce HF's softmax-all -> top-k -> renormalise order."""
-    from lite_llama.models.qwen3_moe import Qwen3MoeSparseMoeBlock
+def test_fp8_scale_tables_are_consumed_not_yielded(tmp_path):
+    """``*.weight_scale_inv`` must never reach the model: it is a file-format detail."""
+    from safetensors.torch import save_file
 
     torch.manual_seed(0)
-    cfg = Qwen3MoeConfig(
-        hidden_size=64,
-        num_experts=16,
-        num_experts_per_tok=4,
-        moe_intermediate_size=32,
-        num_layers=1,
-        num_heads=2,
-        num_kv_heads=2,
-        head_dim=32,
-        max_position_embeddings=64,
-        max_seq_len=64,
+    w = torch.randn(256, 256)
+    w8, scale_inv = _block_quantize_fp8(w)
+    save_file(
+        {"layers.0.mlp.down_proj.weight": w8, "layers.0.mlp.down_proj.weight_scale_inv": scale_inv},
+        str(tmp_path / "model.safetensors"),
     )
-    block = Qwen3MoeSparseMoeBlock(cfg)
-    gate = torch.randn(cfg.num_experts, cfg.hidden_size)
-    block.gate_weight.data.copy_(gate)
 
-    x = torch.randn(7, cfg.hidden_size).half()
-    weights, ids = block._route(x)
-
-    # HF reference: fp32 softmax over all experts, then topk, then renormalise.
-    ref = torch.softmax(torch.nn.functional.linear(x.float(), gate.float()), dim=-1)
-    ref_w, ref_ids = torch.topk(ref, cfg.num_experts_per_tok, dim=-1)
-    ref_w = ref_w / ref_w.sum(dim=-1, keepdim=True)
-
-    assert torch.equal(ids, ref_ids)
-    torch.testing.assert_close(weights.float(), ref_w, atol=1e-3, rtol=1e-3)
+    loaded = dict(hf_weights_iterator(tmp_path))
+    assert list(loaded) == ["layers.0.mlp.down_proj.weight"]
+    torch.testing.assert_close(
+        loaded["layers.0.mlp.down_proj.weight"], dequant_block_fp8(w8, scale_inv)
+    )
 
 
 # --------------------------------------------------------------------------- #
-# Full-model logits parity vs HuggingFace (needs CUDA for the Triton kernels)
+# Layer-type selection
 # --------------------------------------------------------------------------- #
 
 _TINY_HF_CONFIG = {
@@ -160,34 +122,84 @@ _TINY_HF_CONFIG = {
 }
 
 
-def _convert_hf_model(hf_model, tmp_path):
-    """Serialise an HF model as safetensors and run the real converter over it."""
-    from safetensors.torch import save_file
+def _model_config(tmp_path, max_seq_len: int = 256, **overrides) -> ModelConfig:
+    """Round-trip a config.json through AutoConfig, as the loader does."""
+    body = {"model_type": "qwen3_moe", **_TINY_HF_CONFIG, **overrides}
+    (tmp_path / "config.json").write_text(json.dumps(body))
+    return ModelConfig.from_pretrained(tmp_path, max_seq_len=max_seq_len)
 
-    config_dict = {"model_type": "qwen3_moe", **_TINY_HF_CONFIG}
-    (tmp_path / "config.json").write_text(json.dumps(config_dict))
-    save_file(hf_model.state_dict(), str(tmp_path / "model.safetensors"))
 
-    return _convert(tmp_path, "qwen3_moe", _TINY_HF_CONFIG["num_hidden_layers"], torch.float16)
+def test_every_layer_is_moe_by_default(tmp_path):
+    """Qwen3-30B-A3B ships mlp_only_layers=[] and decoder_sparse_step=1."""
+    config = _model_config(tmp_path, num_hidden_layers=48)
+    assert config.num_layers == 48
+    assert all(is_moe_layer(config, i) for i in range(48))
+
+
+def test_mlp_only_layers_stay_dense(tmp_path):
+    config = _model_config(tmp_path, mlp_only_layers=[0, 5])
+    assert not is_moe_layer(config, 0)
+    assert not is_moe_layer(config, 5)
+    assert is_moe_layer(config, 1)
+
+
+def test_decoder_sparse_step_skips_layers(tmp_path):
+    config = _model_config(tmp_path, decoder_sparse_step=2)
+    assert [i for i in range(6) if is_moe_layer(config, i)] == [1, 3, 5]
+
+
+# --------------------------------------------------------------------------- #
+# Router semantics vs HuggingFace (CPU only, no Triton kernels involved)
+# --------------------------------------------------------------------------- #
+
+
+def test_route_matches_hf(tmp_path):
+    """``_route`` must reproduce HF's softmax-all -> top-k -> renormalise order."""
+    from lite_llama.models.qwen3_moe import Qwen3MoeSparseMoeBlock
+
+    torch.manual_seed(0)
+    config = _model_config(
+        tmp_path, hidden_size=64, num_experts=16, num_experts_per_tok=4, moe_intermediate_size=32
+    )
+    block = Qwen3MoeSparseMoeBlock(config)
+    gate = torch.randn(config.num_experts, config.hidden_size)
+    block.gate_weight.data.copy_(gate)
+
+    x = torch.randn(7, config.hidden_size).half()
+    weights, ids = block._route(x)
+
+    # HF reference: fp32 softmax over all experts, then topk, then renormalise.
+    ref = torch.softmax(torch.nn.functional.linear(x.float(), gate.float()), dim=-1)
+    ref_w, ref_ids = torch.topk(ref, config.num_experts_per_tok, dim=-1)
+    ref_w = ref_w / ref_w.sum(dim=-1, keepdim=True)
+
+    assert torch.equal(ids, ref_ids)
+    torch.testing.assert_close(weights.float(), ref_w, atol=1e-3, rtol=1e-3)
+
+
+# --------------------------------------------------------------------------- #
+# Full-model logits parity vs HuggingFace (needs CUDA for the Triton kernels)
+# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.usefixtures("cuda_available")
 def test_qwen3_moe_logits_parity(tmp_path):
+    from safetensors.torch import save_file
     from transformers import Qwen3MoeConfig as HfConfig
     from transformers import Qwen3MoeForCausalLM
 
-    from lite_llama.executor.executor_struct import AttentionInfo
+    from lite_llama.executor.loader import materialise_parameters
+    from lite_llama.executor.model_runner import AttentionMetadata
     from lite_llama.models.qwen3_moe import Qwen3MoeModel
 
     torch.manual_seed(42)
     hf_model = Qwen3MoeForCausalLM(HfConfig(**_TINY_HF_CONFIG)).eval()
+    save_file(hf_model.state_dict(), str(tmp_path / "model.safetensors"))
 
-    state = _convert_hf_model(hf_model, tmp_path)
-
-    lite_cfg = Qwen3MoeConfig.from_dict(_TINY_HF_CONFIG, max_seq_len=256)
-    lite_model = Qwen3MoeModel(lite_cfg)
-    lite_model.load_state_dict(state, strict=True)
-    lite_model = lite_model.cuda().eval()
+    lite_model = Qwen3MoeModel(_model_config(tmp_path))
+    materialise_parameters(lite_model, "cuda")
+    lite_model.load_weights(hf_weights_iterator(tmp_path, "cuda"))
+    lite_model.to("cuda").eval()
 
     seq_len = 12
     input_ids = torch.randint(0, _TINY_HF_CONFIG["vocab_size"], (1, seq_len))
@@ -196,7 +208,7 @@ def test_qwen3_moe_logits_parity(tmp_path):
         ref_logits = hf_model(input_ids=input_ids).logits.float()  # [1, T, V]
 
     num_kv_heads, head_dim = _TINY_HF_CONFIG["num_key_value_heads"], _TINY_HF_CONFIG["head_dim"]
-    atten_info = AttentionInfo(
+    atten_info = AttentionMetadata(
         kv_buffer=[
             torch.zeros(seq_len, 2 * num_kv_heads, head_dim, dtype=torch.float16, device="cuda")
             for _ in range(_TINY_HF_CONFIG["num_hidden_layers"])

@@ -4,9 +4,9 @@ Why this file exists
 --------------------
 The previous implementation (deleted before this refactor) produced garbage output
 once a second decode step ran. Root cause: CUDA Graph records *tensor pointers*
-at capture time. The decode path in :class:`ModelExecutor` used to reassign
+at capture time. The decode path in :class:`ModelRunner` used to reassign
 
-    self.atten_info.cur_select_index = self.kv_mem_manager.alloc_kvcache_index(...)
+    self.atten_info.cur_select_index = self.kv_cache_manager.alloc_kvcache_index(...)
 
 on every step, handing the model a freshly allocated tensor each time. The graph
 still held pointers into the *first-step* tensors, so subsequent replays read
@@ -39,7 +39,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from .executor_struct import AttentionInfo
+from .attention_metadata import AttentionMetadata
 
 # Default buckets balance capture memory (each graph pins tens of MB of
 # workspace) against replay coverage.  A prompt of a few hundred tokens fits
@@ -50,7 +50,7 @@ DEFAULT_SEQ_LEN_BUCKETS: tuple[int, ...] = (256, 512, 1024, 2048, 4096)
 
 # Measured on a 0.5B fp16 model: ~38 MB per captured graph. Reserve 64 MB per
 # graph so the KV-cache profiler leaves headroom for capture; the OOM fallback
-# in ``ModelExecutor.enable_cuda_graph`` covers models that exceed the estimate.
+# in ``ModelRunner.enable_cuda_graph`` covers models that exceed the estimate.
 WORKSPACE_BYTES_PER_GRAPH: int = 64 * 1024**2
 
 
@@ -107,7 +107,7 @@ class CUDAGraphRunner:
         self.input_ids = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
         self.position_ids = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
 
-        self.atten_info = AttentionInfo()
+        self.atten_info = AttentionMetadata()
         self.atten_info.kv_buffer = kv_buffer  # shared list; storage is persistent
         self.atten_info.b_req_tokens_table = b_req_tokens_table
         self.atten_info.cur_select_index = torch.zeros(batch_size, dtype=torch.int32, device=device)
@@ -227,7 +227,7 @@ class CUDAGraphManager:
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        atten_info: AttentionInfo,
+        atten_info: AttentionMetadata,
     ) -> torch.Tensor | None:
         """Run the matching captured graph if one exists, else return ``None``.
 

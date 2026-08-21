@@ -1,96 +1,52 @@
 """Single source of truth mapping a HuggingFace ``model_type`` to its implementation.
 
 Before this module the mapping was duplicated in three places — a string-path table
-in the executor, a config-class table in ``executor_struct``, and an
+in the model runner, a config-class table beside the attention metadata, and an
 ``if model_type in ("llava", "qwen3_vl")`` branch in the forward call — which meant
 adding a model required edits in three files that could silently disagree.
 
-A :class:`ModelSpec` now carries everything the rest of the codebase needs to know
-about a model: how to parse its config, which class to instantiate, and whether it
-consumes multimodal inputs. Implementation modules are imported lazily so that a
-transformers build without, say, ``qwen3_vl`` only fails if that model is requested.
+A registry entry is now two facts, and nothing else:
+
+* which class implements the architecture, written as ``"module.path:ClassName"``
+  so the import is deferred — a transformers build without ``qwen3_vl`` only
+  fails if that model is actually requested;
+* whether the model consumes ``multi_modal_inputs``, which the executor has to
+  know before it holds a model, because it decides CUDA-graph eligibility and the
+  shape of the forward call.
+
+Config parsing used to live here too, as one loader function per architecture.
+It moved to :class:`~lite_llama.models.config.ModelConfig`, which reads every
+checkpoint through ``AutoConfig``, so there is nothing left to vary per model.
+
+Adding a model is therefore one line in :attr:`ModelRegistry._SPECS` plus the
+implementation module.
 """
 
 from __future__ import annotations
 
 import importlib
-import json
-from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import torch.nn as nn
-
-from .model_config import LlamaConfig, Qwen2Config, Qwen3Config, Qwen3MoeConfig, TextModelConfig
-
-
-def _read_config_params(checkpoints_dir: str | Path) -> dict[str, Any]:
-    """Return the raw ``config.json`` mapping of a checkpoint directory.
-
-    The only place ``config.json`` is opened: :meth:`ModelRegistry.load_config`
-    and :meth:`ModelRegistry.read_model_type` both build on it.
-    """
-    config_path = Path(checkpoints_dir) / "config.json"
-    if not config_path.exists():
-        raise FileNotFoundError(f"{config_path} not found")
-    return json.loads(config_path.read_text(encoding="utf-8"))
-
-
-def _model_type_of(params: Mapping[str, Any], checkpoints_dir: str | Path) -> str:
-    if "model_type" not in params:
-        raise ValueError(
-            f"{Path(checkpoints_dir) / 'config.json'} has no 'model_type' field"
-        )
-    return str(params["model_type"])
-
-
-def _text_config_loader(
-    config_cls: type[TextModelConfig],
-) -> Callable[[Mapping[str, Any], int], Any]:
-    """Build a loader that turns a raw HF config mapping into a dataclass config."""
-
-    def load(params: Mapping[str, Any], max_seq_len: int) -> TextModelConfig:
-        return config_cls.from_dict(params, max_seq_len=max_seq_len)
-
-    return load
-
-
-def _hf_config_loader(qualified_name: str) -> Callable[[Mapping[str, Any], int], Any]:
-    """Build a loader for models whose config stays a HuggingFace config object.
-
-    Vision-language configs nest a text config and carry vision fields that the
-    lite_llama dataclasses do not model, so the HF object is kept as-is and
-    ``max_seq_len`` is attached to it for the executor and the model to read.
-    """
-
-    def load(params: Mapping[str, Any], max_seq_len: int) -> Any:
-        module_name, class_name = qualified_name.rsplit(".", 1)
-        config_cls = getattr(importlib.import_module(module_name), class_name)
-        config = config_cls.from_dict(dict(params))
-        config.max_seq_len = max_seq_len
-        return config
-
-    return load
 
 
 @dataclass(frozen=True)
 class ModelSpec:
-    """Everything the framework needs in order to serve one architecture.
+    """How to serve one architecture.
 
     Attributes:
         model_type: The ``model_type`` string found in ``config.json``.
-        config_loader: Turns a raw config mapping plus ``max_seq_len`` into a config.
         implementation: ``"module.path:ClassName"``, imported on first use.
         is_multimodal: Whether the model accepts ``multi_modal_inputs``.
     """
 
     model_type: str
-    config_loader: Callable[[Mapping[str, Any], int], Any]
     implementation: str
     is_multimodal: bool = False
 
     def load_class(self) -> type[nn.Module]:
+        """Import and return the implementation class."""
         module_name, class_name = self.implementation.split(":")
         return getattr(importlib.import_module(module_name), class_name)
 
@@ -98,83 +54,28 @@ class ModelSpec:
 class ModelRegistry:
     """Registry of supported architectures, keyed by ``model_type``."""
 
-    _specs: ClassVar[dict[str, ModelSpec]] = {}
+    _SPECS: ClassVar[tuple[ModelSpec, ...]] = (
+        ModelSpec("llama", "lite_llama.models.llama:LlamaModel"),
+        ModelSpec("qwen2", "lite_llama.models.qwen2:Qwen2Model"),
+        ModelSpec("qwen3", "lite_llama.models.qwen3:Qwen3Model"),
+        ModelSpec("qwen3_moe", "lite_llama.models.qwen3_moe:Qwen3MoeModel"),
+        ModelSpec("llava", "lite_llama.models.llava:LlavaLlama", is_multimodal=True),
+        ModelSpec("qwen3_vl", "lite_llama.models.qwen3_vl:Qwen3VLForCausalLM", is_multimodal=True),
+    )
 
-    @classmethod
-    def register(cls, spec: ModelSpec) -> None:
-        cls._specs[spec.model_type] = spec
+    _BY_TYPE: ClassVar[dict[str, ModelSpec]] = {spec.model_type: spec for spec in _SPECS}
 
     @classmethod
     def supported_types(cls) -> list[str]:
-        return sorted(cls._specs)
+        return sorted(cls._BY_TYPE)
 
     @classmethod
     def resolve(cls, model_type: str) -> ModelSpec:
         """Look up a spec, raising a message that lists the alternatives."""
-        spec = cls._specs.get(model_type.lower())
+        spec = cls._BY_TYPE.get(model_type.lower())
         if spec is None:
             raise ValueError(
                 f"unsupported model_type {model_type!r}; "
                 f"supported: {', '.join(cls.supported_types())}"
             )
         return spec
-
-    @classmethod
-    def read_model_type(cls, checkpoints_dir: str | Path) -> str:
-        """Read just the ``model_type`` key from a checkpoint's ``config.json``.
-
-        Lightweight counterpart to :meth:`load_config` for callers that must
-        know the architecture *before* building anything (CUDA-graph safety,
-        prompter selection). Raises ``FileNotFoundError``/``ValueError`` on a
-        missing or malformed config; callers wanting a fallback must catch.
-        """
-        return _model_type_of(_read_config_params(checkpoints_dir), checkpoints_dir)
-
-    @classmethod
-    def load_config(cls, checkpoints_dir: str | Path, max_seq_len: int) -> tuple[Any, ModelSpec]:
-        """Read ``config.json`` from a checkpoint directory and build its config.
-
-        Returns:
-            ``(config, spec)``.
-        """
-        params = _read_config_params(checkpoints_dir)
-        spec = cls.resolve(_model_type_of(params, checkpoints_dir))
-        return spec.config_loader(params, max_seq_len), spec
-
-    @classmethod
-    def build_model(cls, config: Any, spec: ModelSpec) -> nn.Module:
-        return spec.load_class()(config)
-
-
-ModelRegistry.register(
-    ModelSpec("llama", _text_config_loader(LlamaConfig), "lite_llama.models.llama:LlamaModel")
-)
-ModelRegistry.register(
-    ModelSpec("qwen2", _text_config_loader(Qwen2Config), "lite_llama.models.qwen2:Qwen2Model")
-)
-ModelRegistry.register(
-    ModelSpec("qwen3", _text_config_loader(Qwen3Config), "lite_llama.models.qwen3:Qwen3Model")
-)
-ModelRegistry.register(
-    ModelSpec(
-        "qwen3_moe",
-        _text_config_loader(Qwen3MoeConfig),
-        "lite_llama.models.qwen3_moe:Qwen3MoeModel",
-    )
-)
-ModelRegistry.register(
-    ModelSpec(
-        "llava",
-        _hf_config_loader("transformers.LlavaConfig"),
-        "lite_llama.models.llava:LlavaLlama",
-        is_multimodal=True,
-    )
-)
-ModelRegistry.register(
-    ModelSpec(
-        "qwen3_vl",
-        _hf_config_loader("transformers.models.qwen3_vl.configuration_qwen3_vl.Qwen3VLConfig"),
-        "lite_llama.models.qwen3_vl:Qwen3VLForCausalLM",
-        is_multimodal=True,
-    )
-)

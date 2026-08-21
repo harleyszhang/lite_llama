@@ -16,8 +16,8 @@ from typing import Any
 import torch
 from transformers import AutoTokenizer
 
-from ..executor.model_executor import ModelExecutor
-from ..utils.file_interface import get_model_name_from_path
+from ..executor.model_runner import ModelRunner
+from ..utils.path_utils import get_model_name_from_path
 from .detokenizer import IncrementalDetokenizer
 from .sampler import GeneratedSpan, Sampler, SamplingParams
 from .stop_criteria import (
@@ -59,7 +59,7 @@ class _DecodeSession:
 
         # Each generate() call is an independent batch: reset the paged-KV
         # allocator so a long-lived engine does not leak cache rows.
-        engine.executor.kv_mem_manager.free_all()
+        engine.model_runner.kv_cache_manager.free_all()
 
         self.batch_size = len(prompt_token_ids)
         self._prompt_lens = [len(ids) for ids in prompt_token_ids]
@@ -102,14 +102,14 @@ class _DecodeSession:
         self._stop = StopCriteria(
             self.batch_size,
             engine.stop_token_ids,
-            engine.executor.vocab_size,
+            engine.model_runner.vocab_size,
             device=device,
         )
         self._detokenizer = IncrementalDetokenizer(engine.tokenizer, self.batch_size)
         self.completions = [""] * self.batch_size
 
         self._allocated = [
-            engine.executor.prefill_alloc_kv_cache(
+            engine.model_runner.prefill_alloc_kv_cache(
                 self._max_prompt_len, prompt_len_tensor, torch.arange(self.batch_size, device=device)
             )
         ]
@@ -158,12 +158,12 @@ class _DecodeSession:
             input_ids = self._tokens[:, prev_pos:cur_pos]
             step_positions = self._step_positions(input_ids, prev_pos, is_prefill)
 
-            logits = engine.executor.forward(
+            logits = engine.model_runner.forward(
                 input_ids,
                 step_positions,
                 self._multi_modal_inputs if is_prefill else None,
             )
-            self._allocated.append(engine.executor.decode_alloc_kv_cache(self.batch_size))
+            self._allocated.append(engine.model_runner.decode_alloc_kv_cache(self.batch_size))
 
             if is_prefill:
                 # After prefill the last real token differs per sequence when
@@ -209,7 +209,7 @@ class _DecodeSession:
                 yield deltas
 
         # Release every cache row reserved across prefill + decode.
-        engine.executor.kv_mem_manager.release_ref(torch.cat(self._allocated).long())
+        engine.model_runner.kv_cache_manager.release_ref(torch.cat(self._allocated).long())
         engine.last_stop_reasons = self._stop.reasons()
 
     def _flush(self, start: int, end: int, check_repeat: bool) -> list[str]:
@@ -289,7 +289,8 @@ class LLMEngine:
     """Loads a model and generates text from tokenised prompts.
 
     Args:
-        checkpoints_dir: Directory with ``config.json`` and a ``*.pth`` checkpoint.
+        checkpoints_dir: HuggingFace checkpoint directory (``config.json`` plus
+            ``*.safetensors``).
         tokenizer_path: Tokenizer location; defaults to ``checkpoints_dir``.
         max_seq_len: Context bound; also caps the KV cache.
         max_gpu_num_blocks: Manual KV-cache size in tokens; profiled when ``None``.
@@ -310,7 +311,7 @@ class LLMEngine:
     ) -> None:
         self.device = device
         self.model_path = checkpoints_dir
-        self.executor = ModelExecutor.build(
+        self.model_runner = ModelRunner.build(
             checkpoints_dir=checkpoints_dir,
             max_seq_len=max_seq_len,
             max_gpu_num_blocks=max_gpu_num_blocks,
@@ -318,10 +319,10 @@ class LLMEngine:
             use_cuda_graph=use_cuda_graph,
         )
         if use_cuda_graph:
-            self.executor.enable_cuda_graph()
+            self.model_runner.enable_cuda_graph()
         self.tokenizer = self._load_tokenizer(tokenizer_path or checkpoints_dir)
         self.sampler = Sampler()
-        self.max_seq_len = self.executor.max_seq_len
+        self.max_seq_len = self.model_runner.max_seq_len
         # Full stop-token set (tokenizer EOS + everything generation_config
         # declares). Each session records "eos" / "repeat" / "length" per
         # sequence into ``last_stop_reasons`` so callers can explain why
