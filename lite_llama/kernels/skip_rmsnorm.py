@@ -1,5 +1,13 @@
-"""
-modified from https://github.com/FlagOpen/FlagGems/blob/master/src/flag_gems/fused/skip_rms_norm.py
+"""Fused residual-add + RMSNorm ("skip rmsnorm") in Triton.
+
+Adds the residual and applies RMSNorm in a single pass, returning both the
+normalised output and the updated residual — one kernel instead of an add followed
+by a separate norm.
+
+Modified from https://github.com/FlagOpen/FlagGems/blob/master/src/flag_gems/fused/skip_rms_norm.py
+
+Usage:
+    out, residual = skip_rmsnorm(x, residual, weight, eps=1e-5)
 """
 
 import torch

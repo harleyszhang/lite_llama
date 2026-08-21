@@ -1,20 +1,15 @@
-"""Fused MoE kernels: top-k routed experts via a Triton grouped GEMM.
+"""Fused MoE: top-k routed experts as a Triton grouped GEMM.
 
-Simplified port of vLLM's ``fused_moe_kernel`` (vllm/model_executor/layers/
-fused_moe/fused_moe.py), trimmed to lite_llama's needs: fp16 in / fp32
-accumulate, no quantisation, no bias, no expert parallelism. The data
-protocol is kept identical so the two implementations can be cross-checked:
+A simplified port of vLLM's ``fused_moe_kernel`` (fp16 in / fp32 accumulate; no
+quant, bias or expert parallelism) that keeps vLLM's data protocol so the two can
+be cross-checked: ``sorted_token_ids`` (``token*top_k+slot`` sorted by expert,
+per-expert padded to ``BLOCK_M`` with a masked sentinel), ``expert_ids`` (expert
+per row-block) and ``num_tokens_post_padded`` (device length; overrun blocks exit,
+so the grid needs no host sync). Pipeline: ``moe_align_block_size`` -> GEMM1
+(gate_up) -> silu_and_mul -> GEMM2 (down, router weight folded in) -> ``moe_sum``.
 
-* ``sorted_token_ids`` — flat ``token * top_k + slot`` indices sorted by the
-  expert they route to, padded per-expert up to a multiple of ``BLOCK_M``
-  with the sentinel ``num_slots`` (masked out in the kernel).
-* ``expert_ids`` — expert index serving each ``BLOCK_M`` row-block.
-* ``num_tokens_post_padded`` — device scalar with the real padded length;
-  grid blocks past it exit immediately, so the grid can be sized from the
-  static upper bound without a host sync.
-
-Pipeline: ``moe_align_block_size`` -> grouped GEMM1 (gate_up) -> silu_and_mul
--> grouped GEMM2 (down, router weight folded in) -> ``moe_sum`` over top-k.
+Usage:
+    out = fused_moe(hidden_states, w1, w2, topk_weights, topk_ids)
 """
 
 from __future__ import annotations

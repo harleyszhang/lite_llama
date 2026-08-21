@@ -1,3 +1,12 @@
+"""Elementwise activation kernels (Triton): relu, leaky_relu, tanh, gelu, silu.
+
+Each is a thin pointwise Triton kernel over a flattened tensor — standalone and
+useful on their own, kept apart from the fused MLP/attention kernels.
+
+Usage:
+    y = silu(x)
+"""
+
 import math
 
 import triton

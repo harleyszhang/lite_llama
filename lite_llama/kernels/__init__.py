@@ -13,7 +13,6 @@ from .flashdecoding import flash_decoding
 from .fused_moe import fused_moe, moe_align_block_size
 from .rope_emb import rope_emb_forward
 from .skip_rmsnorm import skip_rmsnorm
-from .softmax_split import softmax_split
 from .swiglu import swiglu_forward
 from .update_kv_buffer import update_kv_buffer
 from .update_kv_index import update_kv_index
@@ -28,7 +27,6 @@ __all__ = [
     "relu",
     "rope_emb_forward",
     "skip_rmsnorm",
-    "softmax_split",
     "swiglu_forward",
     "tanh",
     "update_kv_buffer",

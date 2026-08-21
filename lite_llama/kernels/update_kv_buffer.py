@@ -1,3 +1,12 @@
+"""Scatter freshly computed K/V rows into the paged KV buffer.
+
+Writes each token's fused K/V vector to its allocated slot (``Select_Index``) in the
+global cache buffer, so a decode/prefill step lands both halves with one launch.
+
+Usage:
+    update_kv_buffer(kv_values, select_index, kv_buffer)
+"""
+
 import torch
 import triton
 import triton.language as tl

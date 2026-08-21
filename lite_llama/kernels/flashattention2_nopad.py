@@ -3,6 +3,16 @@
 # https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html
 
 
+"""FlashAttention-2 (Triton) for variable-length, unpadded prefill batches.
+
+Serves the context phase: sequences are packed without padding and indexed by
+cumulative-length offsets, so no work is wasted on pad tokens. Uses the v2 work
+partition (parallelise over query blocks, rescale the softmax once at block end).
+
+Usage:
+    out = flash_attention2_no_pad(q, k, v, ...)   # unpadded (varlen) prefill
+"""
+
 import torch
 import triton
 import triton.language as tl
