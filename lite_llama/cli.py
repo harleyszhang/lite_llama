@@ -1,22 +1,15 @@
 """``lite-llama`` command-line entry point.
 
-架构总览(自底向上四层):
+Built bottom-up in four decoupled layers: a declarative option table
+(:class:`CliOption` + ``COMMON_OPTIONS``) shared by every subcommand; a frozen
+:class:`EngineOptions` that validates the parsed args and builds the right
+``TextGenerator`` / ``VisionGenerator``; a :class:`PrompterResolver` that picks
+base-vs-instruct prompting; and :class:`CliCommand` subclasses that wire it up.
+Adding a subcommand = one ``CliCommand`` subclass listed in ``COMMANDS``.
 
-1. **声明式参数表** —— :class:`CliOption` + ``COMMON_OPTIONS``:
-   所有子命令共享的 argparse 参数集中为一张数据表,``register`` 负责
-   翻译成 ``add_argument`` 调用。新增公共参数只改一处。
-2. **配置对象 + 工厂** —— :class:`EngineOptions`(frozen dataclass):
-   把 ``argparse.Namespace`` 收敛为显式的引擎构造参数并完成校验,
-   同时充当 ``TextGenerator`` / ``VisionGenerator`` 的工厂(Builder),
-   命令类不再关心两种生成器构造签名的差异。
-3. **策略层** —— :class:`PrompterResolver`(Strategy):
-   封装 "base 模型直传 / instruct 模型套聊天模板" 的判定规则与
-   prompter 名称推断,与命令执行完全解耦,可独立测试。
-4. **命令层** —— :class:`CliCommand`(Command + Template Method):
-   ``register`` 固定 "建子 parser → 注册公共参数 → 注册特有参数 →
-   绑定 handler" 的骨架,子类只实现 ``add_arguments`` 与 ``run``。
-
-新增一个子命令 = 写一个 :class:`CliCommand` 子类并加入 ``COMMANDS``。
+Usage:
+    lite-llama chat --model-dir my_weight/Qwen2.5-0.5B
+    lite-llama vl-chat --model-dir my_weight/llava-1.5-7b-hf
 """
 
 from __future__ import annotations
@@ -34,7 +27,7 @@ from PIL import Image
 
 from .engine import SamplingParams, TextGenerator, VisionGenerator
 from .models.config import read_model_type
-from .utils.prompt_templates import BasePrompter, get_prompter
+from .utils.prompt_templates import ChatPrompter, get_prompter
 
 # ---------------------------------------------------------------------------
 # 第一层:声明式 CLI 参数表
@@ -201,16 +194,16 @@ class PrompterResolver:
         return "empty"
 
     @staticmethod
-    def build(style: str, model_dir: str, max_seq_len: int) -> BasePrompter | None:
-        """构造 prompter 实例;``"empty"`` 返回 ``None``。
+    def build(style: str, tokenizer) -> ChatPrompter | None:
+        """构造 prompter;base 模型(``style == "empty"``)或无 chat_template 时返回 ``None``。
 
-        ``EmptyPrompter`` 并非真正的空操作:它仍会用 BasePrompter 的角色
-        分隔符(``": <prompt>:"``)包裹文本,所以 base 模型必须完全绕过
-        prompter 体系,而不是指望它透明透传。
+        返回 ``None`` 表示"原样直传":base 模型没有聊天模板,套模板反而有害
+        (base Qwen2.5 收到 ``<|im_start|>assistant`` 会回显并退化重复)。instruct
+        模型则交给 :func:`get_prompter`,用 tokenizer 自带的官方模板(vLLM 式)。
         """
         if style == "empty":
             return None
-        return get_prompter(style, model_dir, short_prompt=max_seq_len <= 1024)
+        return get_prompter(tokenizer)
 
 
 # ---------------------------------------------------------------------------
@@ -273,9 +266,9 @@ class ChatCommand(CliCommand):
 
     def run(self, args: argparse.Namespace) -> int:
         opts = EngineOptions.from_args(args)
-        style = PrompterResolver.resolve(opts.model_dir, args.prompt_style)
-        prompter = PrompterResolver.build(style, opts.model_dir, opts.max_seq_len)
         generator = opts.build_text_generator()
+        style = PrompterResolver.resolve(opts.model_dir, args.prompt_style)
+        prompter = PrompterResolver.build(style, generator.tokenizer)
         params = self.build_sampling_params(args)
 
         self._print_banner(opts.model_dir, style, params)
@@ -308,7 +301,7 @@ class ChatCommand(CliCommand):
     @staticmethod
     def _stream_reply(
         generator: TextGenerator,
-        prompter: BasePrompter | None,
+        prompter: ChatPrompter | None,
         params: SamplingParams,
         user_input: str,
     ) -> None:

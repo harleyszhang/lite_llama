@@ -1,25 +1,14 @@
 """Single source of truth mapping a HuggingFace ``model_type`` to its implementation.
 
-Before this module the mapping was duplicated in three places — a string-path table
-in the model runner, a config-class table beside the attention metadata, and an
-``if model_type in ("llava", "qwen3_vl")`` branch in the forward call — which meant
-adding a model required edits in three files that could silently disagree.
+Replaces a mapping once duplicated across the runner, a config table and a
+forward-time ``if model_type in (...)`` branch. Each entry is two facts: the class
+(``"module.path:ClassName"``, imported lazily so a missing transformers model only
+fails when requested) and whether it consumes ``multi_modal_inputs`` (the executor
+must know before it holds a model — it decides CUDA-graph eligibility). Adding a
+model is one line in ``_SPECS`` plus the implementation module.
 
-A registry entry is now two facts, and nothing else:
-
-* which class implements the architecture, written as ``"module.path:ClassName"``
-  so the import is deferred — a transformers build without ``qwen3_vl`` only
-  fails if that model is actually requested;
-* whether the model consumes ``multi_modal_inputs``, which the executor has to
-  know before it holds a model, because it decides CUDA-graph eligibility and the
-  shape of the forward call.
-
-Config parsing used to live here too, as one loader function per architecture.
-It moved to :class:`~lite_llama.models.config.ModelConfig`, which reads every
-checkpoint through ``AutoConfig``, so there is nothing left to vary per model.
-
-Adding a model is therefore one line in :attr:`ModelRegistry._SPECS` plus the
-implementation module.
+Usage:
+    ModelRegistry maps a model_type to a ModelSpec (class path + multimodal flag).
 """
 
 from __future__ import annotations

@@ -1,17 +1,13 @@
 """Multimodal prompt preparation (Strategy seam for the LLM entry point).
 
-:class:`MultimodalPreparer` owns everything that turns ``(prompt, images)``
-into engine-ready ``(token_ids, multi_modal_inputs, position_ids)``:
+:class:`MultimodalPreparer` turns ``(prompt, images)`` into engine-ready
+``(token_ids, multi_modal_inputs, position_ids)``: it runs the HF ``AutoProcessor``
+(expanding image placeholders), applies the Qwen3-VL chat template, and builds
+mrope 3D position ids via the vetted HF reference. Extracted from the legacy
+``VisionGenerator`` so both ``LLM`` and the wrappers share one implementation.
 
-* the HuggingFace ``AutoProcessor`` call (expands image placeholders),
-* the Qwen3-VL chat-template wrapping (its processor grows ``<|image_pad|>``
-  placeholders only inside a chat template),
-* mrope 3D position ids for Qwen3-VL (delegated to the vetted HF reference
-  implementation rather than reimplemented).
-
-Extracted from the legacy ``VisionGenerator`` so the logic lives in exactly
-one place, consumed by both :class:`~lite_llama.engine.llm.LLM` and the
-backward-compatible generator wrappers.
+Usage:
+    token_ids, mm_inputs, position_ids = MultimodalPreparer(...).prepare(prompt, images)
 """
 
 from __future__ import annotations
@@ -80,11 +76,6 @@ class MultimodalPreparer:
     def _mrope_positions(self, input_ids: torch.Tensor, batch: dict[str, Any]) -> torch.Tensor:
         """Compute Qwen3-VL 3D position ids, reusing the HF reference implementation."""
         hf_model = self._engine.model_runner.model
-        # Qwen3-VL's config-only get_rope_index is the vetted source of the (t, h, w)
-        # index maths; reimplementing its ~120 lines here would only add risk. It is
-        # an *unbound* method that reads only ``config`` and ``get_vision_position_ids``
-        # off its host, so a tiny adapter exposes both from the lite_llama model. The
-        # config it wants is the raw HF one, not lite_llama's wrapper.
         from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
 
         class _RopeIndexHost:
@@ -101,6 +92,7 @@ class MultimodalPreparer:
             "video_grid_thw": batch.get("video_grid_thw"),
             "attention_mask": batch.get("attention_mask"),
         }
+        
         # transformers >= 5 groups tokens by modality through mm_token_type_ids
         # (returned by the processor) instead of scanning for vision markers.
         if "mm_token_type_ids" in inspect.signature(Qwen3VLModel.get_rope_index).parameters:

@@ -142,10 +142,7 @@ filterwarnings = [
 [tool.coverage.run]
 source = ["lite_llama"]
 branch = true
-omit = [
-  # Kernels kept for reference/teaching but not wired into the shipped model path.
-  "lite_llama/kernels/others/*",
-]
+omit = []
 
 [tool.coverage.report]
 exclude_also = [

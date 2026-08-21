@@ -1,35 +1,14 @@
 """CUDA Graph capture and replay for the decode phase.
 
-Why this file exists
---------------------
-The previous implementation (deleted before this refactor) produced garbage output
-once a second decode step ran. Root cause: CUDA Graph records *tensor pointers*
-at capture time. The decode path in :class:`ModelRunner` used to reassign
+A CUDA Graph bakes in *tensor pointers* at capture time, so the decode path must
+never reallocate the tensors the model reads. Three rules make that hold:
+persistent input buffers that each replay ``copy_()`` into in place; one graph per
+``(batch_size, seq_len_bucket)`` because FlashDecoding sizes scratch by
+``max_actual_seq_len``; and decode-only capture (``seq_len == 1``), with prefill
+always eager.
 
-    self.atten_info.cur_select_index = self.kv_cache_manager.alloc_kvcache_index(...)
-
-on every step, handing the model a freshly allocated tensor each time. The graph
-still held pointers into the *first-step* tensors, so subsequent replays read
-whatever the caching allocator had recycled into those addresses — random KV
-cache row indices, garbage attention output.
-
-The fix has three parts, implemented below:
-
-1. **Persistent buffers.** :class:`CUDAGraphRunner` owns its own ``input_ids`` /
-   ``position_ids`` / ``cur_select_index`` / ``b_seq_len`` / ``b_req_idx`` tensors
-   for the whole generation. Each replay ``.copy_()`` new values in place; the
-   graph's baked pointers stay valid because the underlying storage never moves.
-
-2. **Bucketing by ``max_actual_seq_len``.** The FlashDecoding kernel allocates
-   intermediate ``mid_o`` / ``mid_o_logexpsum`` tensors sized by
-   ``max_num_partitions = ceil(max_actual_seq_len / PARTITION_SIZE)``. Those
-   allocations are baked into the graph, so replay must fit within the captured
-   size. We capture one graph per ``(batch_size, seq_len_bucket)`` pair; at replay
-   we round the current ``max_actual_seq_len`` up to the nearest bucket ceiling.
-
-3. **Decode-only capture.** Prefill uses a different attention kernel and the
-   sequence length varies per prompt, so it is never graph-friendly. Graphs are
-   captured only for ``seq_len == 1``; prefill always falls through to eager.
+Usage:
+    mgr = CUDAGraphManager(...); logits = mgr.decode(input_ids, positions, ...)
 """
 
 from __future__ import annotations
@@ -41,24 +20,24 @@ import torch.nn as nn
 
 from .attention_metadata import AttentionMetadata
 
-# Default buckets balance capture memory (each graph pins tens of MB of
-# workspace) against replay coverage.  A prompt of a few hundred tokens fits
-# in the 512 bucket; long contexts fall through to eager once past the
-# largest bucket.
+# One graph per (batch_size, seq_len_bucket): a graph fixes both the input shapes
+# and ``max_actual_seq_len``, so both axes must be enumerated. More buckets cover
+# more requests but pin more workspace — a few-hundred-token prompt lands in the
+# 512 bucket, anything past the largest bucket falls back to eager.
 DEFAULT_BATCH_SIZES: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 128)
 DEFAULT_SEQ_LEN_BUCKETS: tuple[int, ...] = (256, 512, 1024, 2048, 4096)
 
-# Measured on a 0.5B fp16 model: ~38 MB per captured graph. Reserve 64 MB per
-# graph so the KV-cache profiler leaves headroom for capture; the OOM fallback
-# in ``ModelRunner.enable_cuda_graph`` covers models that exceed the estimate.
+# ~38 MB per graph measured on a 0.5B fp16 model, rounded up for headroom. The KV
+# profiler withholds this much per graph; the OOM fallback in
+# ``ModelRunner.enable_cuda_graph`` covers models that exceed the estimate.
 WORKSPACE_BYTES_PER_GRAPH: int = 64 * 1024**2
 
 
 def estimate_capture_workspace(max_seq_len: int) -> int:
-    """Upper-bound bytes the default capture grid will pin on this model.
+    """Upper bound on the bytes the default capture grid will pin.
 
-    The KV profiler runs before any request index bound is known, so the
-    estimate conservatively assumes every default batch size survives clamping.
+    An upper bound by necessity: the KV profiler runs before ``max_request_num``
+    exists, so every default batch size is assumed to survive clamping.
     """
     n_buckets = sum(1 for b in DEFAULT_SEQ_LEN_BUCKETS if b <= max_seq_len)
     return len(DEFAULT_BATCH_SIZES) * max(n_buckets, 1) * WORKSPACE_BYTES_PER_GRAPH
@@ -113,7 +92,7 @@ class CUDAGraphRunner:
         self.atten_info.cur_select_index = torch.zeros(batch_size, dtype=torch.int32, device=device)
         self.atten_info.b_seq_len = torch.zeros(batch_size, dtype=torch.long, device=device)
         self.atten_info.b_req_idx = torch.arange(batch_size, dtype=torch.long, device=device)
-        # Python int, gets baked into the launched kernel: sets mid_o's shape.
+        # A Python int, so it is baked in: it fixes flash_decoding's mid_o shape and grid.
         self.atten_info.max_actual_seq_len = seq_len_bucket
 
         self._graph: torch.cuda.CUDAGraph | None = None
@@ -121,11 +100,13 @@ class CUDAGraphRunner:
 
     def capture(self) -> None:
         """Warm up on a side stream, then record the graph on the current stream."""
-        # Seed b_seq_len with a plausible non-zero value so that the FlashDecoding
-        # kernel actually visits the K/V rows during capture — otherwise Triton's
-        # autotuner may cache a degenerate specialization keyed on zero-length work.
+        # Warm up on real work: at zero length stage 1 visits no K/V rows, so any
+        # fault would surface inside the capture rather than in the warmup below.
         self.atten_info.b_seq_len.fill_(min(self.seq_len_bucket, 32))
 
+        # The capture stream must be idle, so warmup runs on its own stream, fenced
+        # both ways. Those passes force Triton JIT, cuBLAS workspaces and allocator
+        # blocks to happen *before* the capture, which cannot allocate.
         warmup_stream = torch.cuda.Stream()
         warmup_stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(warmup_stream):

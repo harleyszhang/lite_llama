@@ -1,34 +1,15 @@
 """Qwen3 MoE (A3B series): Qwen3 attention + top-k routed expert FFN.
 
-Organisation mirrors vLLM's ``qwen3_moe.py``: a ``Qwen3MoeSparseMoeBlock``
-per decoder layer holds the router (``gate``) and the stacked expert weights,
-and its forward is ``route -> fused_moe``. The attention stack, q/k norm and
-RoPE are identical to dense Qwen3, so the model reuses
-:class:`~lite_llama.models.base.CausalLM` wholesale and only injects the MoE
-block through the ``_build_mlp`` factory hook.
+Mirrors vLLM's ``qwen3_moe.py``: a ``Qwen3MoeSparseMoeBlock`` per layer holds the
+router and the stacked expert weights (three tensors, not ``3*num_experts``), and
+its forward is ``route -> fused_moe``. Attention, q/k-norm and RoPE are identical
+to dense Qwen3, injected via the ``_build_mlp`` hook. Routing follows HF exactly —
+fp32 softmax over *all* experts, then top-k, then renormalise — an order that is
+not interchangeable. The expert FFN runs as two grouped GEMMs
+(:func:`lite_llama.kernels.fused_moe.fused_moe`), not a Python loop.
 
-Expert weights are stacked along a new leading dim, so one MoE layer is three
-tensors instead of ``3 * num_experts``::
-
-    layers.{i}.mlp.gate_weight              [num_experts, hidden]            router
-    layers.{i}.mlp.experts.gate_up_proj     [num_experts, 2*moe_inter, hidden]
-    layers.{i}.mlp.experts.down_proj        [num_experts, hidden, moe_inter]
-
-The HF checkpoint stores those per expert
-(``layers.{i}.mlp.experts.{e}.gate_proj.weight``); the stacking happens at load
-time in :mod:`lite_llama.models.weights`.
-
-Routing follows HF ``Qwen3MoeSparseMoeBlock`` exactly: fp32 softmax over *all*
-experts first, then top-k, then (``norm_topk_prob=True``) renormalisation of
-the k surviving weights. Softmax-then-topk is not the same as topk-then-
-softmax — the renormalised weights differ — so the order must not be
-"optimised".
-
-The expert FFN itself runs as two grouped GEMMs
-(:func:`lite_llama.kernels.fused_moe.fused_moe`) rather than a Python loop
-over experts: tokens are sorted by expert id once, each expert's share of
-rows is then processed as dense tiles on the tensor cores, and the routing
-weight is folded into the second GEMM's fp32 accumulator.
+Usage:
+    model = Qwen3MoeModel(config)   # via ModelRegistry
 """
 
 from __future__ import annotations

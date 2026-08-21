@@ -1,25 +1,14 @@
-"""Qwen3-VL: SigLIP-style vision tower + Qwen3 language model with mrope and DeepStack.
+"""Qwen3-VL: SigLIP-style vision tower + Qwen3 language model, with mrope + DeepStack.
 
-Two mechanisms make Qwen3-VL more than "encode image, scatter embeddings":
+Two things make it more than "encode image, scatter embeddings". **mrope**: each
+vision token carries a ``(t, h, w)`` position and the rotary dims are split across
+those components (:class:`~lite_llama.models.rotary_embedding.MRotaryEmbedding`; the
+``[3, batch, seq]`` ids come from the processor). **DeepStack**: the tower emits
+extra feature maps that are *added into* the LM hidden states at the vision-token
+positions after the first few layers — skipping it silently degrades quality.
 
-**mrope.** Each vision token carries a ``(t, h, w)`` position instead of one index,
-and the rotary dimensions are split across those components in an interleaved
-layout. :class:`~lite_llama.models.rotary_embedding.MRotaryEmbedding` handles that;
-the ``[3, batch, seq_len]`` position ids are produced by the input processor.
-
-**DeepStack.** The vision tower emits, in addition to the merged patch embeddings,
-one extra feature map per entry of ``vision_config.deepstack_visual_indexes``. Those
-are *added into the language model's hidden states at the vision token positions*
-after the first few decoder layers (see arXiv:2406.04334). Skipping this does not
-crash — it silently degrades quality — so it is wired in through the
-:meth:`~lite_llama.models.base.CausalLM._after_layer` hook.
-
-Parameter layout, and the HF checkpoint keys it is filled from::
-
-    vision_tower.*        <- model.visual.*            (Qwen3VLVisionModel, HF names)
-    language_model.*      <- model.language_model.*    (lite_llama names)
-    language_model.lm_head_weight  <- the tied embedding table (absent from the
-                                      checkpoint, which sets tie_word_embeddings)
+Usage:
+    model = Qwen3VLForCausalLM(config)   # via ModelRegistry
 """
 
 from __future__ import annotations

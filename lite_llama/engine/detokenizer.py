@@ -1,27 +1,15 @@
-"""Incremental detokenisation for streaming output.
+"""Incremental detokenisation: per-step token ids to per-step text deltas.
 
-The naive way to stream text is to decode the whole generated span every step
-and diff it against what was already emitted. That is ``O(n)`` tokenizer work
-per step, so producing ``n`` tokens costs ``O(n^2)`` — at 256 tokens it measured
-0.8 ms per step, comparable to the entire GPU decode step.
+Decoding the whole span each step and diffing is ``O(n^2)``. Instead, per sequence
+two offsets (``prefix_offset`` for context, ``read_offset`` for what was already
+emitted) bound each step to decoding a small window — ``O(1)`` amortised. A window
+rather than a lone token is required for correctness: SentencePiece strips a
+leading ``▁`` from a single token (gluing words together), and multi-byte UTF-8
+split across tokens must be held back until the character completes.
 
-:class:`IncrementalDetokenizer` keeps the cost bounded instead. Per sequence it
-tracks two offsets into the token list:
-
-* ``prefix_offset`` — start of the window that is decoded for *context*;
-* ``read_offset``  — everything before this has already been emitted as text.
-
-Each step decodes only ``tokens[prefix_offset:]`` and the shorter
-``tokens[prefix_offset:read_offset]``, then emits the difference. Both windows
-stay small, which is what makes the step cost constant.
-
-Decoding a window rather than a single token is not an optimisation detail, it
-is required for correctness: SentencePiece tokenizers (LLaMA, LLaVA, Vicuna)
-represent a leading space as ``▁`` and ``decode()`` strips it when the input is
-a lone token, so per-token decoding silently glues words together
-("A large black dog" -> "Alargeblackdog"). Multi-byte UTF-8 characters split
-across tokens are handled by holding text back until the replacement character
-disappears.
+Usage:
+    det = IncrementalDetokenizer(tokenizer, batch_size)
+    delta = det.append(seq_index, token_id)   # "" until a character completes
 """
 
 from __future__ import annotations
