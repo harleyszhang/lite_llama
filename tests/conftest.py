@@ -44,8 +44,13 @@ def _resolve_model_dir() -> Path:
     return candidate if candidate.is_absolute() else REPO_ROOT / candidate
 
 
-def _checkpoint_problem(path: Path) -> str | None:
-    """Describe why ``path`` is unusable as a checkpoint, or ``None`` if it is."""
+def checkpoint_problem(path: Path) -> str | None:
+    """Describe why ``path`` is unusable as a checkpoint, or ``None`` if it is.
+
+    Public because ``tests/evals`` gates on checkpoints named in its own configs
+    rather than on the one this file resolves, and "what counts as a usable
+    checkpoint" must not be answered in two places.
+    """
     if not path.is_dir():
         return f"no such directory: {path}"
     if not (path / "config.json").is_file():
@@ -63,11 +68,11 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     model_dir = _resolve_model_dir()
     # Evaluated once: probing the filesystem per test item is pointless and the
     # answer cannot change mid-run.
-    checkpoint_problem = _checkpoint_problem(model_dir)
+    checkpoint_problem_reason = checkpoint_problem(model_dir)
     cuda_missing = not torch.cuda.is_available()
 
     skip_gpu = pytest.mark.skip(reason="needs a CUDA device")
-    skip_weights = pytest.mark.skip(reason=f"needs a checkpoint: {checkpoint_problem}")
+    skip_weights = pytest.mark.skip(reason=f"needs a checkpoint: {checkpoint_problem_reason}")
 
     for item in items:
         # Triton kernels cannot run on CPU; mark by location so new kernel
@@ -79,7 +84,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
         if cuda_missing and "gpu" in item.keywords:
             item.add_marker(skip_gpu)
-        if checkpoint_problem and "weights" in item.keywords:
+        if checkpoint_problem_reason and "weights" in item.keywords:
             item.add_marker(skip_weights)
 
 
@@ -105,7 +110,7 @@ def _reset_torch_state():
 def model_dir() -> Path:
     """Validated checkpoint directory; skips the test when it is unusable."""
     path = _resolve_model_dir()
-    problem = _checkpoint_problem(path)
+    problem = checkpoint_problem(path)
     if problem:
         pytest.skip(f"needs a checkpoint: {problem}")
     return path
