@@ -1,0 +1,2 @@
+# Default list: the cheapest config that still covers the whole path.
+Qwen2.5-0.5B.yaml

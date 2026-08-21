@@ -1,5 +1,5 @@
 .PHONY: help install install-dev lint format test test-cpu test-gpu test-fast \
-        test-weights test-golden golden-update coverage test-cli clean
+        test-weights test-golden test-eval golden-update coverage test-cli clean
 
 PYTHON ?= python
 UV     ?= uv
@@ -7,6 +7,10 @@ UV     ?= uv
 # Checkpoint used by the weights-gated tier. Override to test another model:
 #   make test-weights MODEL_DIR=my_weight/Qwen3-0.6B
 MODEL_DIR ?= my_weight/Qwen2.5-0.5B
+
+# Eval configs the accuracy tier runs. Override for the full sweep:
+#   make test-eval EVAL_CONFIGS=models-all.txt
+EVAL_CONFIGS ?= models-small.txt
 
 help:
 	@echo "Setup:"
@@ -22,6 +26,7 @@ help:
 	@echo "  test-fast     Everything except the slow golden tier"
 	@echo "  test-weights  End-to-end generation (needs CUDA + a converted checkpoint)"
 	@echo "  test-golden   Byte-exact output regression against the recorded baseline"
+	@echo "  test-eval     GSM8K accuracy against the thresholds in tests/evals/configs"
 	@echo "  coverage      test-cpu with an HTML coverage report in htmlcov/"
 	@echo "  test-cli      CLI smoke test over every checkpoint in my_weight/"
 	@echo ""
@@ -68,6 +73,11 @@ test-weights:
 
 test-golden:
 	LITE_LLAMA_TEST_MODEL_DIR=$(MODEL_DIR) $(PYTHON) -m pytest tests/golden
+
+# Accuracy tier. Each config names its own checkpoint and skips itself when that
+# checkpoint is absent, so MODEL_DIR does not apply here — pick configs instead.
+test-eval:
+	$(PYTHON) -m pytest -s -v tests/evals --config-list-file=$(EVAL_CONFIGS)
 
 coverage:
 	$(PYTHON) -m pytest -m "not gpu and not weights" \
