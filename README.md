@@ -1,28 +1,32 @@
-# lite_llama
+<div align="center">
 
-A lightweight, Triton-kernel based LLM inference framework for LLaMA / Qwen2 / Qwen3 /
-LLaVA / Qwen3-VL, refactored for a small, testable and readable codebase.
+# Litellama
 
-* Custom Triton kernels: flash-attention 2 (variable-length prefill),
-  flash-decoding, SwiGLU, skip-RMSNorm, split-softmax, paged KV read/write.
-* Paged KV cache with dynamic memory profiling.
-* Unified engine for text and vision-language models — no per-model generation loop.
-* Loads HuggingFace checkpoints directly: configs come from `AutoConfig`, weights are
-  streamed from `*.safetensors`. No conversion step, no private file format.
-* Single `ModelRegistry` mapping HF `model_type` to an implementation class.
+**A light llama-like llm inference framework based on the triton kernel.**
 
-## Supported models
+[![en](https://img.shields.io/badge/lang-en-red.svg)](https://github.com/harleyszhang/lite_llama/blob/main/README.md)
+[![zh](https://img.shields.io/badge/lang-zh-yellow.svg)](https://github.com/harleyszhang/lite_llama/blob/main/README.zh.md)
+![PyPI - Python Version](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)
 
-| Family    | Text | Vision-language                | Notes                                    |
-| --------- | :--: | :----------------------------: | ---------------------------------------- |
-| LLaMA     |  ✅  |                                | HF `LlamaForCausalLM` layout             |
-| Qwen2     |  ✅  |                                | q/k/v projections carry a bias           |
-| Qwen3     |  ✅  |                                | per-head RMSNorm on q/k, wide q_size     |
-| Qwen3-MoE |  ✅  |                                | top-k routed experts; FP8 block-quantised checkpoints are dequantised to fp16 while loading |
-| LLaVA-1.5 |      |               ✅               | CLIP vision tower + MLP projector        |
-| Qwen3-VL  |      |               ✅               | mrope + DeepStack visual feature merge   |
+<pre>
+         ✅ Flash attention    ✅ Cuda Graph Optimize    ✅ Beginner friendly    ✅ Fused MoE
+</pre>
 
-## Installation
+</div>
+
+## Features
+
+- Up to `4x` speedup over transformers, llama3 1B and 3B models.
+- Supports the latest `llama3`, `Qwen2.5`, `Qwen3`, `Llava1.5`, `Qwen3-vl`, `Qwen3-MoE` model inference, `top-p` sampling, streaming output.
+- Supports GQA, decode stage support cuda graph optimization (with batch_size limitations).
+- Supports `flashattention1`, `flashattention2`, `flashdecoding` (supports `NopadAttention`).
+- Support efficient dynamic management of kv cache (`auto tokenattnetion`).
+- Support fusion of operators, e.g. fusion of `*` and `silu` for element-by-element multiplication, k v linear layer fusion, fusion of `skip` and `rmsnorm`.
+- Some custom operators such as `rmsnorm`, `rope`, `softmax`, `element-by-element-multiplication`, etc. are implemented using the efficient `triton` kernel.
+
+## Setup and Installation
+
+If you don't have a physical server, you can try using [virtal cloud remote server](https://growthdata.virtaicloud.com/t/hK).
 
 Requires Python 3.10+, CUDA-capable PyTorch 2.4+ and Triton 3.0+.
 
@@ -36,12 +40,9 @@ pre-commit install
 
 ### Get the weights
 
-Point `--model-dir` at a HuggingFace checkpoint directory — the one holding
-`config.json` and `*.safetensors` — exactly as `modelscope download` leaves it.
-There is no conversion step: `config.json` is parsed by `AutoConfig`, and the weights
-are streamed from the safetensors shards straight into the model, with the K/V
-projections fused and the MoE experts stacked on the way in
-(see `lite_llama/models/weights.py`).
+Point `--model-dir` at a HuggingFace checkpoint directory — the one holding `config.json` and `*.safetensors` — exactly as `modelscope download` leaves it.
+
+There is no conversion step: `config.json` is parsed by `AutoConfig`, and the weights are streamed from the safetensors shards straight into the model, with the K/V projections fused and the MoE experts stacked on the way in (see `lite_llama/models/weights.py`).
 
 ```bash
 modelscope download Qwen/Qwen2.5-0.5B         --local-dir my_weight/Qwen2.5-0.5B
@@ -52,8 +53,7 @@ modelscope download Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 \
     --local-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8
 ```
 
-Legacy `pytorch_model*.bin` checkpoints still load; safetensors wins when both are
-present.
+Legacy `pytorch_model*.bin` checkpoints still load; safetensors wins when both are present.
 
 ### Examples
 
@@ -131,6 +131,30 @@ llava-1.5-7b-modelscope default inference:
 python -m lite_llama.cli chat --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8
 ```
 
+### Evaluation
+
+After `cli.py` runs successfully, the terminal displays the interface as shown below, and you can enter your question in the terminal.
+
+![cli](./docs/images/cli_stream.png)
+
+After `generate.py` runs successfully, the terminal displays the interface as shown below, and you can enter your question in the terminal.
+
+![generate](./docs/images/generate_stream.png)
+
+After `cli_llava.py` runs successfully, the terminal displays the interface as shown below, enter your picture and prompt word in the terminal, and then enter.
+
+![llava model streaming output](./docs/images/llava_output2.gif)
+
+For performance test, after changing your model weight path, run `lite_llama/examples/benchmark.py` file directly, it will output the latency and throughput performance comparison between lite_llama and transformers libraries, the result of the first run is not very accurate, so we suggest you to take the second run as a reference. For example, for the Llama-3.2-3B model with `prompt_len = 25`, `batch_size = 12`, and `max_gen_len = 1900`, the result of benchmark:
+```bash
+lite_llama inference time: 31.3463 s
+Transformers inference time: 69.1433 s
+lite_llama throughput: 730.45 tokens/s
+Transformers throughput: 183.95 tokens/s
+lite_llama per token latency: 1.369015 ms/token
+Transformers per token latency: 5.436221 ms/token
+```
+
 ## Architecture
 
 ```text
@@ -163,17 +187,9 @@ lite_llama/
 └── utils/                   # chat templates, logger, image and path helpers
 ```
 
-File and class names follow vLLM's, so the two are easy to read side by side:
-`model_runner.py` matches `v1/worker/gpu_model_runner.py`, `kv_cache_manager.py`
-matches `v1/core/kv_cache_manager.py`, `models/interfaces.py` and `models/registry.py`
-match `model_executor/models/`, and the weight-loading split (key mapping in
-`models/weights.py`, file reading in `executor/weight_utils.py`) mirrors vLLM's
-`model_executor/models/utils.py` versus `model_loader/weight_utils.py`.
+File and class names follow vLLM's, so the two are easy to read side by side: `model_runner.py` matches `v1/worker/gpu_model_runner.py`, `kv_cache_manager.py` matches `v1/core/kv_cache_manager.py`, `models/interfaces.py` and `models/registry.py` match `model_executor/models/`, and the weight-loading split (key mapping in `models/weights.py`, file reading in `executor/weight_utils.py`) mirrors vLLM's `model_executor/models/utils.py` versus `model_loader/weight_utils.py`.
 
-The per-model files declare only their differences — bias flags, per-head qk-norm,
-mrope, or DeepStack layer injection — while all shared behaviour lives in
-`models/base.py`. A new architecture typically means one class body plus one
-`ModelRegistry` entry; its config is whatever `AutoConfig` already returns.
+The per-model files declare only their differences — bias flags, per-head qk-norm, mrope, or DeepStack layer injection — while all shared behaviour lives in `models/base.py`. A new architecture typically means one class body plus one `ModelRegistry` entry; its config is whatever `AutoConfig` already returns.
 
 ## Development
 
@@ -184,11 +200,28 @@ make test-cpu  # runs everything not marked gpu/weights
 make test-gpu  # requires CUDA
 ```
 
-`pre-commit` bundles ruff, typos, markdownlint, actionlint, a filename-space guard,
-and a custom hook that rejects hard-coded absolute paths in library code. The
-`tests` GitHub Actions workflow runs the CPU test subset on 3.10 / 3.12 for every
-PR; the `pre-commit` workflow runs every hook against the whole tree.
+`pre-commit` bundles ruff, typos, markdownlint, actionlint, a filename-space guard, and a custom hook that rejects hard-coded absolute paths in library code. The `tests` GitHub Actions workflow runs the CPU test subset on 3.10+ for every PR; the `pre-commit` workflow runs every hook against the whole tree.
 
-## License
+## Acknowledgement
 
-Apache-2.0 — see `LICENSE`.
+- [meta-llama/llama-models](https://github.com/meta-llama/llama-models/tree/main)
+- [transformers](https://github.com/huggingface/transformers)
+- [Liger-Kernel](https://github.com/linkedin/Liger-Kernel/tree/main)
+- [kernl](https://github.com/ELS-RD/kernl/tree/main)
+- [unsloth](https://github.com/unslothai/unsloth/tree/main)
+- [openai-triton](https://triton-lang.org/main/getting-started/tutorials/)
+- [lightllm](https://github.com/ModelTC/lightllm)
+- [vllm](https://github.com/vllm-project/vllm)
+
+## Citation
+
+If you use Litellama in your research, please cite the following work:
+
+```bibtex
+@misc{litellama-2023,
+  author       = {Litellama AI team},
+  title        = {Litellama},
+  howpublished = {\url{https://github.com/harleyszhang/lite_llama}},
+  year         = {2023},
+}
+```
