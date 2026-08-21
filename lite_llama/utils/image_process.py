@@ -13,6 +13,16 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 
+"""Image loading and preprocessing for the vision-language models.
+
+Loads images from path / URL / base64, optionally pads to a square
+(``expand2square``), and runs the HF image processor to produce pixel tensors for
+the vision tower. Adapted from LLaVA.
+
+Usage:
+    images = load_images(paths); pixels = process_images(images, processor, cfg)
+"""
+
 import base64
 import os
 from io import BytesIO

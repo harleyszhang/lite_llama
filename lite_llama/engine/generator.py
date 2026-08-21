@@ -1,15 +1,13 @@
-"""Backward-compatible wrappers around :class:`~lite_llama.engine.llm.LLM`.
+"""Backward-compatible ``TextGenerator`` / ``VisionGenerator`` wrappers.
 
-``TextGenerator`` / ``VisionGenerator`` predate the unified ``LLM`` entry
-point and are kept as thin delegating shells so existing callers (CLI,
-examples, benchmarks, tests) keep working unchanged. **New code should use
-:class:`~lite_llama.engine.llm.LLM` directly** — it subsumes both wrappers
-with a single ``generate``/``stream`` API.
+Thin delegating shells over :class:`~lite_llama.engine.llm.LLM` (which now
+subsumes both with one ``generate``/``stream`` API); kept so existing CLI,
+examples, benchmarks and tests keep working. New code should use ``LLM``
+directly — nothing is implemented here beyond argument/result adaptation.
 
-All multimodal preparation lives in
-:class:`~lite_llama.engine.multimodal.MultimodalPreparer`; the generation loop
-lives in :class:`~lite_llama.engine.llm_engine.LLMEngine`. Nothing is
-implemented here except argument/result adaptation.
+Usage:
+    gen = TextGenerator(checkpoints_dir="my_weight/Qwen2.5-0.5B")
+    text = gen.generate(prompts, SamplingParams(...))
 """
 
 from __future__ import annotations

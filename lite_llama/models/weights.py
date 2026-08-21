@@ -1,28 +1,15 @@
 """HuggingFace checkpoint keys -> lite_llama parameters.
 
-lite_llama consumes HF checkpoints as they ship: no offline conversion step, no
-private file format. What it *does* need is a translation layer, because two
-deliberate structural choices make its parameter tree differ from HF's:
+lite_llama loads HF checkpoints as-is; only a key translation is needed because two
+structural choices differ from HF: **fused K/V** (``k_proj``+``v_proj`` concatenated
+into ``kv_proj_weight`` for a one-launch cache write) and **stacked MoE experts**
+(``3*num_experts`` matrices packed into three tensors for grouped-GEMM experts).
+The rest is naming (bare ``nn.Parameter`` vs ``nn.Linear``). Rules are expressed as
+*destinations* (parameter + the view to fill); :func:`load_weights` then verifies
+every parameter is covered exactly once, so a missed key fails loudly, not silently.
 
-* **Fused K/V.** ``k_proj`` and ``v_proj`` are concatenated along dim 0 into one
-  ``kv_proj_weight`` so a decode step writes both halves of the KV cache with a
-  single kernel launch.
-* **Stacked MoE experts.** HF stores ``3 * num_experts`` matrices per MoE layer;
-  lite_llama stacks them into three tensors so the expert FFN runs as two grouped
-  GEMMs instead of a Python loop over experts.
-
-Everything else is a naming difference: lite_llama holds projection weights as
-bare ``nn.Parameter``s (``self_attn.q_proj_weight``) rather than ``nn.Linear``
-submodules, which keeps the ``F.linear`` calls explicit in the model code, so the
-checkpoint's ``self_attn.q_proj.weight`` loses one level of nesting.
-
-The mapping is expressed as *destinations*: a checkpoint tensor names the
-parameter it belongs to plus the view inside that parameter which it fills.
-Whole-parameter loads use :func:`whole`; the fused parameters use one of the
-shard selectors, so two (or ``2 * num_experts``) checkpoint tensors add up to one
-parameter. :func:`load_weights` then verifies that every parameter was covered
-exactly once, element for element — a mapping rule that silently misses a key
-would otherwise leave a model that runs and returns nonsense.
+Usage:
+    load_weights(model, hf_weights_iterator(path), model.translate_weight_key)
 """
 
 from __future__ import annotations

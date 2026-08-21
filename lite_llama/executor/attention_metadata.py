@@ -1,4 +1,13 @@
-"""Runtime attention/KV-cache bookkeeping passed through the model forward pass."""
+"""Runtime attention / KV-cache bookkeeping passed through the model forward pass.
+
+One dataclass threaded into every layer's attention: the paged ``kv_buffer``, the
+cache rows written this step (``cur_select_index``), the request->token map and the
+per-sequence lengths. Carrying it as a single object keeps the attention kernels'
+signatures stable and lets CUDA-graph replay mutate its fields in place.
+
+Usage:
+    attn = AttentionMetadata(kv_buffer=..., cur_select_index=..., b_seq_len=...)
+"""
 
 from __future__ import annotations
 

@@ -1,254 +1,213 @@
 """Latency/throughput benchmark: lite_llama vs HuggingFace transformers.
 
-Runs the same prompt batch through both engines and prints wall-clock time,
-output token counts, throughput (tokens/s) and per-token latency for each.
+Reports the metrics used by vLLM / SGLang serving benchmarks, per engine:
 
-Run from the repository root (see README.zh.md "性能测试"):
-    python examples/benchmark.py
+* **TTFT** (time to first token, s) — prefill latency, measured as the wall-clock
+  time of a ``max_new_tokens=1`` generation over the batch (prefill + 1 token).
+* **TPOT** (time per output token, ms) — steady-state decode latency, defined
+  exactly as vLLM does: ``(latency - ttft) / (output_len - 1)``.
+* **TGS** (token generation speed, tokens/s) — aggregate output throughput,
+  ``total_output_tokens / latency``.
+
+Methodology notes (why earlier numbers were not trustworthy):
+
+* Both engines decode **greedily** (``temperature=0`` / ``do_sample=False``) and
+  stop **naturally at EOS** — identical stopping policy, unlike the old script,
+  which forced transformers to ignore EOS (``eos_token_id=None``) while lite_llama
+  stopped early, so the two never ran the same workload.
+* Output tokens are counted by re-tokenising the generated text with the *same*
+  tokenizer for both engines (this is exactly what vLLM's ``benchmark_serving``
+  does; it may inflate counts slightly but is consistent, hence fair).
+* Every timed region is wrapped in ``torch.cuda.synchronize()``; a warmup pass is
+  excluded; ``--iters`` runs are aggregated by median.
+
+Results (and the full config) are printed and saved to ``--log-dir`` as JSON.
+
+Run from the repository root:
+    python examples/benchmark.py --model my_weight/Qwen2.5-1.5B-Instruct \
+        --batch-size 8 --gen-len 128 --iters 2
 """
+
 from __future__ import annotations
 
+import argparse
+import json
+import statistics
 import time
-from typing import Optional
+import warnings
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from lite_llama.engine import SamplingParams, TextGenerator
 
-import warnings
-
 warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
 
+_PROMPTS: list[str] = [
+    "I believe the meaning of life is to find happiness in the simple things. but how to achieve the meaning of life?",
+    "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
+    "Can you introduce the History of the American Civil War. ",
+    "who is the first president of the United States and what's his life story?",
+    "How to learn c++, give me some code example.",
+    "How to learn python, give me some code examples.",
+    "How to learn llm, please introduce transformer architecture ",
+    "How to learn cnn, please introduce resnet architecture and give code ",
+    "How to learn cuda programming, give me some code example.",
+    "How to learn rust, give me some code examples.",
+    "How to learn java, give me some code example.",
+    "How to learn linux c, give me some code examples.",
+    "A Complete Introduction to the History of the American Civil War",
+    "Python is a good programming language, how to learn it?",
+    "Please introduce llama model architecture and give implement cuda code.",
+    "Please introduce Qwen2.5 model structure and give cuda implement code.",
+]
 
-def load_lite_llama_generator(
-    checkpoints_dir: str,
-    max_seq_len: int,
-    max_gpu_num_blocks: Optional[int] = None,
-    device: str = "cuda",
-) -> TextGenerator:
-    """初始化 lite-llama 的生成器"""
-    return TextGenerator(
-        checkpoints_dir=checkpoints_dir,
-        max_seq_len=max_seq_len,
-        max_gpu_num_blocks=max_gpu_num_blocks,
-        device=device,
-    )
+
+@dataclass
+class Metrics:
+    """Per-engine measurement for one (batch_size, gen_len) configuration."""
+
+    engine: str
+    batch_size: int
+    prompt_tokens: int
+    output_tokens: int
+    ttft_s: float
+    tpot_ms: float
+    tgs: float
+    latency_s: float
+
+    @classmethod
+    def from_runs(cls, engine, batch_size, prompt_tokens, ttfts, latencies, out_tokens):
+        ttft = statistics.median(ttfts)
+        latency = statistics.median(latencies)
+        output_tokens = round(statistics.median(out_tokens))
+        avg_out = output_tokens / batch_size
+        tpot_ms = (latency - ttft) / (avg_out - 1) * 1000 if avg_out > 1 else float("nan")
+        tgs = output_tokens / latency if latency > 0 else float("nan")
+        return cls(engine, batch_size, prompt_tokens, output_tokens, ttft, tpot_ms, tgs, latency)
+
+
+def _sync() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
 
 def count_tokens(texts: list[str], tokenizer) -> int:
-    # 优化后的分词统计
-    total_tokens = 0
-    for t in texts:
-        ids = tokenizer(t, add_special_tokens=False)["input_ids"]
-        total_tokens += len(ids)
-    return total_tokens
+    """Re-tokenise generated text to count output tokens (vLLM's own method)."""
+    return sum(len(tokenizer(t, add_special_tokens=False).input_ids) for t in texts)
 
 
-def lite_llama_inference(
-    generator: TextGenerator,
-    prompts: list[str],
-    temperature: float,
-    top_p: float,
-    max_gen_len: Optional[int],
-    device: str = "cuda",
-):
-    """使用 lite-llama 的 TextGenerator 实例执行推理，并返回结果与耗时、输出 tokens 数量"""
-
-    # 预热步骤：使用一个简短的假输入，让模型进行一次简单推理，以加载缓存/编译优化等
-    warm_up_prompt = ["Hello World"] * 4
-    _ = generator.generate(
-        warm_up_prompt,
-        SamplingParams(temperature=temperature, top_p=top_p, max_gen_len=5),
-    )
-
-    params = SamplingParams(
-        temperature=temperature, top_p=top_p, max_gen_len=max_gen_len
-    )
-    start_time = time.time()
-    results = generator.generate(prompts, params)
-    end_time = time.time()
-
-    total_tokens = count_tokens(results, generator.tokenizer)
-
-    return results, end_time - start_time, total_tokens
+def _timed(fn) -> tuple[object, float]:
+    _sync()
+    start = time.perf_counter()
+    out = fn()
+    _sync()
+    return out, time.perf_counter() - start
 
 
-def transformers_inference(
-    hf_model_name: str,
-    prompts: list[str],
-    temperature: float,
-    top_p: float,
-    max_gen_len: int,
-    device: str = "cuda",
-):
-    """使用 Transformers 官方库对一组 prompts 进行批量推理, 返回结果与耗时、输出 tokens 数量。"""
-    tokenizer = AutoTokenizer.from_pretrained(hf_model_name)
-    # 确保分词器有 eos_token
+def bench_lite_llama(model_dir, prompts, gen_len, iters, device) -> Metrics:
+    gen = TextGenerator(checkpoints_dir=model_dir, max_seq_len=2048, device=device)
+    greedy = dict(temperature=0.0, top_p=1.0, repetition_penalty=1.0, stop_on_repeat=False)
+
+    gen.generate(["Hello world"] * len(prompts), SamplingParams(max_gen_len=8, **greedy))  # warmup
+
+    ttfts, latencies, out_tokens = [], [], []
+    texts: list[str] = []
+    for _ in range(iters):
+        _, ttft = _timed(lambda: gen.generate(prompts, SamplingParams(max_gen_len=1, **greedy)))
+        texts, latency = _timed(
+            lambda: gen.generate(prompts, SamplingParams(max_gen_len=gen_len, **greedy))
+        )
+        ttfts.append(ttft)
+        latencies.append(latency)
+        out_tokens.append(count_tokens(texts, gen.tokenizer))
+
+    prompt_tokens = count_tokens(prompts, gen.tokenizer)
+    del gen
+    torch.cuda.empty_cache()
+    return Metrics.from_runs("lite_llama", len(prompts), prompt_tokens, ttfts, latencies, out_tokens)
+
+
+def bench_transformers(model_dir, prompts, gen_len, iters, device) -> Metrics:
+    tokenizer = AutoTokenizer.from_pretrained(model_dir)
     if tokenizer.pad_token is None:
-        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
-
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"  # correct for decoder-only batched generation
     model = AutoModelForCausalLM.from_pretrained(
-        hf_model_name, torch_dtype=torch.float16, device_map="auto"
-    )
-    model.resize_token_embeddings(len(tokenizer))
-    model.eval()
+        model_dir, torch_dtype=torch.float16, device_map=device
+    ).eval()
 
-    # 预热步骤：让模型先对一个非常简单的 prompt 做一次推理
-    warm_up_prompt = ["Hello World"]
-    warm_up_inputs = tokenizer(
-        warm_up_prompt, return_tensors="pt", padding=True, truncation=True
-    ).to(model.device)
-    with torch.no_grad():
-        _ = model.generate(
-            **warm_up_inputs,
-            max_new_tokens=10,
-            temperature=temperature,
-            top_p=top_p,
-            do_sample=True,
-        )
+    def generate(max_new_tokens):
+        inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
+        with torch.no_grad():
+            out = model.generate(
+                **inputs, max_new_tokens=max_new_tokens, do_sample=False, repetition_penalty=1.0
+            )
+        gen_ids = out[:, inputs.input_ids.size(-1) :]
+        return tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
 
-    start_time = time.time()
-    model_inputs = tokenizer(
-        prompts, return_tensors="pt", padding=True, truncation=True
-    ).to(model.device)
-    input_ids = model_inputs.input_ids
-    generation_kwargs = {
-        "max_new_tokens": max_gen_len,
-        "top_p": top_p,
-        "temperature": temperature,
-        "do_sample": True,
-        "eos_token_id": None,  # 避免过早终止
-    }
+    generate(8)  # warmup
 
-    # 一次性进行批量推理
-    with torch.no_grad():
-        outputs = model.generate(**model_inputs, **generation_kwargs)
-        generated_ids = outputs[:, input_ids.size(-1) :]
-        generated_texts = tokenizer.batch_decode(
-            generated_ids, skip_special_tokens=True
-        )
+    ttfts, latencies, out_tokens = [], [], []
+    for _ in range(iters):
+        _, ttft = _timed(lambda: generate(1))
+        texts, latency = _timed(lambda: generate(gen_len))
+        ttfts.append(ttft)
+        latencies.append(latency)
+        out_tokens.append(count_tokens(texts, tokenizer))
 
-    end_time = time.time()
-    total_tokens = count_tokens(generated_texts, tokenizer)
-    total_time = end_time - start_time
-    prompts_tokens = input_ids.numel()
-    per_token_latency = total_time / total_tokens if total_tokens > 0 else float("inf")
-
-    return generated_texts, total_time, total_tokens, prompts_tokens, per_token_latency
+    prompt_tokens = count_tokens(prompts, tokenizer)
+    del model
+    torch.cuda.empty_cache()
+    return Metrics.from_runs("transformers", len(prompts), prompt_tokens, ttfts, latencies, out_tokens)
 
 
-def compare_inference_speed(
-    prompts: list[str],
-    temperature: float,
-    top_p: float,
-    max_seq_len: int,
-    max_gen_len: Optional[int],
-    lite_llama_ckpt_dir: str,
-    hf_model_name: str,
-    print_result: bool = False,
-    device: str = "cuda",
-):
-    """对比 lite-llama 与 transformers 官方模型在相同 prompts 下的推理速度和吞吐量。"""
-    # 两边引擎吃完全相同的原始 prompt（不再套 chat 模板），保证公平对比。
-    update_prompts = list(prompts)
-
-    # 1. lite-llama inference
-    lite_llama_generator = load_lite_llama_generator(
-        lite_llama_ckpt_dir, max_seq_len, max_gpu_num_blocks=40960, device=device
-    )
-    lite_llama_results, lite_llama_time, lite_llama_tokens = lite_llama_inference(
-        lite_llama_generator,
-        update_prompts,
-        temperature,
-        top_p,
-        max_gen_len,
-        device=device,
-    )
-    del lite_llama_generator
-    torch.cuda.empty_cache()  # 使用完成后释放 lite_llama_generator 占用的显存
-
-    # 2. transformers inference
-    hf_results, hf_time, hf_tokens, prompts_tokens, hf_pt_latency = (
-        transformers_inference(
-            hf_model_name,
-            update_prompts,
-            temperature,
-            top_p,
-            max_gen_len,
-            device=device,
-        )
-    )
-
-    lite_llama_pt_latency = lite_llama_time / (lite_llama_tokens)
-
-    # 打印时间对比
-    print("lite_llama inference time: {:.4f} s".format(lite_llama_time))
-    print("Transformers inference time: {:.4f} s".format(hf_time))
-
-    print("lite_llama inference output tokens number: {:2d}".format(lite_llama_tokens))
-    print("Transformers inference output tokens number: {:2d}".format(hf_tokens))
-
-    # 吞吐量计算
-    lite_llama_throughput = (
-        (lite_llama_tokens) / lite_llama_time if lite_llama_time > 0 else float("inf")
-    )
-    print(f"lite_llama throughput: {lite_llama_throughput:.2f} tokens/s")
-
-    hf_throughput = hf_tokens / hf_time if hf_time > 0 else float("inf")
-    print(f"Transformers throughput: {hf_throughput:.2f} tokens/s")
-
-    # 打印 per token latency
-    print(f"lite_llama per token latency: {lite_llama_pt_latency * 1000:.6f} ms/token")
-    print(f"Transformers per token latency: {hf_pt_latency * 1000:.6f} ms/token")
-
-    # 打印部分推理结果对比
-    if print_result:
-        for i, (prompt, litellama_res, hf_res) in enumerate(
-            zip(prompts, lite_llama_results, hf_results)
-        ):
-            if i == 0:  # 省略部分打印
-                print("\n[lite_llama]: {}".format(litellama_res))
-                print("\n[Transformers]: {}".format(hf_res))
-                print("\n" + "=" * 40 + "\n")
+def _print_report(cfg: dict, lite: Metrics, hf: Metrics) -> None:
+    print(f"\n{'=' * 68}\n{cfg['model']}  |  batch={cfg['batch_size']}  gen_len={cfg['gen_len']}"
+          f"  iters={cfg['iters']}  gpu={cfg['gpu']}\n{'=' * 68}")
+    row = "{:<14}{:>12}{:>12}{:>14}{:>14}"
+    print(row.format("engine", "TTFT (s)", "TPOT (ms)", "TGS (tok/s)", "out_tokens"))
+    for m in (lite, hf):
+        print(row.format(m.engine, f"{m.ttft_s:.4f}", f"{m.tpot_ms:.3f}",
+                         f"{m.tgs:.2f}", m.output_tokens))
+    if hf.tpot_ms and lite.tpot_ms:
+        print(f"\nspeedup  TGS {lite.tgs / hf.tgs:.2f}x   "
+              f"TPOT {hf.tpot_ms / lite.tpot_ms:.2f}x   TTFT {hf.ttft_s / lite.ttft_s:.2f}x")
 
 
-def main():
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
+    parser.add_argument("--model", default="my_weight/Qwen2.5-1.5B-Instruct",
+                        help="Checkpoint dir (shared by lite_llama and transformers)")
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--gen-len", type=int, default=128)
+    parser.add_argument("--iters", type=int, default=2, help="Timed repeats (median reported)")
+    parser.add_argument("--log-dir", default="benchmark_logs")
+    args = parser.parse_args()
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
+    prompts = (_PROMPTS * (args.batch_size // len(_PROMPTS) + 1))[: args.batch_size]
 
-    prompts: list[str] = [
-        "I believe the meaning of life is to find happiness in the simple things. but how to achieve the meaning of life?",
-        "VGG is a very important cnn backbone, please introduce vgg architecture and give implement code ",
-        "Can you introduce the History of the American Civil War. ",
-        "who is the first president of the United States and what's his life story?",
-        "How to learn c++, give me some code example.",
-        "How to learn python, give me some code examples.",
-        "How to learn llm, please introduce transformer architecture ",
-        "How to learn cnn, please introduce resnet architecture and give code ",
-        "How to learn cuda programming, give me some code example.",
-        "How to learn rust, give me some code examples.",
-        "How to learn java, give me some code example.",
-        "How to learn linux c, give me some code examples.",
-        "A Complete Introduction to the History of the American Civil War",
-        "Python is a good programming language, how tolearn it?",
-        "Please introduce llama model architecture and give implement cuda code.",
-        "Please introduce Qwen2.5 model structure and give cuda implement code.",
-    ]
+    lite = bench_lite_llama(args.model, prompts, args.gen_len, args.iters, device)
+    hf = bench_transformers(args.model, prompts, args.gen_len, args.iters, device)
 
-    # 根据实际情况修改:lite_llama checkpoint 目录与 transformers 模型名
-    hf_model_name = "my_weight/Qwen2.5-1.5B-Instruct"
-    custom_checkpoints_dir = "my_weight/Qwen2.5-1.5B-Instruct"
-    compare_inference_speed(
-        prompts=prompts,
-        temperature=0.7,
-        top_p=0.8,
-        max_seq_len=2048,
-        max_gen_len=1900,
-        lite_llama_ckpt_dir=custom_checkpoints_dir,
-        hf_model_name=hf_model_name,
-        print_result=True,
-        device=device,
+    cfg = dict(model=args.model, batch_size=args.batch_size, gen_len=args.gen_len,
+               iters=args.iters, gpu=gpu, timestamp=datetime.now().isoformat(timespec="seconds"))
+    _print_report(cfg, lite, hf)
+
+    log_dir = Path(args.log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    tag = Path(args.model).name
+    log_path = log_dir / "docs" / f"bench_{tag}_b{args.batch_size}_g{args.gen_len}_{stamp}.json"
+    log_path.write_text(
+        json.dumps({"config": cfg, "lite_llama": asdict(lite), "transformers": asdict(hf)}, indent=2)
     )
+    print(f"\nsaved log -> {log_path}")
 
 
 if __name__ == "__main__":
