@@ -2,8 +2,8 @@
 
 Three things live here so that no individual test file has to re-derive them:
 
-* **Checkpoint discovery.** Integration tests need a converted lite_llama
-  checkpoint. Resolving its path per-file previously went wrong: the helper was
+* **Checkpoint discovery.** Integration tests need a HuggingFace checkpoint
+  directory. Resolving its path per-file previously went wrong: the helper was
   copy-pasted into three files as ``Path(__file__).parents[1] / "my_weight/..."``,
   which pointed at ``tests/my_weight`` once the files moved into subdirectories.
   Every weights-gated test then skipped even on a machine that had the weights,
@@ -30,8 +30,8 @@ import torch
 # tests/conftest.py -> tests/ -> repository root.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-#: Converted checkpoint used by the integration tier. Override with
-#: ``LITE_LLAMA_TEST_MODEL_DIR`` to point at any other lite_llama checkpoint.
+#: HuggingFace checkpoint used by the integration tier. Override with
+#: ``LITE_LLAMA_TEST_MODEL_DIR`` to point at any other checkpoint.
 DEFAULT_MODEL_DIR = "my_weight/Qwen2.5-0.5B"
 
 #: Directories whose tests always need a CUDA device.
@@ -50,8 +50,8 @@ def _checkpoint_problem(path: Path) -> str | None:
         return f"no such directory: {path}"
     if not (path / "config.json").is_file():
         return f"no config.json in {path}"
-    if not any(path.glob("*.pth")):
-        return f"no *.pth checkpoint in {path} (run lite-llama-convert first)"
+    if not any(path.glob("*.safetensors")) and not any(path.glob("*.bin")):
+        return f"no *.safetensors or *.bin weights in {path}"
     return None
 
 

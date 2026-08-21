@@ -4,11 +4,11 @@ The vision tower is HuggingFace's ``CLIPVisionModel`` (a faithful ViT is not wha
 this project is about), while the language model is lite_llama's own Triton-kernel
 :class:`~lite_llama.models.llama.LlamaModel`.
 
-Checkpoint key layout::
+Parameter layout, and the HF checkpoint keys it is filled from::
 
-    vision_tower.vision_model.*        – CLIPVisionModel parameters (HF names)
-    multi_modal_projector.linear_{1,2}.{weight,bias}
-    language_model.*                   – LlamaModel parameters (lite_llama names)
+    vision_tower.*        <- vision_tower.vision_model.*   (CLIPVisionModel, HF names)
+    multi_modal_projector.linear_{1,2}.{weight,bias}       (unchanged)
+    language_model.*      <- language_model.model.*        (lite_llama names)
 """
 
 from __future__ import annotations
@@ -17,11 +17,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import CLIPVisionModel
-from transformers import LlavaConfig as HFLlavaConfig
 
+from .config import ModelConfig
+from .interfaces import LANGUAGE_MODEL_PREFIX, MultiModalCausalLM
 from .llama import LlamaModel
-from .model_config import LlamaConfig
-from .multimodal import MultiModalCausalLM
 
 
 class LlavaMultiModalProjector(nn.Module):
@@ -50,65 +49,43 @@ class LlavaLlama(MultiModalCausalLM):
     """LLaVA-1.5 for single-image (or multi-image) conditioned generation.
 
     Args:
-        config: A HuggingFace :class:`~transformers.LlavaConfig`. ``max_seq_len`` may
-            be attached to it by the executor to bound the KV cache.
+        config: Parsed configuration wrapping a HuggingFace ``LlavaConfig``.
     """
 
-    def __init__(self, config: HFLlavaConfig) -> None:
+    def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.config = config
+        hf_config = config.hf_config
 
-        self.select_layer = config.vision_feature_layer
-        self.select_feature = config.vision_feature_select_strategy
-        self.image_token_index = config.image_token_index
+        self.select_layer = hf_config.vision_feature_layer
+        self.select_feature = hf_config.vision_feature_select_strategy
+        self.image_token_index = hf_config.image_token_index
 
-        self.vision_tower = CLIPVisionModel(config.vision_config)
+        self.vision_tower = CLIPVisionModel(hf_config.vision_config)
         self.multi_modal_projector = LlavaMultiModalProjector(
-            vision_hidden_size=config.vision_config.hidden_size,
-            text_hidden_size=config.text_config.hidden_size,
-            projector_hidden_act=config.projector_hidden_act,
+            vision_hidden_size=hf_config.vision_config.hidden_size,
+            text_hidden_size=config.hidden_size,
+            projector_hidden_act=hf_config.projector_hidden_act,
         )
+        self.language_model = LlamaModel(config)
 
-        self.text_config = LlamaConfig.from_dict(
-            config.text_config.to_dict(),
-            max_seq_len=getattr(config, "max_seq_len", 2048),
+        nested = any(key.startswith("vision_model.") for key in self.vision_tower.state_dict())
+        vision = "vision_tower.vision_model." if nested else "vision_tower."
+
+        self.weight_prefixes = (
+            (LANGUAGE_MODEL_PREFIX, LANGUAGE_MODEL_PREFIX),
+            ("vision_tower.vision_model.", vision),
+            ("vision_tower.", vision),
+            ("multi_modal_projector.", "multi_modal_projector."),
+            ("model.language_model.", LANGUAGE_MODEL_PREFIX),
+            ("model.vision_tower.", vision),
+            ("model.multi_modal_projector.", "multi_modal_projector."),
+            ("", LANGUAGE_MODEL_PREFIX),
         )
-        self.language_model = LlamaModel(self.text_config)
 
     @property
     def placeholder_token_ids(self) -> tuple[int, ...]:
         return (self.image_token_index,)
-
-    def remap_checkpoint_keys(self, state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Reconcile the vision tower's key layout with the installed transformers.
-
-        ``CLIPVisionModel`` nests its encoder under a ``vision_model`` submodule in
-        transformers 4.x but exposes it directly in 5.x. A checkpoint converted
-        under one major version therefore fails ``load_state_dict`` under the other
-        with hundreds of missing/unexpected ``vision_tower.*`` keys. Rather than
-        pinning transformers, adapt the checkpoint to whatever layout the live
-        module tree actually has.
-        """
-        expects_nested = any(
-            key.startswith("vision_tower.vision_model.") for key in self.state_dict()
-        )
-        has_nested = any(key.startswith("vision_tower.vision_model.") for key in state_dict)
-        if expects_nested == has_nested:
-            return state_dict
-
-        remapped: dict[str, torch.Tensor] = {}
-        for key, value in state_dict.items():
-            if expects_nested and key.startswith("vision_tower."):
-                # 5.x-style checkpoint, 4.x-style module tree: insert vision_model.
-                suffix = key[len("vision_tower.") :]
-                remapped[f"vision_tower.vision_model.{suffix}"] = value
-            elif has_nested and key.startswith("vision_tower.vision_model."):
-                # 4.x-style checkpoint, 5.x-style module tree: drop vision_model.
-                suffix = key[len("vision_tower.vision_model.") :]
-                remapped[f"vision_tower.{suffix}"] = value
-            else:
-                remapped[key] = value
-        return remapped
 
     def _select_image_features(self, image_features: torch.Tensor) -> torch.Tensor:
         """Apply the configured patch-selection strategy.
@@ -137,8 +114,7 @@ class LlavaLlama(MultiModalCausalLM):
         pixel_values = pixel_values.to(device=target_device, dtype=target_dtype)
 
         outputs = self.vision_tower(pixel_values, output_hidden_states=True)
-        # `vision_feature_layer` is negative and indexes the hidden-state tuple,
-        # e.g. -2 picks the penultimate layer as LLaVA-1.5 does.
+
         hidden_states = outputs.hidden_states[self.select_layer]
         hidden_states = self._select_image_features(hidden_states)
 

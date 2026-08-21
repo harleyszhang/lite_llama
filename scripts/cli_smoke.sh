@@ -6,7 +6,7 @@
 # have caught the CUDA-driver-vs-torch mismatch and the earlier CUDA Graph bug.
 #
 # Usage:
-#   scripts/cli_smoke.sh                       # exercise every converted model
+#   scripts/cli_smoke.sh                       # exercise every checkpoint found
 #   PYTHON=... scripts/cli_smoke.sh <name>...  # only the named checkpoints
 #
 # The script auto-discovers a compatible Python. If nothing works, it prints a
@@ -18,7 +18,7 @@ REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 MY_WEIGHT="${REPO_ROOT}/my_weight"
 
 if [[ ! -d "${MY_WEIGHT}" ]]; then
-    echo "no checkpoints under ${MY_WEIGHT}; run lite-llama-convert first" >&2
+    echo "no checkpoints under ${MY_WEIGHT}; download a HuggingFace model there first" >&2
     exit 1
 fi
 
@@ -26,7 +26,7 @@ fi
 # Resolve a Python whose torch.cuda actually works. Users occasionally end up
 # with a torch build that targets a newer CUDA than their driver supports; when
 # that happens, torch.cuda.is_available() returns False and every subsequent
-# ``torch.load(..., map_location='cuda')`` call fails deep inside pickle.
+# copy into a cuda parameter fails deep inside torch.
 # ---------------------------------------------------------------------------- #
 _pick_python() {
     local candidates=()
@@ -96,8 +96,8 @@ _find_test_image() {
 _smoke_one() {
     local name="$1"
     local model_dir="${MY_WEIGHT}/${name}"
-    if [[ ! -f "${model_dir}/config.json" ]] || ! ls "${model_dir}"/*.pth >/dev/null 2>&1; then
-        echo "  [skip] ${name}: no config.json or *.pth"
+    if [[ ! -f "${model_dir}/config.json" ]] || ! compgen -G "${model_dir}/*.safetensors" >/dev/null; then
+        echo "  [skip] ${name}: no config.json or *.safetensors"
         return
     fi
 

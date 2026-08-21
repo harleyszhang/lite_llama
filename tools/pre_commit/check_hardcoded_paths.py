@@ -2,9 +2,11 @@
 """Reject hard-coded absolute model/weight paths in tracked Python sources.
 
 lite_llama historically shipped entry points with the author's own checkpoint
-directory baked in (for example ``checkpoints_dir = "/home/foo/my_weight/..."``),
-which makes the CLI unusable for everybody else. Checkpoint locations must come
-from a CLI argument or an environment variable instead.
+directory baked in — ``model_path = "/gemini/code/Llama-3.2-1B-Instruct/"`` and
+friends — which makes the CLI unusable for everybody else. Checkpoint locations
+must come from a CLI argument or an environment variable instead.
+
+Only ``#`` comments are exempt, plus the directories in :data:`_EXEMPT_DIRS`.
 """
 
 from __future__ import annotations
@@ -15,8 +17,12 @@ import sys
 from pathlib import Path
 
 # Absolute POSIX paths that look like a personal or machine-specific location.
+# The trailing segment is optional so that a bare prefix is caught too —
+# ``os.path.join("/root", "ckpt")`` is the same bug as ``"/root/ckpt"``. Requiring
+# either a ``/`` or the closing quote right after the prefix keeps innocent words
+# like ``"/homework"`` from matching.
 _FORBIDDEN = re.compile(
-    r"""["'](/(?:home|Users|root|gemini|mnt|data)/[^"'\n]*)["']""",
+    r"""["'](/(?:home|Users|root|gemini|mnt|data)(?:/[^"'\n]*)?)["']""",
 )
 
 # Directories whose contents are illustrative rather than executable library code.
@@ -39,7 +45,9 @@ def check_file(path: Path) -> list[str]:
     problems = []
     for lineno, line in enumerate(lines, start=1):
         stripped = line.lstrip()
-        # Comments and docstring examples are allowed to show a sample path.
+        # A ``#`` comment may show a sample path. A docstring deliberately may not:
+        # "usage example" text is the most common route by which someone's personal
+        # path gets copied back into working code.
         if stripped.startswith("#"):
             continue
         match = _FORBIDDEN.search(line)

@@ -5,7 +5,8 @@ A light llama-like llm inference framework based on the triton kernel.
 ## 特性
 
 - 相比 transformers, llama3 1B 和 3B 模型加速比最高达 `4x` 倍。
-- 支持最新的 `llama3`、`Qwen2.5`、`Qwen3`、`Qwen3-MoE`(如 Qwen3-30B-A3B,转换时将 FP8 block 量化权重反量化为 fp16)、`Qwen3-VL`、`Llava1.5` 模型推理，支持 `top-p` 采样, 支持流式输出。
+- 支持最新的 `llama3`、`Qwen2.5`、`Qwen3`、`Qwen3-MoE`(如 Qwen3-30B-A3B,加载时将 FP8 block 量化权重反量化为 fp16)、`Qwen3-VL`、`Llava1.5` 模型推理，支持 `top-p` 采样, 支持流式输出。
+- 直接加载 HuggingFace checkpoint：配置走 `AutoConfig`,权重从 `*.safetensors` 流式读入,K/V 投影与 MoE 专家在加载时就地融合/堆叠,不需要离线权重转换,也没有私有权重格式。
 - 支持 GQA、decode 阶段支持 cuda graph 优化（有 batch_size 限制）。
 - 支持 `flashattention1`、`flashattention2`、 `flashdecoding`(支持 `NopadAttention`)。
 - 支持 kv cache 的高效动态管理（`auto tokenattnetion`）。
@@ -118,7 +119,7 @@ Transformers per token latency: 5.436221 ms/token
 
 ## 如何使用
 
-推荐 cuda 版本 12.0 及以上。下载 [llama3.2-1B-Instruct 模型](https://pan.quark.cn/s/f476119babb3)并放到指定 `cli.py` 文件的指定 `checkpoints_dir` 目录。`cli.py` 运行前，需要先运行 `python apply_weight_convert.py` 将 hf 模型权重转换为 `lite_llama` 权重格式。
+推荐 cuda 版本 12.0 及以上。把 HuggingFace checkpoint 目录（含 `config.json` 与 `*.safetensors`）下载到本地，直接用 `--model-dir` 指向它即可，不需要任何权重转换步骤。
 
 ```bash
 apt update
@@ -128,8 +129,8 @@ conda activate lite_llama
 git clone https://github.com/harleyszhang/lite_llama.git
 cd lite_llama/
 pip install -r requirement.txt
-python test_weight_convert.py # 进行模型权重转换。
-python cli.py # 已经下载好模型并放在指定目录的基础上运行
+hf download Qwen/Qwen2.5-0.5B --local-dir my_weight/Qwen2.5-0.5B  # 下载权重
+python -m lite_llama.cli chat --model-dir my_weight/Qwen2.5-0.5B
 ```
 
 推荐 ROCm 版本 5.7 及以上。
@@ -146,8 +147,8 @@ conda activate lite_llama
 git clone https://github.com/harleyszhang/lite_llama.git
 cd lite_llama/
 pip install -r requirement.txt
-python test_weight_convert.py # 进行模型权重转换。
-python cli.py # 已经下载好模型并放在指定目录的基础上运行
+hf download Qwen/Qwen2.5-0.5B --local-dir my_weight/Qwen2.5-0.5B  # 下载权重
+python -m lite_llama.cli chat --model-dir my_weight/Qwen2.5-0.5B
 ```
 
 `cli.py` 程序运行成功后，终端显示界面如下所示，在终端中输入你的问题即可。
@@ -245,7 +246,7 @@ INFO:lite_llama.generate:Decode stage tokens per second : 217.84 tokens/s
 
 - 新增 [`StopCriteria`](lite_llama/engine/stop_criteria.py)：结束标志常驻 GPU，用词表大小的布尔查找表判 EOS，全批一次张量运算完成，每 8 步才做一次 `all()` 轮询。
 - 新增 [`_DecodeSession`](lite_llama/engine/llm_engine.py)：把 per-request 状态封装出来，主机侧仅在轮询边界读回一次采样结果。
-- 给 [`KVCacheMemoryManager`](lite_llama/executor/mem_manager.py) 加 bump 分配器：`generate()` 内 KV 缓存是纯追加分配，只用一个 int 游标记录写入位置，任一部分释放后自动回退到原全表搜索。
+- 给 [`KVCacheManager`](lite_llama/executor/kv_cache_manager.py) 加 bump 分配器：`generate()` 内 KV 缓存是纯追加分配，只用一个 int 游标记录写入位置，任一部分释放后自动回退到原全表搜索。
 
 11，消除 O(n²) 流式解码。原实现每步都 `tokenizer.decode(tokens[prompt_len:cur])` 整段解码再与已输出内容做差，256 token 时累计 ~0.8 ms/step。新增 [`IncrementalDetokenizer`](lite_llama/engine/detokenizer.py) 用滑动窗口只解码 `[prefix_offset:]` 和 `[prefix_offset:read_offset]` 两小段，仍能正确处理 SentencePiece 的前导空格（`▁` 需要上下文）与跨 token 的多字节 UTF-8（结尾遇 `\ufffd` 时先攥住不吐）。摊销后每步常数代价。
 
@@ -276,6 +277,41 @@ eager 路径的 GPU 计算本身没有变化，TPOT 从 15.04 ms 降到 13.55 ms
 
 精度验证（[`scripts/golden_tokens.py`](scripts/golden_tokens.py)）：8 个 greedy 用例覆盖单条 / 等长 batch / 混合长度 batch × 有无 repetition penalty，优化前后逐字节完全一致。
 
+14，配置 / 权重加载 / 模型注册三个模块重构，参照 vLLM 的分层：
+
+- **配置**。删除按架构手写的 `model_config.py` dataclass 与它的 HF 字段别名表，schema / 解析 / 默认值全部交给 `AutoConfig`（[`models/config.py`](lite_llama/models/config.py)）。`ModelConfig` 只补两件 HF config 给不了的东西：运行时旋钮 `max_seq_len`，以及 `num_kv_heads` / `head_dim` / `rope_theta` 的归一化。复用的是配置体系，**不引入** `modeling_*.py`——文本模型仍全跑自己的 Triton 内核。这也修好了一个真 bug：transformers 5.x 把 `rope_theta` / `mrope_section` 收进 `rope_parameters`，旧别名表不认识，Qwen3-VL 的 `mrope_section` 会静默丢失并退化成普通 RoPE。
+- **权重加载**。删除 `tools/convert_weights.py` 与 `lite-llama-convert` 入口，不再需要离线产物。流程与 vLLM 一致：meta 设备上构造空模型 → 就地分配 fp16 参数 → 从 safetensors 流式 `copy_` 到位。只做名字 / 结构重映射（[`models/weights.py`](lite_llama/models/weights.py)）：K/V 写进 `kv_proj_weight` 的上下两半，MoE 逐专家矩阵堆叠进 `gate_up_proj` / `down_proj`，FP8 block 量化在目标设备上反量化。拷贝循环按**元素个数**统计覆盖率，漏写 / 半写 / 重写都会报错——这是 `strict=True` 的 `load_state_dict` 看不到的（fused 参数只写一半仍然“存在”）。
+- **注册**。[`registry.py`](lite_llama/models/registry.py) 从 181 行降到 81 行：每个条目只剩 `model_type -> (实现类路径, 是否多模态)`，每架构一个 config loader 工厂、`load_config` / `build_model` / `read_model_type` 全部取消。新增一个模型 = 一行表项 + 一个类。
+
+加载耗时（A10 / 页缓存已预热 / 取 3 次最小值）：
+
+| 模型                    | 旧：转换一次 + 加载 `.pth` | 新：直读 safetensors | 硬盘占用变化 |
+|------------------------|--------------------------|------------------------|-------------|
+| Qwen2.5-0.5B           | 5.75 s + 0.26 s          | **0.22 s**             | −988 MB     |
+| Qwen2.5-1.5B-Instruct  | — + 0.61 s               | **0.60 s**             | −3.09 GB    |
+
+稳态推理吞吐不变（同机器各跑 3 次，Qwen2.5-0.5B / batch=8 / greedy）：graph 路径 TPS 2111 / 2119 / 2120（重构前）vs 2117 / 2104 / 2116（重构后），eager 路径两边同处 565–606 的噪声带内。真正省下的是部署路径：0.5B 从“转换 6.0 s + 多占 988 MB”变成“直接 0.22 s 加载”，30B-A3B-FP8 则不再需要那份 61 GB 的 `.pth` 副本。
+
+权重加载的精度验证分三层：
+
+- [`tests/models/test_weight_mapping.py`](tests/models/test_weight_mapping.py)：逐个 key 形状的映射单测 + 覆盖率记账（漏 key / 半写 fused / shape 不对 / 映射到不存在的参数，均必须报错）。
+- [`tests/models/test_weight_parity.py`](tests/models/test_weight_parity.py)：6 个架构各随机初始化一个 tiny HF 模型存成真 safetensors，跑完整加载路径后逐参数逐元素对比——k/v 互换、专家下标错位、gate/up 颠倒这些“形状全对但值错位”的 bug 只有这层能抓。
+- [`tests/models/test_checkpoint_index.py`](tests/models/test_checkpoint_index.py)：拿真实发布 checkpoint 的 `model.safetensors.index.json`（本地验证过 llava-1.5-7b-hf 686 key、Qwen3-VL-4B 713 key、Qwen3-30B-A3B-FP8 37491 key），在 meta 设备上不读一字节权重就验证“每个 key 都有参数接 / 每个参数都有 key 写”。
+
+顺手抓出的两个旧 bug，都改变了输出，所以单独记一笔：
+
+1. **Qwen3-VL 的 RoPE base 错了 500 倍**。transformers 5.x 只在 `rope_parameters` 里写 `rope_theta`，而多模态路径的旧配置是 `LlamaConfig.from_dict(config.text_config.to_dict())`，读不到顶层 `rope_theta` 就退到 dataclass 默认值 **10000.0**，而 checkpoint 声明的是 **5,000,000**。在 201 token 的纯文本 prompt 上与 HF `Qwen3VLForConditionalGeneration` 对照 logits：
+
+   | rope_theta | 与 HF 的平均 cosine | 最小 cosine | top-1 一致率 |
+   |------------|---------------------|--------------|--------------|
+   | 10000（旧，默认值） | 0.928 | **−0.195** | 99.50% |
+   | 5e6（新，读配置） | **0.99973** | **0.982** | **100%** |
+
+   最小 cosine 为负意味着部分位置的 logits 向量完全反了方向。回归用例：[`test_nested_rope_theta_is_not_lost`](tests/config/test_config.py)、[`test_qwen3_vl_language_model_gets_mrope_and_the_right_base`](tests/models/test_weight_parity.py)。
+2. **`inv_freq` 被降成 fp16**。旧 loader 最后一句 `model.half()` 连非持久化 buffer 一起转了，RoPE 的 `inv_freq` 静默变成 fp16。它以 `position × inv_freq` 参与相位计算，误差随位置线性放大：Qwen2.5-0.5B 在 position 1024 处相位误差 0.086 rad，LLaVA-1.5（theta=1e4）在 4096 处 0.99 rad。新 loader 不再动 buffer，`inv_freq` 保持 fp32。
+
+因为这两项修正，golden 基线已重录。作为反向验证：强行把 `inv_freq` 改回 fp16 后，新加载路径在 Qwen2.5-0.5B 上与旧 golden 基线 8 个用例逐字节完全一致，说明三个模块的重构本身是 bit-exact 的，输出差异全部来自上面两个修正。重录 diff 里可以看到多条原本陷入重复循环的输出变成正常叙述。
+
 复现命令：
 
 ```bash
@@ -297,9 +333,6 @@ python scripts/golden_tokens.py --check /tmp/golden.json --cuda-graph
 - feat: 支持 AWQ 和 SmoothQuant 量化。
 - feat: linear、moe 支持 w8a16 的 marlin 格式内核。
 - feat: 支持张量并行。
-- refactor: 模型配置模块重构，可以参考 vllm，目标是直接复用 HF transformers 的 config 体系,不另造轮子。注意:复用的是配置 schema 与解析,不是 transformers 的建模代码(modeling_*.py)。
-- refactor：模型权重加载模块重构：可以参考 vllm，目标是直接加载 HF 权重;只做"名字/结构重映射",不改文件格式和模型权重转换了。重构完成后 ​loader.py​​convert_weights.py​ 移除权重转换工具， 并更新对应代码。
-- refactor: 模型注册模块重构：更优雅的实现、代码更好理解，更精简。
 
 ## Acknowledgement
 

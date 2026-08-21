@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.models.multimodal import merge_multimodal_embeddings
+from lite_llama.models.interfaces import merge_multimodal_embeddings
 
 
 def test_merge_replaces_placeholder_positions():

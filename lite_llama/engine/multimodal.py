@@ -34,7 +34,7 @@ class MultimodalPreparer:
         self._engine = engine
         self.device = engine.device
         self.processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
-        self.is_qwen3_vl = engine.executor.spec.model_type == "qwen3_vl"
+        self.is_qwen3_vl = engine.model_runner.spec.model_type == "qwen3_vl"
 
     def prepare(
         self, prompt: str, images: list[Image.Image]
@@ -79,11 +79,12 @@ class MultimodalPreparer:
 
     def _mrope_positions(self, input_ids: torch.Tensor, batch: dict[str, Any]) -> torch.Tensor:
         """Compute Qwen3-VL 3D position ids, reusing the HF reference implementation."""
-        hf_model = self._engine.executor.model
+        hf_model = self._engine.model_runner.model
         # Qwen3-VL's config-only get_rope_index is the vetted source of the (t, h, w)
         # index maths; reimplementing its ~120 lines here would only add risk. It is
         # an *unbound* method that reads only ``config`` and ``get_vision_position_ids``
-        # off its host, so a tiny adapter exposes both from the lite_llama model.
+        # off its host, so a tiny adapter exposes both from the lite_llama model. The
+        # config it wants is the raw HF one, not lite_llama's wrapper.
         from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
 
         class _RopeIndexHost:
@@ -105,5 +106,7 @@ class MultimodalPreparer:
         if "mm_token_type_ids" in inspect.signature(Qwen3VLModel.get_rope_index).parameters:
             kwargs["mm_token_type_ids"] = batch.get("mm_token_type_ids")
 
-        position_ids, _ = Qwen3VLModel.get_rope_index(_RopeIndexHost(hf_model.config), **kwargs)
+        position_ids, _ = Qwen3VLModel.get_rope_index(
+            _RopeIndexHost(hf_model.config.hf_config), **kwargs
+        )
         return position_ids.to(self.device)

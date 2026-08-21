@@ -8,7 +8,7 @@ Layering (each layer has exactly one reason to change)::
                     here without changing the public API.
     LLMEngine       engine: the single prefill/decode loop, KV-cache and
                     sampling orchestration, stop handling.
-    ModelExecutor   execution: single-device forward. TP evolution lives here
+    ModelRunner     execution: single-device forward. TP evolution lives here
                     (executor becomes a process-group coordinator), transparent
                     to the layers above.
 
@@ -29,6 +29,7 @@ from collections.abc import Iterator
 
 from PIL import Image
 
+from ..models.config import read_model_type
 from ..models.registry import ModelRegistry, ModelSpec
 from .llm_engine import LLMEngine
 from .multimodal import MultimodalPreparer
@@ -42,17 +43,15 @@ def _resolve_spec(model: str) -> ModelSpec:
     The decision whether to build a multimodal preparer (and whether CUDA
     graphs are safe) must happen *before* ``LLMEngine.__init__`` runs, so the
     engine's own config load cannot be reused; the extra read costs a few KB.
-    The read itself is delegated to the registry, the single source of truth
-    for ``config.json`` access.
     """
-    return ModelRegistry.resolve(ModelRegistry.read_model_type(model))
+    return ModelRegistry.resolve(read_model_type(model))
 
 
 class LLM(LLMEngine):
     """Generate completions for text or vision-language prompts.
 
     Args:
-        model: Checkpoint directory with ``config.json`` and a ``*.pth`` file.
+        model: HuggingFace checkpoint directory (``config.json`` plus ``*.safetensors``).
         tokenizer: Tokenizer location; defaults to ``model``.
         max_seq_len: Context bound; also caps the KV cache.
         max_gpu_num_blocks: Manual KV-cache size in tokens; profiled when ``None``.
@@ -78,7 +77,7 @@ class LLM(LLMEngine):
         if tensor_parallel_size != 1:
             raise NotImplementedError(
                 "tensor_parallel_size > 1 is not implemented yet; TP will live in "
-                "ModelExecutor as a process-group coordinator"
+                "ModelRunner as a process-group coordinator"
             )
         if data_parallel_size != 1:
             raise NotImplementedError(
