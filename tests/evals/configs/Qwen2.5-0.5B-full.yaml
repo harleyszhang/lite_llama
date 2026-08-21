@@ -1,0 +1,14 @@
+# Full 1319-question test split, for a reference number rather than a smoke test.
+# Same checkpoint and protocol as Qwen2.5-0.5B.yaml, so the two are comparable
+# and the gap between them is the subset-size error.
+model_dir: my_weight/Qwen2.5-0.5B
+num_questions: 1319
+num_fewshot: 5
+max_gen_len: 256
+batch_size: 32
+max_seq_len: 2048
+chat_template: false
+# Measured 0.3594 on an A10; see docs/eval_models.md.
+accuracy_threshold: 0.36
+tolerance: 0.03
+max_invalid_rate: 0.05
