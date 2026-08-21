@@ -1,14 +1,14 @@
 """Model runner: builds the model, sizes the KV cache, and runs each forward step.
 
-Responsibilities:
+:meth:`ModelRunner.build` parses the config, resolves the architecture via the
+:class:`~lite_llama.models.registry.ModelRegistry` and loads weights; the
+``*_alloc_kv_cache`` methods reserve cache rows; :meth:`forward` dispatches to the
+model (CUDA-graphed on decode, eager otherwise) and passes multimodal inputs only
+when the resolved :class:`ModelSpec` wants them.
 
-* :meth:`ModelRunner.build` — parse ``config.json`` through
-  :class:`~lite_llama.models.config.ModelConfig`, resolve the architecture via the
-  :class:`~lite_llama.models.registry.ModelRegistry`, and hand both to a
-  :class:`~lite_llama.executor.loader.ModelLoader`.
-* :meth:`prefill_alloc_kv_cache` / :meth:`decode_alloc_kv_cache` — reserve cache rows.
-* :meth:`forward` — dispatch to the model, passing multimodal inputs only when the
-  resolved :class:`~lite_llama.models.registry.ModelSpec` says the model wants them.
+Usage:
+    runner = ModelRunner.build(config, ...)
+    logits = runner.forward(input_ids, position_ids, multi_modal_inputs)
 """
 
 from __future__ import annotations

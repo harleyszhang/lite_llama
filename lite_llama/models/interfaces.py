@@ -1,23 +1,14 @@
-"""Capability interfaces a model class opts into, plus their shared helpers.
+"""Capability interfaces a model opts into, plus their shared helpers.
 
-Today there is exactly one: :class:`MultiModalCausalLM`, which a model declares by
-inheriting it in order to accept ``multi_modal_inputs``. Mirrors vLLM's
-``model_executor/models/interfaces.py``, where ``SupportsMultiModal`` and friends
-sit apart from the concrete architectures.
+Today just :class:`MultiModalCausalLM`, inherited by a model to accept
+``multi_modal_inputs`` (mirrors vLLM's ``interfaces.py``). Because the HF
+processors already expand ``<image>`` into the exact number of placeholder tokens
+the vision tower emits, merging vision embeddings is a plain masked scatter
+(:func:`merge_multimodal_embeddings`) — no sequence-expanding rewrite, positions
+stay a plain ``arange``, and KV reservation needs no vision-specific arithmetic.
 
-Design note — why merging is a plain scatter:
-
-The HuggingFace processors for both LLaVA and Qwen3-VL already expand the single
-``<image>`` marker in the prompt into exactly as many placeholder tokens as the
-vision tower will emit patches (576 for LLaVA-1.5 at 336x336). By reusing those
-processors, ``input_ids`` arrives at the model with its final length, so:
-
-* merging vision embeddings is a masked assignment, not a sequence-expanding
-  rewrite (the old ``merge_input_ids_with_image_features`` built new tensors and
-  recomputed positions);
-* ``position_ids`` are a plain ``arange`` over the already-correct length;
-* KV-cache reservation needs no vision-specific arithmetic, because the prompt
-  length the engine sees already accounts for every vision token.
+Usage:
+    class MyVLM(MultiModalCausalLM): ...
 """
 
 from __future__ import annotations

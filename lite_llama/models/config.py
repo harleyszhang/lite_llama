@@ -1,30 +1,14 @@
-"""Model configuration, backed by the HuggingFace config classes.
+"""Model configuration, backed by HuggingFace's ``AutoConfig``.
 
-lite_llama used to redeclare every architecture as its own dataclass with a
-hand-maintained alias table (``num_attention_heads`` -> ``num_heads``) and
-hand-copied defaults. That duplicated a schema transformers already owns, and it
-rotted: transformers 5.x moved ``rope_theta`` and ``mrope_section`` into
-``rope_parameters``, which the alias table did not know about, so Qwen3-VL
-silently lost its mrope section and fell back to plain RoPE.
+Rather than redeclare each architecture (a duplicated schema that rotted —
+transformers 5.x moved ``rope_theta``/``mrope_section`` into ``rope_parameters``,
+silently breaking Qwen3-VL mrope), the schema, parsing and per-architecture
+defaults all come from ``AutoConfig``; only the modelling code is lite_llama's own.
+Note ``head_dim`` is *not* always ``hidden_size // num_heads`` (Qwen3-0.6B has
+wider attention projections) — use :attr:`ModelConfig.q_size` for the query width.
 
-So the schema, the parsing and the per-architecture defaults all come from
-``AutoConfig`` now, exactly as vLLM does it. What is *not* reused is the
-modelling code: :mod:`transformers.models.*.modeling_*` is never imported for a
-text model, because the whole point of this project is its own Triton kernels.
-
-:class:`ModelConfig` adds the two things a raw HF config cannot provide:
-
-* **runtime knobs** — ``max_seq_len``, which bounds the KV cache and is a
-  deployment decision, not a property of the checkpoint;
-* **normalised geometry** — ``num_kv_heads`` / ``head_dim`` / ``rope_theta`` are
-  optional or nested in HF configs, and every consumer would otherwise repeat
-  the same ``getattr(..., default)`` dance.
-
-Note on ``head_dim``: it is *not* always ``hidden_size // num_heads``.
-Qwen3-0.6B has ``hidden_size=1024`` but ``num_heads=16`` and ``head_dim=128``,
-so the attention projections are wider than the residual stream. Use
-:attr:`ModelConfig.q_size` for the query projection width and ``hidden_size``
-only for the residual stream.
+Usage:
+    cfg = ModelConfig(checkpoints_dir, max_seq_len=4096)
 """
 
 from __future__ import annotations

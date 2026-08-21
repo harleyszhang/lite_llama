@@ -1,29 +1,17 @@
-"""Device-resident stop bookkeeping for a decode batch.
+"""Device-resident stop bookkeeping for a decode batch (mirrors vLLM's StopChecker).
 
-Why this is not a handful of ``if`` statements in the loop
----------------------------------------------------------
-The obvious implementation asks "did sequence i just emit a stop token?" right
-after sampling, which reads a GPU tensor from Python and therefore synchronises.
-The previous loop did that once per sequence per step plus an ``all()`` check —
-nine synchronisations per step at batch 8. Each one drains the launch pipeline,
-so the CPU could never queue work ahead of the GPU and the per-step cost became
-CPU latency plus GPU time instead of the maximum of the two.
+Asking "did sequence i emit a stop token?" on the host every step reads a GPU
+tensor and synchronises (nine syncs/step at batch 8), so the CPU can never run
+ahead of the GPU. :class:`StopCriteria` keeps every flag on-device and mutates it
+with tensor ops; the host only polls a stop-everything answer every
+``POLL_INTERVAL`` steps, trading a few redundant steps for no per-step sync. Single
+source of truth for what ends a sequence: :func:`load_stop_token_ids` (EOS +
+``generation_config.json``), :class:`StopCriteria` (device matcher) and
+:func:`detect_repetition` (host-side degeneration breaker).
 
-:class:`StopCriteria` keeps every flag on the device and mutates it with pure
-tensor ops, so :meth:`update` costs nothing on the host. The loop only needs a
-host-visible answer to decide when to stop entirely, and that answer tolerates
-staleness: polling it every :data:`POLL_INTERVAL` steps costs at most a few
-redundant decode steps, which is far cheaper than a sync per step. Text already
-emitted is unaffected, because per-sequence output is masked by the same
-device-side flags.
-
-This module is the single source of truth for *everything* that can end a
-sequence (mirrors vLLM's ``StopChecker``):
-
-* :func:`load_stop_token_ids` — where the stop-token set comes from
-  (tokenizer EOS + ``generation_config.json``);
-* :class:`StopCriteria` — the device-side stop-token matcher and reason book;
-* :func:`detect_repetition` — the host-side degeneration breaker.
+Usage:
+    stop = StopCriteria(batch_size, stop_ids, vocab_size, device=dev)
+    stop.update(next_tokens, writable)
 """
 
 from __future__ import annotations

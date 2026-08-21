@@ -1,26 +1,15 @@
-"""User-facing ``LLM`` entry point — the vLLM-style facade over the engine.
+"""User-facing ``LLM`` entry point — a vLLM-style facade over the engine.
 
-Layering (each layer has exactly one reason to change)::
+``LLM`` *is* an :class:`~lite_llama.engine.llm_engine.LLMEngine` (inheritance): it
+adds prompt normalisation, multimodal preparation and ``RequestOutput`` packaging,
+while the engine owns the prefill/decode loop and ``ModelRunner`` the single-device
+forward. One ``LLM`` == one engine; request routing (DP) and tensor parallel (TP)
+grow in the respective layers without touching this API.
 
-    LLM             entry point: prompt normalisation, multimodal preparation,
-                    RequestOutput packaging. One LLM instance == one engine.
-                    DP evolution: add request routing across N engine workers
-                    here without changing the public API.
-    LLMEngine       engine: the single prefill/decode loop, KV-cache and
-                    sampling orchestration, stop handling.
-    ModelRunner     execution: single-device forward. TP evolution lives here
-                    (executor becomes a process-group coordinator), transparent
-                    to the layers above.
-
-``LLM`` *is* an :class:`LLMEngine` (inheritance): construction arguments are the
-user-facing ones (``model=``, not ``checkpoints_dir=``), and the token-level
-loop methods remain available for advanced callers via the parent class.
-
-Example:
-    >>> from lite_llama import LLM, SamplingParams
-    >>> llm = LLM(model="my_weight/Qwen2.5-0.5B")
-    >>> outputs = llm.generate(["The capital of France is"], SamplingParams(temperature=0.0))
-    >>> outputs[0].outputs[0].text
+Usage:
+    llm = LLM(model="my_weight/Qwen2.5-0.5B")
+    out = llm.generate(["The capital of France is"], SamplingParams(temperature=0.0))
+    print(out[0].outputs[0].text)
 """
 
 from __future__ import annotations

@@ -1,26 +1,14 @@
-"""Model loading: HuggingFace checkpoint in, ready-to-run ``nn.Module`` out.
+"""Model loading: a HuggingFace checkpoint in, a ready-to-run ``nn.Module`` out.
 
-Mirrors vLLM's split between the executor and its ``ModelLoader``: the executor
-decides *what* to build and *when*; the loader owns *how* weights travel from a
-checkpoint on disk into the model. The seam keeps loading unit-testable without
-an executor and leaves room for extra sources (tensor-parallel shards, remote
-object stores) without touching the executor.
+Mirrors vLLM's executor/loader split so loading is unit-testable and open to new
+sources (TP shards, remote stores). It never holds a second copy of the model:
+build the tree on ``meta`` (no alloc, no init), swap in real fp16 storage on the
+target device, then stream the checkpoint through ``model.load_weights`` — a copy
+loop (not ``load_state_dict``) because tensors land in the *middle* of fused K/V
+and stacked-expert parameters. There is deliberately no trailing ``half()``.
 
-The sequence is the one vLLM uses, and it never holds a second copy of the model:
-
-1. build the module tree with its parameters on ``torch.device("meta")``, so no
-   allocation and no random initialisation happens (a 30B skeleton costs
-   milliseconds);
-2. replace those meta parameters with real fp16 storage on the target device;
-3. stream the checkpoint through ``model.load_weights``, which copies each
-   tensor straight into its destination — including into the *middle* of the
-   fused K/V and stacked-expert parameters, which is why this is a copy loop
-   rather than ``load_state_dict``.
-
-There is deliberately no ``model.half()`` at the end. Step 2 allocates fp16
-parameters and step 3 casts on copy, so a blanket ``half()`` would only add a
-second pass — and it used to also cast non-persistent buffers, which quietly
-demoted RoPE's fp32 ``inv_freq`` table to fp16.
+Usage:
+    model = DefaultModelLoader().load_model(config, model_cls, device)
 """
 
 from __future__ import annotations
