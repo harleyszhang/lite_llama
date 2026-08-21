@@ -1,3 +1,13 @@
+"""FlashDecoding: single-token decode attention against the paged KV cache.
+
+Splits each sequence's KV history into partitions processed in parallel (stage 1
+emits per-partition softmax stats and partial outputs), then stage 2 combines them
+— turning the memory-bound decode step into a parallel reduction over context.
+
+Usage:
+    out = flash_decoding(q, k_cache, v_cache, ...)
+"""
+
 import torch
 import triton
 import triton.language as tl
