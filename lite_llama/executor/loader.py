@@ -1,37 +1,56 @@
-"""Model loading strategies.
+"""Model loading: HuggingFace checkpoint in, ready-to-run ``nn.Module`` out.
 
-Mirrors vLLM's split between the executor and its ``ModelLoader``: the
-executor decides *what* to build and *when*; the loader owns *how* weights
-travel from a checkpoint on disk into a ready-to-run ``nn.Module``. The seam
-keeps loading unit-testable without an executor and leaves room for extra
-sources (direct safetensors, tensor-parallel shards) without touching the
-executor.
+Mirrors vLLM's split between the executor and its ``ModelLoader``: the executor
+decides *what* to build and *when*; the loader owns *how* weights travel from a
+checkpoint on disk into the model. The seam keeps loading unit-testable without
+an executor and leaves room for extra sources (tensor-parallel shards, remote
+object stores) without touching the executor.
+
+The sequence is the one vLLM uses, and it never holds a second copy of the model:
+
+1. build the module tree with its parameters on ``torch.device("meta")``, so no
+   allocation and no random initialisation happens (a 30B skeleton costs
+   milliseconds);
+2. replace those meta parameters with real fp16 storage on the target device;
+3. stream the checkpoint through ``model.load_weights``, which copies each
+   tensor straight into its destination — including into the *middle* of the
+   fused K/V and stacked-expert parameters, which is why this is a copy loop
+   rather than ``load_state_dict``.
+
+There is deliberately no ``model.half()`` at the end. Step 2 allocates fp16
+parameters and step 3 casts on copy, so a blanket ``half()`` would only add a
+second pass — and it used to also cast non-persistent buffers, which quietly
+demoted RoPE's fp32 ``inv_freq`` table to fp16.
 """
 
 from __future__ import annotations
 
 import contextlib
 import time
-from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import torch
 import torch.nn as nn
 
-from ..models.registry import ModelRegistry, ModelSpec
+from ..models.config import ModelConfig
 from ..utils.logger import get_logger
+from .weight_utils import hf_weights_iterator
 
 logger = get_logger(__name__)
 
+#: Every lite_llama parameter is fp16: that is what the Triton kernels are
+#: written for, and checkpoints are cast on copy.
+PARAM_DTYPE = torch.float16
+
 
 @contextlib.contextmanager
-def _init_empty_parameters():
+def init_empty_parameters():
     """Skeleton context: parameters allocate on the meta device, buffers do not.
 
     Mirrors ``accelerate.init_empty_weights(include_buffers=False)``. Buffers must
-    keep real storage because non-persistent buffers such as
+    keep real storage because non-persistent ones such as
     :attr:`~lite_llama.models.rotary_embedding.RotaryEmbedding.inv_freq` are absent
-    from checkpoints and therefore cannot be materialised by ``load_state_dict``.
+    from checkpoints and are computed, not loaded.
     """
     original = nn.Module.register_parameter
 
@@ -51,70 +70,74 @@ def _init_empty_parameters():
         nn.Module.register_parameter = original
 
 
+def materialise_parameters(
+    model: nn.Module, device: str | torch.device, dtype: torch.dtype = PARAM_DTYPE
+) -> None:
+    """Give every meta parameter real, uninitialised storage on ``device``.
+
+    Only floating-point parameters are cast to ``dtype``; integer ones (a
+    handful of HF vision towers keep index tables as parameters) keep theirs.
+    The storage stays uninitialised because :func:`load_weights` overwrites all
+    of it and verifies that it did.
+
+    ``requires_grad=False`` is load-bearing, not just tidy: copying into a leaf
+    tensor that requires grad is an in-place autograd error, and the copy is how
+    the fused parameters get filled.
+    """
+    for module in model.modules():
+        for name, param in module._parameters.items():
+            if param is None:
+                continue
+            target_dtype = dtype if param.is_floating_point() else param.dtype
+            module._parameters[name] = type(param)(
+                torch.empty(param.shape, dtype=target_dtype, device=device),
+                requires_grad=False,
+            )
+
+
 @runtime_checkable
 class ModelLoader(Protocol):
     """Strategy seam: anything that can turn a checkpoint dir into a model."""
 
     def load_model(
-        self, config: Any, spec: ModelSpec, checkpoints_dir: str, device: str
+        self, config: ModelConfig, model_cls: type[nn.Module], checkpoints_dir: str, device: str
     ) -> nn.Module: ...
 
 
 class DefaultModelLoader:
-    """Build the skeleton on the meta device, then assign real fp16 weights.
-
-    Weight loading uses ``torch.device("meta")`` for the empty skeleton (no
-    ``accelerate`` dependency) and relies on ``load_state_dict(assign=True)``
-    to replace the meta parameters with real tensors mmap-loaded from disk.
-    """
+    """Loads HuggingFace weights directly, with no offline conversion step."""
 
     def load_model(
-        self, config: Any, spec: ModelSpec, checkpoints_dir: str, device: str
+        self, config: ModelConfig, model_cls: type[nn.Module], checkpoints_dir: str, device: str
     ) -> nn.Module:
+        """Build ``model_cls`` and fill it from the checkpoint in ``checkpoints_dir``.
+
+        Args:
+            config: Parsed configuration, already carrying ``max_seq_len``.
+            model_cls: The implementation class resolved from the registry.
+            checkpoints_dir: HuggingFace checkpoint directory (``config.json`` plus
+                ``*.safetensors``).
+            device: Torch device string the model must end up on.
+        """
         start = time.time()
         self._check_device(device)
 
-        logger.info(
-            "Initializing model of type '%s' and moving it to device '%s'...",
-            spec.model_type,
-            device,
-        )
-        with _init_empty_parameters():
-            model = ModelRegistry.build_model(config, spec)
-        logger.info("The model has been initialized and moved to the device. '%s'", device)
+        logger.info("Building %s skeleton on the meta device", model_cls.__name__)
+        with init_empty_parameters():
+            model = model_cls(config)
+        materialise_parameters(model, device)
 
-        state_dict = self._load_state_dict(checkpoints_dir, device)
-        # Models whose submodule layout depends on the installed transformers
-        # version (e.g. LLaVA's CLIP vision tower) normalise checkpoint keys here.
-        remap = getattr(model, "remap_checkpoint_keys", None)
-        if callable(remap):
-            state_dict = remap(state_dict)
-        # assign=True swaps the meta params for the loaded tensors instead of copying.
-        model.load_state_dict(state_dict, strict=True, assign=True)
-
-        model.eval().to(device)
-        for name, param in model.named_parameters():
-            if param.is_meta:
-                raise RuntimeError(
-                    f"parameter {name!r} was not materialised from the checkpoint"
-                )
-        logger.info("Loaded state dict in %.2fs", time.time() - start)
-
-        # The converter stores fp16 weights; half() is a no-op that verifies it.
-        model.half()
-        for param in model.parameters():
-            if param.dtype != torch.float16:
-                raise RuntimeError(
-                    f"expected fp16 parameters after half(), got {param.dtype}"
-                )
-        logger.info("Converted model to half precision (FP16)")
+        model.load_weights(hf_weights_iterator(checkpoints_dir, device))
+        # Buffers were computed on the CPU while the skeleton was on meta.
+        model.to(device).eval()
+        logger.info("Loaded %s onto %s in %.2fs", model_cls.__name__, device, time.time() - start)
         return model
 
     @staticmethod
     def _check_device(device: str) -> None:
         if device.startswith("cuda") and not torch.cuda.is_available():
-            # ``torch.load(..., map_location="cuda")`` would otherwise fail deep
-            # inside pickle with a message that says nothing about drivers.
+            # Copying into cuda parameters would otherwise fail deep inside torch
+            # with a message that says nothing about drivers.
             raise RuntimeError(
                 "device='cuda' was requested but torch.cuda.is_available() is False. "
                 "This usually means the installed torch build targets a newer CUDA "
@@ -123,14 +146,3 @@ class DefaultModelLoader:
                 "the local driver, e.g. `uv pip install torch --index-url "
                 "https://download.pytorch.org/whl/cu124`."
             )
-
-    @staticmethod
-    def _load_state_dict(checkpoints_dir: str, device: str) -> dict[str, torch.Tensor]:
-        checkpoints = sorted(Path(checkpoints_dir).glob("*.pth"))
-        if not checkpoints:
-            raise FileNotFoundError(
-                f"no *.pth checkpoint found in {checkpoints_dir}; run "
-                "`lite-llama-convert` on the HuggingFace weights first"
-            )
-        logger.info('Loading checkpoint "%s"', checkpoints[0])
-        return torch.load(checkpoints[0], mmap=True, weights_only=True, map_location=device)

@@ -1,4 +1,4 @@
-"""Tests for :class:`KVCacheMemoryManager`.
+"""Tests for :class:`KVCacheManager`.
 
 The manager hands out cache rows and tracks refcounts. Two things make it worth
 testing carefully:
@@ -23,15 +23,15 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.executor.mem_manager import KVCacheMemoryManager
+from lite_llama.executor.kv_cache_manager import KVCacheManager
 
 _BLOCKS = 9
 
 
 @pytest.fixture
-def manager() -> KVCacheMemoryManager:
+def manager() -> KVCacheManager:
     """A 9-row pool; small enough that exhaustion cases are easy to express."""
-    return KVCacheMemoryManager(
+    return KVCacheManager(
         num_layers=2,
         num_kv_heads=4,
         head_dim=64,

@@ -7,13 +7,16 @@ RoPE are identical to dense Qwen3, so the model reuses
 :class:`~lite_llama.models.base.CausalLM` wholesale and only injects the MoE
 block through the ``_build_mlp`` factory hook.
 
-Checkpoint layout produced by the converter (experts are stacked along a new
-leading dim so the whole layer is three tensors instead of
-``3 * num_experts``)::
+Expert weights are stacked along a new leading dim, so one MoE layer is three
+tensors instead of ``3 * num_experts``::
 
     layers.{i}.mlp.gate_weight              [num_experts, hidden]            router
     layers.{i}.mlp.experts.gate_up_proj     [num_experts, 2*moe_inter, hidden]
     layers.{i}.mlp.experts.down_proj        [num_experts, hidden, moe_inter]
+
+The HF checkpoint stores those per expert
+(``layers.{i}.mlp.experts.{e}.gate_proj.weight``); the stacking happens at load
+time in :mod:`lite_llama.models.weights`.
 
 Routing follows HF ``Qwen3MoeSparseMoeBlock`` exactly: fp32 softmax over *all*
 experts first, then top-k, then (``norm_topk_prob=True``) renormalisation of
@@ -36,19 +39,34 @@ import torch.nn.functional as F
 
 from ..kernels import fused_moe
 from .base import CausalLM, FusedMLP
-from .model_config import Qwen3MoeConfig
+from .config import ModelConfig
+
+
+def is_moe_layer(config: ModelConfig, layer_index: int) -> bool:
+    """Layer-type test matching HF ``Qwen3MoeDecoderLayer``.
+
+    Layers named in ``mlp_only_layers`` keep a dense MLP; of the rest, every
+    ``decoder_sparse_step``-th layer is MoE. Qwen3-30B-A3B ships
+    ``mlp_only_layers=[]`` and ``decoder_sparse_step=1``, i.e. all 48 layers are
+    MoE.
+    """
+    return (
+        config.num_experts > 0
+        and layer_index not in (config.mlp_only_layers or [])
+        and (layer_index + 1) % config.decoder_sparse_step == 0
+    )
 
 
 class Qwen3MoeSparseMoeBlock(nn.Module):
     """Top-k routed MoE FFN with stacked expert weights.
 
     Args:
-        config: A :class:`Qwen3MoeConfig` (also accepts any config exposing the
-            ``num_experts`` / ``num_experts_per_tok`` / ``moe_intermediate_size``
-            fields, which keeps unit tests cheap).
+        config: Any config exposing the HF MoE fields ``num_experts``,
+            ``num_experts_per_tok``, ``moe_intermediate_size`` and
+            ``norm_topk_prob``.
     """
 
-    def __init__(self, config: Qwen3MoeConfig) -> None:
+    def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
@@ -119,12 +137,11 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
 class Qwen3MoeModel(CausalLM):
     """Qwen3-MoE causal LM: dense-Qwen3 attention, MoE FFN on configured layers."""
 
-    config_class = Qwen3MoeConfig
     qkv_bias = False
     use_qk_norm = True
 
-    def _build_mlp(self, config: Qwen3MoeConfig, layer_index: int) -> nn.Module:
+    def _build_mlp(self, config: ModelConfig, layer_index: int) -> nn.Module:
         # ``mlp_only_layers`` keep the dense SwiGLU; everything else is routed.
-        if config.is_moe_layer(layer_index):
+        if is_moe_layer(config, layer_index):
             return Qwen3MoeSparseMoeBlock(config)
         return FusedMLP(config)

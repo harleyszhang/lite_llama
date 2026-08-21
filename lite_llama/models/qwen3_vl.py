@@ -14,11 +14,12 @@ after the first few decoder layers (see arXiv:2406.04334). Skipping this does no
 crash — it silently degrades quality — so it is wired in through the
 :meth:`~lite_llama.models.base.CausalLM._after_layer` hook.
 
-Checkpoint key layout::
+Parameter layout, and the HF checkpoint keys it is filled from::
 
-    vision_tower.*        – Qwen3VLVisionModel parameters (HF names)
-    language_model.*      – Qwen3VLTextModel parameters (lite_llama names),
-                            including language_model.lm_head_weight
+    vision_tower.*        <- model.visual.*            (Qwen3VLVisionModel, HF names)
+    language_model.*      <- model.language_model.*    (lite_llama names)
+    language_model.lm_head_weight  <- the tied embedding table (absent from the
+                                      checkpoint, which sets tie_word_embeddings)
 """
 
 from __future__ import annotations
@@ -27,19 +28,21 @@ from collections.abc import Mapping
 from typing import Any
 
 import torch
-from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 
 from .base import CausalLM
-from .model_config import Qwen3Config
-from .multimodal import MultiModalCausalLM, merge_multimodal_embeddings
+from .config import ModelConfig
+from .interfaces import (
+    LANGUAGE_MODEL_PREFIX,
+    MultiModalCausalLM,
+    merge_multimodal_embeddings,
+)
 from .rotary_embedding import MRotaryEmbedding
 
 
 class Qwen3VLTextModel(CausalLM):
     """Qwen3 decoder stack with mrope and DeepStack feature injection."""
 
-    config_class = Qwen3Config
     qkv_bias = False
     use_qk_norm = True
     rotary_class = MRotaryEmbedding
@@ -65,39 +68,28 @@ class Qwen3VLForCausalLM(MultiModalCausalLM):
     """Qwen3-VL for image/video conditioned generation.
 
     Args:
-        config: A HuggingFace :class:`Qwen3VLConfig`. ``max_seq_len`` may be attached
-            by the executor to bound the KV cache.
+        config: Parsed configuration wrapping a HuggingFace ``Qwen3VLConfig``.
     """
 
-    def __init__(self, config: Qwen3VLConfig) -> None:
+    weight_prefixes = (
+        ("model.language_model.", LANGUAGE_MODEL_PREFIX),
+        ("model.visual.", "vision_tower."),
+        ("", LANGUAGE_MODEL_PREFIX),
+    )
+
+    def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.config = config
+        hf_config = config.hf_config
 
-        self.vision_tower = Qwen3VLVisionModel(config.vision_config)
+        self.vision_tower = Qwen3VLVisionModel(hf_config.vision_config)
+        self.language_model = Qwen3VLTextModel(config)
 
-        self.text_config = self._text_config(config)
-        self.language_model = Qwen3VLTextModel(self.text_config)
-
-        self.image_token_id = config.image_token_id
-        self.video_token_id = config.video_token_id
+        self.image_token_id = hf_config.image_token_id
+        self.video_token_id = hf_config.video_token_id
 
         # Populated by encode_vision and consumed by forward in the same step.
         self._deepstack_embeds: list[torch.Tensor] | None = None
-
-    @staticmethod
-    def _text_config(config: Qwen3VLConfig) -> Qwen3Config:
-        """Adapt the HF text config, tolerating the transformers 5.x rope rename.
-
-        transformers 5.x serialises the rope settings as ``rope_parameters`` (and
-        drops ``rope_scaling`` from ``to_dict()``); without the mapping below the
-        ``mrope_section`` would be lost and :class:`MRotaryEmbedding` would silently
-        fall back to plain RoPE, which misreads the ``[3, batch, seq]`` position ids.
-        """
-        data = config.text_config.to_dict()
-        rope_params = data.pop("rope_parameters", None)
-        if rope_params is not None and not data.get("rope_scaling"):
-            data["rope_scaling"] = rope_params
-        return Qwen3Config.from_dict(data, max_seq_len=getattr(config, "max_seq_len", 2048))
 
     @property
     def placeholder_token_ids(self) -> tuple[int, ...]:

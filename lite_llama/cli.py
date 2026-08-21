@@ -33,7 +33,7 @@ from typing import Any, ClassVar
 from PIL import Image
 
 from .engine import SamplingParams, TextGenerator, VisionGenerator
-from .models.registry import ModelRegistry
+from .models.config import read_model_type
 from .utils.prompt_templates import BasePrompter, get_prompter
 
 # ---------------------------------------------------------------------------
@@ -160,11 +160,11 @@ class PrompterResolver:
     def read_model_type(model_dir: str) -> str:
         """从 checkpoint 的 config.json 读 ``model_type``;读不到返回 ``""``。
 
-        读取本身委托 :meth:`ModelRegistry.read_model_type`(config SSOT);
+        读取本身委托 :func:`lite_llama.models.config.read_model_type`(config SSOT);
         CLI 侧只对缺失/损坏的配置做容错,降级为按目录名推断模板。
         """
         try:
-            return ModelRegistry.read_model_type(model_dir).lower()
+            return read_model_type(model_dir)
         except (OSError, ValueError):
             return ""
 

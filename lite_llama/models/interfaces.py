@@ -1,4 +1,9 @@
-"""Shared scaffolding for vision-language models.
+"""Capability interfaces a model class opts into, plus their shared helpers.
+
+Today there is exactly one: :class:`MultiModalCausalLM`, which a model declares by
+inheriting it in order to accept ``multi_modal_inputs``. Mirrors vLLM's
+``model_executor/models/interfaces.py``, where ``SupportsMultiModal`` and friends
+sit apart from the concrete architectures.
 
 Design note — why merging is a plain scatter:
 
@@ -18,12 +23,19 @@ processors, ``input_ids`` arrives at the model with its final length, so:
 from __future__ import annotations
 
 from abc import abstractmethod
+from collections.abc import Iterable
 from typing import Any, ClassVar
 
 import torch
 import torch.nn as nn
 
+from . import weights
 from .base import CausalLM
+
+#: lite_llama parameter prefix of the decoder stack inside a vision-language model.
+#: Also the marker in :attr:`MultiModalCausalLM.weight_prefixes` that says "hand the
+#: rest of this key to the text model's own translation".
+LANGUAGE_MODEL_PREFIX = "language_model."
 
 
 def merge_multimodal_embeddings(
@@ -79,11 +91,14 @@ class MultiModalCausalLM(nn.Module):
     decode split and the merge itself are handled here.
 
     Class attributes:
-        placeholder_token_attrs: Config attribute names holding the placeholder
-            token ids (for example ``("image_token_index",)``).
+        weight_prefixes: ``(checkpoint prefix, lite_llama prefix)`` pairs covering the
+            whole checkpoint, tried in order. A pair targeting
+            :data:`LANGUAGE_MODEL_PREFIX` hands the remainder to the text model's own
+            key translation; every other pair is a plain rename, because the vision
+            tower and projector *are* HF modules and keep HF parameter names.
     """
 
-    placeholder_token_attrs: ClassVar[tuple[str, ...]] = ()
+    weight_prefixes: ClassVar[tuple[tuple[str, str], ...]] = ()
 
     language_model: CausalLM
 
@@ -99,6 +114,35 @@ class MultiModalCausalLM(nn.Module):
     @abstractmethod
     def placeholder_token_ids(self) -> tuple[int, ...]:
         """Token ids that vision embeddings are scattered onto."""
+
+    # ---- weight loading --------------------------------------------------- #
+    def translate_weight_key(self, key: str) -> weights.Target:
+        """Route a checkpoint key to the right submodule via :attr:`weight_prefixes`."""
+        for hf_prefix, lite_prefix in self.weight_prefixes:
+            rest = weights.strip_prefix(key, hf_prefix)
+            if rest is None:
+                continue
+            if lite_prefix != LANGUAGE_MODEL_PREFIX:
+                return lite_prefix + rest, weights.whole
+            target = self.language_model.translate_weight_key(rest)
+            if target is None:
+                return None
+            name, destination = target
+            return lite_prefix + name, destination
+        return None
+
+    def load_weights(self, checkpoint: Iterable[tuple[str, torch.Tensor]]) -> None:
+        """Fill vision tower, projector and language model from one checkpoint stream."""
+        tied = (
+            {
+                f"{LANGUAGE_MODEL_PREFIX}lm_head_weight": (
+                    f"{LANGUAGE_MODEL_PREFIX}embed_tokens.weight"
+                )
+            }
+            if self.language_model.config.tie_word_embeddings
+            else None
+        )
+        weights.load_weights(self, checkpoint, self.translate_weight_key, tied=tied)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.language_model.get_input_embeddings(input_ids)

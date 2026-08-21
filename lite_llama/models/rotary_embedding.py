@@ -3,7 +3,13 @@
 The module produces the ``(cos, sin)`` tables consumed by
 :func:`lite_llama.kernels.rope_emb_forward`. Only the frequency computation differs
 between variants, so each variant is a plain function registered in
-:data:`ROPE_INIT_FUNCTIONS` and selected from ``config.rope_scaling["rope_type"]``.
+:data:`ROPE_INIT_FUNCTIONS` and selected from the config's ``rope_type``.
+
+The config passed in is the flat mapping built by
+:attr:`lite_llama.models.config.ModelConfig.rope_config`, not a HF config object:
+transformers has moved these fields between ``rope_theta``, ``rope_scaling`` and
+``rope_parameters`` across versions, and normalising that once at the config layer
+keeps the frequency functions free of version checks.
 """
 
 from __future__ import annotations
@@ -46,11 +52,10 @@ def compute_llama3_rope(
     """
     inv_freq, attention_scaling = compute_default_rope(config, device)
 
-    scaling = config["rope_scaling"]
-    factor = scaling["factor"]
-    low_freq_factor = scaling["low_freq_factor"]
-    high_freq_factor = scaling["high_freq_factor"]
-    original_context = scaling["original_max_position_embeddings"]
+    factor = config["factor"]
+    low_freq_factor = config["low_freq_factor"]
+    high_freq_factor = config["high_freq_factor"]
+    original_context = config["original_max_position_embeddings"]
 
     wavelength = 2 * math.pi / inv_freq
     # Long wavelengths (low frequencies) get the full division by `factor`.
@@ -83,16 +88,18 @@ class RotaryEmbedding(nn.Module):
     """Builds ``(cos, sin)`` for the given ``position_ids``.
 
     Args:
-        config: A text model config (dataclass or mapping) exposing ``hidden_size``,
-            ``num_heads``, ``head_dim``, ``rope_theta`` and ``rope_scaling``.
+        config: Flat RoPE settings — ``head_dim``, ``hidden_size``, ``num_heads``,
+            ``rope_theta``, ``rope_type`` and any variant-specific keys. Built by
+            :attr:`lite_llama.models.config.ModelConfig.rope_config`, which is
+            also where the transformers 4.x/5.x ``rope_scaling`` vs
+            ``rope_parameters`` difference is absorbed.
     """
 
-    def __init__(self, config: Any, device: torch.device | None = None) -> None:
+    def __init__(self, config: Mapping[str, Any], device: torch.device | None = None) -> None:
         super().__init__()
-        self.config: Mapping[str, Any] = config if isinstance(config, Mapping) else vars(config)
+        self.config = config
 
-        scaling = self.config.get("rope_scaling") or {}
-        self.rope_type: str = scaling.get("rope_type") or scaling.get("type") or "default"
+        self.rope_type: str = config.get("rope_type") or config.get("type") or "default"
         if self.rope_type not in ROPE_INIT_FUNCTIONS:
             raise ValueError(
                 f"Unsupported rope_type {self.rope_type!r}; "
@@ -143,10 +150,9 @@ class MRotaryEmbedding(RotaryEmbedding):
     so :func:`lite_llama.kernels.rope_emb_forward` is reused unchanged.
     """
 
-    def __init__(self, config: Any, device: torch.device | None = None) -> None:
+    def __init__(self, config: Mapping[str, Any], device: torch.device | None = None) -> None:
         super().__init__(config, device)
-        scaling = self.config.get("rope_scaling") or {}
-        self.mrope_section: list[int] | None = scaling.get("mrope_section")
+        self.mrope_section: list[int] | None = config.get("mrope_section")
         if self.mrope_section is not None and len(self.mrope_section) != 3:
             raise ValueError(
                 f"mrope_section must have 3 entries (t, h, w), got {self.mrope_section}"

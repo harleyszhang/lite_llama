@@ -3,7 +3,7 @@ import gc
 import torch
 
 from ..utils.logger import get_logger
-from .executor_struct import AttentionInfo
+from .attention_metadata import AttentionMetadata
 
 logger = get_logger(__name__)
 
@@ -60,7 +60,7 @@ class MemoryProfiler:
         input_ids = torch.randint(0, vocab_size, (1, seq_len), device=self.device)
         position_ids = torch.arange(seq_len, device=self.device).unsqueeze(0)
 
-        dummy = AttentionInfo()
+        dummy = AttentionMetadata()
         dummy.kv_buffer = [
             torch.empty(
                 (seq_len, 2 * self.num_kv_heads, self.head_dim),
@@ -123,13 +123,13 @@ class MemoryProfiler:
         return num_blocks
 
 
-class KVCacheMemoryManager:
+class KVCacheManager:
     """
     param:
     num_layers: int, 模型的 Transformer 层数
     num_kv_heads: int, 每层的 KV 头数
     head_dim: int, 每个头的维度
-    gpu_num_blocks: int, 用户自行设置的最大可用 blocks(tokens), 如果设置该值， kv cache 内存管理器的最大可用内存-tokens 由该值决定。
+    gpu_num_blocks: int, 用户自行设置的最大可用 blocks(tokens)
     block_size: int, 每个 block 的大小，默认为 1
     """
 
@@ -146,9 +146,8 @@ class KVCacheMemoryManager:
         self.num_layers = num_layers
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
-        self.gpu_num_blocks = (
-            gpu_num_blocks  # 手动设定的给kv cache 内存管理分配的可用 blocks 数目:gpu_num_blocks
-        )
+        # 手动设定的给kv cache 内存管理分配的可用 blocks 数目:gpu_num_blocks
+        self.gpu_num_blocks = gpu_num_blocks
         self.block_size = block_size
         self.max_num_tokens = gpu_num_blocks * block_size
 

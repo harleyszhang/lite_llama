@@ -26,11 +26,34 @@ disappears.
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Protocol
 
 # Emitted by tokenizers for a byte sequence that is not yet a complete
 # character; text ending in it must be held back until the next token arrives.
 _REPLACEMENT_CHAR = "\ufffd"
+
+
+class Tokenizer(Protocol):
+    """The one tokenizer method incremental detokenisation depends on."""
+
+    def decode(self, token_ids: list[int], skip_special_tokens: bool = ...) -> str: ...
+
+
+@dataclass
+class _SequenceState:
+    """Detokenisation state for a single sequence: token history and two offsets.
+
+    ``prefix_offset`` starts the window decoded for context; ``read_offset`` is
+    the boundary already emitted as text. ``prefix_text`` caches
+    ``decode(tokens[prefix_offset:read_offset])`` so a step that holds text back —
+    leaving both offsets unchanged — does not decode that same window again.
+    """
+
+    tokens: list[int] = field(default_factory=list)
+    prefix_offset: int = 0
+    read_offset: int = 0
+    prefix_text: str | None = None
 
 
 class IncrementalDetokenizer:
@@ -41,15 +64,13 @@ class IncrementalDetokenizer:
         batch_size: Number of independent sequences to track.
     """
 
-    def __init__(self, tokenizer: Any, batch_size: int) -> None:
+    def __init__(self, tokenizer: Tokenizer, batch_size: int) -> None:
         self._tokenizer = tokenizer
-        self._tokens: list[list[int]] = [[] for _ in range(batch_size)]
-        self._prefix_offset = [0] * batch_size
-        self._read_offset = [0] * batch_size
+        self._states = [_SequenceState() for _ in range(batch_size)]
 
     def tokens(self, index: int) -> list[int]:
         """Token ids appended to sequence ``index`` so far."""
-        return self._tokens[index]
+        return self._states[index].tokens
 
     def append(self, index: int, token_id: int) -> str:
         """Append one token to a sequence and return the newly readable text.
@@ -57,26 +78,24 @@ class IncrementalDetokenizer:
         Returns an empty string when the token does not complete a character
         yet; the held-back bytes are emitted with a later token.
         """
-        tokens = self._tokens[index]
-        tokens.append(token_id)
-        return self._flush(index)
+        state = self._states[index]
+        state.tokens.append(token_id)
 
-    def _flush(self, index: int) -> str:
-        tokens = self._tokens[index]
-        prefix_offset = self._prefix_offset[index]
-        read_offset = self._read_offset[index]
-
-        prefix_text = self._decode(tokens[prefix_offset:read_offset])
-        full_text = self._decode(tokens[prefix_offset:])
+        prefix_text = state.prefix_text
+        if prefix_text is None:
+            prefix_text = self._decode(state.tokens[state.prefix_offset : state.read_offset])
+        full_text = self._decode(state.tokens[state.prefix_offset :])
 
         if len(full_text) <= len(prefix_text) or full_text.endswith(_REPLACEMENT_CHAR):
-            # Nothing new is safely readable yet: keep the window open so the
-            # next token is decoded with the same context.
+            # Nothing new is safely readable yet: keep the window open so the next
+            # token is decoded with the same context, and reuse this prefix decode.
+            state.prefix_text = prefix_text
             return ""
 
         # Slide the window forward: what we just emitted becomes the context.
-        self._prefix_offset[index] = read_offset
-        self._read_offset[index] = len(tokens)
+        state.prefix_offset = state.read_offset
+        state.read_offset = len(state.tokens)
+        state.prefix_text = None
         return full_text[len(prefix_text) :]
 
     def text(self, index: int) -> str:
@@ -85,7 +104,7 @@ class IncrementalDetokenizer:
         Used by callers that need the whole generated string (the repetition
         breaker, and the blocking API when it skips per-step streaming).
         """
-        return self._decode(self._tokens[index])
+        return self._decode(self._states[index].tokens)
 
     def _decode(self, token_ids: list[int]) -> str:
         if not token_ids:
