@@ -1,3 +1,12 @@
+"""Coloured console logging.
+
+:func:`get_logger` returns a stdlib ``logging.Logger`` wired to a
+:class:`ColoredFormatter` that tints level names for readable terminal output.
+
+Usage:
+    logger = get_logger(__name__); logger.info("loaded")
+"""
+
 import logging
 from typing import ClassVar
 
@@ -58,8 +67,4 @@ def get_logger(name):
         handler.setFormatter(formatter)
         logger.addHandler(handler)
 
-    # Return the bare logger: the extra wrapper layer would make
-    # %(filename)s / %(lineno)d resolve to logger.py instead of the caller.
-    # (logging.Logger.info already short-circuits on isEnabledFor, so the
-    # wrapper added nothing but the wrong file name in the legacy format.)
     return logger

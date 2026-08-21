@@ -1,9 +1,11 @@
 """Token sampling: turns a step's logits into the next token id per sequence.
 
-The four legacy generators each inlined their own copy of the temperature +
-top-p logic (and one shipped a second copy of ``sample_top_p`` at module scope).
-:class:`Sampler` is the single implementation; :class:`SamplingParams` carries the
-knobs. ``temperature == 0`` is treated as greedy decoding.
+The single implementation of the temperature + top-p logic the legacy generators
+each used to inline: :class:`Sampler` does the work, :class:`SamplingParams` carries
+the knobs, and ``temperature == 0`` is greedy decoding.
+
+Usage:
+    next_ids = Sampler().sample(logits, SamplingParams(temperature=0.0))
 """
 
 from __future__ import annotations

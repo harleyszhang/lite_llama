@@ -1,3 +1,13 @@
+"""Paged KV cache: block allocation with reference counting, plus sizing.
+
+:class:`MemoryProfiler` measures free device memory to decide how many cache blocks
+fit; :class:`KVCacheManager` hands out and ref-counts block indices so prefill and
+decode reserve rows and release them when a sequence ends.
+
+Usage:
+    idx = kv.alloc_kvcache_index(need_size); kv.release_ref(idx)
+"""
+
 import gc
 
 import torch
@@ -124,13 +134,25 @@ class MemoryProfiler:
 
 
 class KVCacheManager:
-    """
-    param:
-    num_layers: int, 模型的 Transformer 层数
-    num_kv_heads: int, 每层的 KV 头数
-    head_dim: int, 每个头的维度
-    gpu_num_blocks: int, 用户自行设置的最大可用 blocks(tokens)
-    block_size: int, 每个 block 的大小，默认为 1
+    """Owns the paged KV buffers and hands out cache rows by reference count.
+
+    One row per token (``block_size=1``), so "block" and "token" are the same unit
+    here. ``kv_mem_use_state[i]`` is the reference count of row ``i``: a row is free
+    at zero, and :attr:`can_use_mem_size` tracks how many are.
+
+    :meth:`alloc_kvcache_index` is the entry point and picks between three
+    strategies, cheapest first: a bump cursor while the cache is append-only, then a
+    contiguous-run search, then any scattered free rows.
+
+    Args:
+        num_layers: Decoder layer count.
+        num_kv_heads: Key/value heads per layer.
+        head_dim: Size of one attention head.
+        gpu_num_blocks: Cache capacity in blocks, either profiled by
+            :class:`MemoryProfiler` or set by the caller.
+        block_size: Tokens per block; only 1 is implemented.
+        dtype: KV-cache dtype.
+        device: Torch device string.
     """
 
     def __init__(
@@ -146,16 +168,15 @@ class KVCacheManager:
         self.num_layers = num_layers
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
-        # 手动设定的给kv cache 内存管理分配的可用 blocks 数目:gpu_num_blocks
         self.gpu_num_blocks = gpu_num_blocks
         self.block_size = block_size
         self.max_num_tokens = gpu_num_blocks * block_size
 
         self.dtype = dtype
         self.device = device
-        self.can_use_mem_size = gpu_num_blocks  # 可用的 kv cache tokens 数量
+        self.can_use_mem_size = gpu_num_blocks  # rows currently free
 
-        # 定义 kv 内存位置索引和内存使用状态变量
+        # Row indices to hand out, and the per-row reference count.
         self.kv_mem_pos_indexs = torch.arange(
             0, self.max_num_tokens, dtype=torch.long, device=self.device
         )
@@ -174,7 +195,7 @@ class KVCacheManager:
         self.init_kv_buffers(self.max_num_tokens, head_dim, num_kv_heads, num_layers, dtype, device)
 
     def init_kv_buffers(
-        self,  # 为每一层预先分配KV缓存的GPU内存， shape = [max_num_tokens, 2 * num_kv_heads, head_dim]  2 表示 kv 两个缓存d的拼接
+        self,
         max_num_tokens,
         head_dim,
         num_kv_heads,
@@ -182,18 +203,21 @@ class KVCacheManager:
         dtype,
         device: str = "cuda",
     ) -> None:
-        # kv cache shape: config.max_batch_size, config.max_seq_len, self.num_kv_heads, self.head_dim
-        # max_num_tokens = max_num_blocks * self.block_size
-        # TODO 修改 kv buffer 形状支持 PagedAttention
+        """Pre-allocate one KV tensor per layer, ``[max_num_tokens, 2 * kv_heads, head_dim]``.
+
+        K and V share the tensor along dim 1 — K heads first, then V heads — so a
+        decode step writes both with one kernel launch.
+        """
+        # TODO: reshape into [blocks, block_size, ...] to support PagedAttention.
         self.gpu_kv_buffer = [
             torch.empty((max_num_tokens, 2 * num_kv_heads, head_dim), dtype=dtype, device=device)
             for _ in range(num_layers)
         ]
         logger.debug(f"gpu_kv_buffer per layer shape: {self.gpu_kv_buffer[0].shape}")
 
-    # =========================判断是否可以分配连续的或者不连续的kv cache=================================
     @torch.no_grad()
     def alloc_kvcache(self, need_size):
+        """Reserve ``need_size`` free rows, wherever they are. Returns ``None`` if short."""
         if need_size > self.can_use_mem_size:
             logger.warning(
                 f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}"
@@ -208,35 +232,33 @@ class KVCacheManager:
 
     @torch.no_grad()
     def alloc_contiguous_kvcache(self, need_size):
+        """Reserve ``need_size`` *consecutive* free rows, or ``None`` if there is no such run.
+
+        Returns:
+            ``(select_index, start_index, end_index)``, or ``None``.
+        """
         if need_size > self.can_use_mem_size:
             logger.warning(
                 f"warn no enough contiguous cache need_size {need_size} left_size {self.can_use_mem_size}"
             )
             return None
 
-        # 获取未使用的内存块索引
         can_use_pos_index = torch.nonzero(self.kv_mem_use_state == 0).view(-1)
         N = can_use_pos_index.numel()
         if need_size <= N:
-            # 正确地计算 start_indexs 和 end_indexs.
-            # NOTE: 起始索引不能大于 N - need_size, 又因为 [: index] 切片操作是不包含 index 的, 所以需要将 N - need_size 加 1
+            # Two views of the free list offset by need_size - 1, so start_indexs[j]
+            # and end_indexs[j] are the ends of a candidate window. The last valid
+            # start is at N - need_size, and slicing excludes the stop, hence the + 1.
             start_indexs = can_use_pos_index[: N - need_size + 1]
-            # NOTE: can_use_pos_index[3:], 将获取索引为 3 到 9 的元素。
             end_indexs = can_use_pos_index[need_size - 1 :]
-            diff = end_indexs - start_indexs
-
-            # 寻找连续的块，差值应为 need_size - 1
-            contiguous_blocks = (diff == need_size - 1).nonzero(as_tuple=True)[0]
+            # A window holds consecutive rows exactly when its two ends differ by
+            # need_size - 1; anything larger means a used row sits in between.
+            contiguous_blocks = (end_indexs - start_indexs == need_size - 1).nonzero(as_tuple=True)[
+                0
+            ]
 
             if contiguous_blocks.numel() > 0:
-                # 取出第一个连续块的起始索引
-                # NOTE: contiguous_blocks[0] 是第一个连续块的索引
-                # NOTE: start_indexs[contiguous_blocks[0]] 获取第一个连续块
-                # 的起始索引
-                # NOTE: end_indexs[contiguous_blocks[0]] 获取第一个连续块
-                # 的结束索引
-                # NOTE: start_indexs[contiguous_blocks[0]] 是连续块的起
-                start_index = start_indexs[contiguous_blocks[0]].item()
+                start_index = start_indexs[contiguous_blocks[0]].item()  # first run wins
                 end_index = start_index + need_size
                 select_index = self.kv_mem_pos_indexs[start_index:end_index]
                 self.add_ref(select_index)
@@ -276,9 +298,13 @@ class KVCacheManager:
             select_index = self.alloc_kvcache(need_size)
         return select_index.to(torch.int32)
 
-    # 增加引用计数
     @torch.no_grad()
     def add_ref(self, token_index: torch.Tensor):
+        """Increment the reference count of the given rows.
+
+        Only rows that were free reduce :attr:`can_use_mem_size`; taking a second
+        reference on an already-held row costs no capacity.
+        """
         state = self.kv_mem_use_state[token_index]
         has_used_tokens = torch.count_nonzero(state).item()
         all_tokens = len(state)
@@ -287,15 +313,18 @@ class KVCacheManager:
         self.kv_mem_use_state[token_index] += 1
         return
 
-    # 减少引用计数
     @torch.no_grad()
     def release_ref(self, token_index: torch.Tensor):
+        """Decrement the reference count of the given rows, freeing those that reach zero.
+
+        ``token_index`` may name a row more than once — the engine releases prefill
+        and every decode step in one concatenated tensor — so counts are collapsed
+        with ``unique`` first and subtracted in one go.
+        """
         # Freeing rows leaves holes, so the append-only cursor no longer
         # describes the free list; fall back to searching until ``free_all``.
         self._bump_is_exact = False
-        # 使用 unique 方法获取 token_index 中唯一的 token 索引，并返回每个唯一索引在原始张量中出现的次数。
         token_index, counts = token_index.unique(return_counts=True)
-        # 当引用计数减少到零时，意味着该缓存块可以被释放或重新分配。
         self.kv_mem_use_state[token_index] -= counts
         state = self.kv_mem_use_state[token_index]
         used_tokens = torch.count_nonzero(state).item()
@@ -303,20 +332,20 @@ class KVCacheManager:
         self.can_use_mem_size += all_tokens - used_tokens
         return
 
-    # 释放指定的kv cache 内存块索引
     @torch.no_grad()
     def free(self, free_index):
+        """Release rows by index, logging when that empties the cache."""
         free_index = free_index.long()
         self.release_ref(free_index)
         if self.can_use_mem_size == len(self.kv_mem_use_state):
             logger.debug(f"freed all gpu mem size {self.can_use_mem_size}")
         return
 
-    # 释放所有内存
     @torch.no_grad()
     def free_all(
         self,
     ):
+        """Drop every reference at once, as each ``generate()`` call starts by doing."""
         self.can_use_mem_size = len(self.kv_mem_use_state)
         self.kv_mem_use_state[:] = 0
         # The cache is empty again, so appending from row 0 is exact once more.

@@ -1,29 +1,15 @@
 """Shared building blocks for the decoder-only models.
 
-LLaMA, Qwen2 and Qwen3 differ only in a handful of details — whether the q/k/v
-projections carry a bias, whether q and k get their own RMSNorm, and how wide the
-attention projections are relative to the residual stream. Everything else (the
-KV-cache write, the prefill/decode kernel split, SwiGLU MLP, pre-norm residual
-wiring, the forward skeleton) is identical, so it lives here once and the concrete
-models only declare their differences.
+LLaMA, Qwen2 and Qwen3 differ only in a few knobs — q/k/v bias, per-head q/k
+RMSNorm, and how wide the attention projections are versus the residual stream.
+Everything else (KV-cache write, the prefill/decode kernel split, SwiGLU MLP,
+pre-norm residual wiring, the forward skeleton) lives here once in
+:class:`CausalLM`; concrete models only declare their differences. K and V are
+stored fused as ``kv_proj_weight`` so decode writes both cache halves in one launch
+(:mod:`lite_llama.models.weights` owns the key translation).
 
-Parameter layout, and the HuggingFace checkpoint keys it is filled from::
-
-    embed_tokens.weight                     <- model.embed_tokens.weight
-    layers.{i}.input_layernorm_weight       <- ....input_layernorm.weight
-    layers.{i}.post_attention_layernorm_weight
-    layers.{i}.self_attn.q_proj_weight      <- ....self_attn.q_proj.weight
-    layers.{i}.self_attn.kv_proj_weight     <- ....self_attn.{k,v}_proj.weight
-    layers.{i}.self_attn.o_proj_weight
-    layers.{i}.self_attn.q_norm_weight      [only if use_qk_norm]
-    layers.{i}.self_attn.k_norm_weight      [only if use_qk_norm]
-    layers.{i}.mlp.{gate,up,down}_proj.weight   (unchanged)
-    norm_weight                             <- model.norm.weight
-    lm_head_weight                          <- lm_head.weight, or the tied embedding
-
-K and V are stored fused as ``kv_proj_weight`` so the decode path can write both
-halves of the KV cache with a single kernel launch;
-:mod:`lite_llama.models.weights` owns the resulting key translation.
+Usage:
+    class LlamaModel(CausalLM): ...   # built via ModelRegistry + ModelLoader
 """
 
 from __future__ import annotations

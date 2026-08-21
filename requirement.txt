@@ -14,3 +14,4 @@ rich==15.0.0
 accelerate==1.14.0
 sentence-transformers==6.0.0
 jsonargparse==4.50.0
+ruff==0.16.3
