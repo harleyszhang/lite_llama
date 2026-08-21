@@ -1,0 +1,14 @@
+# Instruction-tuned checkpoint: prompts go through the chat template.
+# Batch is halved against the 0.5B config — 28 layers x 128 head dim is ~2.3x
+# the KV bytes per token, and prefill logits scale with batch x vocab too.
+model_dir: my_weight/Qwen2.5-1.5B-Instruct
+num_questions: 200
+num_fewshot: 5
+max_gen_len: 256
+batch_size: 16
+max_seq_len: 2048
+chat_template: true
+# Measured 0.6300 on an A10; see docs/eval_models.md.
+accuracy_threshold: 0.63
+tolerance: 0.05
+max_invalid_rate: 0.05

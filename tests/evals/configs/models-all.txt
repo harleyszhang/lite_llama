@@ -1,0 +1,5 @@
+# Every config. Configs whose checkpoint is absent skip themselves, so this list
+# is safe to run anywhere — it reports what it could not evaluate and why.
+Qwen2.5-0.5B.yaml
+Qwen2.5-0.5B-full.yaml
+Qwen2.5-1.5B-Instruct.yaml

@@ -41,8 +41,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Accuracy evaluation harness under examples/evaluator.
-eval = ["sentence-transformers>=4.0"]
+# Accuracy evaluation: the harness under examples/evaluator (sentence embeddings)
+# and the benchmark suite under tests/evals (YAML model configs).
+eval = ["sentence-transformers>=4.0", "pyyaml>=6.0"]
 
 [dependency-groups]
 dev = [
@@ -50,6 +51,8 @@ dev = [
   "pytest-cov>=5.0",
   "ruff==0.16.3",
   "pre-commit>=4.0",
+  # tests/evals reads its model configs from YAML.
+  "pyyaml>=6.0",
 ]
 
 [project.scripts]
@@ -130,6 +133,7 @@ markers = [
   "gpu: requires a CUDA device (auto-skipped on CPU-only machines; applied automatically to tests/kernels/)",
   "weights: requires a converted checkpoint (auto-skipped when none is found; override the location with LITE_LLAMA_TEST_MODEL_DIR)",
   "slow: takes seconds rather than milliseconds (golden regression); excluded by `make test-fast`",
+  "eval: benchmark accuracy run driven by tests/evals/configs (minutes, needs the dataset); run it with `make test-eval`",
 ]
 filterwarnings = [
   "ignore::FutureWarning:torch.*",
