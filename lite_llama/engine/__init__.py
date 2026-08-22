@@ -1,19 +1,40 @@
-"""Generation engine: the single prefill/decode loop plus its user-facing entry."""
+"""Generation engine: two batching strategies over one shared executor.
 
+:class:`LLM` / :class:`LLMEngine` run a *one-shot* batch — every prompt starts on
+the same step and the batch keeps its width until the longest sequence ends. That
+is the right shape for offline generation, where all the prompts are known up
+front.
+
+:class:`ContinuousBatchingEngine` decides the batch per step instead, so requests
+join and leave mid-flight; :class:`AsyncLLMEngine` puts an asyncio face on it for
+online serving.
+"""
+
+from .async_engine import AsyncLLMEngine, StreamedOutput
+from .continuous_engine import ContinuousBatchingEngine
 from .generator import TextGenerator, VisionGenerator
 from .llm import LLM
 from .llm_engine import LLMEngine
 from .outputs import CompletionOutput, RequestOutput
-from .sampler import Sampler, SamplingParams, sample_top_p
+from .sampler import BatchedSamplingParams, Sampler, SamplingParams, sample_top_p
+from .scheduler import Request, RequestStatus, Scheduler, SchedulerConfig
 
 __all__ = [
     "LLM",
+    "AsyncLLMEngine",
+    "BatchedSamplingParams",
+    "CompletionOutput",
+    "ContinuousBatchingEngine",
     "LLMEngine",
+    "Request",
+    "RequestOutput",
+    "RequestStatus",
     "Sampler",
     "SamplingParams",
+    "Scheduler",
+    "SchedulerConfig",
+    "StreamedOutput",
     "TextGenerator",
     "VisionGenerator",
-    "CompletionOutput",
-    "RequestOutput",
     "sample_top_p",
 ]

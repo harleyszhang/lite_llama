@@ -633,11 +633,179 @@ class VlChatCommand(CliCommand):
         return 0
 
 
+class ServeCommand(CliCommand):
+    """``serve``:启动 OpenAI 兼容的 HTTP 服务(连续批处理引擎)。"""
+
+    name = "serve"
+    help = "Start an OpenAI-compatible API server"
+
+    def add_arguments(self, sub: argparse.ArgumentParser) -> None:
+        for option in (
+            CliOption("--host", {"default": "0.0.0.0"}),
+            CliOption("--port", {"type": int, "default": 8000}),
+            CliOption(
+                "--served-model-name",
+                {"help": "Name reported by /v1/models (defaults to the directory name)"},
+            ),
+            CliOption(
+                "--max-num-seqs",
+                {
+                    "type": int,
+                    "default": 32,
+                    "help": "How many requests may decode concurrently",
+                },
+            ),
+            CliOption(
+                "--max-num-batched-tokens",
+                {
+                    "type": int,
+                    "default": 8192,
+                    "help": "Padded token budget for one prefill group",
+                },
+            ),
+            CliOption(
+                "--no-cuda-graph",
+                {"action": "store_true", "help": "Run decode eager instead of replaying graphs"},
+            ),
+            CliOption(
+                "--no-chat-template",
+                {
+                    "action": "store_true",
+                    "help": "Send /v1/chat/completions messages verbatim (base models)",
+                },
+            ),
+        ):
+            option.register(sub)
+
+    def run(self, args: argparse.Namespace) -> int:
+        from .entrypoints.api_server import ServerConfig, run_server
+
+        opts = EngineOptions.from_args(args)
+        # Sampling flags do not apply here: every HTTP request carries its own.
+        config = ServerConfig(
+            model_dir=opts.model_dir,
+            served_model_name=args.served_model_name,
+            max_seq_len=opts.max_seq_len,
+            max_num_seqs=args.max_num_seqs,
+            max_num_batched_tokens=args.max_num_batched_tokens,
+            max_gpu_num_blocks=opts.max_gpu_num_blocks,
+            device=opts.device,
+            use_cuda_graph=not args.no_cuda_graph,
+            chat_template=not args.no_chat_template,
+        )
+        print(f"Serving {config.model_name} on http://{args.host}:{args.port}")
+        run_server(config, host=args.host, port=args.port)
+        return 0
+
+
+class BatchCommand(CliCommand):
+    """``batch``:把一批 prompt 交给连续批处理引擎离线跑完。
+
+    与 ``chat`` 的区别不在于接口而在于调度:这里每个 prompt 是一个独立请求,
+    先结束的请求立即释放槽位给后面排队的 prompt,而不是拖到整批里最长的那一条。
+    """
+
+    name = "batch"
+    help = "Run a prompt file through the continuous-batching engine"
+
+    def add_arguments(self, sub: argparse.ArgumentParser) -> None:
+        for option in (
+            CliOption(
+                "--prompts-file",
+                {"help": "Text file with one prompt per line; omit to use a built-in demo set"},
+            ),
+            CliOption("--max-num-seqs", {"type": int, "default": 32}),
+            CliOption(
+                "--no-chat-template",
+                {"action": "store_true", "help": "Send prompts verbatim (base models)"},
+            ),
+            CliOption(
+                "--show-stats",
+                {"action": "store_true", "help": "Print throughput and per-request timings"},
+            ),
+        ):
+            option.register(sub)
+
+    def run(self, args: argparse.Namespace) -> int:
+        import time
+
+        from .engine import ContinuousBatchingEngine
+
+        opts = EngineOptions.from_args(args)
+        prompts = self._load_prompts(args.prompts_file)
+
+        engine = ContinuousBatchingEngine.from_pretrained(
+            opts.model_dir,
+            max_seq_len=opts.max_seq_len,
+            max_num_seqs=args.max_num_seqs,
+            max_gpu_num_blocks=opts.max_gpu_num_blocks,
+            device=opts.device,
+        )
+        prompter = (
+            None
+            if args.no_chat_template
+            else PrompterResolver.build(
+                PrompterResolver.resolve(opts.model_dir), engine.tokenizer
+            )
+        )
+        if prompter is not None:
+            prompts = [prompter.insert_prompt(p) for p in prompts]
+
+        params = self.build_sampling_params(args)
+        started = time.perf_counter()
+        requests = [engine.add_request(prompt, params) for prompt in prompts]
+        while engine.has_unfinished_requests():
+            engine.step()
+        elapsed = time.perf_counter() - started
+
+        for index, request in enumerate(requests):
+            print(f"--- [{index}] {request.finish_reason} ---")
+            print(request.text.strip())
+            print()
+
+        if args.show_stats:
+            self._print_stats(requests, elapsed, started)
+        return 0
+
+    @staticmethod
+    def _load_prompts(path: str | None) -> list[str]:
+        if path is None:
+            return [
+                "What is the capital of France?",
+                "Write a haiku about the sea.",
+                "List three prime numbers.",
+                "Explain what a GPU is in one sentence.",
+            ]
+        lines = [line.strip() for line in Path(path).read_text().splitlines()]
+        prompts = [line for line in lines if line]
+        if not prompts:
+            raise SystemExit(f"{path!r} contains no prompts")
+        return prompts
+
+    @staticmethod
+    def _print_stats(requests: list, elapsed: float, started: float) -> None:
+        generated = sum(len(r.output_token_ids) for r in requests)
+        ttfts = [
+            (r.first_token_time - started) * 1000
+            for r in requests
+            if r.first_token_time is not None
+        ]
+        print(f"{len(requests)} requests, {generated} tokens in {elapsed:.2f}s")
+        print(f"throughput {generated / elapsed:7.1f} tok/s")
+        if ttfts:
+            print(f"TTFT mean {sum(ttfts) / len(ttfts):7.1f} ms | max {max(ttfts):7.1f} ms")
+
+
 # ---------------------------------------------------------------------------
 # 装配层:命令注册表 + 入口
 # ---------------------------------------------------------------------------
 
-COMMANDS: tuple[CliCommand, ...] = (ChatCommand(), VlChatCommand())
+COMMANDS: tuple[CliCommand, ...] = (
+    ChatCommand(),
+    VlChatCommand(),
+    ServeCommand(),
+    BatchCommand(),
+)
 """已注册子命令;新增命令 = 实现一个 :class:`CliCommand` 子类并加入此表。"""
 
 
