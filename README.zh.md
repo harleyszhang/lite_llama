@@ -7,6 +7,13 @@ A light llama-like llm inference framework based on the triton kernel.
 - 相比 transformers, llama3 1B 和 3B 模型加速比最高达 `4x` 倍。
 - 支持最新的 `llama3`、`Qwen2.5`、`Qwen3`、`Qwen3-MoE`(如 Qwen3-30B-A3B,加载时将 FP8 block 量化权重反量化为 fp16)、`Qwen3-VL`、`Llava1.5` 模型推理，支持 `top-p` 采样, 支持流式输出。
 - 直接加载 HuggingFace checkpoint：配置走 `AutoConfig`,权重从 `*.safetensors` 流式读入,K/V 投影与 MoE 专家在加载时就地融合/堆叠,不需要离线权重转换,也没有私有权重格式。
+- **在线批量推理 + 连续批处理**：请求随时加入、结束即离开正在跑的 batch，新到达的请求
+  不必等当前这轮生成结束。单卡 A10 + Qwen2.5-1.5B-Instruct、16 个请求每 250 ms 到达一个：
+  吞吐 93 → 644 tok/s（`6.9x`），平均端到端延迟 19.1s → 2.3s（`8.3x`）。
+  设计与完整口径见 [docs/continuous_batching.md](docs/continuous_batching.md)。
+- **OpenAI 兼容 HTTP 服务**（`lite-llama serve`）：`/v1/completions` 与
+  `/v1/chat/completions`，含 SSE 流式，官方 `openai` 客户端可直接指过来。
+  见 [docs/online_serving.md](docs/online_serving.md)。
 - 支持 GQA、decode 阶段支持 cuda graph 优化（有 batch_size 限制）。
 - 支持 `flashattention1`、`flashattention2`、 `flashdecoding`(支持 `NopadAttention`)。
 - 支持 kv cache 的高效动态管理（`auto tokenattnetion`）。
@@ -211,6 +218,45 @@ Transformers throughput: 183.95 tokens/s
 lite_llama per token latency: 1.369015 ms/token
 Transformers per token latency: 5.436221 ms/token
 ```
+
+## 在线批量推理
+
+六个请求、三个槽位。看 slot 那一列：某个请求结束后，它占的槽位在**下一步**就已经在
+解码排队中的请求了。
+
+![连续批处理](docs/images/continuous_batching.gif)
+
+起一个 OpenAI 兼容服务：
+
+```bash
+pip install 'lite-llama[serve]'
+lite-llama serve --model-dir my_weight/Qwen2.5-1.5B-Instruct --port 8000
+```
+
+也可以直接驱动引擎——每个 prompt 是一个独立请求，各自带自己的采样参数：
+
+```python
+from lite_llama import ContinuousBatchingEngine, SamplingParams
+
+engine = ContinuousBatchingEngine.from_pretrained(
+    "my_weight/Qwen2.5-1.5B-Instruct", max_num_seqs=16
+)
+engine.add_request("日本的首都是哪里?", SamplingParams(max_gen_len=32))
+engine.add_request("写一首关于雨的俳句", SamplingParams(temperature=0.8, max_gen_len=64))
+
+while engine.has_unfinished_requests():
+    for request in engine.step():
+        print(f"[{request.request_id}] {request.delta}", end="", flush=True)
+```
+
+离线跑一批 prompt（仍走连续批处理调度）：
+
+```bash
+lite-llama batch --model-dir my_weight/Qwen2.5-1.5B-Instruct --show-stats
+```
+
+更多用法（异步接口、SSE、CLI 参数、线程模型）见
+[docs/online_serving.md](docs/online_serving.md)。
 
 ## 性能优化
 

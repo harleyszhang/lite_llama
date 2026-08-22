@@ -1,5 +1,6 @@
 .PHONY: help install install-dev lint format test test-cpu test-gpu test-fast \
-        test-weights test-golden test-eval golden-update coverage test-cli clean
+        test-weights test-golden test-eval test-serving golden-update coverage \
+        test-cli bench-continuous serving-gif clean
 
 PYTHON ?= python
 UV     ?= uv
@@ -27,8 +28,13 @@ help:
 	@echo "  test-weights  End-to-end generation (needs CUDA + a converted checkpoint)"
 	@echo "  test-golden   Byte-exact output regression against the recorded baseline"
 	@echo "  test-eval     GSM8K accuracy against the thresholds in tests/evals/configs"
+	@echo "  test-serving  Continuous batching + async engine + OpenAI API tier"
 	@echo "  coverage      test-cpu with an HTML coverage report in htmlcov/"
 	@echo "  test-cli      CLI smoke test over every checkpoint in my_weight/"
+	@echo ""
+	@echo "Benchmarks:"
+	@echo "  bench-continuous  Continuous vs one-shot batching, all three scenarios"
+	@echo "  serving-gif       Re-record the README continuous-batching GIF"
 	@echo ""
 	@echo "Maintenance:"
 	@echo "  golden-update Re-record the golden baseline for MODEL_DIR (review the diff!)"
@@ -79,6 +85,13 @@ test-golden:
 test-eval:
 	$(PYTHON) -m pytest -s -v tests/evals --config-list-file=$(EVAL_CONFIGS)
 
+# The scheduler and the HTTP protocol are covered on CPU (fake/stub engines), so
+# this target is useful even without a GPU -- it just skips the tiers it cannot run.
+test-serving:
+	LITE_LLAMA_TEST_MODEL_DIR=$(MODEL_DIR) $(PYTHON) -m pytest \
+		tests/engine/test_scheduler.py tests/engine/test_async_engine.py \
+		tests/engine/test_continuous_batching.py tests/entrypoints
+
 coverage:
 	$(PYTHON) -m pytest -m "not gpu and not weights" \
 		--cov=lite_llama --cov-report=term-missing --cov-report=html
@@ -96,6 +109,14 @@ golden-update:
 # the model, executor or engine layers.
 test-cli:
 	bash scripts/cli_smoke.sh
+
+# Prints the table in docs/continuous_batching.md. Needs a checkpoint and a GPU.
+bench-continuous:
+	cd benchmarks && $(PYTHON) bench_continuous.py --model-dir ../$(MODEL_DIR) \
+		--scenario all --batch 16 --max-num-seqs 16
+
+serving-gif:
+	$(PYTHON) scripts/gen_serving_gif.py --model-dir $(MODEL_DIR) --every 1
 
 clean:
 	rm -rf build dist *.egg-info .pytest_cache .ruff_cache .coverage htmlcov

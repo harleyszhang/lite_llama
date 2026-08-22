@@ -11,6 +11,7 @@
 <pre>
          ✅ Flash attention    ✅ Cuda Graph Optimize    ✅ Beginner friendly    ✅ Fused MoE
          ✅ W8A16 Quantization ✅ W4A16 (AWQ/GPTQ)      ✅ SmoothQuant W8A8     ✅ Tensor Parallel
+         ✅ Continuous batching ✅ OpenAI API server     ✅ Online batch inference
 </pre>
 
 </div>
@@ -18,6 +19,14 @@
 ## Features
 
 - Up to `4x` speedup over transformers, llama3 1B and 3B models.
+- **Online batch inference with continuous batching**: requests join and leave a running
+  batch, so an arrival never waits for the current generation to finish. On one A10 with
+  Qwen2.5-1.5B-Instruct and requests arriving 250 ms apart, throughput goes from 93 to
+  644 tok/s (`6.9x`) and mean latency from 19.1 s to 2.3 s (`8.3x`) — see
+  [docs/continuous_batching.md](./docs/continuous_batching.md).
+- **OpenAI-compatible server** (`lite-llama serve`): `/v1/completions` and
+  `/v1/chat/completions`, streaming included, so the official `openai` client works
+  unchanged — see [docs/online_serving.md](./docs/online_serving.md).
 - Supports the latest `llama3`, `Qwen2.5`, `Qwen3`, `Llava1.5`, `Qwen3-vl`, `Qwen3-MoE` model inference, `top-p` sampling, streaming output.
 - Supports GQA, decode stage support cuda graph optimization (with batch_size limitations).
 - Supports `flashattention1`, `flashattention2`, `flashdecoding` (supports `NopadAttention`).
@@ -104,6 +113,60 @@ for step in gen.stream(["The capital of France is"], params):
     print(step[0], end="", flush=True)
 ```
 
+### Online batch inference
+
+Six requests, three slots. Watch the slot column: when a request finishes, the slot it
+held is decoding a queued request on the very next step.
+
+![continuous batching](./docs/images/continuous_batching.gif)
+
+Serve an OpenAI-compatible API:
+
+```bash
+pip install 'lite-llama[serve]'
+lite-llama serve --model-dir my_weight/Qwen2.5-1.5B-Instruct --port 8000
+```
+
+```bash
+curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model": "Qwen2.5-1.5B-Instruct",
+       "messages": [{"role": "user", "content": "Explain a GPU in one sentence."}],
+       "max_tokens": 64}'
+```
+
+Or drive the engine directly — every prompt is an independent request, and each carries
+its own sampling parameters:
+
+```python
+from lite_llama import ContinuousBatchingEngine, SamplingParams
+
+engine = ContinuousBatchingEngine.from_pretrained(
+    "my_weight/Qwen2.5-1.5B-Instruct", max_num_seqs=16
+)
+engine.add_request("Name the capital of Japan.", SamplingParams(max_gen_len=32))
+engine.add_request("Write a haiku about rain.", SamplingParams(temperature=0.8, max_gen_len=64))
+
+while engine.has_unfinished_requests():
+    for request in engine.step():
+        print(f"[{request.request_id}] {request.delta}", end="", flush=True)
+```
+
+Asynchronously, with concurrent coroutines sharing one batch:
+
+```python
+import asyncio
+from lite_llama import AsyncLLMEngine, SamplingParams
+
+async def main():
+    async with AsyncLLMEngine.from_pretrained("my_weight/Qwen2.5-1.5B-Instruct") as engine:
+        async def ask(prompt):
+            async for chunk in engine.generate(prompt, SamplingParams(max_gen_len=64)):
+                print(chunk.delta, end="", flush=True)
+        await asyncio.gather(ask("Hello"), ask("Goodbye"))
+
+asyncio.run(main())
+```
+
 ### Image conditioned generation
 
 ```python
@@ -123,6 +186,8 @@ llava-1.5-7b-modelscope default inference:
 ```bash
 export LITE_LLAMA_MODEL_DIR=my_weight/Qwen2.5-0.5B
 lite-llama chat                              # interactive text chat
+lite-llama serve --port 8000                 # OpenAI-compatible API server
+lite-llama batch --show-stats                # a prompt set through the scheduler
 lite-llama vl-chat --model-dir my_weight/llava-1.5-7b-modelscope \
                    --image docs/images/dog.jpeg \
                    --prompt "USER: <image>\nWhat animal is this? ASSISTANT:"
@@ -212,9 +277,12 @@ Quantized inference demo (Qwen3-30B-A3B-FP8, tensor parallel × 2):
 lite_llama/
 ├── engine/
 │   ├── llm.py               # LLM entry point
-│   ├── llm_engine.py        # the single prefill/decode loop
+│   ├── llm_engine.py        # one-shot batch: a single prefill/decode loop
+│   ├── continuous_engine.py # continuous batching: one step at a time
+│   ├── scheduler.py         # who prefills, who decodes, who holds which slot
+│   ├── async_engine.py      # asyncio front end over a worker thread
 │   ├── generator.py         # TextGenerator / VisionGenerator facades
-│   ├── sampler.py           # temperature / top-p / repetition penalty
+│   ├── sampler.py           # temperature / top-p / repetition penalty, per request
 │   ├── detokenizer.py       # incremental text output
 │   ├── stop_criteria.py     # EOS, repetition and length stopping
 │   ├── multimodal.py        # processor call + mrope position ids
@@ -225,7 +293,11 @@ lite_llama/
 │   ├── weight_utils.py      # safetensors reading, FP8 passthrough
 │   ├── kv_cache_manager.py  # paged KV pool + memory profiler
 │   ├── attention_metadata.py # per-step KV bookkeeping handed to the kernels
-│   └── cuda_graph.py        # decode graph capture and replay
+│   ├── slot_batch.py        # fixed-slot KV layout for continuous batching
+│   └── cuda_graph.py        # decode graph capture, replay and batch padding
+├── entrypoints/
+│   ├── api_server.py        # OpenAI-compatible FastAPI app
+│   └── protocol.py          # request/response schemas
 ├── kernels/                 # Triton kernels used by the models
 │   ├── w8a16.py             # fp8/int8 weight-only GEMM
 │   ├── w4a16.py             # AWQ/GPTQ int4 GEMM
@@ -246,7 +318,9 @@ lite_llama/
 └── utils/                   # chat templates, logger, image and path helpers
 ```
 
-File and class names follow vLLM's, so the two are easy to read side by side: `model_runner.py` matches `v1/worker/gpu_model_runner.py`, `kv_cache_manager.py` matches `v1/core/kv_cache_manager.py`, `models/interfaces.py` and `models/registry.py` match `model_executor/models/`, and the weight-loading split (key mapping in `models/weights.py`, file reading in `executor/weight_utils.py`) mirrors vLLM's `model_executor/models/utils.py` versus `model_loader/weight_utils.py`.
+File and class names follow vLLM's, so the two are easy to read side by side: `model_runner.py` matches `v1/worker/gpu_model_runner.py`, `kv_cache_manager.py` matches `v1/core/kv_cache_manager.py`, `continuous_engine.py` plus `scheduler.py` match `v1/engine/` plus `v1/core/sched/`,
+`async_engine.py` matches `AsyncLLMEngine`, `entrypoints/` matches `entrypoints/openai/`,
+`models/interfaces.py` and `models/registry.py` match `model_executor/models/`, and the weight-loading split (key mapping in `models/weights.py`, file reading in `executor/weight_utils.py`) mirrors vLLM's `model_executor/models/utils.py` versus `model_loader/weight_utils.py`.
 
 The per-model files declare only their differences — bias flags, per-head qk-norm, mrope, or DeepStack layer injection — while all shared behaviour lives in `models/base.py`. A new architecture typically means one class body plus one `ModelRegistry` entry; its config is whatever `AutoConfig` already returns.
 
