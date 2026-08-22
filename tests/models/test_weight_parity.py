@@ -216,12 +216,12 @@ def test_decoder_weights_land_in_the_right_place(model_type: str, tmp_path: Path
     kv = config.kv_size
     for i in range(config.num_layers):
         attn, lite_attn = f"{hf}layers.{i}.self_attn", f"{lite}layers.{i}.self_attn"
-        same(f"{attn}.q_proj.weight", f"{lite_attn}.q_proj_weight")
-        same(f"{attn}.o_proj.weight", f"{lite_attn}.o_proj_weight")
+        same(f"{attn}.q_proj.weight", f"{lite_attn}.q_proj.weight")
+        same(f"{attn}.o_proj.weight", f"{lite_attn}.o_proj.weight")
         # The fused halves are the whole reason a mapping layer exists: swapping
         # them keeps every shape and every count valid.
-        same(f"{attn}.k_proj.weight", f"{lite_attn}.kv_proj_weight", (slice(0, kv),))
-        same(f"{attn}.v_proj.weight", f"{lite_attn}.kv_proj_weight", (slice(kv, 2 * kv),))
+        same(f"{attn}.k_proj.weight", f"{lite_attn}.kv_proj.weight", (slice(0, kv),))
+        same(f"{attn}.v_proj.weight", f"{lite_attn}.kv_proj.weight", (slice(kv, 2 * kv),))
 
         norms = f"{attn}.q_norm.weight" in state
         assert norms == (f"{lite_attn}.q_norm_weight" in params)
@@ -230,11 +230,11 @@ def test_decoder_weights_land_in_the_right_place(model_type: str, tmp_path: Path
             same(f"{attn}.k_norm.weight", f"{lite_attn}.k_norm_weight")
 
         # Qwen2 is the only family here with a q/k/v bias, i.e. the only one that
-        # exercises the fused ``kv_proj_bias``.
+        # exercises the fused ``kv_proj.bias``.
         if f"{attn}.q_proj.bias" in state:
-            same(f"{attn}.q_proj.bias", f"{lite_attn}.q_proj_bias")
-            same(f"{attn}.k_proj.bias", f"{lite_attn}.kv_proj_bias", (slice(0, kv),))
-            same(f"{attn}.v_proj.bias", f"{lite_attn}.kv_proj_bias", (slice(kv, 2 * kv),))
+            same(f"{attn}.q_proj.bias", f"{lite_attn}.q_proj.bias")
+            same(f"{attn}.k_proj.bias", f"{lite_attn}.kv_proj.bias", (slice(0, kv),))
+            same(f"{attn}.v_proj.bias", f"{lite_attn}.kv_proj.bias", (slice(kv, 2 * kv),))
 
         mlp, lite_mlp = f"{hf}layers.{i}.mlp", f"{lite}layers.{i}.mlp"
         if f"{mlp}.gate.weight" not in state:  # dense SwiGLU
