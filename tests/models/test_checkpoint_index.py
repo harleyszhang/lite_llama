@@ -68,8 +68,6 @@ def mapping(checkpoint: Path) -> tuple[list[str], dict[str, str | None], set[str
 
     translated: dict[str, str | None] = {}
     for key in keys:
-        if key.endswith(_SCALE_SUFFIX):
-            continue
         target = model.translate_weight_key(key)
         translated[key] = None if target is None else target[0]
     return keys, translated, set(dict(model.named_parameters())), config
