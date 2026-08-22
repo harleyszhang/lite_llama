@@ -79,12 +79,6 @@ class LLM(LLMEngine):
         if tensor_parallel_size > 1:
             use_cuda_graph = False
 
-        # Initialise the TP process group before building the model so that
-        # ColumnParallelLinear / RowParallelLinear read the correct world size.
-        if tensor_parallel_size > 1:
-            from ..distributed.parallel_state import init_tensor_parallel
-            init_tensor_parallel(rank=0, world_size=tensor_parallel_size)
-
         super().__init__(
             checkpoints_dir=model,
             tokenizer_path=tokenizer,
