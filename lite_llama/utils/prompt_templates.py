@@ -32,14 +32,31 @@ class ChatPrompter:
         self.system_prompt = system_prompt
         self.model_input: str | None = None
 
-    def insert_prompt(self, prompt: str) -> str:
-        """Format ``prompt`` into ``model_input`` (and return it) as a single-turn chat."""
-        messages = [{"role": "system", "content": self.system_prompt}] if self.system_prompt else []
-        messages.append({"role": "user", "content": prompt})
+    def apply(self, messages: list[dict[str, str]]) -> str:
+        """Format a whole conversation and return the prompt string.
+
+        The multi-turn entry point the OpenAI ``/v1/chat/completions`` endpoint
+        needs; :meth:`insert_prompt` is the single-turn shorthand built on it, so
+        both paths format through one call and cannot drift apart.
+
+        Args:
+            messages: ``{"role": ..., "content": ...}`` dicts in order. A system
+                prompt configured on this prompter is prepended unless the caller
+                already supplied one.
+
+        Returns:
+            The templated prompt, with the assistant turn opened.
+        """
+        if self.system_prompt and not (messages and messages[0]["role"] == "system"):
+            messages = [{"role": "system", "content": self.system_prompt}, *messages]
         self.model_input = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
         return self.model_input
+
+    def insert_prompt(self, prompt: str) -> str:
+        """Format ``prompt`` into ``model_input`` (and return it) as a single-turn chat."""
+        return self.apply([{"role": "user", "content": prompt}])
 
 
 def has_chat_template(tokenizer: Any) -> bool:
