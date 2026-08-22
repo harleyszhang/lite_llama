@@ -333,6 +333,25 @@ class KVCacheManager:
         return
 
     @torch.no_grad()
+    def claim(self, num_rows: int) -> None:
+        """Hand the first ``num_rows`` rows to an external owner, permanently.
+
+        Continuous batching manages its rows itself (see
+        :class:`~lite_llama.executor.slot_batch.SlotBatch`, which maps each
+        request slot onto a fixed contiguous region). Marking those rows used
+        keeps :attr:`can_use_mem_size` honest and stops this allocator from
+        handing the same row to a second owner; the bump cursor resumes just
+        past the claimed region so the two schemes can share one pool.
+        """
+        if num_rows > self.can_use_mem_size:
+            raise ValueError(
+                f"cannot claim {num_rows} rows: only {self.can_use_mem_size} are free"
+            )
+        self.kv_mem_use_state[:num_rows] += 1
+        self.can_use_mem_size -= num_rows
+        self._bump_cursor = max(self._bump_cursor, num_rows)
+
+    @torch.no_grad()
     def free(self, free_index):
         """Release rows by index, logging when that empties the cache."""
         free_index = free_index.long()

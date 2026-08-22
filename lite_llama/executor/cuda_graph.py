@@ -204,6 +204,21 @@ class CUDAGraphManager:
                 return bucket
         return None
 
+    def pad_to(self, batch_size: int) -> int | None:
+        """Smallest captured batch size that can absorb ``batch_size``.
+
+        Continuous batching submits whatever batch the workload produces, which
+        rarely lands on the captured grid. Padding the batch out to a captured
+        size and discarding the filler rows keeps those steps on the graph path;
+        the extra rows cost a little attention work, which is far less than the
+        ~300 kernel launches an eager decode step pays. Returns ``None`` when the
+        batch is larger than anything captured.
+        """
+        for bs in self.batch_sizes:
+            if bs >= batch_size:
+                return bs
+        return None
+
     def try_replay(
         self,
         input_ids: torch.Tensor,
