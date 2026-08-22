@@ -36,7 +36,6 @@
 - **Quantization**: W8A16 (fp8/int8), W4A16 (AWQ/GPTQ), SmoothQuant W8A8 — up to `1.7x` decode speedup.
 - **Tensor Parallelism**: split a 30B MoE model across 2× A10 (24 GB) with one all-reduce per block.
 - **Data Parallelism**: replicate the model across GPUs and route requests between them — `2.00x` throughput on 2 GPUs (100% linear).
-- **Data Parallelism**: replicate the model across GPUs and route requests between them — `2.00x` throughput on 2 GPUs (100% linear).
 
 ## Setup and Installation
 
