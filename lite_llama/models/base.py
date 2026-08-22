@@ -123,6 +123,7 @@ class PagedAttention(nn.Module):
             kv_buffer[:, self.num_kv_heads :, :],
             self.scale,
             atten_info.b_req_tokens_table,
+            atten_info.b_req_idx,
             atten_info.b_seq_len,
             atten_info.max_actual_seq_len,
         )
