@@ -50,8 +50,11 @@ class LLM(LLMEngine):
             whose vision tower changes control flow per prefill.
         quantization: Runtime weight quantisation (``"int8"``); ``None`` keeps
             the checkpoint's native format (fp16 or auto-detected fp8).
-        tensor_parallel_size: Number of GPUs for tensor parallelism.
-        data_parallel_size: Reserved for DP support; must be 1 today.
+        tensor_parallel_size: Number of GPUs this replica's weights are split over.
+        data_parallel_size: Accepted only as ``1``. DP replicates the whole model
+            across processes, which cannot be done from inside one of them; use
+            :class:`~lite_llama.engine.data_parallel.DataParallelEngine`, which owns
+            the replicas and exposes the same ``generate``.
     """
 
     def __init__(
@@ -67,9 +70,11 @@ class LLM(LLMEngine):
         data_parallel_size: int = 1,
     ) -> None:
         if data_parallel_size != 1:
-            raise NotImplementedError(
-                "data_parallel_size > 1 is not implemented yet; DP will route "
-                "requests across engine workers at this entry layer"
+            raise ValueError(
+                f"LLM is a single model replica and cannot host "
+                f"data_parallel_size={data_parallel_size}; use "
+                f"DataParallelEngine(model=..., data_parallel_size={data_parallel_size}) "
+                f"instead — it spawns one LLM per replica and routes requests to them"
             )
 
         spec = _resolve_spec(model)

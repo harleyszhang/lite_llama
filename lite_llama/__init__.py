@@ -21,6 +21,10 @@ use the continuous-batching engine instead::
     print(engine.generate(["Hello", "Bonjour"], SamplingParams())[0].text)
 
 ``AsyncLLMEngine`` is the asyncio wrapper behind ``lite-llama serve``.
+
+One GPU too few for the request rate? :class:`DataParallelEngine` takes the same
+arguments plus ``data_parallel_size`` and routes the prompts across that many whole-
+model replicas, one process per GPU.
 """
 
 from .engine import (
@@ -28,6 +32,7 @@ from .engine import (
     AsyncLLMEngine,
     CompletionOutput,
     ContinuousBatchingEngine,
+    DataParallelEngine,
     LLMEngine,
     Request,
     RequestOutput,
@@ -47,6 +52,7 @@ __all__ = [
     "LLMEngine",
     "AsyncLLMEngine",
     "ContinuousBatchingEngine",
+    "DataParallelEngine",
     "Request",
     "SchedulerConfig",
     "StreamedOutput",
