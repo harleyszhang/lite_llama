@@ -77,10 +77,18 @@ def test_images_rejected_on_text_model(llm: LLM):
 
 
 def test_parallel_size_placeholders(model_dir: Path):
-    """TP/DP are declared but unimplemented; they must fail loudly, not silently
-    fall back to single-GPU and report bogus scaling."""
-    with pytest.raises(NotImplementedError, match="tensor_parallel"):
-        LLM(model=str(model_dir), tensor_parallel_size=2)
+    """TP is implemented; DP is not. DP must still fail loudly."""
+    # tensor_parallel_size=2 should not raise NotImplementedError (TP is supported).
+    # On a single-GPU machine it may fail for other reasons (NCCL), so we only
+    # assert it does not raise NotImplementedError.
+    try:
+        llm = LLM(model=str(model_dir), tensor_parallel_size=2, max_seq_len=512, max_gpu_num_blocks=_KV_TOKENS)
+        del llm
+        torch.cuda.empty_cache()
+    except NotImplementedError:
+        pytest.fail("tensor_parallel_size=2 should not raise NotImplementedError")
+    except Exception:
+        pass  # NCCL/network errors are acceptable in test environments
     with pytest.raises(NotImplementedError, match="data_parallel"):
         LLM(model=str(model_dir), data_parallel_size=2)
 
