@@ -19,6 +19,8 @@ from typing import Any
 
 from transformers import AutoConfig, PretrainedConfig
 
+from .quantization import QuantConfig
+
 
 def read_model_type(checkpoints_dir: str | Path) -> str:
     """Return a checkpoint's ``model_type`` without parsing its whole config.
@@ -66,6 +68,10 @@ class ModelConfig:
         # models are their own text config.
         self.text_config: PretrainedConfig = getattr(hf_config, "text_config", hf_config)
         self.max_seq_len = max_seq_len
+        # Weight format the *checkpoint* is stored in, which decides both what the
+        # model allocates and whether the loader may widen anything on the way in.
+        # A runtime ``--quantization`` request is a separate, post-load step.
+        self.quant: QuantConfig | None = QuantConfig.from_hf(hf_config)
         self.validate()
 
     @classmethod
