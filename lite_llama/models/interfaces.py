@@ -123,7 +123,12 @@ class MultiModalCausalLM(nn.Module):
         return None
 
     def load_weights(self, checkpoint: Iterable[tuple[str, torch.Tensor]]) -> None:
-        """Fill vision tower, projector and language model from one checkpoint stream."""
+        """Fill vision tower, projector and language model from one checkpoint stream.
+
+        The sharder is passed through so tensor parallelism works for the language
+        model; vision-tower parameters do not match any ``_SHARD_DIM`` entry and
+        are therefore returned unchanged (replicated across ranks).
+        """
         tied = (
             {
                 f"{LANGUAGE_MODEL_PREFIX}lm_head_weight": (
@@ -133,7 +138,15 @@ class MultiModalCausalLM(nn.Module):
             if self.language_model.config.tie_word_embeddings
             else None
         )
-        weights.load_weights(self, checkpoint, self.translate_weight_key, tied=tied)
+        weights.load_weights(
+            self, checkpoint, self.translate_weight_key,
+            tied=tied, shard=weights.tp_shard,
+        )
+
+    @torch.no_grad()
+    def quantize_(self, quant) -> None:
+        """Delegate to the language model; vision modules stay in their native dtype."""
+        self.language_model.quantize_(quant)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.language_model.get_input_embeddings(input_ids)

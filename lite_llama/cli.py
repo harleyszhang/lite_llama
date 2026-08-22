@@ -40,12 +40,17 @@ def _tp_mirror_worker(
     max_seq_len: int,
     max_gpu_num_blocks: int | None,
     quantization: str | None,
+    image_paths: list[str] | None = None,
+    prompt_text: str | None = None,
 ) -> None:
     """Non-rank-0 TP worker: builds model, then mirrors rank 0's forwards via NCCL.
 
     The worker sits in a loop: it receives a flag (1=forward, 0=exit) and the
     prompt tokens from rank 0 via dist.broadcast, then calls generator.stream()
     which participates in the same all-reduces as rank 0. Output is discarded.
+
+    For multimodal models, ``image_paths`` and ``prompt_text`` let the worker
+    run the same vision-tower + language-model forward calls as rank 0.
     """
     import torch
     import torch.distributed as dist
@@ -57,15 +62,26 @@ def _tp_mirror_worker(
     torch.cuda.set_device(rank)
     init_tensor_parallel(rank=rank, world_size=world_size)
 
-    generator = TextGenerator(
-        checkpoints_dir=model_dir,
-        max_seq_len=max_seq_len,
-        max_gpu_num_blocks=max_gpu_num_blocks,
-        device=f"cuda:{rank}",
-        use_cuda_graph=False,
-        quantization=quantization,
-        tensor_parallel_size=world_size,
-    )
+    if image_paths:
+        from .engine import VisionGenerator
+        generator = VisionGenerator(
+            checkpoints_dir=model_dir,
+            max_seq_len=max_seq_len,
+            max_gpu_num_blocks=max_gpu_num_blocks,
+            device=f"cuda:{rank}",
+            quantization=quantization,
+            tensor_parallel_size=world_size,
+        )
+    else:
+        generator = TextGenerator(
+            checkpoints_dir=model_dir,
+            max_seq_len=max_seq_len,
+            max_gpu_num_blocks=max_gpu_num_blocks,
+            device=f"cuda:{rank}",
+            use_cuda_graph=False,
+            quantization=quantization,
+            tensor_parallel_size=world_size,
+        )
     params = SamplingParams(temperature=0.0, max_gen_len=4096)
 
     # Mirror loop: wait for rank 0's broadcast, generate, discard output.
@@ -79,9 +95,14 @@ def _tp_mirror_worker(
         tok_tensor = torch.zeros(length.item(), dtype=torch.int64, device=f"cuda:{rank}")
         dist.broadcast(tok_tensor, src=0)
 
-        prompt_text = generator.tokenizer.decode(tok_tensor.tolist())
-        for _ in generator.stream([prompt_text], params):
-            pass  # participate in all-reduces, discard output
+        prompt = generator.engine.tokenizer.decode(tok_tensor.tolist())
+        if image_paths:
+            images = [Image.open(p).convert("RGB") for p in image_paths]
+            for _ in generator.stream(prompt_text or prompt, images, params):
+                pass
+        else:
+            for _ in generator.stream([prompt], params):
+                pass  # participate in all-reduces, discard output
 
     dist.destroy_process_group()
 
@@ -202,6 +223,8 @@ class EngineOptions:
             max_seq_len=self.max_seq_len,
             max_gpu_num_blocks=self.max_gpu_num_blocks,
             device=self.device,
+            quantization=self.quantization,
+            tensor_parallel_size=self.tensor_parallel_size,
         )
 
 
@@ -508,6 +531,10 @@ class VlChatCommand(CliCommand):
 
     def run(self, args: argparse.Namespace) -> int:
         opts = EngineOptions.from_args(args)
+
+        if opts.tensor_parallel_size > 1:
+            return self._run_tp(args, opts)
+
         generator = opts.build_vision_generator()
         params = self.build_sampling_params(args)
 
@@ -522,6 +549,87 @@ class VlChatCommand(CliCommand):
         for delta in generator.stream(args.prompt or default_prompt, images, params):
             print(delta, end="", flush=True)
         print()
+        return 0
+
+    @staticmethod
+    def _run_tp(args: argparse.Namespace, opts: EngineOptions) -> int:
+        """TP vision chat: all ranks process the image independently (vision tower
+        is replicated); the language model's all-reduces keep them in lockstep."""
+        import torch
+        import torch.distributed as dist
+        import torch.multiprocessing as mp
+
+        from .distributed.parallel_state import init_tensor_parallel
+        from .engine import VisionGenerator
+
+        world_size = opts.tensor_parallel_size
+
+        # Determine the prompt before spawning workers so they get it too.
+        from .models.config import read_model_type
+        is_qwen3_vl = read_model_type(opts.model_dir) == "qwen3_vl"
+        default_prompt = (
+            "Describe this image."
+            if is_qwen3_vl
+            else "USER: <image>\nDescribe this image. ASSISTANT:"
+        )
+        prompt = args.prompt or default_prompt
+
+        # Spawn mirror workers for ranks 1..N-1.
+        try:
+            mp.set_start_method("spawn", force=True)
+        except RuntimeError:
+            pass
+        workers = []
+        for rank in range(1, world_size):
+            p = mp.Process(
+                target=_tp_mirror_worker,
+                args=(rank, world_size, opts.model_dir, opts.max_seq_len,
+                      opts.max_gpu_num_blocks, opts.quantization,
+                      args.image, prompt),
+                daemon=True,
+            )
+            p.start()
+            workers.append(p)
+
+        # Main process = rank 0.
+        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        os.environ.setdefault("MASTER_PORT", "29500")
+        torch.cuda.set_device(0)
+        init_tensor_parallel(rank=0, world_size=world_size)
+
+        generator = VisionGenerator(
+            checkpoints_dir=opts.model_dir,
+            max_seq_len=opts.max_seq_len,
+            max_gpu_num_blocks=opts.max_gpu_num_blocks,
+            device="cuda:0",
+            quantization=opts.quantization,
+            tensor_parallel_size=world_size,
+        )
+        params = CliCommand.build_sampling_params(args)
+
+        images = [Image.open(p).convert("RGB") for p in args.image]
+
+        # Broadcast the go-signal and prompt tokens so workers enter the same
+        # forward calls as rank 0 (vision tower + language model).
+        formatted = prompt
+        tokens = generator.engine.tokenizer.encode(formatted)
+        tok_tensor = torch.tensor(tokens, dtype=torch.int64, device="cuda:0")
+        length = torch.tensor([len(tokens)], dtype=torch.int64, device="cuda:0")
+        flag = torch.tensor([1], dtype=torch.int64, device="cuda:0")
+        dist.broadcast(flag, src=0)
+        dist.broadcast(length, src=0)
+        dist.broadcast(tok_tensor, src=0)
+
+        for delta in generator.stream(prompt, images, params):
+            print(delta, end="", flush=True)
+        print()
+
+        # Shutdown workers.
+        flag.zero_()
+        dist.broadcast(flag, src=0)
+        for p in workers:
+            p.join(timeout=5)
+        dist.destroy_process_group()
         return 0
 
 

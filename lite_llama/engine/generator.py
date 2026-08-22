@@ -78,6 +78,8 @@ class VisionGenerator:
         max_seq_len: int = 2048,
         max_gpu_num_blocks: int | None = None,
         device: str = "cuda",
+        quantization: str | None = None,
+        tensor_parallel_size: int = 1,
     ) -> None:
         self._llm = LLM(
             model=checkpoints_dir,
@@ -85,6 +87,8 @@ class VisionGenerator:
             max_gpu_num_blocks=max_gpu_num_blocks,
             device=device,
             use_cuda_graph=False,
+            quantization=quantization,
+            tensor_parallel_size=tensor_parallel_size,
         )
         self.engine = self._llm
         self.device = device
