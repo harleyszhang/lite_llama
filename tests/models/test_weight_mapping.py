@@ -40,18 +40,19 @@ from lite_llama.models import weights
         ("lm_head.weight", "lm_head_weight"),
         ("layers.3.input_layernorm.weight", "layers.3.input_layernorm_weight"),
         ("layers.3.post_attention_layernorm.weight", "layers.3.post_attention_layernorm_weight"),
-        ("layers.3.self_attn.q_proj.weight", "layers.3.self_attn.q_proj_weight"),
-        ("layers.3.self_attn.q_proj.bias", "layers.3.self_attn.q_proj_bias"),
-        ("layers.3.self_attn.o_proj.weight", "layers.3.self_attn.o_proj_weight"),
+        # Projections are submodules (LinearBase), so their parameters use dots.
+        ("layers.3.self_attn.q_proj.weight", "layers.3.self_attn.q_proj.weight"),
+        ("layers.3.self_attn.q_proj.bias", "layers.3.self_attn.q_proj.bias"),
+        ("layers.3.self_attn.o_proj.weight", "layers.3.self_attn.o_proj.weight"),
         ("layers.3.self_attn.q_norm.weight", "layers.3.self_attn.q_norm_weight"),
         ("layers.3.self_attn.k_norm.weight", "layers.3.self_attn.k_norm_weight"),
         # MoE router. Must not be confused with the dense ``mlp.gate_proj``.
         ("layers.3.mlp.gate.weight", "layers.3.mlp.gate_weight"),
         # Fused pairs.
-        ("layers.3.self_attn.k_proj.weight", "layers.3.self_attn.kv_proj_weight"),
-        ("layers.3.self_attn.v_proj.weight", "layers.3.self_attn.kv_proj_weight"),
-        ("layers.3.self_attn.k_proj.bias", "layers.3.self_attn.kv_proj_bias"),
-        ("layers.3.self_attn.v_proj.bias", "layers.3.self_attn.kv_proj_bias"),
+        ("layers.3.self_attn.k_proj.weight", "layers.3.self_attn.kv_proj.weight"),
+        ("layers.3.self_attn.v_proj.weight", "layers.3.self_attn.kv_proj.weight"),
+        ("layers.3.self_attn.k_proj.bias", "layers.3.self_attn.kv_proj.bias"),
+        ("layers.3.self_attn.v_proj.bias", "layers.3.self_attn.kv_proj.bias"),
         # Stacked experts.
         ("layers.3.mlp.experts.7.gate_proj.weight", "layers.3.mlp.experts.gate_up_proj"),
         ("layers.3.mlp.experts.7.up_proj.weight", "layers.3.mlp.experts.gate_up_proj"),
