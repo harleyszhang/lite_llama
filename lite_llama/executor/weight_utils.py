@@ -1,9 +1,17 @@
 """Reading HuggingFace checkpoint files into a stream of ``(key, tensor)`` pairs.
 
 safetensors shards are opened once and read lazily, so a 30B checkpoint never
-exists in host RAM as a whole state dict. Block-FP8 checkpoints (Qwen3-30B-A3B-FP8)
-are dequantised here — that is a property of the file, not the architecture — on the
-target device, where the GPU is ~30x faster than the CPU (~2 s vs ~56 s for 30B).
+exists in host RAM as a whole state dict.
+
+Block-FP8 checkpoints (Qwen3-30B-A3B-FP8) can be read two ways, and which one the
+loader picks is the difference between a model that fits and one that does not:
+
+* ``dequantize=True`` widens each e4m3 block to fp16 here, on the target device
+  where the GPU is ~30x faster than the CPU (~2 s vs ~56 s for 30B). The model
+  then holds plain fp16 weights, at twice the memory.
+* ``dequantize=False`` passes the raw bytes through as ``uint8`` and yields the
+  ``*.weight_scale_inv`` tables alongside them, for a model whose layers are
+  themselves 8-bit (:mod:`lite_llama.models.quantization`).
 
 Usage:
     for key, tensor in hf_weights_iterator(checkpoints_dir, device="cuda"):
@@ -17,17 +25,13 @@ from pathlib import Path
 
 import torch
 
+from ..models.quantization import FP8_BLOCK, SCALE_SUFFIX
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-#: Block size of the fine-grained FP8 format used by Qwen FP8 checkpoints:
-#: ``weight`` is e4m3 and ``weight_scale_inv[i, j]`` scales the 128x128 block
-#: starting at ``(i * 128, j * 128)``.
-FP8_BLOCK = 128
-
 #: Suffix of the per-block scale table that accompanies an FP8 weight.
-_SCALE_SUFFIX = ".weight_scale_inv"
+_SCALE_SUFFIX = "." + SCALE_SUFFIX
 
 
 def hf_weight_files(checkpoints_dir: str | Path) -> list[Path]:
@@ -68,7 +72,9 @@ def dequant_block_fp8(weight: torch.Tensor, scale_inv: torch.Tensor) -> torch.Te
 
 
 def hf_weights_iterator(
-    checkpoints_dir: str | Path, device: str | torch.device = "cpu"
+    checkpoints_dir: str | Path,
+    device: str | torch.device = "cpu",
+    dequantize_fp8: bool = True,
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Stream ``(key, tensor)`` pairs from a checkpoint, tensors already on ``device``.
 
@@ -78,21 +84,24 @@ def hf_weights_iterator(
         device: Where the tensors land. Passing the compute device lets the
             caller copy straight into its parameters and makes the FP8
             dequantisation a GPU op.
+        dequantize_fp8: Whether to widen FP8 weights to fp16 and consume their
+            scales, or hand both through untouched for a w8a16 model.
 
     Yields:
-        Pairs in shard order. FP8 weights are yielded dequantised to fp16 and
-        their ``*.weight_scale_inv`` partners are consumed, not yielded.
+        Pairs in shard order.
     """
     files = hf_weight_files(checkpoints_dir)
     logger.info("Loading weights from %d file(s) in %s", len(files), checkpoints_dir)
     for path in files:
         if path.suffix == ".safetensors":
-            yield from _iter_safetensors(path, device)
+            yield from _iter_safetensors(path, device, dequantize_fp8)
         else:
-            yield from _iter_torch_bin(path, device)
+            yield from _iter_torch_bin(path, device, dequantize_fp8)
 
 
-def _iter_safetensors(path: Path, device: str | torch.device) -> Iterator[tuple[str, torch.Tensor]]:
+def _iter_safetensors(
+    path: Path, device: str | torch.device, dequantize_fp8: bool
+) -> Iterator[tuple[str, torch.Tensor]]:
     from safetensors import safe_open
 
     with safe_open(path, framework="pt", device="cpu") as shard:
@@ -100,24 +109,42 @@ def _iter_safetensors(path: Path, device: str | torch.device) -> Iterator[tuple[
         keys = set(shard.keys())
         for key in sorted(keys):
             if key.endswith(_SCALE_SUFFIX):
-                continue  # consumed alongside its weight below
-            tensor = shard.get_tensor(key).to(device)
-            scale_key = key.removesuffix(".weight") + _SCALE_SUFFIX
-            if scale_key in keys:
-                tensor = dequant_block_fp8(tensor, shard.get_tensor(scale_key).to(device))
-            yield key, tensor
+                if dequantize_fp8:
+                    continue  # consumed alongside its weight below
+                yield key, shard.get_tensor(key).to(device)
+                continue
+            tensor = shard.get_tensor(key)
+            if key.removesuffix(".weight") + _SCALE_SUFFIX in keys:
+                tensor = (
+                    dequant_block_fp8(
+                        tensor.to(device),
+                        shard.get_tensor(key.removesuffix(".weight") + _SCALE_SUFFIX).to(device),
+                    )
+                    if dequantize_fp8
+                    # Reinterpret rather than convert: Ampere cannot compute on
+                    # fp8, and the w8a16 kernel widens the raw bytes itself.
+                    else tensor.view(torch.uint8)
+                )
+            yield key, tensor.to(device)
 
 
-def _iter_torch_bin(path: Path, device: str | torch.device) -> Iterator[tuple[str, torch.Tensor]]:
+def _iter_torch_bin(
+    path: Path, device: str | torch.device, dequantize_fp8: bool
+) -> Iterator[tuple[str, torch.Tensor]]:
     # mmap keeps the shard out of the process's resident set; weights_only rejects
     # the arbitrary-code-execution pickle payloads a downloaded .bin could carry.
     state = torch.load(path, map_location="cpu", mmap=True, weights_only=True)
     scales = {k: v for k, v in state.items() if k.endswith(_SCALE_SUFFIX)}
     for key, tensor in state.items():
         if key.endswith(_SCALE_SUFFIX):
+            if not dequantize_fp8:
+                yield key, tensor.to(device)
             continue
-        tensor = tensor.to(device)
         scale = scales.get(key.removesuffix(".weight") + _SCALE_SUFFIX)
         if scale is not None:
-            tensor = dequant_block_fp8(tensor, scale.to(device))
-        yield key, tensor
+            tensor = (
+                dequant_block_fp8(tensor.to(device), scale.to(device))
+                if dequantize_fp8
+                else tensor.view(torch.uint8)
+            )
+        yield key, tensor.to(device)
