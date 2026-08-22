@@ -21,6 +21,7 @@ import torch
 import torch.nn as nn
 
 from ..models.config import ModelConfig
+from ..models.quantization import QuantConfig, RawParameter
 from ..utils.logger import get_logger
 from .weight_utils import hf_weights_iterator
 
@@ -64,7 +65,10 @@ def materialise_parameters(
     """Give every meta parameter real, uninitialised storage on ``device``.
 
     Only floating-point parameters are cast to ``dtype``; integer ones (a
-    handful of HF vision towers keep index tables as parameters) keep theirs.
+    handful of HF vision towers keep index tables as parameters) keep theirs, and
+    so do the quantisation parameters marked
+    :class:`~lite_llama.models.quantization.RawParameter` — an 8-bit weight must
+    not be widened, and its fp32 scales must not be narrowed.
     The storage stays uninitialised because :func:`load_weights` overwrites all
     of it and verifies that it did.
 
@@ -76,9 +80,9 @@ def materialise_parameters(
         for name, param in module._parameters.items():
             if param is None:
                 continue
-            target_dtype = dtype if param.is_floating_point() else param.dtype
+            keep_dtype = isinstance(param, RawParameter) or not param.is_floating_point()
             module._parameters[name] = type(param)(
-                torch.empty(param.shape, dtype=target_dtype, device=device),
+                torch.empty(param.shape, dtype=param.dtype if keep_dtype else dtype, device=device),
                 requires_grad=False,
             )
 
@@ -88,7 +92,12 @@ class ModelLoader(Protocol):
     """Strategy seam: anything that can turn a checkpoint dir into a model."""
 
     def load_model(
-        self, config: ModelConfig, model_cls: type[nn.Module], checkpoints_dir: str, device: str
+        self,
+        config: ModelConfig,
+        model_cls: type[nn.Module],
+        checkpoints_dir: str,
+        device: str,
+        quantization: str | None = None,
     ) -> nn.Module: ...
 
 
@@ -96,16 +105,25 @@ class DefaultModelLoader:
     """Loads HuggingFace weights directly, with no offline conversion step."""
 
     def load_model(
-        self, config: ModelConfig, model_cls: type[nn.Module], checkpoints_dir: str, device: str
+        self,
+        config: ModelConfig,
+        model_cls: type[nn.Module],
+        checkpoints_dir: str,
+        device: str,
+        quantization: str | None = None,
     ) -> nn.Module:
         """Build ``model_cls`` and fill it from the checkpoint in ``checkpoints_dir``.
 
         Args:
-            config: Parsed configuration, already carrying ``max_seq_len``.
+            config: Parsed configuration, already carrying ``max_seq_len`` and the
+                checkpoint's own weight format (``config.quant``).
             model_cls: The implementation class resolved from the registry.
             checkpoints_dir: HuggingFace checkpoint directory (``config.json`` plus
                 ``*.safetensors``).
             device: Torch device string the model must end up on.
+            quantization: Post-load quantisation to apply to an fp16 checkpoint,
+                currently ``"int8"`` or ``None``. Ignored for a checkpoint that is
+                already quantised, which needs no conversion.
         """
         start = time.time()
         self._check_device(device)
@@ -115,11 +133,35 @@ class DefaultModelLoader:
             model = model_cls(config)
         materialise_parameters(model, device)
 
-        model.load_weights(hf_weights_iterator(checkpoints_dir, device))
+        # An already-quantised checkpoint is copied in byte for byte; only an
+        # fp16 model wants the FP8 blocks widened on the way through.
+        model.load_weights(
+            hf_weights_iterator(checkpoints_dir, device, dequantize_fp8=config.quant is None)
+        )
+        if quantization and config.quant is None:
+            self._quantize(model, quantization)
         # Buffers were computed on the CPU while the skeleton was on meta.
         model.to(device).eval()
         logger.info("Loaded %s onto %s in %.2fs", model_cls.__name__, device, time.time() - start)
         return model
+
+    @staticmethod
+    def _quantize(model: nn.Module, quantization: str) -> None:
+        """Apply a runtime quantisation request to a freshly loaded fp16 model.
+
+        Raises:
+            ValueError: On a scheme that cannot be produced from an fp16
+                checkpoint (fp8 needs calibration data lite_llama does not have).
+        """
+        if quantization != "int8":
+            raise ValueError(
+                f"cannot quantise an fp16 checkpoint to {quantization!r} at load time; "
+                "use 'int8', or point --model-dir at a checkpoint that ships fp8 weights"
+            )
+        if not hasattr(model, "quantize_"):
+            raise ValueError(f"{type(model).__name__} does not support runtime quantisation")
+        logger.info("Quantising weights to int8 (per output channel)")
+        model.quantize_(QuantConfig.int8_per_channel())
 
     @staticmethod
     def _check_device(device: str) -> None:

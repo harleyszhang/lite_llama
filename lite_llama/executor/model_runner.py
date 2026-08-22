@@ -18,6 +18,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from ..distributed.parallel_state import all_reduce_min, divide, get_tp_world_size
 from ..kernels import update_kv_index
 from ..models.config import ModelConfig
 from ..models.registry import ModelRegistry, ModelSpec
@@ -57,7 +58,9 @@ class ModelRunner:
         # ModelConfig already normalises the geometry across HF field names and
         # unwraps the nested text config of a vision-language checkpoint.
         self.num_layers = config.num_layers
-        self.num_kv_heads = config.num_kv_heads
+        # Attention heads are dealt out across tensor-parallel ranks, so this rank
+        # caches only the K/V of the heads it owns.
+        self.num_kv_heads = divide(config.num_kv_heads, get_tp_world_size(), "key/value heads")
         self.head_dim = config.head_dim
         self.vocab_size = config.vocab_size
         self.max_seq_len = config.max_seq_len
@@ -77,7 +80,12 @@ class ModelRunner:
                 device=device,
                 reserved_bytes=reserved,
             )
-            max_gpu_num_blocks = profiler.available_kv_blocks(model, self.vocab_size)
+            # Every rank must reach the same answer: the cache row a rank hands
+            # out is derived from its own capacity, and two ranks with different
+            # capacities would write the same token to different rows.
+            max_gpu_num_blocks = all_reduce_min(
+                profiler.available_kv_blocks(model, self.vocab_size)
+            )
 
         self.kv_cache_manager = KVCacheManager(
             num_layers=self.num_layers,
@@ -112,6 +120,7 @@ class ModelRunner:
         device: str = "cuda",
         use_cuda_graph: bool = False,
         loader: ModelLoader | None = None,
+        quantization: str | None = None,
     ) -> ModelRunner:
         """Load config + weights and return a ready-to-run runner.
 
@@ -126,11 +135,13 @@ class ModelRunner:
             loader: Weight-loading strategy; defaults to
                 :class:`~lite_llama.executor.loader.DefaultModelLoader`. Inject a
                 fake in tests to build a runner without real weights.
+            quantization: Weight quantisation to apply to an fp16 checkpoint
+                (``"int8"``); fp8 checkpoints carry their own and ignore this.
         """
         config = ModelConfig.from_pretrained(checkpoints_dir, max_seq_len)
         spec = ModelRegistry.resolve(config.model_type)
         model = (loader or DefaultModelLoader()).load_model(
-            config, spec.load_class(), checkpoints_dir, device
+            config, spec.load_class(), checkpoints_dir, device, quantization
         )
         return cls(checkpoints_dir, config, spec, model, max_gpu_num_blocks, device, use_cuda_graph)
 
@@ -216,6 +227,13 @@ class ModelRunner:
         """
         if self.spec.is_multimodal:
             logger.warning("CUDA Graph is not supported for multi-modal models; running eager.")
+            return
+        if get_tp_world_size() > 1:
+            # A captured graph would have to replay the block's NCCL all-reduce,
+            # which only works if every rank captures the identical sequence and
+            # replays it in lockstep; a mismatch hangs in the collective instead of
+            # raising. Eager decode under TP is the safe default.
+            logger.warning("CUDA Graph is disabled under tensor parallelism; running eager.")
             return
         if self._graph_manager is not None:
             return  # idempotent
