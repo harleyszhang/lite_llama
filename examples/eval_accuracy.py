@@ -2,17 +2,17 @@
 
 Feeds the benchmark prompts through a :class:`~lite_llama.engine.generator.TextGenerator`
 in batches and hands the completions to the dataset evaluators in
-``evaluator/eval.py`` (HotpotQA uses sentence-embedding similarity, HellaSwag
+``evaluator/datasets.py`` (HotpotQA uses sentence-embedding similarity, HellaSwag
 scores multiple-choice selections).
 
-Run from the repository root:
-    python examples/example_eval_acc.py
+Run from the ``examples/`` directory:
+    python eval_accuracy.py
 """
 from __future__ import annotations
 
 import torch
 
-from .evaluator.eval import HellaSwag, HotpotQA
+from evaluator.datasets import HellaSwag, HotpotQA
 
 from lite_llama.engine import SamplingParams, TextGenerator
 
