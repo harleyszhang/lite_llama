@@ -8,10 +8,15 @@ front.
 :class:`ContinuousBatchingEngine` decides the batch per step instead, so requests
 join and leave mid-flight; :class:`AsyncLLMEngine` puts an asyncio face on it for
 online serving.
+
+:class:`DataParallelEngine` is orthogonal to both: it runs several whole-model
+replicas in separate processes and routes requests between them, for throughput once
+one GPU is saturated.
 """
 
 from .async_engine import AsyncLLMEngine, StreamedOutput
 from .continuous_engine import ContinuousBatchingEngine
+from .data_parallel import DataParallelEngine
 from .generator import TextGenerator, VisionGenerator
 from .llm import LLM
 from .llm_engine import LLMEngine
@@ -25,6 +30,7 @@ __all__ = [
     "BatchedSamplingParams",
     "CompletionOutput",
     "ContinuousBatchingEngine",
+    "DataParallelEngine",
     "LLMEngine",
     "Request",
     "RequestOutput",
