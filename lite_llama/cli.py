@@ -29,6 +29,62 @@ from .engine import SamplingParams, TextGenerator, VisionGenerator
 from .models.config import read_model_type
 from .utils.prompt_templates import ChatPrompter, get_prompter
 
+
+# --------------------------------------------------------------------------- #
+# TP worker (module-level so mp can pickle it)
+# --------------------------------------------------------------------------- #
+def _tp_mirror_worker(
+    rank: int,
+    world_size: int,
+    model_dir: str,
+    max_seq_len: int,
+    max_gpu_num_blocks: int | None,
+    quantization: str | None,
+) -> None:
+    """Non-rank-0 TP worker: builds model, then mirrors rank 0's forwards via NCCL.
+
+    The worker sits in a loop: it receives a flag (1=forward, 0=exit) and the
+    prompt tokens from rank 0 via dist.broadcast, then calls generator.stream()
+    which participates in the same all-reduces as rank 0. Output is discarded.
+    """
+    import torch
+    import torch.distributed as dist
+
+    from .distributed.parallel_state import init_tensor_parallel
+
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", "29500")
+    torch.cuda.set_device(rank)
+    init_tensor_parallel(rank=rank, world_size=world_size)
+
+    generator = TextGenerator(
+        checkpoints_dir=model_dir,
+        max_seq_len=max_seq_len,
+        max_gpu_num_blocks=max_gpu_num_blocks,
+        device=f"cuda:{rank}",
+        use_cuda_graph=False,
+        quantization=quantization,
+        tensor_parallel_size=world_size,
+    )
+    params = SamplingParams(temperature=0.0, max_gen_len=4096)
+
+    # Mirror loop: wait for rank 0's broadcast, generate, discard output.
+    while True:
+        flag = torch.zeros(1, dtype=torch.int64, device=f"cuda:{rank}")
+        dist.broadcast(flag, src=0)
+        if flag.item() == 0:
+            break
+        length = torch.zeros(1, dtype=torch.int64, device=f"cuda:{rank}")
+        dist.broadcast(length, src=0)
+        tok_tensor = torch.zeros(length.item(), dtype=torch.int64, device=f"cuda:{rank}")
+        dist.broadcast(tok_tensor, src=0)
+
+        prompt_text = generator.tokenizer.decode(tok_tensor.tolist())
+        for _ in generator.stream([prompt_text], params):
+            pass  # participate in all-reduces, discard output
+
+    dist.destroy_process_group()
+
 # ---------------------------------------------------------------------------
 # 第一层:声明式 CLI 参数表
 # ---------------------------------------------------------------------------
@@ -315,95 +371,84 @@ class ChatCommand(CliCommand):
             self._stream_reply(generator, prompter, params, user_input)
 
     def _run_tp(self, args: argparse.Namespace, opts: EngineOptions) -> int:
-        """Launch TP workers via mp.spawn; all ranks run the same generate loop."""
+        """Run TP chat: main process is rank 0 (has stdin), workers mirror forwards."""
+        import torch
+        import torch.distributed as dist
         import torch.multiprocessing as mp
+
+        from .distributed.parallel_state import init_tensor_parallel
 
         world_size = opts.tensor_parallel_size
 
-        def _tp_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
-            import torch
-            import torch.distributed as dist
-            from ..distributed.parallel_state import init_tensor_parallel
-
-            torch.cuda.set_device(rank)
-            init_tensor_parallel(rank=rank, world_size=world_size)
-
-            # All ranks build the engine (each gets its GPU slice of the weights).
-            # Override device to this rank's GPU.
-            opts_local = EngineOptions(
-                model_dir=opts.model_dir,
-                max_seq_len=opts.max_seq_len,
-                max_gpu_num_blocks=opts.max_gpu_num_blocks,
-                device=f"cuda:{rank}",
-                use_cuda_graph=False,
-                quantization=opts.quantization,
-                tensor_parallel_size=world_size,
-            )
-            generator = opts_local.build_text_generator()
-            params = self.build_sampling_params(args)
-
-            if rank == 0:
-                style = PrompterResolver.resolve(opts.model_dir, args.prompt_style)
-                prompter = PrompterResolver.build(style, generator.tokenizer)
-                self._print_banner(opts.model_dir, style, params)
-
-            # Shared loop: rank 0 reads input, broadcasts token count as sync signal.
-            # All ranks generate with the same prompt; all-reduces synchronize them.
-            while True:
-                if rank == 0:
-                    try:
-                        user_input = input(">>> ").strip()
-                    except (EOFError, KeyboardInterrupt):
-                        user_input = "__EXIT__"
-                    # Broadcast a sync flag: 1 = generate, 0 = exit
-                    flag = torch.tensor(
-                        [0 if user_input in ("", "__EXIT__", "exit") else 1],
-                        dtype=torch.int64, device=f"cuda:{rank}",
-                    )
-                    dist.broadcast(flag, src=0)
-                    if flag.item() == 0:
-                        break
-                    if not user_input:
-                        continue
-                else:
-                    flag = torch.zeros(1, dtype=torch.int64, device=f"cuda:{rank}")
-                    dist.broadcast(flag, src=0)
-                    if flag.item() == 0:
-                        break
-                    # Workers receive the prompt from rank 0 via object broadcast.
-                    # For simplicity, workers use a fixed prompt that rank 0 also uses.
-                    # In practice, we broadcast the tokenized input.
-
-                # All ranks: broadcast the actual prompt tokens from rank 0.
-                if rank == 0:
-                    prompt_text = user_input
-                    style = PrompterResolver.resolve(opts.model_dir, args.prompt_style)
-                    prompter = PrompterResolver.build(style, generator.tokenizer)
-                    formatted = prompter.build_prompt(prompt_text)
-                    tokens = generator.tokenizer.encode(formatted)
-                    tok_tensor = torch.tensor(tokens, dtype=torch.int64, device=f"cuda:{rank}")
-                    length = torch.tensor([len(tokens)], dtype=torch.int64, device=f"cuda:{rank}")
-                else:
-                    length = torch.zeros(1, dtype=torch.int64, device=f"cuda:{rank}")
-
-                dist.broadcast(length, src=0)
-                if rank != 0:
-                    tok_tensor = torch.zeros(length.item(), dtype=torch.int64, device=f"cuda:{rank}")
-                dist.broadcast(tok_tensor, src=0)
-
-                # All ranks decode the same tokens and generate.
-                prompt_text = generator.tokenizer.decode(tok_tensor.tolist())
-                for step_tokens in generator.stream([prompt_text], params):
-                    if rank == 0:
-                        print(step_tokens[0], end="", flush=True)
-                if rank == 0:
-                    print()  # newline after generation
-
+        # Spawn mirror workers for ranks 1..N-1.
         try:
             mp.set_start_method("spawn", force=True)
         except RuntimeError:
             pass
-        mp.spawn(_tp_worker, args=(world_size, args), nprocs=world_size, join=True)
+        workers = []
+        for rank in range(1, world_size):
+            p = mp.Process(
+                target=_tp_mirror_worker,
+                args=(rank, world_size, opts.model_dir, opts.max_seq_len,
+                      opts.max_gpu_num_blocks, opts.quantization),
+                daemon=True,
+            )
+            p.start()
+            workers.append(p)
+
+        # Main process = rank 0.
+        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        os.environ.setdefault("MASTER_PORT", "29500")
+        torch.cuda.set_device(0)
+        init_tensor_parallel(rank=0, world_size=world_size)
+
+        generator = TextGenerator(
+            checkpoints_dir=opts.model_dir,
+            max_seq_len=opts.max_seq_len,
+            max_gpu_num_blocks=opts.max_gpu_num_blocks,
+            device="cuda:0",
+            use_cuda_graph=False,
+            quantization=opts.quantization,
+            tensor_parallel_size=world_size,
+        )
+        style = PrompterResolver.resolve(opts.model_dir, getattr(args, "prompt_style", None))
+        prompter = PrompterResolver.build(style, generator.tokenizer)
+        params = self.build_sampling_params(args)
+        self._print_banner(opts.model_dir, style, params)
+
+        while True:
+            try:
+                user_input = input(">>> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                user_input = "exit"
+
+            # Broadcast flag: 1=generate, 0=exit.
+            flag_val = 0 if user_input in ("", "exit") else 1
+            flag = torch.tensor([flag_val], dtype=torch.int64, device="cuda:0")
+            dist.broadcast(flag, src=0)
+            if flag_val == 0:
+                break
+            if not user_input:
+                continue
+
+            # Tokenize and broadcast prompt tokens to workers.
+            formatted = prompter.insert_prompt(user_input) if prompter else user_input
+            tokens = generator.tokenizer.encode(formatted)
+            tok_tensor = torch.tensor(tokens, dtype=torch.int64, device="cuda:0")
+            length = torch.tensor([len(tokens)], dtype=torch.int64, device="cuda:0")
+            dist.broadcast(length, src=0)
+            dist.broadcast(tok_tensor, src=0)
+
+            # All ranks generate together (all-reduces synchronize).
+            prompt_text = generator.tokenizer.decode(tokens)
+            for step_tokens in generator.stream([prompt_text], params):
+                print(step_tokens[0], end="", flush=True)
+            print()
+
+        # Shutdown workers.
+        for p in workers:
+            p.join(timeout=5)
+        dist.destroy_process_group()
         return 0
 
     @staticmethod
