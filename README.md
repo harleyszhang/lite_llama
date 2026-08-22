@@ -35,6 +35,8 @@
 - Some custom operators such as `rmsnorm`, `rope`, `softmax`, `element-by-element-multiplication`, etc. are implemented using the efficient `triton` kernel.
 - **Quantization**: W8A16 (fp8/int8), W4A16 (AWQ/GPTQ), SmoothQuant W8A8 — up to `1.7x` decode speedup.
 - **Tensor Parallelism**: split a 30B MoE model across 2× A10 (24 GB) with one all-reduce per block.
+- **Data Parallelism**: replicate the model across GPUs and route requests between them — `2.00x` throughput on 2 GPUs (100% linear).
+- **Data Parallelism**: replicate the model across GPUs and route requests between them — `2.00x` throughput on 2 GPUs (100% linear).
 
 ## Setup and Installation
 
@@ -270,6 +272,30 @@ python -m lite_llama.cli vl-chat \
 Quantized inference demo (Qwen3-30B-A3B-FP8, tensor parallel × 2):
 
 ![quantization tp demo](./docs/images/qwen2.5-3b-output.gif)
+
+### Data Parallelism
+
+Where tensor parallelism splits one model across GPUs, data parallelism replicates the
+whole model onto each GPU and routes the request stream between the replicas — for
+throughput once one card is saturated. Each prompt is dealt to a replica by a load
+balancer (round-robin or least-loaded), and the replicas decode their own batches
+concurrently. See [docs/data_parallel.md](docs/data_parallel.md) for the design (it
+mirrors vLLM's `DPEngineCoreProc` / `DPLBAsyncMPClient` and SGLang's
+`DataParallelController`) and the benchmarks.
+
+![data parallel](./docs/images/data_parallel.gif)
+
+```python
+from lite_llama import DataParallelEngine, SamplingParams
+
+# Two whole-model replicas, one per GPU; requests routed round-robin.
+with DataParallelEngine(model="my_weight/Qwen2.5-1.5B-Instruct", data_parallel_size=2) as engine:
+    outputs = engine.generate(prompts, SamplingParams(temperature=0.0))
+```
+
+On 2× A10 (Qwen2.5-1.5B-Instruct): **weak scaling 2.00x** (100% linear, 1790 → 3580
+tok/s), **strong scaling 1.67x** at batch 256, with byte-identical outputs. Compose it
+with TP — `data_parallel_size=2, tensor_parallel_size=2` — on a 4-GPU box.
 
 ## Architecture
 
