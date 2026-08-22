@@ -174,7 +174,15 @@ def translate_text_key(key: str) -> Target:
 
 
 def shard_dim(param_name: str) -> int | None:
-    """Dimension of the incoming tensor that ``param_name`` is split along, if any."""
+    """Dimension of the incoming tensor that ``param_name`` is split along, if any.
+
+    Vision-tower parameters (``vision_tower.*``) are never sharded — the vision
+    encoder is replicated across TP ranks. The suffix-based match would otherwise
+    falsely trigger on vision keys that share names with text projections
+    (e.g. ``self_attn.q_proj``).
+    """
+    if param_name.startswith("vision_tower."):
+        return None
     module = param_name
     for suffix in _PARAM_SUFFIXES:
         if module.endswith(suffix):

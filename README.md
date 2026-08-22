@@ -183,6 +183,25 @@ python -m lite_llama.cli chat \
 python -m lite_llama.cli chat --model-dir my_weight/Qwen2.5-0.5B --quantization int8
 ```
 
+**Vision-language models** (Qwen3-VL / LLaVA with TP + quantization):
+
+```bash
+# Qwen3-VL vision chat with TP=2
+python -m lite_llama.cli vl-chat \
+    --model-dir /data/shared/llm_weights/Qwen3-VL-4B-Instruct \
+    --image photo.jpg --tensor-parallel-size 2
+
+# LLaVA with INT8 quantisation + TP=2
+python -m lite_llama.cli vl-chat \
+    --model-dir /data/shared/llm_weights/llava-hf/llava-1.5-7b-hf \
+    --image photo.jpg --quantization int8 --tensor-parallel-size 2
+```
+
+| Model | FP16 TP=1 | FP16 TP=2 | INT8 TP=1 | INT8 TP=2 |
+|-------|-----------|-----------|-----------|----------|
+| Qwen3-VL-4B | 9.66 GB | 6.35 GB/GPU | 6.93 GB | 5.34 GB/GPU |
+| LLaVA-1.5-7B | 13.74 GB | 7.90 GB/GPU | 8.12 GB | 5.15 GB/GPU |
+
 Quantized inference demo (Qwen3-30B-A3B-FP8, tensor parallel × 2):
 
 ![quantization tp demo](./docs/images/qwen2.5-3b-output.gif)
