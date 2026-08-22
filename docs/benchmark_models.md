@@ -58,7 +58,7 @@ python -m pytest tests/kernels/test_quantization.py -v
 # 性能基准
 python -c "
 import torch, triton
-from lite_llama.kernels.w8a16 import w8a16_matmul
+from lite_llama.kernels.quantization import w8a16_matmul
 M, N, K = 1, 4096, 4096
 x = torch.randn(M, K, device='cuda', dtype=torch.float16)
 qw = torch.randn(N, K, device='cuda').to(torch.float8_e4m3fn).view(torch.uint8)

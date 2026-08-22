@@ -1,36 +1,25 @@
-"""Quantisation: what the weights look like in memory, and how to get there.
+"""Quantisation config: what a quantised weight looks like in memory.
 
-One module, multiple schemes. All of them end up in the same shape — 8-bit (or
-4-bit) weight plus a grid of scales — which is what lets the w8a16 / w4a16
-kernels and the MoE grouped GEMM serve them with one kernel each. Activations
-are never quantised in the weight-only schemes: "a16" is the whole point, since
-the error budget of an fp16 activation is what keeps the output faithful.
-
-Supported schemes:
-    * **fp8** — block-wise fp8-e4m3 with one scale per 128×128 block. Qwen and
-      DeepSeek FP8 checkpoints ship this format ready-made.
-    * **int8** — symmetric per-output-channel int8, computed at load time from
-      an fp16 checkpoint for models that ship no FP8 variant.
-    * **awq** / **gptq** — group-wise int4 (W4A16), loaded from pre-quantised
-      checkpoints. AWQ uses per-group scales; GPTQ uses a different packing
-      order. Both share the same w4a16 kernel at inference time.
-    * **smoothquant** — dynamic per-token activation quantisation + per-channel
-      weight quantisation (W8A8). The weights are int8 with per-channel scales,
-      and the activations are quantised on the fly with per-token scales.
+Every scheme is reduced to one description — a low-bit weight plus a scale covering a
+``group_n x group_k`` block of it — which is why a single w8a16 / w4a16 kernel serves
+all of them: fp8-e4m3 in 128x128 blocks (Qwen/DeepSeek checkpoints), per-output-channel
+or group-wise int8, group-wise int4 for AWQ/GPTQ, and SmoothQuant's per-channel int8
+with activations quantised per token at runtime. Checkpoint schemes are parsed by
+:meth:`QuantConfig.from_hf` and rejected loudly when unsupported; runtime schemes come
+from ``--quantization`` and are computed after loading. ``_REGISTRY`` keeps the
+``quant_method`` -> format mapping extensible without forking the parser.
 
 Usage:
-    quant = QuantConfig.from_hf(hf_config)          # fp8 checkpoints
-    quant = QuantConfig.int8_per_channel()           # --quantization int8
-    quant = QuantConfig.from_hf(gptq_config)         # GPTQ/AWQ checkpoints
+    quant = QuantConfig.from_hf(hf_config)              # fp8 / awq / gptq checkpoints
+    quant = QuantConfig.for_runtime_scheme("int8")      # --quantization int8
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import torch
-import torch.nn as nn
 
 # --------------------------------------------------------------------------- #
 # Format constants
@@ -55,6 +44,15 @@ _REGISTRY: dict[str, str] = {
     "smoothquant": SMOOTHQUANT,
 }
 
+#: Runtime quantisation schemes accepted by ``--quantization``.
+RUNTIME_SCHEMES: dict[str, str] = {
+    "int8": INT8,
+    "int8-blockwise": INT8,
+    "fp8": FP8,
+    "int4": INT4,
+    "smoothquant": SMOOTHQUANT,
+}
+
 
 def register_quant_method(name: str, format_id: str) -> None:
     """Register a new ``quant_method`` name -> format mapping.
@@ -63,23 +61,6 @@ def register_quant_method(name: str, format_id: str) -> None:
     the built-in table without forking the module.
     """
     _REGISTRY[name.lower()] = format_id
-
-
-# --------------------------------------------------------------------------- #
-# RawParameter: marker for "do not cast this"
-# --------------------------------------------------------------------------- #
-class RawParameter(nn.Parameter):
-    """A parameter the loader must leave alone instead of casting to fp16.
-
-    :func:`lite_llama.executor.loader.materialise_parameters` gives every
-    floating-point parameter fp16 storage, which is right for weights and wrong
-    for the two things quantisation adds: the 8-bit weight itself (``uint8`` /
-    ``int8``, so it is not floating point anyway) and its fp32 scales, whose
-    dynamic range is the reason the fp8 format works at all.
-    """
-
-    def __new__(cls, data: torch.Tensor, requires_grad: bool = False) -> RawParameter:
-        return super().__new__(cls, data, requires_grad=requires_grad)
 
 
 # --------------------------------------------------------------------------- #
@@ -92,8 +73,10 @@ class QuantConfig:
     A scale covers a ``group_n x group_k`` block of the ``[out_features,
     in_features]`` weight, which describes all supported schemes:
 
-    * fp8: ``128×128`` blocks (one scale per block).
+    * fp8: ``128×128`` blocks (one scale per block), or per-channel
+      (``group_n=1, group_k=K``) for the runtime ``--quantization fp8`` scheme.
     * int8 per-channel: ``group_n=1, group_k=K`` (one scale per output row).
+    * int8 block-wise: ``group_n=1, group_k=group_size``.
     * int4 (AWQ/GPTQ): ``1×group_size`` (one scale per group of input channels).
     * smoothquant: weights are ``group_n=1, group_k=K`` (per-channel).
 
@@ -174,6 +157,55 @@ class QuantConfig:
         """Symmetric int8, one scale per output channel, computed at load time."""
         return cls(INT8, group_n=1, group_k=1 << 30)
 
+    @classmethod
+    def int8_groupwise(cls, group_size: int = 128) -> QuantConfig:
+        """Symmetric int8 with one scale per ``group_size`` input channels.
+
+        Finer granularity than per-channel: closer to fp16 accuracy at the same
+        8-bit storage, at the price of a ``K / group_size``-wide scale grid.
+        """
+        return cls(INT8, group_n=1, group_k=group_size)
+
+    @classmethod
+    def fp8_per_channel(cls) -> QuantConfig:
+        """fp8-e4m3 weights with one scale per output channel, computed at load time.
+
+        Activations stay fp16 (W8A16), so no calibration data is needed.
+        """
+        return cls(FP8, group_n=1, group_k=1 << 30)
+
+    @classmethod
+    def int4_groupwise(cls, group_size: int = 128) -> QuantConfig:
+        """Group-wise int4 (AWQ/GPTQ format), computed at load time."""
+        return cls(INT4, group_n=1, group_k=group_size)
+
+    @classmethod
+    def smoothquant_per_channel(cls) -> QuantConfig:
+        """SmoothQuant W8A8: per-channel int8 weights + dynamic per-token activations."""
+        return cls(SMOOTHQUANT, group_n=1, group_k=1 << 30, is_dynamic=True)
+
+    @classmethod
+    def for_runtime_scheme(cls, name: str) -> QuantConfig:
+        """Build a config for ``--quantization <name>``.
+
+        Raises:
+            ValueError: On an unrecognised scheme name.
+        """
+        fmt = RUNTIME_SCHEMES.get(name.lower())
+        if fmt is None:
+            raise ValueError(
+                f"unknown runtime quantisation {name!r}; supported: {sorted(RUNTIME_SCHEMES)}"
+            )
+        if fmt == INT8:
+            return cls.int8_groupwise() if name.lower() == "int8-blockwise" else cls.int8_per_channel()
+        if fmt == FP8:
+            return cls.fp8_per_channel()
+        if fmt == INT4:
+            return cls.int4_groupwise()
+        if fmt == SMOOTHQUANT:
+            return cls.smoothquant_per_channel()
+        raise ValueError(f"no runtime factory for format {fmt!r}")
+
     # ---- layout ----------------------------------------------------------- #
     @property
     def storage_dtype(self) -> torch.dtype:
@@ -211,67 +243,9 @@ class QuantConfig:
 
     def shard_is_aligned(self, size: int) -> bool:
         """Whether a TP shard of ``size`` channels keeps whole scale blocks."""
+        # Per-channel schemes (one scale per output row) have no block to cut.
+        if self.group_n <= 1 and self.group_k >= (1 << 30):
+            return True
         if self.format == INT4:
             return size % self.group_k == 0
-        return size % max(self.group_n, self.group_k) == 0 or self.format in (INT8, SMOOTHQUANT)
-
-
-# --------------------------------------------------------------------------- #
-# Quantisation utilities
-# --------------------------------------------------------------------------- #
-def quantize_int8_per_channel(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantise ``[N, K]`` fp16 weights to symmetric per-channel int8.
-
-    The scale of row ``n`` is ``max|W[n]| / 127``, so the largest magnitude in
-    each output channel maps onto the end of the int8 range.
-
-    Args:
-        weight: ``[N, K]`` (or ``[E, N, K]`` for stacked experts) float weights.
-
-    Returns:
-        ``(qweight, scales)`` with ``scales`` shaped ``[..., N, 1]``.
-    """
-    scale = weight.abs().amax(dim=-1, keepdim=True).float() / 127.0
-    scale = torch.where(scale > 0, scale, torch.ones_like(scale))
-    qweight = (weight.float() / scale).round().clamp_(-127, 127).to(torch.int8)
-    return qweight, scale
-
-
-def quantize_int4_groupwise(
-    weight: torch.Tensor, group_size: int = 128
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Quantise ``[N, K]`` fp16 weights to group-wise int4 (AWQ/GPTQ format).
-
-    Each group of ``group_size`` input channels gets its own fp32 scale and zero
-    point. The packed output stores 8 int4 values per int32 word.
-
-    Args:
-        weight: ``[N, K]`` float weights. K must be a multiple of ``group_size``.
-        group_size: Number of input channels per quantisation group.
-
-    Returns:
-        ``(qweight, scales, zeros)`` where ``qweight`` is ``[N, K//8]`` int32,
-        ``scales`` is ``[N, K//group_size]`` fp32, and ``zeros`` is the same
-        shape as ``scales``.
-    """
-    n, k = weight.shape
-    if k % group_size != 0:
-        raise ValueError(f"in_features {k} must be a multiple of group_size {group_size}")
-
-    w = weight.float().reshape(n, k // group_size, group_size)
-    w_min = w.amin(dim=-1)
-    w_max = w.amax(dim=-1)
-
-    # Symmetric quantisation: use max(|min|, |max|) as the range.
-    qmax = 7.0  # int4 range: [-8, 7]
-    scale = (w_max - w_min).clamp(min=1e-5) / (2 * qmax)
-    # Centre the zero point so that zero maps to the middle of the int4 range.
-    zero = (-w_min / scale).round().clamp(0, 15)
-    q = (w / scale.unsqueeze(-1) + zero.unsqueeze(-1)).round().clamp(0, 15).to(torch.int32)
-
-    # Pack 8 int4 values per int32 word along the K dimension.
-    q = q.reshape(n, -1, 8)
-    shifts = torch.arange(8, device=q.device, dtype=torch.int32) * 4
-    packed = (q << shifts[None, None, :]).sum(dim=-1)  # [N, K//8]
-
-    return packed.to(torch.int32), scale.float(), zero.float()
+        return size % max(self.group_n, self.group_k) == 0
