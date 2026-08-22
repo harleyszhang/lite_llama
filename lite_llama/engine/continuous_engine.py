@@ -189,6 +189,8 @@ class ContinuousBatchingEngine:
         max_gpu_num_blocks: int | None = None,
         device: str = "cuda",
         use_cuda_graph: bool = True,
+        quantization: str | None = None,
+        tensor_parallel_size: int = 1,
     ) -> ContinuousBatchingEngine:
         """Load a checkpoint and wrap it in a continuous-batching engine.
 
@@ -203,7 +205,26 @@ class ContinuousBatchingEngine:
             use_cuda_graph: Capture decode graphs. Worth keeping on: continuous
                 batching pads odd batch sizes onto the captured grid, so most
                 steps stay on the graph path.
+            quantization: Runtime weight quantisation, forwarded to the engine.
+                Orthogonal to batching -- it changes the linear layers, not the
+                KV cache or the schedule.
+            tensor_parallel_size: Must be 1; see below.
+
+        Raises:
+            NotImplementedError: The checkpoint is multimodal, or tensor
+                parallelism was requested.
         """
+        if tensor_parallel_size != 1:
+            # TP is driven by the multi-process worker path in lite_llama.cli,
+            # which owns one engine per rank. Combining that with this engine's
+            # single worker thread and per-request slot pool is a real design
+            # question, not a parameter to forward -- so it is refused rather
+            # than accepted and silently ignored.
+            raise NotImplementedError(
+                "continuous batching does not support tensor_parallel_size > 1 yet; "
+                "use `lite-llama chat` for tensor-parallel inference"
+            )
+
         spec = ModelRegistry.resolve(read_model_type(model))
         if spec.is_multimodal:
             raise NotImplementedError(
@@ -218,6 +239,7 @@ class ContinuousBatchingEngine:
             max_gpu_num_blocks=max_gpu_num_blocks,
             device=device,
             use_cuda_graph=use_cuda_graph,
+            quantization=quantization,
         )
         return cls(
             engine,
