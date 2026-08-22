@@ -4,8 +4,15 @@ Splits each sequence's KV history into partitions processed in parallel (stage 1
 emits per-partition softmax stats and partial outputs), then stage 2 combines them
 — turning the memory-bound decode step into a parallel reduction over context.
 
+The history of batch row ``i`` is found through ``b_req_tokens_table[b_req_idx[i]]``.
+That indirection matters: a batch row is a *position in this step's batch*, which
+under continuous batching has nothing to do with which cache slot the request
+owns. Reading the table by batch position instead — correct only while
+``b_req_idx == arange(batch)`` — makes a request silently attend over its
+neighbour's KV as soon as anyone leaves the batch.
+
 Usage:
-    out = flash_decoding(q, k_cache, v_cache, ...)
+    out = flash_decoding(q, k_cache, v_cache, scale, table, b_req_idx, b_seq_len, max_len)
 """
 
 import torch
@@ -20,6 +27,7 @@ def _flash_decoding_stage1_kernel(
     V,
     qk_scale,
     b_req_tokens_table,
+    B_Req_Idx,
     B_Seqlen,
     num_kv_groups,  # group of kv heads
     Mid_O,
@@ -55,7 +63,10 @@ def _flash_decoding_stage1_kernel(
 
     # 计算当前批次的起始位置
     cur_batch_seq_len = tl.load(B_Seqlen + batch_pid)
-    tl.load(b_req_tokens_table + stride_req_to_tokens_b * batch_pid)
+    # 该批次行属于哪个请求(KV cache 槽位): 批次内位置与槽位号无关,
+    # 必须经 b_req_idx 转译后再去索引 token 映射表
+    cur_req_idx = tl.load(B_Req_Idx + batch_pid)
+    req_table_offset = b_req_tokens_table + stride_req_to_tokens_b * cur_req_idx
 
     # 计算当前分区的起始和结束索引
     cur_batch_partition_start_index = seq_block_pid * BLOCK_SEQ
@@ -91,7 +102,7 @@ def _flash_decoding_stage1_kernel(
         # k 位置索引计算
         offs_n_new = offs_n + start_n * BLOCK_N  # [BLOCK_N]
         k_loc = tl.load(
-            b_req_tokens_table + stride_req_to_tokens_b * batch_pid + offs_n_new,
+            req_table_offset + offs_n_new,
             mask=offs_n_new < cur_batch_partition_end_index,
             other=0.0,
         )
@@ -157,6 +168,7 @@ def flash_decode_stage1(
     v,  # Q: [batchs, num_heads, head_dim], K, V: [batchs * seq_len, num_heads, head_dim]
     qk_scale,
     b_req_tokens_table,
+    b_req_idx,
     b_seq_len,
     max_actual_seq_len,  # 最大的实际序列长度
     mid_o,
@@ -190,6 +202,7 @@ def flash_decode_stage1(
         v,
         qk_scale,
         b_req_tokens_table,
+        b_req_idx,
         b_seq_len,
         num_kv_groups,  # kv 组数量
         mid_o,
@@ -307,9 +320,24 @@ def flash_decoding(
     v_cache,  # 键/值向量缓存，形状为 [max_tokens, kv_num_head, head_dim]
     qk_scale,
     b_req_tokens_table,
+    b_req_idx,  # which cache slot each batch row belongs to
     b_seq_len,  # start locations and sequence lengths for kv cache in a batch
     max_actual_seq_len,
 ):
+    """Decode attention for one token per sequence.
+
+    Args:
+        q: ``[batch, num_heads, head_dim]`` — decode has ``seq_len == 1``.
+        k_cache: ``[max_tokens, num_kv_heads, head_dim]`` paged key cache.
+        v_cache: Value cache, same shape as ``k_cache``.
+        qk_scale: Softmax scale, ``1 / sqrt(head_dim)``.
+        b_req_tokens_table: ``[max_requests, max_seq_len]`` position-to-cache-row map.
+        b_req_idx: ``[batch]`` request/slot id owning each batch row. Batch order
+            is not slot order once requests join and leave a running batch, so
+            this is what makes the lookup correct rather than coincidental.
+        b_seq_len: ``[batch]`` history length per row, including this step's token.
+        max_actual_seq_len: Longest row, which sizes the partition grid.
+    """
     # q.view(-1, num_heads, head_dim)
     assert q.shape[-1] == k_cache.shape[-1] == v_cache.shape[-1]
     PARTITION_SIZE = 128  # 3090ti 显卡以上可设置为 256
@@ -336,6 +364,7 @@ def flash_decoding(
         v_cache,
         qk_scale,
         b_req_tokens_table,
+        b_req_idx,
         b_seq_len,
         max_actual_seq_len,
         mid_o,

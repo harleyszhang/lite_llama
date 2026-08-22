@@ -70,8 +70,15 @@ def _cache_and_table(seq_lens, num_kv_heads, head_dim, *, scattered=False):
     return k_cache, v_cache, table, b_seq_len
 
 
-def _run(seq_lens, num_q_heads, num_kv_heads, head_dim, *, scattered=False):
-    """Run kernel and reference on the same randomly built cache."""
+def _run(seq_lens, num_q_heads, num_kv_heads, head_dim, *, scattered=False, req_idx=None):
+    """Run kernel and reference on the same randomly built cache.
+
+    Args:
+        req_idx: Optional slot id per batch row. ``None`` means the identity
+            mapping every other caller uses; passing a permutation is what
+            distinguishes a table lookup that honours ``b_req_idx`` from one that
+            silently indexes by batch position.
+    """
     q = torch.randn(len(seq_lens), num_q_heads, head_dim, device="cuda", dtype=torch.float16) * 0.3
     k_cache, v_cache, table, b_seq_len = _cache_and_table(
         seq_lens, num_kv_heads, head_dim, scattered=scattered
@@ -79,8 +86,16 @@ def _run(seq_lens, num_q_heads, num_kv_heads, head_dim, *, scattered=False):
     scale = 1.0 / math.sqrt(head_dim)
     max_len = max(seq_lens)
 
-    out = flash_decoding(q, k_cache, v_cache, scale, table, b_seq_len, max_len)
-    ref = paged_decode_attention(q, k_cache, v_cache, table, b_seq_len, scale)
+    if req_idx is None:
+        b_req_idx = torch.arange(len(seq_lens), dtype=torch.int32, device="cuda")
+        ref_table = table
+    else:
+        b_req_idx = torch.tensor(req_idx, dtype=torch.int32, device="cuda")
+        # The reference has no indirection, so hand it the rows already permuted.
+        ref_table = table[b_req_idx.long()]
+
+    out = flash_decoding(q, k_cache, v_cache, scale, table, b_req_idx, b_seq_len, max_len)
+    ref = paged_decode_attention(q, k_cache, v_cache, ref_table, b_seq_len, scale)
     return out, ref
 
 
@@ -186,8 +201,41 @@ def test_uniform_values_reproduce_that_value():
 
     table = torch.arange(seq_len, dtype=torch.int32, device="cuda").unsqueeze(0)
     b_seq_len = torch.tensor([seq_len], dtype=torch.int32, device="cuda")
+    b_req_idx = torch.zeros(1, dtype=torch.int32, device="cuda")
 
-    out = flash_decoding(q, k_cache, v_cache, 1.0 / math.sqrt(head_dim), table, b_seq_len, seq_len)
+    out = flash_decoding(
+        q, k_cache, v_cache, 1.0 / math.sqrt(head_dim), table, b_req_idx, b_seq_len, seq_len
+    )
     torch.testing.assert_close(
         out.float(), torch.full_like(out, 0.25).float(), rtol=_RTOL, atol=_ATOL
     )
+
+
+# --------------------------------------------------------------------------- #
+# Slot indirection (b_req_idx)
+# --------------------------------------------------------------------------- #
+def test_batch_row_reads_the_slot_named_by_b_req_idx():
+    """A batch row must attend over *its own* request's history, not row ``i``'s.
+
+    Regression test. The kernel used to index ``b_req_tokens_table`` by
+    ``batch_pid``, which is correct only while ``b_req_idx == arange(batch)`` --
+    exactly what the one-shot batch path always passes. Continuous batching
+    breaks that assumption the moment a request finishes mid-batch: the survivors
+    shift down one position and every one of them silently starts attending over
+    its neighbour's KV, producing fluent text belonging to another request.
+
+    Reversing the mapping is the cheapest way to make the two disagree.
+    """
+    seq_lens = [40, 24, 61]
+    out, ref = _run(seq_lens, 8, 8, 64, req_idx=[2, 1, 0])
+    torch.testing.assert_close(out.float(), ref.float(), rtol=_RTOL, atol=_ATOL)
+
+
+def test_two_rows_may_share_one_slot():
+    """Padding a batch onto a captured graph size points spare rows at one slot.
+
+    Those filler rows are discarded by the engine, but they must not disturb the
+    real rows sharing the kernel launch with them.
+    """
+    out, ref = _run([33, 33, 33], 4, 2, 64, req_idx=[0, 1, 1])
+    torch.testing.assert_close(out.float(), ref.float(), rtol=_RTOL, atol=_ATOL)
