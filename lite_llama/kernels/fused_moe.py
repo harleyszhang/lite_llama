@@ -10,7 +10,7 @@ so the grid needs no host sync). Pipeline: ``moe_align_block_size`` -> GEMM1
 
 Expert weights may be fp16 or 8-bit (fp8-e4m3 / int8 with one scale per
 ``group_n x group_k`` block, the same layout
-:mod:`lite_llama.kernels.w8a16` uses for dense linears). The 8-bit path is what
+:mod:`lite_llama.kernels.quantization.w8a16` uses for dense linears). The 8-bit path is what
 puts a 30B MoE checkpoint on two 24 GB cards: only the *weights* are 8-bit, both
 GEMM inputs and the intermediate activation stay fp16.
 
@@ -27,7 +27,7 @@ import triton
 import triton.language as tl
 
 from .utils import torch_to_triton_dtype
-from .w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
+from .quantization.w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
 
 #: ``QUANT_MODE`` values shared by the kernel and its launcher.
 _QUANT_NONE = 0
