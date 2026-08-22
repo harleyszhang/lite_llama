@@ -289,6 +289,13 @@ class ChatCommand(CliCommand):
 
     def run(self, args: argparse.Namespace) -> int:
         opts = EngineOptions.from_args(args)
+
+        # Tensor parallelism: spawn N processes, each running the same engine.
+        # All ranks call forward with the same inputs; the NCCL all-reduce
+        # inside RowParallelLinear keeps them in lockstep.
+        if opts.tensor_parallel_size > 1:
+            return self._run_tp(args, opts)
+
         generator = opts.build_text_generator()
         style = PrompterResolver.resolve(opts.model_dir, args.prompt_style)
         prompter = PrompterResolver.build(style, generator.tokenizer)
@@ -306,6 +313,98 @@ class ChatCommand(CliCommand):
             if user_input.lower() == "exit":
                 return 0
             self._stream_reply(generator, prompter, params, user_input)
+
+    def _run_tp(self, args: argparse.Namespace, opts: EngineOptions) -> int:
+        """Launch TP workers via mp.spawn; all ranks run the same generate loop."""
+        import torch.multiprocessing as mp
+
+        world_size = opts.tensor_parallel_size
+
+        def _tp_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
+            import torch
+            import torch.distributed as dist
+            from ..distributed.parallel_state import init_tensor_parallel
+
+            torch.cuda.set_device(rank)
+            init_tensor_parallel(rank=rank, world_size=world_size)
+
+            # All ranks build the engine (each gets its GPU slice of the weights).
+            # Override device to this rank's GPU.
+            opts_local = EngineOptions(
+                model_dir=opts.model_dir,
+                max_seq_len=opts.max_seq_len,
+                max_gpu_num_blocks=opts.max_gpu_num_blocks,
+                device=f"cuda:{rank}",
+                use_cuda_graph=False,
+                quantization=opts.quantization,
+                tensor_parallel_size=world_size,
+            )
+            generator = opts_local.build_text_generator()
+            params = self.build_sampling_params(args)
+
+            if rank == 0:
+                style = PrompterResolver.resolve(opts.model_dir, args.prompt_style)
+                prompter = PrompterResolver.build(style, generator.tokenizer)
+                self._print_banner(opts.model_dir, style, params)
+
+            # Shared loop: rank 0 reads input, broadcasts token count as sync signal.
+            # All ranks generate with the same prompt; all-reduces synchronize them.
+            while True:
+                if rank == 0:
+                    try:
+                        user_input = input(">>> ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        user_input = "__EXIT__"
+                    # Broadcast a sync flag: 1 = generate, 0 = exit
+                    flag = torch.tensor(
+                        [0 if user_input in ("", "__EXIT__", "exit") else 1],
+                        dtype=torch.int64, device=f"cuda:{rank}",
+                    )
+                    dist.broadcast(flag, src=0)
+                    if flag.item() == 0:
+                        break
+                    if not user_input:
+                        continue
+                else:
+                    flag = torch.zeros(1, dtype=torch.int64, device=f"cuda:{rank}")
+                    dist.broadcast(flag, src=0)
+                    if flag.item() == 0:
+                        break
+                    # Workers receive the prompt from rank 0 via object broadcast.
+                    # For simplicity, workers use a fixed prompt that rank 0 also uses.
+                    # In practice, we broadcast the tokenized input.
+
+                # All ranks: broadcast the actual prompt tokens from rank 0.
+                if rank == 0:
+                    prompt_text = user_input
+                    style = PrompterResolver.resolve(opts.model_dir, args.prompt_style)
+                    prompter = PrompterResolver.build(style, generator.tokenizer)
+                    formatted = prompter.build_prompt(prompt_text)
+                    tokens = generator.tokenizer.encode(formatted)
+                    tok_tensor = torch.tensor(tokens, dtype=torch.int64, device=f"cuda:{rank}")
+                    length = torch.tensor([len(tokens)], dtype=torch.int64, device=f"cuda:{rank}")
+                else:
+                    length = torch.zeros(1, dtype=torch.int64, device=f"cuda:{rank}")
+
+                dist.broadcast(length, src=0)
+                if rank != 0:
+                    tok_tensor = torch.zeros(length.item(), dtype=torch.int64, device=f"cuda:{rank}")
+                dist.broadcast(tok_tensor, src=0)
+
+                # All ranks decode the same tokens and generate.
+                prompt_text = generator.tokenizer.decode(tok_tensor.tolist())
+                for step_tokens in generator.stream([prompt_text], params):
+                    if rank == 0:
+                        print(step_tokens[0], end="", flush=True)
+                if rank == 0:
+                    print()  # newline after generation
+
+        try:
+            mp.set_start_method("spawn", force=True)
+        except RuntimeError:
+            pass
+        mp.spawn(_tp_worker, args=(world_size, args), nprocs=world_size, join=True)
+        return 0
 
     @staticmethod
     def _print_banner(model_dir: str, style: str, params: SamplingParams) -> None:
