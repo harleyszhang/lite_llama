@@ -4,7 +4,8 @@ The public surface is intentionally small: exactly the kernels the model and
 engine layers call, plus the standalone activation kernels that are useful on
 their own. ``flash_attention2_no_pad`` serves the prefill (context) phase on
 variable-length batches, while ``flash_decoding`` serves the single-token decode
-phase against the paged KV buffer.
+phase against the paged KV buffer. ``w8a16_matmul`` and the quantised branch of
+``fused_moe`` serve the 8-bit-weight models.
 """
 
 from .activations import gelu, leaky_relu, relu, tanh
@@ -16,6 +17,9 @@ from .skip_rmsnorm import skip_rmsnorm
 from .swiglu import swiglu_forward
 from .update_kv_buffer import update_kv_buffer
 from .update_kv_index import update_kv_index
+from .w8a16 import w8a16_matmul
+from .w4a16 import w4a16_matmul
+from .smoothquant import smoothquant_matmul
 
 __all__ = [
     "flash_attention2_no_pad",
@@ -31,4 +35,7 @@ __all__ = [
     "tanh",
     "update_kv_buffer",
     "update_kv_index",
+    "w4a16_matmul",
+    "w8a16_matmul",
+    "smoothquant_matmul",
 ]
