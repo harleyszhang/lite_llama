@@ -1,0 +1,43 @@
+{
+  "config": {
+    "model": "my_weight/Qwen2.5-1.5B-Instruct",
+    "gpu": "NVIDIA A10",
+    "n_gpus": 2,
+    "scaling": "weak",
+    "batch_size": 16,
+    "gen_len": 128,
+    "iters": 2,
+    "load_balancer": "round_robin",
+    "quantization": null,
+    "timestamp": "2026-08-23T05:14:44"
+  },
+  "results": [
+    {
+      "label": "LLM (in-process)",
+      "replicas": 1,
+      "batch": 16,
+      "latency_s": 1.1436585504561663,
+      "gen_tokens": 2048,
+      "tps": 1790.7,
+      "tps_per_gpu": 1790.7
+    },
+    {
+      "label": "DataParallelEngine dp=1",
+      "replicas": 1,
+      "batch": 16,
+      "latency_s": 1.1443910486996174,
+      "gen_tokens": 2048,
+      "tps": 1789.6,
+      "tps_per_gpu": 1789.6
+    },
+    {
+      "label": "DataParallelEngine dp=2",
+      "replicas": 2,
+      "batch": 32,
+      "latency_s": 1.1442726962268353,
+      "gen_tokens": 4096,
+      "tps": 3579.6,
+      "tps_per_gpu": 1789.8
+    }
+  ]
+}

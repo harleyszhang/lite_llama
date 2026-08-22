@@ -76,11 +76,17 @@ def test_images_rejected_on_text_model(llm: LLM):
         llm.generate(["hi"], SamplingParams(), images=[object()])  # type: ignore[list-item]
 
 
-def test_parallel_size_placeholders(model_dir: Path):
-    """TP is implemented; DP is not. DP must still fail loudly."""
-    # tensor_parallel_size=2 should not raise NotImplementedError (TP is supported).
-    # On a single-GPU machine it may fail for other reasons (NCCL), so we only
-    # assert it does not raise NotImplementedError.
+def test_parallel_size_contract(model_dir: Path):
+    """TP grows inside one ``LLM``; DP does not fit inside one, and says so.
+
+    ``LLM`` is a single replica, so ``data_parallel_size>1`` cannot be honoured here —
+    the error has to name the class that can
+    (:class:`~lite_llama.engine.data_parallel.DataParallelEngine`), otherwise the
+    caller is told only that their argument was wrong.
+    """
+    # tensor_parallel_size=2 must not be rejected outright (TP is supported).
+    # On a single-GPU machine it may still fail for NCCL reasons, so only the
+    # "not implemented" class of failure is ruled out.
     try:
         llm = LLM(model=str(model_dir), tensor_parallel_size=2, max_seq_len=512, max_gpu_num_blocks=_KV_TOKENS)
         del llm
@@ -89,7 +95,8 @@ def test_parallel_size_placeholders(model_dir: Path):
         pytest.fail("tensor_parallel_size=2 should not raise NotImplementedError")
     except Exception:
         pass  # NCCL/network errors are acceptable in test environments
-    with pytest.raises(NotImplementedError, match="data_parallel"):
+
+    with pytest.raises(ValueError, match="DataParallelEngine"):
         LLM(model=str(model_dir), data_parallel_size=2)
 
 
