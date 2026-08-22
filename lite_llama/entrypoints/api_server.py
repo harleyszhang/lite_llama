@@ -83,6 +83,7 @@ class ServerConfig:
         max_gpu_num_blocks: Manual KV-cache size in tokens; profiled when ``None``.
         device: Torch device string.
         use_cuda_graph: Capture decode CUDA graphs.
+        quantization: Runtime weight quantisation for fp16 checkpoints.
         chat_template: ``True`` applies the tokenizer's chat template to
             ``/v1/chat/completions`` messages. Turn it off for base models, which
             have no template and degenerate when given one.
@@ -96,6 +97,7 @@ class ServerConfig:
     max_gpu_num_blocks: int | None = None
     device: str = "cuda"
     use_cuda_graph: bool = True
+    quantization: str | None = None
     chat_template: bool = True
 
     @property
@@ -238,6 +240,7 @@ def build_app(config: ServerConfig, engine: AsyncLLMEngine | None = None):
                 max_gpu_num_blocks=config.max_gpu_num_blocks,
                 device=config.device,
                 use_cuda_graph=config.use_cuda_graph,
+                quantization=config.quantization,
             )
         active: AsyncLLMEngine = state["engine"]
         active.start()

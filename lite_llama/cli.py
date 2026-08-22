@@ -681,6 +681,11 @@ class ServeCommand(CliCommand):
         from .entrypoints.api_server import ServerConfig, run_server
 
         opts = EngineOptions.from_args(args)
+        if opts.tensor_parallel_size > 1:
+            raise SystemExit(
+                "serve does not support --tensor-parallel-size > 1 yet; "
+                "the continuous-batching engine is single-process"
+            )
         # Sampling flags do not apply here: every HTTP request carries its own.
         config = ServerConfig(
             model_dir=opts.model_dir,
@@ -691,6 +696,7 @@ class ServeCommand(CliCommand):
             max_gpu_num_blocks=opts.max_gpu_num_blocks,
             device=opts.device,
             use_cuda_graph=not args.no_cuda_graph,
+            quantization=opts.quantization,
             chat_template=not args.no_chat_template,
         )
         print(f"Serving {config.model_name} on http://{args.host}:{args.port}")
@@ -732,6 +738,11 @@ class BatchCommand(CliCommand):
         from .engine import ContinuousBatchingEngine
 
         opts = EngineOptions.from_args(args)
+        if opts.tensor_parallel_size > 1:
+            raise SystemExit(
+                "batch does not support --tensor-parallel-size > 1 yet; "
+                "the continuous-batching engine is single-process"
+            )
         prompts = self._load_prompts(args.prompts_file)
 
         engine = ContinuousBatchingEngine.from_pretrained(
@@ -740,6 +751,7 @@ class BatchCommand(CliCommand):
             max_num_seqs=args.max_num_seqs,
             max_gpu_num_blocks=opts.max_gpu_num_blocks,
             device=opts.device,
+            quantization=opts.quantization,
         )
         prompter = (
             None
