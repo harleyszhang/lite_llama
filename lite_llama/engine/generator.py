@@ -37,6 +37,8 @@ class TextGenerator:
         max_gpu_num_blocks: int | None = None,
         device: str = "cuda",
         use_cuda_graph: bool = True,
+        quantization: str | None = None,
+        tensor_parallel_size: int = 1,
     ) -> None:
         self._llm = LLM(
             model=checkpoints_dir,
@@ -45,6 +47,8 @@ class TextGenerator:
             max_gpu_num_blocks=max_gpu_num_blocks,
             device=device,
             use_cuda_graph=use_cuda_graph,
+            quantization=quantization,
+            tensor_parallel_size=tensor_parallel_size,
         )
         # Legacy attribute: callers (e.g. the CLI) read ``engine.last_stop_reasons``.
         self.engine = self._llm

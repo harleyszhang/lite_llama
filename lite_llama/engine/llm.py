@@ -48,7 +48,9 @@ class LLM(LLMEngine):
         use_cuda_graph: Capture decode CUDA graphs. ``None`` (default) enables
             them for text-only models and disables them for multimodal ones,
             whose vision tower changes control flow per prefill.
-        tensor_parallel_size: Reserved for TP support; must be 1 today.
+        quantization: Runtime weight quantisation (``"int8"``); ``None`` keeps
+            the checkpoint's native format (fp16 or auto-detected fp8).
+        tensor_parallel_size: Number of GPUs for tensor parallelism.
         data_parallel_size: Reserved for DP support; must be 1 today.
     """
 
@@ -60,14 +62,10 @@ class LLM(LLMEngine):
         max_gpu_num_blocks: int | None = None,
         device: str = "cuda",
         use_cuda_graph: bool | None = None,
+        quantization: str | None = None,
         tensor_parallel_size: int = 1,
         data_parallel_size: int = 1,
     ) -> None:
-        if tensor_parallel_size != 1:
-            raise NotImplementedError(
-                "tensor_parallel_size > 1 is not implemented yet; TP will live in "
-                "ModelRunner as a process-group coordinator"
-            )
         if data_parallel_size != 1:
             raise NotImplementedError(
                 "data_parallel_size > 1 is not implemented yet; DP will route "
@@ -77,6 +75,15 @@ class LLM(LLMEngine):
         spec = _resolve_spec(model)
         if use_cuda_graph is None:
             use_cuda_graph = not spec.is_multimodal
+        # CUDA graphs are incompatible with TP (NCCL collectives inside the graph)
+        if tensor_parallel_size > 1:
+            use_cuda_graph = False
+
+        # Initialise the TP process group before building the model so that
+        # ColumnParallelLinear / RowParallelLinear read the correct world size.
+        if tensor_parallel_size > 1:
+            from ..distributed.parallel_state import init_tensor_parallel
+            init_tensor_parallel(rank=0, world_size=tensor_parallel_size)
 
         super().__init__(
             checkpoints_dir=model,
@@ -85,6 +92,8 @@ class LLM(LLMEngine):
             max_gpu_num_blocks=max_gpu_num_blocks,
             device=device,
             use_cuda_graph=use_cuda_graph,
+            quantization=quantization,
+            tensor_parallel_size=tensor_parallel_size,
         )
 
         # Strategy: only multimodal checkpoints get a preparer (and pay for the
