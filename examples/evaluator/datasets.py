@@ -11,6 +11,11 @@ def read_jsonl(jsonl_path):
         data = [json.loads(line) for line in f]
     return data
 
+
+def read_json(json_path):
+    with open(json_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
 class HotpotQA(object):
     r"""
     for testing hotpot wget http://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json
@@ -179,28 +184,6 @@ class HellaSwag(object):
         )
 
 
-def matched_pairs(list1, list2, n):
-    """
-    Randomly sample n matched pairs from two lists with aligned indices.
-
-    Args:
-        list1 (list): The first list.
-        list2 (list): The second list. Must have the same length as list1.
-        n (int): The number of samples to draw.
-
-    Returns:
-        tuple: Two lists containing the sampled elements from list1 and list2,
-               where the elements at each index still match.
-    """
-    assert len(list1) == len(list2), "Both lists must have the same length"
-    assert n <= len(list1), "n must not be greater than the length of the lists"
-
-    indices = random.sample(range(len(list1)), n)
-    sampled_list1 = [list1[i] for i in indices]
-    sampled_list2 = [list2[i] for i in indices]
-    return sampled_list1, sampled_list2
-
-
 def unify_data(test_data, data_batch, data_type: Optional[str]):
     ground_truth, prompts, options = list(), list(), list()
 
@@ -211,7 +194,14 @@ def unify_data(test_data, data_batch, data_type: Optional[str]):
         prompts.append(data[key]["prompt"])
         if data_type == "mcq":
             options.append(data[key]["options"])
-    ground_truth, prompts = matched_pairs(ground_truth, prompts, data_batch)
+
+    # Synchronously sample all three lists so MCQ options stay aligned
+    # with the sampled prompts/ground_truth.
+    indices = random.sample(range(len(ground_truth)), data_batch)
+    ground_truth = [ground_truth[i] for i in indices]
+    prompts = [prompts[i] for i in indices]
+    if data_type == "mcq":
+        options = [options[i] for i in indices]
 
     return ground_truth, prompts, options
 
@@ -330,7 +320,3 @@ def match_mc_option(prediction, options):
         0
     ], cos_sims.tolist()  # Returns the matching option ID and all similarities
 
-
-if __name__ == "__main__":
-    hw = HellaSwag("/path_to/hellaswag_val.jsonl")
-    hw.process()

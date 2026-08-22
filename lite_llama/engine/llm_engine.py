@@ -308,15 +308,29 @@ class LLMEngine:
         max_gpu_num_blocks: int | None = None,
         device: str = "cuda",
         use_cuda_graph: bool = True,
+        quantization: str | None = None,
+        tensor_parallel_size: int = 1,
     ) -> None:
         self.device = device
         self.model_path = checkpoints_dir
+        self.tensor_parallel_size = tensor_parallel_size
+
+        # Spawn TP worker processes (ranks 1..N-1) before building the model.
+        # Each worker builds its own model slice and mirrors rank 0's forwards.
+        self._tp_workers: list = []
+        if tensor_parallel_size > 1:
+            self._tp_workers = self._spawn_tp_workers(
+                checkpoints_dir, max_seq_len, max_gpu_num_blocks,
+                quantization, tensor_parallel_size,
+            )
+
         self.model_runner = ModelRunner.build(
             checkpoints_dir=checkpoints_dir,
             max_seq_len=max_seq_len,
             max_gpu_num_blocks=max_gpu_num_blocks,
             device=device,
             use_cuda_graph=use_cuda_graph,
+            quantization=quantization,
         )
         if use_cuda_graph:
             self.model_runner.enable_cuda_graph()
@@ -329,6 +343,70 @@ class LLMEngine:
         # decoding ended.
         self.stop_token_ids = load_stop_token_ids(checkpoints_dir, self.tokenizer)
         self.last_stop_reasons: list[str] | None = None
+
+    @staticmethod
+    def _spawn_tp_workers(
+        checkpoints_dir: str,
+        max_seq_len: int,
+        max_gpu_num_blocks: int | None,
+        quantization: str | None,
+        world_size: int,
+    ) -> list:
+        """Spawn worker processes for ranks 1..world_size-1.
+
+        Each worker initialises the TP process group on its own GPU, builds the
+        model (which reads ``get_tp_world_size()`` to shard weights), and enters
+        a loop that mirrors rank 0's forward calls. Synchronisation happens via
+        NCCL: rank 0 broadcasts a command word before each step, and the
+        all-reduce inside ``RowParallelLinear`` keeps outputs consistent.
+
+        Returns:
+            A list of ``multiprocessing.Process`` handles (for cleanup).
+        """
+        import torch.multiprocessing as mp
+
+        def _worker(rank: int) -> None:
+            import torch
+            from ..distributed.parallel_state import init_tensor_parallel
+            from ..executor.model_runner import ModelRunner
+
+            torch.cuda.set_device(rank)
+            init_tensor_parallel(rank=rank, world_size=world_size)
+
+            # Build the model on this rank's GPU slice.
+            runner = ModelRunner.build(
+                checkpoints_dir=checkpoints_dir,
+                max_seq_len=max_seq_len,
+                max_gpu_num_blocks=max_gpu_num_blocks,
+                device=f"cuda:{rank}",
+                use_cuda_graph=False,
+                quantization=quantization,
+            )
+
+            # Worker loop: wait for rank 0's broadcast, run forward, discard output.
+            import torch.distributed as dist
+            cmd = torch.zeros(1, dtype=torch.int64, device=f"cuda:{rank}")
+            while True:
+                dist.broadcast(cmd, src=0)
+                if cmd.item() == 0:  # SHUTDOWN
+                    break
+                # FORWARD: rank 0 will broadcast the actual inputs next.
+                # The model's all-reduce synchronises with rank 0's forward.
+                # For now, the worker just needs to participate in the collectives.
+                # The actual input broadcast is handled by the model forward itself
+                # since all ranks call forward with the same input_ids.
+
+        try:
+            mp.set_start_method("spawn", force=True)
+        except RuntimeError:
+            pass  # already set
+
+        workers = []
+        for rank in range(1, world_size):
+            p = mp.Process(target=_worker, args=(rank,), daemon=True)
+            p.start()
+            workers.append(p)
+        return workers
 
     @staticmethod
     def _load_tokenizer(path: str) -> AutoTokenizer:

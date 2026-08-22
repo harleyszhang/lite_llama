@@ -65,6 +65,23 @@ COMMON_OPTIONS: tuple[CliOption, ...] = (
             "1.1 is the default because small base models easily loop on repeats)",
         },
     ),
+    CliOption(
+        "--quantization",
+        {
+            "choices": ["int8"],
+            "default": None,
+            "help": "Runtime weight quantisation for fp16 checkpoints "
+            "(fp8 checkpoints are detected automatically from config.json)",
+        },
+    ),
+    CliOption(
+        "--tensor-parallel-size",
+        {
+            "type": int,
+            "default": 1,
+            "help": "Number of GPUs for tensor parallelism (splits weights across cards)",
+        },
+    ),
 )
 
 
@@ -87,6 +104,8 @@ class EngineOptions:
     max_gpu_num_blocks: int | None = None
     device: str = "cuda"
     use_cuda_graph: bool = False
+    quantization: str | None = None
+    tensor_parallel_size: int = 1
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "EngineOptions":
@@ -105,6 +124,8 @@ class EngineOptions:
             max_gpu_num_blocks=args.max_gpu_num_blocks,
             device=args.device,
             use_cuda_graph=getattr(args, "use_cuda_graph", False),
+            quantization=getattr(args, "quantization", None),
+            tensor_parallel_size=getattr(args, "tensor_parallel_size", 1),
         )
 
     def build_text_generator(self) -> TextGenerator:
@@ -114,6 +135,8 @@ class EngineOptions:
             max_gpu_num_blocks=self.max_gpu_num_blocks,
             device=self.device,
             use_cuda_graph=self.use_cuda_graph,
+            quantization=self.quantization,
+            tensor_parallel_size=self.tensor_parallel_size,
         )
 
     def build_vision_generator(self) -> VisionGenerator:
