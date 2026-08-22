@@ -1,0 +1,182 @@
+"""Request and response schemas for the OpenAI-compatible endpoints.
+
+Only the fields lite_llama can actually honour are modelled. Accepting a knob and
+ignoring it is worse than rejecting it: a client that sets ``n=4`` and silently
+gets one completion has no way to notice, so unsupported values raise instead.
+
+Usage:
+    body = CompletionRequest(model="qwen", prompt="hi", max_tokens=16)
+    params = body.to_sampling_params()
+"""
+
+from __future__ import annotations
+
+import time
+import uuid
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator
+
+from ..engine.sampler import SamplingParams
+
+# OpenAI's default is 1.0 for both. lite_llama's own default (0.6 / 0.9) belongs
+# to its CLI, not to a wire protocol that clients expect to behave like OpenAI's.
+_DEFAULT_TEMPERATURE = 1.0
+_DEFAULT_TOP_P = 1.0
+
+
+def _request_id(prefix: str) -> str:
+    return f"{prefix}-{uuid.uuid4().hex}"
+
+
+class _GenerationOptions(BaseModel):
+    """Sampling fields shared by the completion and chat-completion bodies."""
+
+    model: str
+    max_tokens: int | None = Field(default=16, ge=1)
+    temperature: float = Field(default=_DEFAULT_TEMPERATURE, ge=0.0)
+    top_p: float = Field(default=_DEFAULT_TOP_P, gt=0.0, le=1.0)
+    stream: bool = False
+    # OpenAI expresses this as presence/frequency penalties on a different scale;
+    # this is lite_llama's own multiplicative penalty, passed through by name.
+    repetition_penalty: float = Field(default=1.0, gt=0.0)
+    n: int = Field(default=1, ge=1)
+
+    @field_validator("n")
+    @classmethod
+    def _only_one_completion(cls, value: int) -> int:
+        if value != 1:
+            raise ValueError("n > 1 is not supported; the sampler emits one completion")
+        return value
+
+    def to_sampling_params(self) -> SamplingParams:
+        """Translate the wire fields into engine sampling parameters."""
+        return SamplingParams(
+            temperature=self.temperature,
+            top_p=self.top_p,
+            max_gen_len=self.max_tokens,
+            repetition_penalty=self.repetition_penalty,
+        )
+
+
+class CompletionRequest(_GenerationOptions):
+    """Body of ``POST /v1/completions``."""
+
+    prompt: str
+
+    @field_validator("prompt")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        if not value:
+            raise ValueError("prompt must not be empty")
+        return value
+
+
+class ChatMessage(BaseModel):
+    """One turn of a chat conversation."""
+
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
+class ChatCompletionRequest(_GenerationOptions):
+    """Body of ``POST /v1/chat/completions``."""
+
+    messages: list[ChatMessage] = Field(min_length=1)
+
+
+class UsageInfo(BaseModel):
+    """Token accounting for one response."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+class CompletionChoice(BaseModel):
+    index: int = 0
+    text: str = ""
+    finish_reason: str | None = None
+
+
+class CompletionResponse(BaseModel):
+    """Body of a non-streaming ``/v1/completions`` reply."""
+
+    id: str = Field(default_factory=lambda: _request_id("cmpl"))
+    object: Literal["text_completion"] = "text_completion"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    choices: list[CompletionChoice]
+    usage: UsageInfo = Field(default_factory=UsageInfo)
+
+
+class ChatCompletionMessage(BaseModel):
+    role: Literal["assistant"] = "assistant"
+    content: str = ""
+
+
+class ChatCompletionChoice(BaseModel):
+    index: int = 0
+    message: ChatCompletionMessage
+    finish_reason: str | None = None
+
+
+class ChatCompletionResponse(BaseModel):
+    """Body of a non-streaming ``/v1/chat/completions`` reply."""
+
+    id: str = Field(default_factory=lambda: _request_id("chatcmpl"))
+    object: Literal["chat.completion"] = "chat.completion"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    choices: list[ChatCompletionChoice]
+    usage: UsageInfo = Field(default_factory=UsageInfo)
+
+
+class ChatCompletionDelta(BaseModel):
+    """Incremental content of a streamed chat chunk.
+
+    ``role`` appears on the first chunk only, matching OpenAI, so clients can
+    start rendering before any text arrives.
+    """
+
+    role: Literal["assistant"] | None = None
+    content: str | None = None
+
+
+class ChatCompletionChunkChoice(BaseModel):
+    index: int = 0
+    delta: ChatCompletionDelta
+    finish_reason: str | None = None
+
+
+class ChatCompletionChunk(BaseModel):
+    """One ``data:`` frame of a streamed chat completion."""
+
+    id: str
+    object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    choices: list[ChatCompletionChunkChoice]
+
+
+class CompletionChunk(BaseModel):
+    """One ``data:`` frame of a streamed text completion."""
+
+    id: str
+    object: Literal["text_completion"] = "text_completion"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    choices: list[CompletionChoice]
+
+
+class ModelCard(BaseModel):
+    id: str
+    object: Literal["model"] = "model"
+    owned_by: str = "lite_llama"
+
+
+class ModelList(BaseModel):
+    """Body of ``GET /v1/models``."""
+
+    object: Literal["list"] = "list"
+    data: list[ModelCard]
