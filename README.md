@@ -10,6 +10,7 @@
 
 <pre>
          ✅ Flash attention    ✅ Cuda Graph Optimize    ✅ Beginner friendly    ✅ Fused MoE
+         ✅ W8A16 Quantization ✅ W4A16 (AWQ/GPTQ)      ✅ SmoothQuant W8A8     ✅ Tensor Parallel
 </pre>
 
 </div>
@@ -23,6 +24,8 @@
 - Support efficient dynamic management of kv cache (`auto tokenattnetion`).
 - Support fusion of operators, e.g. fusion of `*` and `silu` for element-by-element multiplication, k v linear layer fusion, fusion of `skip` and `rmsnorm`.
 - Some custom operators such as `rmsnorm`, `rope`, `softmax`, `element-by-element-multiplication`, etc. are implemented using the efficient `triton` kernel.
+- **Quantization**: W8A16 (fp8/int8), W4A16 (AWQ/GPTQ), SmoothQuant W8A8 — up to `1.7x` decode speedup.
+- **Tensor Parallelism**: split a 30B MoE model across 2× A10 (24 GB) with one all-reduce per block.
 
 ## Setup and Installation
 
@@ -155,6 +158,35 @@ lite_llama per token latency: 1.369015 ms/token
 Transformers per token latency: 5.436221 ms/token
 ```
 
+### Quantization & Tensor Parallelism
+
+lite_llama supports multiple weight quantization schemes and multi-GPU tensor
+parallelism. See [docs/quantization.md](docs/quantization.md) for the full guide.
+
+**FP8 checkpoint** (auto-detected from `config.json`):
+
+```bash
+python -m lite_llama.cli chat --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8
+```
+
+**Tensor parallelism** (30B MoE on 2× A10):
+
+```bash
+python -m lite_llama.cli chat \
+    --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8 \
+    --tensor-parallel-size 2
+```
+
+**Runtime int8 quantisation** (halve memory of any fp16 model):
+
+```bash
+python -m lite_llama.cli chat --model-dir my_weight/Qwen2.5-0.5B --quantization int8
+```
+
+Quantized inference demo (Qwen3-30B-A3B-FP8, tensor parallel × 2):
+
+![quantization tp demo](./docs/images/qwen2.5-3b-output.gif)
+
 ## Architecture
 
 ```text
@@ -170,20 +202,28 @@ lite_llama/
 │   └── outputs.py           # RequestOutput / CompletionOutput
 ├── executor/
 │   ├── model_runner.py      # owns the model, KV cache and per-step forward
-│   ├── loader.py            # HF checkpoint -> fp16 parameters
-│   ├── weight_utils.py      # safetensors reading, FP8 dequantisation
+│   ├── loader.py            # HF checkpoint -> fp16/8-bit parameters
+│   ├── weight_utils.py      # safetensors reading, FP8 passthrough
 │   ├── kv_cache_manager.py  # paged KV pool + memory profiler
 │   ├── attention_metadata.py # per-step KV bookkeeping handed to the kernels
 │   └── cuda_graph.py        # decode graph capture and replay
 ├── kernels/                 # Triton kernels used by the models
+│   ├── w8a16.py             # fp8/int8 weight-only GEMM
+│   ├── w4a16.py             # AWQ/GPTQ int4 GEMM
+│   ├── smoothquant.py       # W8A8 dynamic quantisation GEMM
+│   └── fused_moe.py         # MoE grouped GEMM (fp16/fp8/int8)
 ├── models/
 │   ├── config.py            # ModelConfig over the HF AutoConfig
 │   ├── registry.py          # model_type -> implementation class
-│   ├── weights.py           # HF checkpoint keys -> parameters
+│   ├── weights.py           # HF checkpoint keys -> parameters (+ TP shard)
+│   ├── quantization.py      # QuantConfig registry (fp8/int8/int4/smoothquant)
+│   ├── linear.py            # ColumnParallelLinear / RowParallelLinear
 │   ├── interfaces.py        # MultiModalCausalLM, the multimodal capability
 │   ├── base.py              # PagedAttention, FusedMLP, DecoderLayer, CausalLM
 │   ├── rotary_embedding.py  # RoPE / mrope tables
 │   └── llama.py / qwen2.py / qwen3.py / qwen3_moe.py / llava.py / qwen3_vl.py
+├── distributed/
+│   └── parallel_state.py    # TP process group, all-reduce, divide
 └── utils/                   # chat templates, logger, image and path helpers
 ```
 

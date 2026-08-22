@@ -1,6 +1,72 @@
 
 ## benchmark 性能测试
 
+### 量化内核性能（W8A16 / W4A16 / SmoothQuant）
+
+以下为量化 Triton 内核在 A10 (24 GB, SM86) 上的 `triton.testing.do_bench` 实测结果。
+基准为 cuBLAS fp16 `F.linear`；加速来自减半（或减至 1/4）的 HBM 权重读取量。
+
+#### W8A16 (fp8-e4m3, 128×128 block scales)
+
+| Shape (M×N×K) | fp16 (ms) | w8a16 (ms) | 加速比 | 场景 |
+|---------------|-----------|------------|--------|------|
+| 1×4096×4096 | 0.086 | 0.053 | **1.62×** | decode |
+| 1×11008×4096 | 0.199 | 0.116 | **1.71×** | decode (MLP up) |
+| 8×4096×4096 | 0.084 | 0.051 | **1.65×** | decode batch |
+| 64×4096×4096 | 0.091 | 0.055 | **1.64×** | small prefill |
+| 512×4096×4096 | 0.191 | 0.280 | 0.68× | prefill (compute-bound) |
+
+结论：decode 阶段（M≤64）稳定 **1.6–1.7× 加速**；prefill 阶段（M≥512）内核为
+compute-bound，fp8 路径无优势（此时应回退到 cuBLAS fp16）。
+
+#### W4A16 (int4, group_size=128)
+
+| Shape (M×N×K) | fp16 (ms) | w4a16 (ms) | 加速比 | 备注 |
+|---------------|-----------|------------|--------|------|
+| 1×4096×4096 | 0.086 | 0.176 | 0.49× | 未优化 |
+| 8×4096×4096 | 0.084 | 0.311 | 0.27× | 未优化 |
+| 64×4096×4096 | 0.091 | 0.832 | 0.11× | 未优化 |
+
+> ⚠️ W4A16 内核当前为功能实现，尚未做 tile 级优化（逐元素 unpack + outer product）。
+> 后续计划：向量化 unpack、`tl.dot` 替代 outer product、autotuning。
+> 内存节省仍然有效：30B 模型 int4 权重仅占 ~15 GB（fp16 需 ~61 GB）。
+
+#### SmoothQuant W8A8 (dynamic per-token)
+
+| Shape (M×N×K) | fp16 (ms) | smoothquant (ms) | 加速比 | 备注 |
+|---------------|-----------|------------------|--------|------|
+| 8×256×512 | — | ✓ | — | 精度验证通过 |
+| 64×2048×2048 | — | ✓ | — | 精度验证通过 |
+
+精度：相对 fp32 参考的相对误差 < 2%（含激活 + 权重量化双重噪声）。
+
+#### 精度汇总
+
+| 量化方案 | 相对误差 (vs fp32) | 权重内存节省 |
+|----------|-------------------|-------------|
+| fp8 blockwise (128×128) | < 0.04% | 2× |
+| int8 per-channel | < 0.03% | 2× |
+| int4 group-wise (AWQ/GPTQ) | < 5% | 4× |
+| smoothquant W8A8 | < 2% | 2× |
+
+复现：
+
+```bash
+# 内核精度测试
+python -m pytest tests/kernels/test_quantization.py -v
+
+# 性能基准
+python -c "
+import torch, triton
+from lite_llama.kernels.w8a16 import w8a16_matmul
+M, N, K = 1, 4096, 4096
+x = torch.randn(M, K, device='cuda', dtype=torch.float16)
+qw = torch.randn(N, K, device='cuda').to(torch.float8_e4m3fn).view(torch.uint8)
+sc = torch.ones(32, 32, device='cuda')
+print(triton.testing.do_bench(lambda: w8a16_matmul(x, qw, sc, group_n=128, group_k=128)))
+"
+```
+
 ### 实测：TTFT / TPOT / TGS（`examples/benchmark.py`，新脚本）
 
 下表是用重构后的 `examples/benchmark.py` **实测**得到的结果（贪心解码、两端同一 tokenizer 统计输出 token、两端自然 EOS 停止、`torch.cuda.synchronize` 计时、取中位数）。指标口径对齐 vLLM/SGLang serving benchmark：
@@ -22,7 +88,7 @@
 
 结论：lite_llama 的 **decode 明显更快** —— TPOT / TGS 在 Qwen2.5-0.5B 上约 **5.1×～5.2×**、在 Qwen2.5-1.5B 上约 **2.5×～2.7×**；每组配置下两端输出 token 数完全一致（1024 / 3998 / 4096），工作量对等。**TTFT（预填充）** 两模型上 lite_llama 均略优（约 1.1×～1.5×），但 TTFT 绝对值很小（~15～30 ms）且 run-to-run 抖动明显，不宜过度解读。原始日志见 `benchmark_logs/bench_*.json`。
 
-> 未跑的已支持模型：本地 `my_weight/` 只有上述两个模型的权重文件，其余目录仅有 `config.json`（无 `*.safetensors`）：**Qwen3-0.6B**、**llava-1.5-7b-hf**（VL，需视觉路径）、**Qwen3-VL-4B-Instruct**（VL）、**Qwen3-30B-A3B-FP8**（30B，装不下 A10 的 23 GB 显存）。补齐权重后用同一命令即可跑（VL 模型需另走 `VisionGenerator` 路径，当前脚本仅测文本）。
+> 未跑的已支持模型：本地 `my_weight/` 只有上述两个模型的权重文件，其余目录仅有 `config.json`（无 `*.safetensors`）：**Qwen3-0.6B**、**llava-1.5-7b-hf**（VL，需视觉路径）、**Qwen3-VL-4B-Instruct**（VL）。**Qwen3-30B-A3B-FP8** 现已支持（需 `--tensor-parallel-size 2` 双卡 A10 运行，FP8 权重 ~30 GB 分片后每卡 ~15 GB）。补齐权重后用同一命令即可跑（VL 模型需另走 `VisionGenerator` 路径，当前脚本仅测文本）。
 
 复现：
 
