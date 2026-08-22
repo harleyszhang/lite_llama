@@ -32,6 +32,7 @@ from .cuda_graph import (
 )
 from .kv_cache_manager import KVCacheManager, MemoryProfiler
 from .loader import DefaultModelLoader, ModelLoader
+from .slot_batch import SlotBatch
 
 logger = get_logger(__name__)
 
@@ -109,6 +110,9 @@ class ModelRunner:
         # Populated by :meth:`enable_cuda_graph`; when non-None, :meth:`forward`
         # dispatches eligible decode steps to a captured graph.
         self._graph_manager: CUDAGraphManager | None = None
+        # Populated by :meth:`enable_slot_kv_cache` for the continuous-batching
+        # path; the one-shot batch path never builds it.
+        self._slot_batch: SlotBatch | None = None
 
     # ------------------------------------------------------------------ build #
     @classmethod
@@ -214,6 +218,31 @@ class ModelRunner:
         return self.atten_info.cur_select_index
 
     # ------------------------------------------------------------- inference #
+    def enable_slot_kv_cache(self) -> SlotBatch:
+        """Switch the KV cache to the fixed-slot layout continuous batching needs.
+
+        Idempotent, and mutually exclusive with the one-shot batch path: the
+        returned :class:`~lite_llama.executor.slot_batch.SlotBatch` claims every
+        row the slot table names, so ``prefill_alloc_kv_cache`` and
+        ``decode_alloc_kv_cache`` have nothing left to hand out afterwards.
+
+        Call it *after* :meth:`enable_cuda_graph` so batch padding can see the
+        captured grid.
+        """
+        if self._slot_batch is None:
+            self._slot_batch = SlotBatch(self)
+        return self._slot_batch
+
+    def graph_batch_size(self, batch_size: int) -> int:
+        """Batch size to submit so a decode step lands on a captured graph.
+
+        Returns ``batch_size`` unchanged when graphs are off or the batch is
+        bigger than anything captured, in which case the step runs eager.
+        """
+        if self._graph_manager is None:
+            return batch_size
+        return self._graph_manager.pad_to(batch_size) or batch_size
+
     def enable_cuda_graph(
         self,
         batch_sizes: tuple[int, ...] = DEFAULT_BATCH_SIZES,
