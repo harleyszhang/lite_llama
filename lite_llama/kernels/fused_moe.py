@@ -1,15 +1,23 @@
 """Fused MoE: top-k routed experts as a Triton grouped GEMM.
 
 A simplified port of vLLM's ``fused_moe_kernel`` (fp16 in / fp32 accumulate; no
-quant, bias or expert parallelism) that keeps vLLM's data protocol so the two can
-be cross-checked: ``sorted_token_ids`` (``token*top_k+slot`` sorted by expert,
+bias or expert parallelism) that keeps vLLM's data protocol so the two can be
+cross-checked: ``sorted_token_ids`` (``token*top_k+slot`` sorted by expert,
 per-expert padded to ``BLOCK_M`` with a masked sentinel), ``expert_ids`` (expert
 per row-block) and ``num_tokens_post_padded`` (device length; overrun blocks exit,
 so the grid needs no host sync). Pipeline: ``moe_align_block_size`` -> GEMM1
 (gate_up) -> silu_and_mul -> GEMM2 (down, router weight folded in) -> ``moe_sum``.
 
+Expert weights may be fp16 or 8-bit (fp8-e4m3 / int8 with one scale per
+``group_n x group_k`` block, the same layout
+:mod:`lite_llama.kernels.w8a16` uses for dense linears). The 8-bit path is what
+puts a 30B MoE checkpoint on two 24 GB cards: only the *weights* are 8-bit, both
+GEMM inputs and the intermediate activation stay fp16.
+
 Usage:
     out = fused_moe(hidden_states, w1, w2, topk_weights, topk_ids)
+    out = fused_moe(x, qw1, qw2, tw, ids, w1_scale=s1, w2_scale=s2,
+                    group_n=128, group_k=128)
 """
 
 from __future__ import annotations
@@ -19,6 +27,16 @@ import triton
 import triton.language as tl
 
 from .utils import torch_to_triton_dtype
+from .w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
+
+#: ``QUANT_MODE`` values shared by the kernel and its launcher.
+_QUANT_NONE = 0
+_QUANT_FP8 = 1
+_QUANT_INT8 = 2
+
+#: k-tile of the quantised path: one byte per weight element, k-contiguous, so a
+#: 128-wide tile is one full memory transaction per output channel.
+_QUANT_BLOCK_K = 128
 
 
 # --------------------------------------------------------------------------- #
@@ -47,7 +65,12 @@ def moe_align_block_size(
     sort_index = torch.argsort(flat_experts, stable=True)
     sorted_experts = flat_experts[sort_index]
 
-    counts = torch.bincount(flat_experts, minlength=num_experts)
+    # scatter_add rather than bincount: bincount reads the largest element back
+    # to the host to size its output, which both stalls the launch pipeline
+    # (~0.4 ms, more than the two GEMMs cost at decode batch sizes) and makes the
+    # whole MoE layer uncapturable as a CUDA graph.
+    counts = torch.zeros(num_experts, dtype=torch.int64, device=device)
+    counts.scatter_add_(0, flat_experts, torch.ones_like(flat_experts))
     padded_counts = (
         torch.div(counts + (block_size - 1), block_size, rounding_mode="floor") * block_size
     )
@@ -84,6 +107,7 @@ def _fused_moe_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
+    b_scale_ptr,
     topk_weights_ptr,
     sorted_token_ids_ptr,
     expert_ids_ptr,
@@ -99,18 +123,28 @@ def _fused_moe_kernel(
     stride_bk,
     stride_cm,
     stride_cn,
+    stride_bse,
+    stride_bsn,
+    stride_bsk,
+    GROUP_N: tl.constexpr,
+    GROUP_K: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
     top_k: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
+    QUANT_MODE: tl.constexpr,
+    DEQUANT_SCALE: tl.constexpr,
     compute_type: tl.constexpr,
 ):
     """One C row-block of ``A @ B[expert]`` where rows of A are gathered tokens.
 
-    A: ``[num_tokens, K]`` activations. B: ``[E, N, K]`` stacked expert weights.
-    C: ``[num_tokens * top_k, N]`` (each token's per-slot output row).
+    A: ``[num_tokens, K]`` activations. B: ``[E, N, K]`` stacked expert weights,
+    fp16 or 8-bit. C: ``[num_tokens * top_k, N]`` (each token's per-slot output row).
+    When ``QUANT_MODE`` is non-zero, ``b_scale_ptr`` holds
+    ``[E, ceil(N / GROUP_N), ceil(K / GROUP_K)]`` dequantisation scales and
+    ``BLOCK_K`` divides ``GROUP_K``, so one scale covers a whole k-tile.
     """
     # Grouped pid ordering for L2 reuse (same scheme as vLLM/triton matmul).
     pid = tl.program_id(axis=0)
@@ -138,6 +172,9 @@ def _fused_moe_kernel(
     b_ptrs = (
         b_ptr + off_experts * stride_be + offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn
     )
+    if QUANT_MODE != 0:
+        # Scale row is fixed for this tile; only the k-block index advances.
+        b_scale_ptrs = b_scale_ptr + off_experts * stride_bse + (offs_bn // GROUP_N) * stride_bsn
 
     # fp32 accumulation keeps the K-loop noise below the fp16 storage floor.
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
@@ -147,11 +184,21 @@ def _fused_moe_kernel(
             mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_K),
             other=0.0,
         )
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)
-        accumulator = tl.dot(a, b, acc=accumulator)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0)
+        if QUANT_MODE == 0:
+            accumulator = tl.dot(a, b, acc=accumulator)
+        else:
+            if QUANT_MODE == 1:
+                b = dequant_fp8e4m3(b)
+            else:
+                b = b.to(tl.float16)
+            # Hoisted out of the dot, so the tensor cores still see fp16 operands.
+            b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
+            accumulator += tl.dot(a, b) * b_scale[None, :]
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
 
+    accumulator *= DEQUANT_SCALE
     # Router weights multiply in fp32 before the final downcast (gemm2 only).
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
@@ -164,7 +211,7 @@ def _fused_moe_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-def _launch_config(num_tokens: int) -> dict:
+def _launch_config(num_tokens: int, quant_mode: int) -> dict:
     """Heuristic tile config (vLLM falls back to similar shapes when no tuned
     JSON config exists). ``BLOCK_M`` must be identical for both GEMMs because
     they share one alignment."""
@@ -177,7 +224,9 @@ def _launch_config(num_tokens: int) -> dict:
     return {
         "BLOCK_M": block_m,
         "BLOCK_N": 64,
-        "BLOCK_K": 32,
+        # The quantised path reads bytes, so it wants a wide enough k-tile to
+        # fill a memory transaction; fp16 already fills one at 32.
+        "BLOCK_K": _QUANT_BLOCK_K if quant_mode else 32,
         "GROUP_M": 8,
         "num_warps": 4,
         "num_stages": 3,
@@ -188,12 +237,16 @@ def _invoke_moe_gemm(
     a: torch.Tensor,
     b: torch.Tensor,
     c: torch.Tensor,
+    b_scale: torch.Tensor | None,
     topk_weights: torch.Tensor,
     sorted_token_ids: torch.Tensor,
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor,
     top_k: int,
     mul_routed_weight: bool,
+    quant_mode: int,
+    group_n: int,
+    group_k: int,
     config: dict,
 ) -> None:
     """Launch one grouped GEMM: ``C[slot] = A[slot // top_k] @ B[expert].T``."""
@@ -206,6 +259,7 @@ def _invoke_moe_gemm(
         a,
         b,
         c,
+        b_scale,
         topk_weights,
         sorted_token_ids,
         expert_ids,
@@ -221,12 +275,17 @@ def _invoke_moe_gemm(
         b.stride(2),
         c.stride(0),
         c.stride(1),
+        *(b_scale.stride() if b_scale is not None else (0, 0, 0)),
+        GROUP_N=group_n or 1,
+        GROUP_K=min(group_k, k) if group_k else 1,
         BLOCK_M=config["BLOCK_M"],
         BLOCK_N=config["BLOCK_N"],
         BLOCK_K=config["BLOCK_K"],
         GROUP_M=config["GROUP_M"],
         top_k=top_k,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
+        QUANT_MODE=quant_mode,
+        DEQUANT_SCALE=FP8_E4M3_BIT_TRICK_SCALE if quant_mode == _QUANT_FP8 else 1.0,
         compute_type=torch_to_triton_dtype[c.dtype],
         num_warps=config["num_warps"],
         num_stages=config["num_stages"],
@@ -279,25 +338,47 @@ def _moe_sum_kernel(
 # --------------------------------------------------------------------------- #
 # Facade
 # --------------------------------------------------------------------------- #
+def _quant_mode(weight: torch.Tensor, scale: torch.Tensor | None) -> int:
+    """Classify an expert weight tensor into one of the three ``QUANT_MODE`` values."""
+    if scale is None:
+        return _QUANT_NONE
+    if weight.dtype == torch.uint8:
+        return _QUANT_FP8
+    if weight.dtype == torch.int8:
+        return _QUANT_INT8
+    raise ValueError(f"quantised expert weights must be uint8 or int8, got {weight.dtype}")
+
+
 def fused_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    *,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    group_n: int = 0,
+    group_k: int = 0,
 ) -> torch.Tensor:
     """Run the routed-expert FFN: ``sum_k w_k * (silu(x @ W1g.T) * (x @ W1u.T)) @ W2.T``.
 
     Args:
         hidden_states: ``[num_tokens, hidden]`` activations (fp16, contiguous rows).
-        w1: ``[E, 2 * moe_intermediate, hidden]`` fused gate/up projections.
-        w2: ``[E, hidden, moe_intermediate]`` down projections.
+        w1: ``[E, 2 * moe_intermediate, hidden]`` fused gate/up projections, fp16
+            or 8-bit (``uint8`` fp8-e4m3 / ``int8``).
+        w2: ``[E, hidden, moe_intermediate]`` down projections, same dtype as ``w1``.
         topk_weights: ``[num_tokens, top_k]`` routing weights (already
             renormalised when the model config asks for it).
         topk_ids: ``[num_tokens, top_k]`` expert indices.
+        w1_scale: ``[E, ceil(2I / group_n), ceil(H / group_k)]`` dequantisation
+            scales; ``None`` selects the fp16 path.
+        w2_scale: ``[E, ceil(H / group_n), ceil(I / group_k)]`` scales for ``w2``.
+        group_n: Rows of one scale block (``1`` = per output channel).
+        group_k: Columns of one scale block (``>= K`` = one scale per channel).
 
     Returns:
-        ``[num_tokens, hidden]`` combined expert output.
+        ``[num_tokens, hidden]`` combined expert output, in ``hidden_states``' dtype.
     """
     num_tokens, hidden = hidden_states.shape
     num_experts, two_inter, _ = w1.shape
@@ -306,10 +387,16 @@ def fused_moe(
     device = hidden_states.device
     dtype = hidden_states.dtype
 
+    quant_mode = _quant_mode(w1, w1_scale)
+    if quant_mode != _quant_mode(w2, w2_scale):
+        raise ValueError("w1 and w2 must use the same quantisation format")
+    if quant_mode and group_k % 128 != 0 and group_k < min(hidden, intermediate):
+        raise ValueError(f"group_k ({group_k}) must be a multiple of 128 unless it covers K")
+
     topk_ids = topk_ids.to(torch.int32)
     flat_weights = topk_weights.reshape(-1).to(dtype).contiguous()
 
-    config = _launch_config(num_tokens)
+    config = _launch_config(num_tokens, quant_mode)
     sorted_ids, expert_ids, num_post = moe_align_block_size(
         topk_ids, config["BLOCK_M"], num_experts
     )
@@ -317,9 +404,10 @@ def fused_moe(
     # GEMM1: [M, hidden] x [E, 2I, hidden] -> [M * top_k, 2I]
     gate_up = torch.empty((num_tokens * top_k, two_inter), device=device, dtype=dtype)
     _invoke_moe_gemm(
-        hidden_states, w1, gate_up, flat_weights,
+        hidden_states, w1, gate_up, w1_scale, flat_weights,
         sorted_ids, expert_ids, num_post, top_k,
-        mul_routed_weight=False, config=config,
+        mul_routed_weight=False, quant_mode=quant_mode,
+        group_n=group_n, group_k=group_k, config=config,
     )
 
     # silu(gate) * up -> [M * top_k, I]
@@ -335,9 +423,10 @@ def fused_moe(
     # ``offs_token // top_k`` into the identity on slot indices.
     expanded = torch.empty((num_tokens * top_k, hidden), device=device, dtype=dtype)
     _invoke_moe_gemm(
-        act, w2, expanded, flat_weights,
+        act, w2, expanded, w2_scale, flat_weights,
         sorted_ids, expert_ids, num_post, 1,
-        mul_routed_weight=True, config=config,
+        mul_routed_weight=True, quant_mode=quant_mode,
+        group_n=group_n, group_k=group_k, config=config,
     )
 
     # Reduce over the top_k slot dim -> [M, hidden]
