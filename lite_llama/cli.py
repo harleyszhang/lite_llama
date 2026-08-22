@@ -27,6 +27,7 @@ from PIL import Image
 
 from .engine import SamplingParams, TextGenerator, VisionGenerator
 from .models.config import read_model_type
+from .models.quantization import RUNTIME_SCHEMES
 from .utils.prompt_templates import ChatPrompter, get_prompter
 
 
@@ -145,7 +146,7 @@ COMMON_OPTIONS: tuple[CliOption, ...] = (
     CliOption(
         "--quantization",
         {
-            "choices": ["int8"],
+            "choices": sorted(RUNTIME_SCHEMES),
             "default": None,
             "help": "Runtime weight quantisation for fp16 checkpoints "
             "(fp8 checkpoints are detected automatically from config.json)",

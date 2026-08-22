@@ -17,9 +17,7 @@ from .skip_rmsnorm import skip_rmsnorm
 from .swiglu import swiglu_forward
 from .update_kv_buffer import update_kv_buffer
 from .update_kv_index import update_kv_index
-from .w8a16 import w8a16_matmul
-from .w4a16 import w4a16_matmul
-from .smoothquant import smoothquant_matmul
+from .quantization import w4a16_matmul, w8a16_matmul, smoothquant_matmul
 
 __all__ = [
     "flash_attention2_no_pad",

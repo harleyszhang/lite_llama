@@ -1,21 +1,12 @@
 """Linear layers: one place that knows about both quantisation and sharding.
 
-Every projection in the decoder goes through one of the three classes here, and
-each of them answers two questions that used to be spread across the model code:
-*is this weight 8-bit* (then the fp16 ``F.linear`` becomes
-:func:`~lite_llama.kernels.w8a16.w8a16_matmul`) and *is this weight split across
-tensor-parallel ranks* (then how, and does the result need an all-reduce).
-
-Which of the three a projection uses follows from where its matrix is contracted,
-the standard Megatron split::
-
-    x @ [W1 | W2].T          -> ColumnParallelLinear, no communication, output is
-                                already the rank's slice of the feature dim
-    [x1 | x2] @ [W1 ; W2].T  -> RowParallelLinear, each rank holds a partial sum,
-                                so the forward ends in an all-reduce
-
-Chaining a column-parallel layer into a row-parallel one — ``gate/up`` then
-``down``, ``q/k/v`` then ``o`` — is what makes one all-reduce per block enough.
+Every projection in the decoder goes through one of the three classes here.
+The classes themselves answer only the *sharding* question — the Megatron rule
+that chaining a column-parallel layer into a row-parallel one (``gate/up`` then
+``down``, ``q/k/v`` then ``o``) makes one all-reduce per block enough. The
+*storage* question — fp16 ``F.linear`` or which quantised kernel — is delegated
+to a quant-method object from :mod:`lite_llama.models.quantization.methods`,
+so adding a scheme touches no layer code.
 
 Parameter names deliberately match HuggingFace (``weight``, ``weight_scale_inv``),
 so :mod:`lite_llama.models.weights` needs no rule for them.
@@ -29,29 +20,18 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from ..distributed.parallel_state import all_reduce_tp, divide, get_tp_world_size
-from ..kernels.w8a16 import w8a16_matmul
-from ..kernels.w4a16 import w4a16_matmul
-from ..kernels.smoothquant import smoothquant_matmul
-from .quantization import (
-    FP8,
-    INT4,
-    INT8,
-    SMOOTHQUANT,
-    QuantConfig,
-    RawParameter,
-    quantize_int8_per_channel,
-)
+from .quantization import QuantConfig, get_linear_method
 
 
 class LinearBase(nn.Module):
-    """``y = x @ W.T (+ b)`` with the weight held at fp16 or 8 bit.
+    """``y = x @ W.T (+ b)`` with the weight stored however the quant method says.
 
-    Subclasses decide how ``input_size``/``output_size`` are split; this class
-    owns the parameters and the multiply, and the two are kept together because
-    the choice of kernel follows from how the weight was stored.
+    Subclasses decide how ``input_size``/``output_size`` are split; the
+    :attr:`quant_method` owns the parameters and the multiply, and the two are
+    composed rather than subclassed because sharding and storage format are
+    orthogonal choices.
 
     Args:
         input_size: Contracted (in-feature) width of the local weight.
@@ -72,35 +52,8 @@ class LinearBase(nn.Module):
         self.input_size = input_size
         self.output_size = output_size
         self.quant = quant
-
-        if quant is None:
-            self.weight = nn.Parameter(
-                torch.empty(output_size, input_size, dtype=torch.float16), requires_grad=False
-            )
-        elif quant.format in (FP8, INT8, SMOOTHQUANT):
-            # 8-bit weight + scale grid.
-            self.weight = RawParameter(
-                torch.empty(output_size, input_size, dtype=quant.storage_dtype)
-            )
-            self.weight_scale_inv = RawParameter(
-                torch.empty(*quant.scale_shape(output_size, input_size), dtype=torch.float32)
-            )
-        elif quant.format == INT4:
-            # AWQ/GPTQ: packed int32 weight + group-wise scales + zeros.
-            # 8 int4 values per int32 word along the K dimension.
-            packed_k = (input_size + 7) // 8
-            self.weight = RawParameter(
-                torch.empty(output_size, packed_k, dtype=torch.int32)
-            )
-            self.weight_scale = RawParameter(
-                torch.empty(*quant.scale_shape(output_size, input_size), dtype=torch.float32)
-            )
-            self.weight_zeros = RawParameter(
-                torch.empty(*quant.scale_shape(output_size, input_size), dtype=torch.float32)
-            )
-        else:
-            raise ValueError(f"unsupported quantisation format: {quant.format}")
-
+        self.quant_method = get_linear_method(quant)
+        self.quant_method.create_weights(self, input_size, output_size)
         self.bias = (
             nn.Parameter(torch.empty(output_size, dtype=torch.float16), requires_grad=False)
             if bias
@@ -109,57 +62,27 @@ class LinearBase(nn.Module):
 
     def apply_linear(self, x: torch.Tensor) -> torch.Tensor:
         """The multiply itself, without any tensor-parallel communication."""
-        if self.quant is None:
-            return F.linear(x, self.weight, self.bias)
-
-        if self.quant.format in (FP8, INT8):
-            return w8a16_matmul(
-                x,
-                self.weight,
-                self.weight_scale_inv,
-                group_n=self.quant.group_n,
-                group_k=min(self.quant.group_k, self.input_size),
-                bias=self.bias,
-            )
-
-        if self.quant.format == SMOOTHQUANT:
-            return smoothquant_matmul(
-                x,
-                self.weight,
-                self.weight_scale_inv,
-                bias=self.bias,
-            )
-
-        if self.quant.format == INT4:
-            return w4a16_matmul(
-                x,
-                self.weight,
-                self.weight_scale,
-                self.weight_zeros,
-                group_size=self.quant.group_k,
-                bias=self.bias,
-            )
-
-        raise ValueError(f"unsupported quantisation format: {self.quant.format}")
+        return self.quant_method.apply(self, x)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.apply_linear(x)
 
     @torch.no_grad()
     def quantize_(self, quant: QuantConfig) -> None:
-        """Replace a loaded fp16 weight with its int8 quantisation, in place.
+        """Replace a loaded fp16 weight with its quantised form, in place.
 
-        Used by the ``--quantization int8`` path, where the checkpoint is fp16 and
-        the 8-bit weight has to be computed rather than read. The fp16 storage is
-        dropped as each layer is converted, so peak memory stays at the size of
-        the fp16 checkpoint rather than the sum of both.
+        Used by the ``--quantization <scheme>`` path, where the checkpoint is
+        fp16 and the low-bit weight has to be computed rather than read. The
+        fp16 storage is dropped as each layer is converted, so peak memory
+        stays at the size of the fp16 checkpoint. Layers that were already
+        quantised (an fp8 checkpoint) are left alone.
         """
         if self.quant is not None:
             return
-        qweight, scale = quantize_int8_per_channel(self.weight.data)
-        self.weight = RawParameter(qweight)
-        self.weight_scale_inv = RawParameter(scale)
+        method = get_linear_method(quant)
+        method.convert_from_fp16(self, quant)
         self.quant = quant
+        self.quant_method = method
 
     def extra_repr(self) -> str:
         fmt = self.quant.format if self.quant else "fp16"

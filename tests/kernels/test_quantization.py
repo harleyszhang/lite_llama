@@ -11,9 +11,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.kernels.w8a16 import w8a16_matmul
-from lite_llama.kernels.w4a16 import w4a16_matmul
-from lite_llama.kernels.smoothquant import smoothquant_matmul
+from lite_llama.kernels.quantization import w4a16_matmul, w8a16_matmul, smoothquant_matmul
 from lite_llama.models.quantization import (
     QuantConfig,
     FP8,
