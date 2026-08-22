@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 
 from ..models.config import ModelConfig
-from ..models.quantization import QuantConfig, RawParameter
+from ..models.quantization import RUNTIME_SCHEMES, QuantConfig, RawParameter
 from ..utils.logger import get_logger
 from .weight_utils import hf_weights_iterator
 
@@ -121,9 +121,10 @@ class DefaultModelLoader:
             checkpoints_dir: HuggingFace checkpoint directory (``config.json`` plus
                 ``*.safetensors``).
             device: Torch device string the model must end up on.
-            quantization: Post-load quantisation to apply to an fp16 checkpoint,
-                currently ``"int8"`` or ``None``. Ignored for a checkpoint that is
-                already quantised, which needs no conversion.
+            quantization: Post-load quantisation to apply to an fp16 checkpoint
+                (see :data:`~lite_llama.models.quantization.RUNTIME_SCHEMES`),
+                or ``None``. Ignored for a checkpoint that is already quantised,
+                which needs no conversion.
         """
         start = time.time()
         self._check_device(device)
@@ -150,18 +151,21 @@ class DefaultModelLoader:
         """Apply a runtime quantisation request to a freshly loaded fp16 model.
 
         Raises:
-            ValueError: On a scheme that cannot be produced from an fp16
-                checkpoint (fp8 needs calibration data lite_llama does not have).
+            ValueError: On an unrecognised scheme name.
         """
-        if quantization != "int8":
+        try:
+            quant = QuantConfig.for_runtime_scheme(quantization)
+        except ValueError:
             raise ValueError(
                 f"cannot quantise an fp16 checkpoint to {quantization!r} at load time; "
-                "use 'int8', or point --model-dir at a checkpoint that ships fp8 weights"
-            )
+                f"supported schemes: {sorted(RUNTIME_SCHEMES)}, or point --model-dir "
+                "at a checkpoint that ships pre-quantised weights"
+            ) from None
         if not hasattr(model, "quantize_"):
             raise ValueError(f"{type(model).__name__} does not support runtime quantisation")
-        logger.info("Quantising weights to int8 (per output channel)")
-        model.quantize_(QuantConfig.int8_per_channel())
+        logger.info("Quantising weights to %s (%s, %sx%s scale blocks)",
+                    quantization, quant.format, quant.group_n, quant.group_k)
+        model.quantize_(quant)
 
     @staticmethod
     def _check_device(device: str) -> None:

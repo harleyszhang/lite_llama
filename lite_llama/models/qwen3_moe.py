@@ -25,10 +25,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..distributed.parallel_state import all_reduce_tp, divide, get_tp_world_size
-from ..kernels import fused_moe
 from .base import CausalLM, FusedMLP
 from .config import ModelConfig
-from .quantization import QuantConfig, RawParameter, quantize_int8_per_channel
+from .quantization import QuantConfig, get_moe_method
 
 
 def is_moe_layer(config: ModelConfig, layer_index: int) -> bool:
@@ -78,42 +77,10 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         )
         # Experts live in a ParameterDict so the state-dict keys read
         # ``mlp.experts.{gate_up_proj,down_proj}``; gate and up projections are
-        # fused along dim 1, mirroring the fused K/V layout of attention.
-        self.experts = nn.ParameterDict(self._expert_parameters(quant))
-
-    def _expert_parameters(self, quant: QuantConfig | None) -> dict[str, nn.Parameter]:
-        """Allocate the stacked expert tensors, plus their scale grids when 8-bit."""
-        gate_up_shape = (self.num_experts, 2 * self.moe_intermediate_size, self.hidden_size)
-        down_shape = (self.num_experts, self.hidden_size, self.moe_intermediate_size)
-        if quant is None:
-            return {
-                "gate_up_proj": nn.Parameter(
-                    torch.empty(*gate_up_shape, dtype=torch.float16), requires_grad=False
-                ),
-                "down_proj": nn.Parameter(
-                    torch.empty(*down_shape, dtype=torch.float16), requires_grad=False
-                ),
-            }
-
-        storage = quant.storage_dtype
-        return {
-            "gate_up_proj": RawParameter(torch.empty(*gate_up_shape, dtype=storage)),
-            "gate_up_proj_scale_inv": RawParameter(
-                torch.empty(
-                    self.num_experts,
-                    *quant.scale_shape(2 * self.moe_intermediate_size, self.hidden_size),
-                    dtype=torch.float32,
-                )
-            ),
-            "down_proj": RawParameter(torch.empty(*down_shape, dtype=storage)),
-            "down_proj_scale_inv": RawParameter(
-                torch.empty(
-                    self.num_experts,
-                    *quant.scale_shape(self.hidden_size, self.moe_intermediate_size),
-                    dtype=torch.float32,
-                )
-            ),
-        }
+        # fused along dim 1, mirroring the fused K/V layout of attention. Their
+        # storage format is the quant method's business, not this class's.
+        self.quant_method = get_moe_method(quant)
+        self.experts = nn.ParameterDict(self.quant_method.create_weights(self))
 
     def _route(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute per-token expert ids and weights (HF-compatible ordering).
@@ -137,20 +104,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         x = x.reshape(-1, self.hidden_size)
 
         weights, ids = self._route(x)
-        quant = self.quant
-        out = fused_moe(
-            x,
-            self.experts["gate_up_proj"],
-            self.experts["down_proj"],
-            weights,
-            ids,
-            w1_scale=self.experts.get("gate_up_proj_scale_inv"),
-            w2_scale=self.experts.get("down_proj_scale_inv"),
-            group_n=quant.group_n if quant else 0,
-            # Both GEMMs contract a dimension no wider than the hidden size, so
-            # clamping once here covers ``down_proj``'s narrower one too.
-            group_k=min(quant.group_k, self.hidden_size) if quant else 0,
-        )
+        out = self.quant_method.apply(self, x, weights, ids)
         # Each rank produced the partial sum from its slice of the experts'
         # intermediate dimension.
         out = all_reduce_tp(out)
@@ -158,15 +112,14 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
 
     @torch.no_grad()
     def quantize_experts_(self, quant: QuantConfig) -> None:
-        """Convert loaded fp16 expert weights to int8, in place (see
-        :meth:`lite_llama.models.base.CausalLM.quantize_`)."""
+        """Convert loaded fp16 expert weights to the requested scheme, in place
+        (see :meth:`lite_llama.models.base.CausalLM.quantize_`)."""
         if self.quant is not None:
             return
-        for name in ("gate_up_proj", "down_proj"):
-            qweight, scale = quantize_int8_per_channel(self.experts[name].data)
-            self.experts[name] = RawParameter(qweight)
-            self.experts[f"{name}_scale_inv"] = RawParameter(scale)
+        method = get_moe_method(quant)
+        method.convert_from_fp16(self, quant)
         self.quant = quant
+        self.quant_method = method
 
 
 class Qwen3MoeModel(CausalLM):

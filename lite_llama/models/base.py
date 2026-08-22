@@ -416,11 +416,11 @@ class CausalLM(nn.Module):
     
     @torch.no_grad()
     def quantize_(self, quant: QuantConfig) -> None:
-        """Convert every loaded fp16 projection to 8 bit, in place.
-    
-        The ``--quantization int8`` path: the checkpoint has no scales of its own,
-        so they are computed here, after loading. Layers that were already 8-bit
-        (an fp8 checkpoint) are left alone.
+        """Convert every loaded fp16 projection to the requested scheme, in place.
+
+        The ``--quantization <scheme>`` path: the checkpoint has no scales of its
+        own, so they are computed here, after loading. Layers that were already
+        quantised (an fp8 checkpoint) are left alone.
         """
         for module in self.modules():
             if isinstance(module, LinearBase):
