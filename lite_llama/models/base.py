@@ -5,8 +5,13 @@ RMSNorm, and how wide the attention projections are versus the residual stream.
 Everything else (KV-cache write, the prefill/decode kernel split, SwiGLU MLP,
 pre-norm residual wiring, the forward skeleton) lives here once in
 :class:`CausalLM`; concrete models only declare their differences. K and V are
-stored fused as ``kv_proj_weight`` so decode writes both cache halves in one launch
+stored fused as ``kv_proj.weight`` so decode writes both cache halves in one launch
 (:mod:`lite_llama.models.weights` owns the key translation).
+
+Every projection is a :mod:`lite_llama.models.linear` layer, which is where the
+two cross-cutting concerns live: an 8-bit weight swaps ``F.linear`` for the w8a16
+kernel, and tensor parallelism narrows the layer and adds the block's single
+all-reduce. Neither shows up in the code below beyond the choice of class.
 
 Usage:
     class LlamaModel(CausalLM): ...   # built via ModelRegistry + ModelLoader
@@ -22,6 +27,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..distributed.parallel_state import divide, get_tp_world_size
 from ..kernels import (
     flash_attention2_no_pad,
     flash_decoding,
@@ -32,6 +38,8 @@ from ..kernels import (
 )
 from . import weights
 from .config import ModelConfig
+from .linear import ColumnParallelLinear, LinearBase, RowParallelLinear
+from .quantization import QuantConfig
 from .rotary_embedding import RotaryEmbedding
 
 # The prefill kernel evaluates exp2 rather than exp, so its softmax scale has to
@@ -136,44 +144,59 @@ class PagedAttention(nn.Module):
 class Attention(nn.Module):
     """Fused-QKV self-attention with RoPE and optional per-head q/k normalisation.
 
+    Under tensor parallelism the heads are dealt out across ranks: q/k/v are
+    column-parallel (each rank owns ``num_heads / tp`` query heads and the KV heads
+    that go with them, so its KV cache is that much smaller too) and ``o_proj`` is
+    row-parallel, contributing this block's only all-reduce.
+
     Args:
         config: Model config supplying the head geometry.
         qkv_bias: Whether q/k/v projections carry a bias (true for Qwen2).
         use_qk_norm: Whether q and k are RMSNormed per head before RoPE (Qwen3).
+        quant: Quantisation layout of the projections, or ``None`` for fp16.
     """
 
     def __init__(
-        self, config: ModelConfig, *, qkv_bias: bool = False, use_qk_norm: bool = False
+        self,
+        config: ModelConfig,
+        *,
+        qkv_bias: bool = False,
+        use_qk_norm: bool = False,
+        quant: QuantConfig | None = None,
     ) -> None:
         super().__init__()
-        self.num_heads = config.num_heads
-        self.num_kv_heads = config.num_kv_heads
+        tp_size = get_tp_world_size()
+        self.num_heads = divide(config.num_heads, tp_size, "attention heads")
+        self.num_kv_heads = divide(config.num_kv_heads, tp_size, "key/value heads")
         self.head_dim = config.head_dim
         self.hidden_size = config.hidden_size
-        # Attention width is independent of the residual stream width (Qwen3).
-        self.q_size = config.q_size
-        self.kv_size = config.kv_size
+        # Attention width is independent of the residual stream width (Qwen3),
+        # and these are this rank's share of it.
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
         self.rms_norm_eps = config.rms_norm_eps
         self.use_qk_norm = use_qk_norm
 
-        dtype = torch.float16
-        self.q_proj_weight = nn.Parameter(torch.empty(self.q_size, self.hidden_size, dtype=dtype))
-        # K and V fused along dim 0 so one split yields both.
-        self.kv_proj_weight = nn.Parameter(
-            torch.empty(2 * self.kv_size, self.hidden_size, dtype=dtype)
+        self.q_proj = ColumnParallelLinear(
+            self.hidden_size, config.q_size, bias=qkv_bias, quant=quant, what="query features"
         )
-        self.o_proj_weight = nn.Parameter(torch.empty(self.hidden_size, self.q_size, dtype=dtype))
-
-        if qkv_bias:
-            self.q_proj_bias = nn.Parameter(torch.empty(self.q_size, dtype=dtype))
-            self.kv_proj_bias = nn.Parameter(torch.empty(2 * self.kv_size, dtype=dtype))
-        else:
-            self.q_proj_bias = None
-            self.kv_proj_bias = None
+        # K and V fused along dim 0 so one split yields both. Each rank assembles
+        # its own fused pair from its slice of k_proj and of v_proj.
+        self.kv_proj = ColumnParallelLinear(
+            self.hidden_size,
+            2 * config.kv_size,
+            bias=qkv_bias,
+            quant=quant,
+            what="key/value features",
+        )
+        self.o_proj = RowParallelLinear(
+            config.q_size, self.hidden_size, quant=quant, what="query features"
+        )
 
         if use_qk_norm:
-            self.q_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=dtype))
-            self.k_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=dtype))
+            # Normalises over head_dim, so it is replicated rather than sharded.
+            self.q_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=torch.float16))
+            self.k_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=torch.float16))
 
         self.attn = PagedAttention(self.num_kv_heads, self.head_dim)
 
@@ -186,8 +209,8 @@ class Attention(nn.Module):
         batch_size, seq_len, _ = x.shape
         x = x.view(-1, self.hidden_size)
 
-        xq = F.linear(x, self.q_proj_weight, self.q_proj_bias)
-        xkv = F.linear(x, self.kv_proj_weight, self.kv_proj_bias)
+        xq = self.q_proj(x)
+        xkv = self.kv_proj(x)
         xk, xv = torch.split(xkv, self.kv_size, dim=-1)
 
         num_tokens = batch_size * seq_len
@@ -218,24 +241,23 @@ class Attention(nn.Module):
         attn_output = self.attn(xq, xk, xv, atten_info, layer_index, is_prefill=seq_len > 1)
         # Back to the residual-stream layout before the output projection.
         attn_output = attn_output.view(batch_size, seq_len, self.q_size)
-        return F.linear(attn_output, self.o_proj_weight)
+        return self.o_proj(attn_output)
 
 
 class FusedMLP(nn.Module):
-    """SwiGLU feed-forward block: ``down(silu(gate(x)) * up(x))``."""
+    """SwiGLU feed-forward block: ``down(silu(gate(x)) * up(x))``.
 
-    def __init__(self, config: ModelConfig) -> None:
+    ``gate``/``up`` are column-parallel and ``down`` row-parallel, so the split
+    intermediate dimension never has to be gathered — only ``down``'s partial sums
+    are all-reduced.
+    """
+
+    def __init__(self, config: ModelConfig, quant: QuantConfig | None = None) -> None:
         super().__init__()
-        dtype = torch.float16
-        self.gate_proj = nn.Linear(
-            config.hidden_size, config.intermediate_size, bias=False, dtype=dtype
-        )
-        self.up_proj = nn.Linear(
-            config.hidden_size, config.intermediate_size, bias=False, dtype=dtype
-        )
-        self.down_proj = nn.Linear(
-            config.intermediate_size, config.hidden_size, bias=False, dtype=dtype
-        )
+        hidden, inter = config.hidden_size, config.intermediate_size
+        self.gate_proj = ColumnParallelLinear(hidden, inter, quant=quant, what="MLP intermediate")
+        self.up_proj = ColumnParallelLinear(hidden, inter, quant=quant, what="MLP intermediate")
+        self.down_proj = RowParallelLinear(inter, hidden, quant=quant, what="MLP intermediate")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.down_proj(swiglu_forward(self.gate_proj(x), self.up_proj(x)))
@@ -256,6 +278,7 @@ class DecoderLayer(nn.Module):
         *,
         qkv_bias: bool = False,
         use_qk_norm: bool = False,
+        quant: QuantConfig | None = None,
         mlp: nn.Module | None = None,
     ) -> None:
         super().__init__()
@@ -266,9 +289,11 @@ class DecoderLayer(nn.Module):
         self.post_attention_layernorm_weight = nn.Parameter(
             torch.ones(config.hidden_size, dtype=torch.float16)
         )
-        self.self_attn = Attention(config, qkv_bias=qkv_bias, use_qk_norm=use_qk_norm)
+        self.self_attn = Attention(
+            config, qkv_bias=qkv_bias, use_qk_norm=use_qk_norm, quant=quant
+        )
         # MoE 变体由 CausalLM._build_mlp 注入 SparseMoeBlock;默认 dense SwiGLU
-        self.mlp = mlp if mlp is not None else FusedMLP(config)
+        self.mlp = mlp if mlp is not None else FusedMLP(config, quant)
 
     def forward(
         self,
@@ -312,18 +337,26 @@ class CausalLM(nn.Module):
     use_qk_norm: ClassVar[bool] = False
     rotary_class: ClassVar[type[RotaryEmbedding]] = RotaryEmbedding
     hf_prefix: ClassVar[str] = "model."
-
+    
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.config = config
+        # Weight format of the checkpoint being loaded, and therefore of every
+        # projection built below. ``None`` is fp16; an fp8 checkpoint declares its
+        # own block layout, which the layers keep as-is instead of widening.
+        self.quant = config.quant
         dtype = torch.float16
-
+    
+        # Vocabulary tensors stay replicated and fp16: the embedding is a gather
+        # (no arithmetic to split) and sharding either of them would buy ~0.3 GB
+        # per rank at the price of two more collectives on every step.
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, dtype=dtype)
         self.layers = nn.ModuleList(
             DecoderLayer(
                 config,
                 qkv_bias=self.qkv_bias,
                 use_qk_norm=self.use_qk_norm,
+                quant=self._layer_quant(i),
                 mlp=self._build_mlp(config, i),
             )
             for i in range(config.num_layers)
@@ -332,26 +365,40 @@ class CausalLM(nn.Module):
         self.lm_head_weight = nn.Parameter(
             torch.empty(config.vocab_size, config.hidden_size, dtype=dtype)
         )
-
+    
         self.rotary_emb = self.rotary_class(config.rope_config)
         self.rms_norm_eps = config.rms_norm_eps
-
+    
+    def _layer_quant(self, layer_index: int) -> QuantConfig | None:
+        """Quantisation layout for layer ``layer_index``, honouring the checkpoint's
+        ``modules_to_not_convert``.
+    
+        Checkpoints exclude modules by HF path, so the question is asked with the
+        HF path a projection of this layer would have. All projections of one layer
+        share an answer in every checkpoint seen so far; the ones excluded by name
+        (layer norms, the MoE router, ``lm_head``) are not built from
+        :class:`~lite_llama.models.linear.LinearBase` at all.
+        """
+        if self.quant is None:
+            return None
+        return self.quant if self.quant.quantizes(f"{self.hf_prefix}layers.{layer_index}") else None
+    
     def _build_mlp(self, config: ModelConfig, layer_index: int) -> nn.Module:
         """Per-layer MLP factory; MoE 变体覆盖它以按层返回 SparseMoeBlock。"""
-        return FusedMLP(config)
-
+        return FusedMLP(config, self._layer_quant(layer_index))
+    
     # ---- weight loading --------------------------------------------------- #
     def translate_weight_key(self, key: str) -> weights.Target:
         """Map a checkpoint key onto this model's parameters.
-
+    
         Strips :attr:`hf_prefix` (``lm_head.weight`` sits outside it) and defers
         the rest to :func:`lite_llama.models.weights.translate_text_key`.
         """
         return weights.translate_text_key(key.removeprefix(self.hf_prefix))
-
+    
     def load_weights(self, checkpoint: Iterable[tuple[str, torch.Tensor]]) -> None:
         """Fill every parameter from a HuggingFace checkpoint stream.
-
+    
         Args:
             checkpoint: ``(key, tensor)`` pairs as produced by
                 :func:`lite_llama.executor.weight_utils.hf_weights_iterator`.
@@ -363,7 +410,22 @@ class CausalLM(nn.Module):
             tied={"lm_head_weight": "embed_tokens.weight"}
             if self.config.tie_word_embeddings
             else None,
+            shard=weights.tp_shard,
         )
+    
+    @torch.no_grad()
+    def quantize_(self, quant: QuantConfig) -> None:
+        """Convert every loaded fp16 projection to 8 bit, in place.
+    
+        The ``--quantization int8`` path: the checkpoint has no scales of its own,
+        so they are computed here, after loading. Layers that were already 8-bit
+        (an fp8 checkpoint) are left alone.
+        """
+        for module in self.modules():
+            if isinstance(module, LinearBase):
+                module.quantize_(quant)
+            elif hasattr(module, "quantize_experts_"):
+                module.quantize_experts_(quant)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

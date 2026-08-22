@@ -8,6 +8,12 @@ fp32 softmax over *all* experts, then top-k, then renormalise — an order that 
 not interchangeable. The expert FFN runs as two grouped GEMMs
 (:func:`lite_llama.kernels.fused_moe.fused_moe`), not a Python loop.
 
+The experts are where an A3B checkpoint's weight actually is (~29 of its 30B
+parameters), so this is also where the two features that make it servable on small
+cards apply: the stacked tensors stay 8-bit end to end, and their intermediate
+dimension is split across tensor-parallel ranks — the expert equivalent of the
+dense ``gate/up`` + ``down`` pairing, ending in the same single all-reduce.
+
 Usage:
     model = Qwen3MoeModel(config)   # via ModelRegistry
 """
@@ -18,9 +24,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..distributed.parallel_state import all_reduce_tp, divide, get_tp_world_size
 from ..kernels import fused_moe
 from .base import CausalLM, FusedMLP
 from .config import ModelConfig
+from .quantization import QuantConfig, RawParameter, quantize_int8_per_channel
 
 
 def is_moe_layer(config: ModelConfig, layer_index: int) -> bool:
@@ -45,15 +53,24 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         config: Any config exposing the HF MoE fields ``num_experts``,
             ``num_experts_per_tok``, ``moe_intermediate_size`` and
             ``norm_topk_prob``.
+        quant: Quantisation layout of the expert weights, or ``None`` for fp16.
+            The router is always fp16: it is ``num_experts x hidden``, small
+            enough to be free and precise enough to matter, since a wrong top-k
+            pick costs far more than a rounded weight.
     """
 
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: ModelConfig, quant: QuantConfig | None = None) -> None:
         super().__init__()
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
         self.hidden_size = config.hidden_size
-        self.moe_intermediate_size = config.moe_intermediate_size
+        # Each rank owns a slice of every expert's intermediate dimension, the
+        # same split a dense MLP gets, applied to all experts at once.
+        self.moe_intermediate_size = divide(
+            config.moe_intermediate_size, get_tp_world_size(), "MoE intermediate"
+        )
+        self.quant = quant
 
         dtype = torch.float16
         self.gate_weight = nn.Parameter(
@@ -62,26 +79,41 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         # Experts live in a ParameterDict so the state-dict keys read
         # ``mlp.experts.{gate_up_proj,down_proj}``; gate and up projections are
         # fused along dim 1, mirroring the fused K/V layout of attention.
-        self.experts = nn.ParameterDict(
-            {
+        self.experts = nn.ParameterDict(self._expert_parameters(quant))
+
+    def _expert_parameters(self, quant: QuantConfig | None) -> dict[str, nn.Parameter]:
+        """Allocate the stacked expert tensors, plus their scale grids when 8-bit."""
+        gate_up_shape = (self.num_experts, 2 * self.moe_intermediate_size, self.hidden_size)
+        down_shape = (self.num_experts, self.hidden_size, self.moe_intermediate_size)
+        if quant is None:
+            return {
                 "gate_up_proj": nn.Parameter(
-                    torch.empty(
-                        self.num_experts,
-                        2 * self.moe_intermediate_size,
-                        self.hidden_size,
-                        dtype=dtype,
-                    )
+                    torch.empty(*gate_up_shape, dtype=torch.float16), requires_grad=False
                 ),
                 "down_proj": nn.Parameter(
-                    torch.empty(
-                        self.num_experts,
-                        self.hidden_size,
-                        self.moe_intermediate_size,
-                        dtype=dtype,
-                    )
+                    torch.empty(*down_shape, dtype=torch.float16), requires_grad=False
                 ),
             }
-        )
+
+        storage = quant.storage_dtype
+        return {
+            "gate_up_proj": RawParameter(torch.empty(*gate_up_shape, dtype=storage)),
+            "gate_up_proj_scale_inv": RawParameter(
+                torch.empty(
+                    self.num_experts,
+                    *quant.scale_shape(2 * self.moe_intermediate_size, self.hidden_size),
+                    dtype=torch.float32,
+                )
+            ),
+            "down_proj": RawParameter(torch.empty(*down_shape, dtype=storage)),
+            "down_proj_scale_inv": RawParameter(
+                torch.empty(
+                    self.num_experts,
+                    *quant.scale_shape(self.hidden_size, self.moe_intermediate_size),
+                    dtype=torch.float32,
+                )
+            ),
+        }
 
     def _route(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute per-token expert ids and weights (HF-compatible ordering).
@@ -105,14 +137,36 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         x = x.reshape(-1, self.hidden_size)
 
         weights, ids = self._route(x)
+        quant = self.quant
         out = fused_moe(
             x,
             self.experts["gate_up_proj"],
             self.experts["down_proj"],
             weights,
             ids,
+            w1_scale=self.experts.get("gate_up_proj_scale_inv"),
+            w2_scale=self.experts.get("down_proj_scale_inv"),
+            group_n=quant.group_n if quant else 0,
+            # Both GEMMs contract a dimension no wider than the hidden size, so
+            # clamping once here covers ``down_proj``'s narrower one too.
+            group_k=min(quant.group_k, self.hidden_size) if quant else 0,
         )
+        # Each rank produced the partial sum from its slice of the experts'
+        # intermediate dimension.
+        out = all_reduce_tp(out)
         return out.reshape(*leading_shape, self.hidden_size)
+
+    @torch.no_grad()
+    def quantize_experts_(self, quant: QuantConfig) -> None:
+        """Convert loaded fp16 expert weights to int8, in place (see
+        :meth:`lite_llama.models.base.CausalLM.quantize_`)."""
+        if self.quant is not None:
+            return
+        for name in ("gate_up_proj", "down_proj"):
+            qweight, scale = quantize_int8_per_channel(self.experts[name].data)
+            self.experts[name] = RawParameter(qweight)
+            self.experts[f"{name}_scale_inv"] = RawParameter(scale)
+        self.quant = quant
 
 
 class Qwen3MoeModel(CausalLM):
@@ -123,6 +177,7 @@ class Qwen3MoeModel(CausalLM):
 
     def _build_mlp(self, config: ModelConfig, layer_index: int) -> nn.Module:
         # ``mlp_only_layers`` keep the dense SwiGLU; everything else is routed.
+        quant = self._layer_quant(layer_index)
         if is_moe_layer(config, layer_index):
-            return Qwen3MoeSparseMoeBlock(config)
-        return FusedMLP(config)
+            return Qwen3MoeSparseMoeBlock(config, quant)
+        return FusedMLP(config, quant)
