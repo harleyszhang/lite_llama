@@ -7,16 +7,14 @@ name = "lite-llama"
 version = "0.3.0"
 description = "A lightweight, Triton-kernel based LLM inference framework for LLaMA / Qwen / LLaVA / Qwen3-VL"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 license = "Apache-2.0"
 authors = [{ name = "harleyszhang", email = "zhg5200211@outlook.com" }]
 keywords = ["llm", "inference", "triton", "cuda", "transformer"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
@@ -80,7 +78,7 @@ lite_llama = ["py.typed"]
 # --------------------------------------------------------------------------- #
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py313"
 extend-exclude = ["docs", "images", "my_weight"]
 
 [tool.ruff.lint]

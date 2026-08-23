@@ -12,12 +12,7 @@ import pytest
 import torch
 
 from lite_llama.kernels.quantization import w4a16_matmul, w8a16_matmul, smoothquant_matmul
-from lite_llama.models.quantization import (
-    QuantConfig,
-    FP8,
-    INT8,
-    INT4,
-    SMOOTHQUANT,
+from lite_llama.modules.quantization.utils import (
     quantize_int8_per_channel,
     quantize_int4_groupwise,
 )
@@ -123,32 +118,36 @@ def test_smoothquant_matches_reference(M, N, K):
 
 
 # --------------------------------------------------------------------------- #
-# QuantConfig
+# QuantizationConfig
 # --------------------------------------------------------------------------- #
 def test_quant_config_fp8():
-    qc = QuantConfig(FP8, 128, 128)
+    from lite_llama.modules.quantization.fp8 import Fp8Config
+    qc = Fp8Config(group_n=128, group_k=128)
     assert qc.is_fp8
     assert qc.storage_dtype == torch.uint8
     assert qc.scale_shape(256, 512) == (2, 4)
 
 
 def test_quant_config_int8():
-    qc = QuantConfig.int8_per_channel()
-    assert qc.format == INT8
+    from lite_llama.modules.quantization.blockwise_int8 import BlockInt8Config
+    qc = BlockInt8Config.per_channel()
+    assert qc.get_name() == "blockwise_int8"
     assert qc.storage_dtype == torch.int8
     assert qc.scale_shape(256, 512) == (256, 1)
 
 
 def test_quant_config_int4():
-    qc = QuantConfig(INT4, 1, 128)
+    from lite_llama.modules.quantization.awq import AWQConfig
+    qc = AWQConfig(group_size=128)
     assert qc.is_int4
     assert qc.storage_dtype == torch.int32
     assert qc.scale_shape(256, 512) == (256, 4)
 
 
 def test_quant_config_smoothquant():
-    qc = QuantConfig(SMOOTHQUANT, 1, 1 << 30, is_dynamic=True)
-    assert qc.format == SMOOTHQUANT
+    from lite_llama.modules.quantization.w8a8_int8 import W8A8Int8Config
+    qc = W8A8Int8Config()
+    assert qc.get_name() == "w8a8_int8"
     assert qc.is_dynamic
     assert qc.storage_dtype == torch.int8
 

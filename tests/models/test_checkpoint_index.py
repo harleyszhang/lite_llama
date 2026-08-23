@@ -34,6 +34,24 @@ from tests.conftest import REPO_ROOT
 #: Scale tables are consumed by the loader, not handed to the model.
 _SCALE_SUFFIX = ".weight_scale_inv"
 
+#: AWQ/GPTQ key renaming (matches the non-tensor part of adapt_int4_checkpoint).
+_INT4_KEY_RENAMES: dict[str, str | None] = {
+    ".qweight": ".weight",
+    ".qzeros": ".weight_zeros",
+    ".scales": ".weight_scale",
+    ".g_idx": None,  # dropped
+}
+
+
+def _adapt_int4_key(key: str) -> str | None:
+    """Rename an AWQ/GPTQ checkpoint key to canonical form (key only, no tensor)."""
+    for suffix, replacement in _INT4_KEY_RENAMES.items():
+        if key.endswith(suffix):
+            if replacement is None:
+                return None
+            return key.removesuffix(suffix) + replacement
+    return key
+
 
 def _candidate_dirs() -> list[Path]:
     override = os.environ.get("LITE_LLAMA_INDEX_DIRS")
@@ -66,9 +84,19 @@ def mapping(checkpoint: Path) -> tuple[list[str], dict[str, str | None], set[str
     with init_empty_parameters():
         model = model_cls(config)
 
+    # For AWQ/GPTQ checkpoints, adapt_int4_checkpoint renames keys before
+    # translate_weight_key sees them. Simulate that renaming here.
+    is_int4 = config.quant is not None and getattr(config.quant, "is_int4", False)
+
     translated: dict[str, str | None] = {}
     for key in keys:
-        target = model.translate_weight_key(key)
+        effective_key = key
+        if is_int4:
+            effective_key = _adapt_int4_key(key)
+            if effective_key is None:
+                translated[key] = None  # dropped (e.g. g_idx)
+                continue
+        target = model.translate_weight_key(effective_key)
         translated[key] = None if target is None else target[0]
     return keys, translated, set(dict(model.named_parameters())), config
 
