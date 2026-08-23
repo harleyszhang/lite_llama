@@ -3,7 +3,7 @@
 Where tensor parallelism splits a *weight matrix* and pays an all-reduce per block,
 data parallelism splits the *request stream* and pays nothing in the forward: a
 replica holds the entire model, so it needs no collective at all. The only machinery
-is therefore routing \u2014 pick a replica per request, collect its answer \u2014 which is why
+is therefore routing pick a replica per request, collect its answer  which is why
 the replicas here are OS processes talking over ``multiprocessing`` queues rather than
 NCCL ranks, and why each worker profiles and sizes its own KV cache against its card.
 
@@ -11,17 +11,17 @@ The structure mirrors how vLLM and SGLang lay this out, scaled down to lite_llam
 synchronous batch API:
 
 * a **worker** (:func:`_dp_worker`) is a rank-aware process that builds one
-  :class:`~lite_llama.engine.llm.LLM` on its own GPU and serves requests off a queue \u2014
+  :class:`~lite_llama.engine.llm.LLM` on its own GPU and serves requests off a queue
   the role of vLLM's ``DPEngineCoreProc`` and SGLang's scheduler process;
 * a **load balancer** (:mod:`lite_llama.engine.dp_load_balancer`) decides which replica
-  each request goes to \u2014 SGLang's ``LoadBalanceMethod``, vLLM's ``DPLBAsyncMPClient``;
+  each request goes to  SGLang's ``LoadBalanceMethod``, vLLM's ``DPLBAsyncMPClient``;
 * the **coordinator** (:class:`DataParallelEngine`) owns the worker processes, routes
-  through the balancer, and reassembles results in the caller's order \u2014 SGLang's
+  through the balancer, and reassembles results in the caller's order  SGLang's
   ``DataParallelController``.
 
 The cost model that follows: DP multiplies throughput (each replica decodes an
 independent batch) while leaving per-token latency alone, and needs the weights
-resident once per GPU. TP is the opposite trade \u2014 it splits the weights so a model too
+resident once per GPU. TP is the opposite trade  it splits the weights so a model too
 large for one card fits, and pays latency for the collectives. They compose:
 ``dp_size`` replicas of ``tp_size`` ranks each, the grid
 :func:`~lite_llama.distributed.parallel_state.init_parallel` describes.
