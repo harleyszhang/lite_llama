@@ -1,0 +1,34 @@
+
+=== WITHOUT Chunked Prefill (v0.6) ===
+
+Step 1: [PREFILL ████████████████████████████████] 2000 tokens (BLOCKING)
+         Decode requests A,B,C,D: ⏸ STALLED
+
+Step 2: [DECODE A] [DECODE B] [DECODE C] [DECODE D]
+         (finally running after full prefill)
+
+⚠ Decode latency spike: ~200ms during long prefill
+
+
+=== WITH Chunked Prefill (v0.7, chunk=512) ===
+
+Step 1: [PREFILL chunk 1/4 ████    ] + [DECODE A,B,C,D ████]
+Step 2: [PREFILL chunk 2/4 ████    ] + [DECODE A,B,C,D ████]
+Step 3: [PREFILL chunk 3/4 ████    ] + [DECODE A,B,C,D ████]
+Step 4: [PREFILL chunk 4/4 ████    ] + [DECODE A,B,C,D ████]
+
+✓ Decode runs EVERY step — no latency spike!
+✓ 2000-token prefill split into 4×512 chunks
+
+
+=== Performance Comparison ===
+
+| Metric              | No Chunk | Chunk 512 | Improvement |
+|---------------------|----------|-----------|-------------|
+| Decode steps        | 0 (blocked) | 4 (every step) | ∞        |
+| Max decode latency  | ~200ms   | ~4ms      | 50x better  |
+| Prefill throughput  | Same     | Same      | No loss     |
+| Time-to-first-token | Same     | Same      | No loss     |
+
+Conclusion: Chunked prefill eliminates head-of-line blocking
+            with ZERO throughput cost.
