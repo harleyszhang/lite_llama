@@ -12,7 +12,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from lite_llama.models.linear import ReplicatedLinear
+from lite_llama.modules.linear import ReplicatedLinear
 from lite_llama.models.quantization import (
     FP8,
     INT4,
@@ -26,6 +26,9 @@ from lite_llama.models.quantization import (
     quantize_int8_groupwise,
 )
 from lite_llama.models.quantization.methods import (
+    AWQLinearMethod,
+    Fp8LinearMethod,
+    GPTQLinearMethod,
     SmoothQuantLinearMethod,
     UnquantizedLinearMethod,
     UnquantizedMoeMethod,
@@ -64,12 +67,23 @@ def _fill_fp16(layer: ReplicatedLinear, scale: float = 0.05) -> torch.Tensor:
 # --------------------------------------------------------------------------- #
 def test_linear_method_registry():
     assert isinstance(get_linear_method(None), UnquantizedLinearMethod)
-    for fmt in (FP8, INT8):
-        assert isinstance(get_linear_method(QuantConfig(fmt, 128, 128)), W8A16LinearMethod)
+    # fp8 linears run true W8A8 (per-token fp8 activations); int8 stays W8A16.
+    assert isinstance(get_linear_method(QuantConfig(FP8, 128, 128)), Fp8LinearMethod)
+    assert isinstance(get_linear_method(QuantConfig(INT8, 128, 128)), W8A16LinearMethod)
     assert isinstance(
         get_linear_method(QuantConfig.smoothquant_per_channel()), SmoothQuantLinearMethod
     )
     assert isinstance(get_linear_method(QuantConfig.int4_groupwise()), W4A16LinearMethod)
+
+
+def test_int4_method_dispatches_on_checkpoint_method():
+    """AWQ/GPTQ checkpoints get their named (vLLM-style) method classes."""
+    assert isinstance(get_linear_method(QuantConfig(INT4, 1, 128, method="awq")), AWQLinearMethod)
+    assert isinstance(
+        get_linear_method(QuantConfig(INT4, 1, 128, method="gptq")), GPTQLinearMethod
+    )
+    # Runtime int4 (no checkpoint layout) stays on the generic method.
+    assert isinstance(get_linear_method(QuantConfig(INT4, 1, 128)), W4A16LinearMethod)
 
 
 def test_moe_method_registry():
@@ -167,7 +181,7 @@ def test_quantize_fp8_per_channel_roundtrip():
     layer = ReplicatedLinear(256, 128)
     w = _fill_fp16(layer)
     layer.quantize_(QuantConfig.fp8_per_channel())
-    assert isinstance(layer.quant_method, W8A16LinearMethod)
+    assert isinstance(layer.quant_method, Fp8LinearMethod)
     assert layer.weight.dtype == torch.uint8
     deq = layer.weight.view(torch.float8_e4m3fn).float() * layer.weight_scale_inv
     # e4m3 has 3 mantissa bits, so the tolerance is wider than int8's.

@@ -191,6 +191,7 @@ class ContinuousBatchingEngine:
         use_cuda_graph: bool = True,
         quantization: str | None = None,
         tensor_parallel_size: int = 1,
+        kv_cache_dtype: str = "auto",
     ) -> ContinuousBatchingEngine:
         """Load a checkpoint and wrap it in a continuous-batching engine.
 
@@ -209,6 +210,8 @@ class ContinuousBatchingEngine:
                 Orthogonal to batching -- it changes the linear layers, not the
                 KV cache or the schedule.
             tensor_parallel_size: Must be 1; see below.
+            kv_cache_dtype: KV-cache element type, forwarded to the engine
+                (``"auto"`` for fp16, or an fp8 spelling to halve the cache).
 
         Raises:
             NotImplementedError: The checkpoint is multimodal, or tensor
@@ -240,6 +243,7 @@ class ContinuousBatchingEngine:
             device=device,
             use_cuda_graph=use_cuda_graph,
             quantization=quantization,
+            kv_cache_dtype=kv_cache_dtype,
         )
         return cls(
             engine,

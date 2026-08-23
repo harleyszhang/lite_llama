@@ -310,6 +310,7 @@ class LLMEngine:
         use_cuda_graph: bool = True,
         quantization: str | None = None,
         tensor_parallel_size: int = 1,
+        kv_cache_dtype: str = "auto",
     ) -> None:
         self.device = device
         self.model_path = checkpoints_dir
@@ -322,6 +323,7 @@ class LLMEngine:
             device=device,
             use_cuda_graph=use_cuda_graph,
             quantization=quantization,
+            kv_cache_dtype=kv_cache_dtype,
         )
         if use_cuda_graph:
             self.model_runner.enable_cuda_graph()

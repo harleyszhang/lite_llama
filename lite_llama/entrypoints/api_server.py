@@ -84,6 +84,7 @@ class ServerConfig:
         device: Torch device string.
         use_cuda_graph: Capture decode CUDA graphs.
         quantization: Runtime weight quantisation for fp16 checkpoints.
+        kv_cache_dtype: KV-cache element type (``"auto"`` or an fp8 spelling).
         chat_template: ``True`` applies the tokenizer's chat template to
             ``/v1/chat/completions`` messages. Turn it off for base models, which
             have no template and degenerate when given one.
@@ -98,6 +99,7 @@ class ServerConfig:
     device: str = "cuda"
     use_cuda_graph: bool = True
     quantization: str | None = None
+    kv_cache_dtype: str = "auto"
     chat_template: bool = True
 
     @property
@@ -241,6 +243,7 @@ def build_app(config: ServerConfig, engine: AsyncLLMEngine | None = None):
                 device=config.device,
                 use_cuda_graph=config.use_cuda_graph,
                 quantization=config.quantization,
+                kv_cache_dtype=config.kv_cache_dtype,
             )
         active: AsyncLLMEngine = state["engine"]
         active.start()
