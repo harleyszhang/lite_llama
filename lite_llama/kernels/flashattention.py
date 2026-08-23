@@ -1,12 +1,7 @@
-# https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
-# https://github.com/ELS-RD/kernl/blob/main/src/kernl/implementations/attention.py#L438
-
 """FlashAttention v1 (Triton) with a PyTorch reference for cross-checking.
 
-Tiles attention over K/V blocks so the full ``QK^T`` score matrix never
-materialises in HBM, carrying the online-softmax statistics instead.
-:func:`standard_attention` is the naive reference; the ``test_*`` helpers compare
-the two for the prefill and decode stages.
+Tiles attention over K/V blocks so the full QK^T score matrix never materialises
+in HBM, carrying the online-softmax statistics instead.
 
 Usage:
     out = flash_attention_v1(q, k, v)   # q,k,v: [batch, heads, seq, head_dim]
