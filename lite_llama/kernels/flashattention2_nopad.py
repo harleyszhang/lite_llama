@@ -193,12 +193,22 @@ def flash_attention2_no_pad(
     batchs = b_seq_len.shape[0]
     n_heads, HEAD_DIM = q.shape[1], q.shape[2]
 
-    BLOCK_SIZE = 64  # For Ampere Architecture, 3090ti, set 128
-    num_warps = 4 if HEAD_DIM <= 64 else 8
-    num_stages = 1
+    # Autotune lookup: use persisted best config if available, else heuristic.
+    from .autotune import get_best_config
+    tuned = get_best_config("flash_attn_nopad", m=max_seq_len, n=HEAD_DIM, k=HEAD_DIM, dtype="fp16")
+    if tuned is not None:
+        BLOCK_M = tuned.get("BLOCK_M_SIZE", 64)
+        BLOCK_N = tuned.get("BLOCK_N_SIZE", 64)
+        num_warps = tuned.get("num_warps", 4)
+        num_stages = tuned.get("num_stages", 1)
+    else:
+        BLOCK_M = 64  # For Ampere Architecture, 3090ti, set 128
+        BLOCK_N = 64
+        num_warps = 4 if HEAD_DIM <= 64 else 8
+        num_stages = 1
 
     num_kv_groups = q.shape[1] // k.shape[1]  # num_q_heads // num_k_heads
-    grid = (triton.cdiv(max_seq_len, BLOCK_SIZE), batchs * n_heads, 1)
+    grid = (triton.cdiv(max_seq_len, BLOCK_M), batchs * n_heads, 1)
 
     flash_attention2_nopad_kernel[grid](
         q,
@@ -223,8 +233,8 @@ def flash_attention2_no_pad(
         output.stride(1),
         output.stride(2),
         HEAD_DIM=HEAD_DIM,
-        BLOCK_M_SIZE=BLOCK_SIZE,  # 使用或者关闭 autotune 针对不同机器和上下文长度自动优化内核配置
-        BLOCK_N_SIZE=BLOCK_SIZE,
+        BLOCK_M_SIZE=BLOCK_M,
+        BLOCK_N_SIZE=BLOCK_N,
         num_warps=num_warps,
         num_stages=num_stages,
     )
