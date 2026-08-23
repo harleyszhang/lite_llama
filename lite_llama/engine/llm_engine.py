@@ -16,6 +16,7 @@ from typing import Any
 import torch
 from transformers import AutoTokenizer
 
+from ..distributed.parallel_state import broadcast_tp, get_tp_world_size
 from ..executor.model_runner import ModelRunner
 from ..utils.path_utils import get_model_name_from_path
 from .detokenizer import IncrementalDetokenizer
@@ -177,6 +178,11 @@ class _DecodeSession:
                     self._tokens[:, :cur_pos], self._is_generated[:, :cur_pos]
                 )
             next_token = engine.sampler.sample(logits, params, generated).reshape(-1)
+            # TP synchronisation: rank 0 samples, then broadcasts the token ids
+            # to all other TP ranks. Without this, non-greedy sampling would
+            # diverge across ranks (each has an independent RNG state).
+            if get_tp_world_size() > 1:
+                next_token = broadcast_tp(next_token)
 
             # Only fill positions that are not part of the original prompt.
             writable = ~self._prompt_mask[:, cur_pos]

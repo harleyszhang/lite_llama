@@ -213,6 +213,24 @@ def all_reduce_tp(tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
+def broadcast_tp(tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
+    """Broadcast ``tensor`` from the TP-local ``src`` rank to all TP ranks.
+
+    Used after sampling: rank 0 draws the next token and broadcasts it so every
+    rank feeds the same input_ids on the next decode step. Without this, each
+    rank would run ``torch.multinomial`` with an independent RNG state and
+    diverge on the first non-greedy sample.
+
+    No-op when ``tp_world_size == 1``.
+    """
+    if _TP_WORLD_SIZE <= 1:
+        return tensor
+    # ``src`` is the *global* rank of the broadcast root within the TP group.
+    global_src = _DP_RANK * _TP_WORLD_SIZE + src
+    dist.broadcast(tensor, src=global_src, group=_TP_GROUP)
+    return tensor
+
+
 def all_reduce_min(value: int) -> int:
     """Smallest ``value`` across this replica's TP group.
 

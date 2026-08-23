@@ -35,6 +35,7 @@ from collections.abc import Sequence
 
 import torch
 
+from ..distributed.parallel_state import broadcast_tp, get_tp_world_size
 from ..models.config import read_model_type
 from ..models.registry import ModelRegistry
 from .detokenizer import IncrementalDetokenizer
@@ -380,6 +381,8 @@ class ContinuousBatchingEngine:
             slots, [0] * len(group), [r.params for r in group], self._gen_grid, self.device
         )
         next_token = self.engine.sampler.sample_batched(logits, self._batch.sampling).reshape(-1)
+        if get_tp_world_size() > 1:
+            next_token = broadcast_tp(next_token)
         self._batch.record(next_token)
         return next_token
 
@@ -419,6 +422,8 @@ class ContinuousBatchingEngine:
         next_token = self.engine.sampler.sample_batched(logits, batch.sampling, generated).reshape(
             -1
         )
+        if get_tp_world_size() > 1:
+            next_token = broadcast_tp(next_token)
         batch.record(next_token)
         return next_token
 
