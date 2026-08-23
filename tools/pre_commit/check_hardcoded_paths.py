@@ -26,7 +26,7 @@ _FORBIDDEN = re.compile(
 )
 
 # Directories whose contents are illustrative rather than executable library code.
-_EXEMPT_DIRS = ("docs/", "tools/pre_commit/", "tests/tools/")
+_EXEMPT_DIRS = ("docs/", "tools/pre_commit/", "tests/tools/", "benchmarks/", "scripts/")
 
 
 def _is_exempt(path: Path) -> bool:
