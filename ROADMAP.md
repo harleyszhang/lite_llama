@@ -1,55 +1,5 @@
 
-# 一、对你 comment 的回应
-
-**1. 单进程 —— 你对,但结论要改写而不是删掉**
-
-DP 走 `torch.multiprocessing` 起 `_dp_worker` 进程,TP 也起镜像 worker,所以"单进程"只在 TP=1/DP=1 成立。但**这个差异化仍然站得住,只是表述要精确**:vLLM v1 即使单卡也默认把 EngineCore 放独立进程(`VLLM_ENABLE_V1_MULTIPROCESSING` 默认开),而你在 TP=1/DP=1 时是真单进程、`pdb` 直接可用。正确表述:**"默认单卡路径全程单进程,断点可直达 kernel 调用点;并行模式才多进程"**。
-
-**2. golden 测试 —— 你的判断对,但根因不是"不严谨",而是"静默跳过 + 覆盖面窄"**
-
-我读了代码,设计其实不错:`cases.py` 有 4 个用例(single / batch_uniform / batch_mixed / batch8 跨 graph 桶)× 2 个 penalty,而且分两层——`test_eager_matches_graph` 不需要基线数据、永不过期,`test_matches_committed_golden` 对committed JSON。这个分层是对的。
-
-真正的问题是三个:
-- `pytestmark = [gpu, weights, slow]` → **无卡或无 checkpoint 时静默 skip**,所以它当不了"保险丝"——你以为绿了,其实根本没跑
-- 只覆盖 Qwen2.5-0.5B、只有文本、只有 greedy、只有 TP=1、**不覆盖 continuous batching / 量化 / VL / DP**
-- 没有 CI 强制,没有多模型矩阵
-
-所以要做的是"**把它从可选测试升级成带 GPU runner 的强制门禁 + 扩展矩阵**",不是重写。
-
-**3. DeepSeek 单 layer 对比 —— 这个想法很好,而且我算了,真的可行**
-
-DeepSeek-V3 单层参数量:
-
-| 部件 | 参数量 |
-|---|---|
-| 256 routed experts(gate+up+down,inter=2048,hidden=7168) | 11.27 B |
-| shared expert | 0.044 B |
-| MLA(q_a/q_b/kv_a/kv_b/o_proj) | 0.187 B |
-| **合计** | **≈ 11.5 B** |
-
-fp8 ≈ **11.5 GB → 单张 A10(24GB)装得下**;fp16 ≈ 23GB → 2×A10 可行。
-
-**结论:单层 DeepSeek-V3/V4 在你现有硬件上完全跑得起来**,而且 vLLM 也能用同样方式跑单层对比。这从"跑不了"变成了"可实测",是这次讨论最有价值的一条。我把它升级成一个正式的**单层 harness 工具**(见第五节),它同时解决 MLA/DSA 正确性验证、性能对比、和"支持前沿架构"的简历叙事。
-
-**4. 并行能力(chunked prefill / prefix caching / EP / DCP / CP / PD / EPLB)** —— 见第四节,我给了依赖图和 2×A10 可实测性判定。注意 **PD 分离在 2 卡上做 1P1D 是可演示的**,不需要更多卡。
-
-**5. Vision 重叠 —— 你对了一半,我的表述错了**
-
-- 单请求内:vision → LLM 是严格数据依赖,**无法重叠**。你说得对。
-- 离线 batch(N 张图):**跨请求流水是可以的**——encode 第 i+1 张时 prefill 第 i 张。所以离线 batch>1 有效。
-- 但真正好摘的果子我上次说错了重点:**CPU 侧图像预处理(PIL 解码/resize/normalize)与 GPU 计算重叠**。这是纯 CPU-GPU 重叠,离线在线都有效,且实现简单。
-
-修正后的表述:"CPU 预处理与 GPU 计算重叠(离线也有效)+ 跨请求 encode/prefill 流水(需 batch>1)";单请求内不承诺收益。
-
-**6. fused_moe 自动调优 —— 你说对了,而且现在完全没有**
-
-`fused_moe.py` L214 的 `_launch_config(num_tokens, quant_mode)` 是硬编码启发式,没有 autotune。`flashattention2_nopad.py` L41-44 的 autotune 被注释掉。
-
-你的方案(warm-up 搜索)是对的,但要加一步才实用:**搜索结果按 (GPU型号, shape key) 持久化到磁盘**,否则每次启动都付搜索代价。vLLM 是手工提交 `E=...,N=...,device_name=....json` 配置文件;你可以做成**自动生成 + 自动复用**,这反而比他们先进。见第三节。
-
-**7. 20 条凑数 —— 认。#2(1.2万行可读)、#11(数值对齐报告)确实是软的**,下面按你要的维度重建,每条都是可验证的能力而不是感觉。
-
-# 二、差异化亮点(重建:功能 / 性能 / 架构 / 自动化)
+# 框架差异化亮点(重建:功能 / 性能 / 架构 / 自动化)
 
 标注「已有」「待建」,每条附"为什么 vLLM/SGLang 不会做"。
 
@@ -134,6 +84,8 @@ fp8 ≈ **11.5 GB → 单张 A10(24GB)装得下**;fp16 ≈ 23GB → 2×A10 可�
 
 后面所有功能都挂在这三个地基上,顺序不能反。
 
+后面所有功能都挂在这三个地基上,顺序不能反。
+
 ## 地基 1:真分页 KV + 请求级动态管理(解锁 chunked prefill + prefix caching)
 
 现状问题:`block_size` 恒为 1,按 token 行分配 + refcount,`alloc_contiguous_kvcache` 慢路径每 decode 步 3 次 D2H 同步,每请求预占 `max_seq_len` 行;`free_all` 每次 `generate()` 全量重置,无请求级回收;缺显存不足时的抢占。
@@ -149,16 +101,70 @@ fp8 ≈ **11.5 GB → 单张 A10(24GB)装得下**;fp16 ≈ 23GB → 2×A10 可�
 
 验收:golden 全绿;并发容量提升(不再预占 max_seq_len);decode 步无 D2H 同步;请求结束后 block 立即可复用。
 
-## 地基 2:多后端稀疏注册表
+## 地基 2:算子作为一等公民 —— 一个算子 / 一个签名 / N 份实现 / 一份清单 / 一条确定性分发
 
+参考 sglang `python/sglang/kernels`(spec/registry/selector/fused_op)的成熟设计,并补上它刻意留白的一环:**如何自动调到性能最佳的实现**。
+
+### 五根支柱
+
+**① 一个逻辑算子**:收敛成固定清单,只定义"算什么",id 用 `<group>.<name>`:
+`attention.prefill / attention.decode / linear / moe / rmsnorm / rope / kv_write / sample`。
+现有 `flashattention.py`(死代码)、`flashattentionv2.py`(死代码)、`flashattention2_nopad.py`、`flashdecoding.py` 命名混乱的根因就是缺这层——它们其实是 `attention.prefill` / `attention.decode` 两个逻辑算子的不同实现。
+
+**② 一个签名(ABC,吃语义张量,不含 layout)**:所有实现共享同一 `forward()` 签名与语义,`forward_native`(纯 PyTorch/参考实现)是**正确性基准**,必须存在。这一模式项目已有雏形——`models/quantization/methods/base.py` 的 `LinearQuantMethod.apply(layer, x)`,推广到全部算子即可。layout 差异(DeepGEMM 要转置权重、FlashInfer 要自己的 KV 布局)不进签名,进元数据。
+
+**③ N 份实现(按来源分目录)**:
 ```
-register(op="linear", scheme="fp8_blockwise", arch=">=sm90", provider=DeepGemm,     priority=100)
-register(op="linear", scheme="*",             arch="*",      provider=NativeTriton, priority=0)  # 保底行
+kernels/
+  ops/            # 逻辑算子签名(ABC) + 注册表,torch-free,不含实现
+    registry.py   # register / select / explain
+    attention.py linear.py moe.py ...
+  impls/
+    native/       # 纯 Triton,永远存在=保底行+golden 基准
+      attention_prefill_triton.py   ← 现 flash_attention2_nopad
+      attention_decode_triton.py    ← 现 flash_decoding
+      linear_triton.py  moe_triton.py  ← 现 fused_moe
+    external/     # 可选,import 失败即 is_available()=False
+      linear_deepgemm.py  attention_flashinfer.py
 ```
+迁移=纯搬运+删两个死 attention 文件。
 
-选择器 = f(scheme, arch, `is_available()`) → 取最高优先级。外部后端全放 `backends/`,全部 optional extra,永不进核心依赖。配套 T3 的 explain 输出决策链。
+**④ 一份元数据清单(声明式,集中一处,torch-free)**:借 sglang `KernelSpec`——注册时只存 `target="module:attr"` 字符串,**惰性 import**,注册全程不加载 torch/kernel(保证冷启动秒级、CPU 机器可 `import`)。每份实现声明:
 
-先只做 linear/GEMM 打通全链路,再 attention → MoE → 通信。
+| 字段 | 作用 | 借鉴 |
+|---|---|---|
+| `available()` | import 探测 | sglang 惰性 load |
+| `capability`(device + SM 窗口,OR 语义) | 硬过滤,如 DeepGEMM `>=sm90` | sglang `CapabilityRequirement` |
+| `dtypes` / `scheme` | 支持的精度/量化方案 | 合并现有量化 method |
+| `shape`(hard 约束 + prefer 偏好) | 过滤 + 排序 | 本项目新增 |
+| `layout`(输入/输出布局要求) | dispatcher 决定转换或排除 | 防抽象泄漏 |
+| `golden`(verified + max_abs_diff) | 未过对齐门禁不进默认分发 | 挂钩 acc.align |
+| `perf_key`(gpu, op, shape_bucket, dtype) | 指向冻结的实测记录 | 本项目新增,见支柱⑤ |
+
+**⑤ 一条确定性分发规则(sglang 的确定性 + 实测排序)**:
+```
+select(op, key=(arch, dtype, shape_bucket)) -> impl:
+  1. 过滤:available ∧ capability匹配 ∧ dtype支持 ∧ shape.hard满足 ∧ layout可获得 ∧ golden.verified
+  2. 排序:显式 backend= 覆盖  >  该 key 的冻结实测最优  >  shape.prefer/priority
+  3. 取 top;native 保底行保证非空
+  4. 结果按 key 缓存(lru_cache)+ 记录决策链供 explain
+```
+**确定性来源**:第 2 步的"实测最优"来自 autotune/profiling **预先冻结**的记录(存盘,见地基 3),不是运行时现测——同一 key 永远选同一实现,benchmark/golden/bug 全部可复现。这正是对 sglang selector(多后端可用时甩给用户显式指定)的超越:**lite_llama 用实测记录自动选最快,选完仍确定**。
+
+### 两个必须做对的地方
+
+1. **不造两个注册表**:项目已有 `models/quantization/methods/` 按 scheme 注册。若再建一个按 (arch,shape) 的 kernel 注册表,`linear` 会被两套机制管辖。正解:**scheme 只是 dispatch key 的一维**,量化 method 就是 `linear` 在某 dtype 下的一份实现,统一进同一张清单。重构时就合并。
+2. **layout 转换必须显式、可缓存、可被 explain 看到**:实现要求的 layout 与输入不符时,dispatcher 要么插入声明过的转换(权重转置只做一次并缓存),要么排除该实现,绝不允许实现内部偷偷假设 layout。
+
+### 配套设施(直接复用 sglang 思路)
+
+- **强制后端开关**(`LITE_LLAMA_FORCE_BACKEND=native`):对标 sglang `SGLANG_FORCE_FUSED_OP_BACKEND`,二分数值 bug 时把整模型钉到 native。
+- **调用 trace**(对标 sglang `enable_fused_op_trace`):记录每次调用的 (op, backend, shape/dtype),**直接产出 ops-collector(地基 3 的 collect 阶段)要的真实 shape 清单**。
+- 外部后端全放 `impls/external/`,全部 optional extra,永不进核心依赖。
+
+### 落地顺序
+
+先只做 `linear` 一个算子打通"注册→过滤→排序→explain"全链路(纯 Python,不需 GPU 就能验证 dispatch 与测试骨架),再 attention → MoE → 通信。
 
 ## 地基 3:自动调优与配置持久化(T1+T2)
 
@@ -264,14 +270,12 @@ register(op="linear", scheme="*",             arch="*",      provider=NativeTrit
 | 版本 | 主题 | 内容 | 验收 |
 |---|---|---|---|
 | **v0.4** | 可信基线 | 修 TP 采样 RNG 不同步;acc.golden 强制门禁(GPU runner、禁静默 skip、扩 continuous/量化/VL/DP);perf.watchdog;AWQ/GPTQ 修复或撤下宣称 | 无卡时 CI 明确报"未验证"而非绿;TP=2 采样不 diverge |
-| **v0.5** | 自动化调优 + 基础可视化 | autotune(collect+search+persist)应用到 fused_moe / nopad / 量化 GEMM;w4a16 重写为 `tl.dot`;viz.structure + viz.memory;P1 megakernel 雏形(先融 RMSNorm+QKV) | 高频 shape 有落盘配置;w4a16 出前后对比数字;能导出结构图/显存图 |
+| **v0.5** | 自动化调优 | autotune(collect+search+persist)应用到 fused_moe / nopad / 量化 GEMM;w4a16 重写为 `tl.dot`;P1 megakernel 雏形(先融 RMSNorm+QKV) | 高频 shape 有落盘配置;w4a16 出前后对比数字 |
 | **v0.6** | 多后端 + overlap 骨架 | 地基 2(注册表+探测+选择+explain+acc.align);先做 linear;attention 接口拆薄;overlap 调度器抽象 + L1 跨 stream | 一条命令切后端并解释;缺库自动回退;L1 有 timeline 佐证 |
-| **v0.7** | 分页 KV | 地基 1,KV 布局可插拔并存迁移;请求级 alloc/free + watermark 准入;viz.flow | 两种布局 golden 都绿;decode 无 D2H 同步;请求结束 block 即回收 |
+| **v0.7** | 分页 KV | 地基 1,KV 布局可插拔并存迁移;请求级 alloc/free + watermark 准入;viz.flow;viz.structure(L1 文本树) + viz.memory(L1 静态预算表) | 两种布局 golden 都绿;decode 无 D2H 同步;请求结束 block 即回收;能导出结构树/显存预算表 |
 | **v0.8** | 调度能力 | chunked prefill + prefix caching;抢占(recompute/swap-out);调度 policy 化合并双引擎循环;P5 overlap 进 CUDA graph;MTP 接入 | 长 prompt 期间 decode 不停顿;共享前缀命中率可观测;缺块时能抢占而非拒绝 |
 | **v0.9** | 前沿架构 | 单层 harness(F1);MLA(DeepSeek-V2-Lite 端到端 + V3/V4 单层);DSA indexer;acc.bisect | HF 单层 max-abs-diff 达阈值;V3 单层 vs vLLM 对比数据 |
 | **v0.10** | 并行扩展 | 通信原语补全;EP(EP=2);DCP(DCP=2);perf.timeline + viz.schedule | Qwen3-MoE 上 EP 可跑并有数据 |
 | **v0.10.5** | 通信重叠 | L2 ping-pong + L3 分解 + L4 tile-signaling 原语;Nsight 对照报告 | overlap on/off 有对照数据 |
 | **v0.11** | 服务能力 + KV 传输 | `KVTransfer` 统一抽象;分层存储(CPU/磁盘 tier,服务 prefix cache 溢出);PD 分离 1P1D(对齐 TileRT KVConnector);CP/PCP;L5 MoE all-to-all 重叠;专家负载均衡 | 1P1D 端到端可演示;前缀溢出 CPU 后命中率不降 |
 | **v1.0** | 收口 | API 冻结、完整 benchmark 矩阵、文档站 | 公开 API 语义稳定 |
-
-顺序原则:**v0.4 必须第一**——没有可信的 golden 门禁和 benchmark 基线,后面每个优化都说不清是真快了还是偷偷坏了。这也是你 comment 2 指出的问题的直接回应。
