@@ -20,9 +20,9 @@ from typing import Any, ClassVar
 import torch
 import torch.nn as nn
 
+from ..modules.quantization import adapt_int4_checkpoint
 from . import weights
 from .base import CausalLM
-from .quantization._layout import adapt_int4_checkpoint
 
 #: lite_llama parameter prefix of the decoder stack inside a vision-language model.
 #: Also the marker in :attr:`MultiModalCausalLM.weight_prefixes` that says "hand the

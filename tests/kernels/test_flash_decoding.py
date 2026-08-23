@@ -245,7 +245,7 @@ def test_two_rows_may_share_one_slot():
 # fp8 KV cache (e4m3 bytes in a uint8 container)
 # --------------------------------------------------------------------------- #
 def _quantize_kv(k_cache, v_cache, k_scale=1.0, v_scale=1.0):
-    from lite_llama.models.quantization.params import quantize_fp8_per_tensor
+    from lite_llama.modules.quantization.utils import quantize_fp8_per_tensor
 
     return (
         quantize_fp8_per_tensor(k_cache, k_scale),

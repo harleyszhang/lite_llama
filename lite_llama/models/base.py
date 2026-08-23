@@ -24,10 +24,9 @@ import torch.nn.functional as F
 
 from ..kernels import skip_rmsnorm
 from ..modules import Attention, FusedMLP, LinearBase, RotaryEmbedding
+from ..modules.quantization import QuantizationConfig, adapt_int4_checkpoint
 from . import weights
 from .config import ModelConfig
-from .quantization import QuantConfig
-from .quantization._layout import adapt_int4_checkpoint
 
 
 class DecoderLayer(nn.Module):
@@ -45,7 +44,7 @@ class DecoderLayer(nn.Module):
         *,
         qkv_bias: bool = False,
         use_qk_norm: bool = False,
-        quant: QuantConfig | None = None,
+        quant: QuantizationConfig | None = None,
         mlp: nn.Module | None = None,
     ) -> None:
         super().__init__()
@@ -136,7 +135,7 @@ class CausalLM(nn.Module):
         self.rotary_emb = self.rotary_class(config.rope_config)
         self.rms_norm_eps = config.rms_norm_eps
 
-    def _layer_quant(self, layer_index: int) -> QuantConfig | None:
+    def _layer_quant(self, layer_index: int) -> QuantizationConfig | None:
         """Quantisation layout for layer ``layer_index``, honouring the checkpoint's
         ``modules_to_not_convert``.
 
@@ -185,7 +184,7 @@ class CausalLM(nn.Module):
         )
 
     @torch.no_grad()
-    def quantize_(self, quant: QuantConfig) -> None:
+    def quantize_(self, quant: QuantizationConfig) -> None:
         """Convert every loaded fp16 projection to the requested scheme, in place.
 
         The ``--quantization <scheme>`` path: the checkpoint has no scales of its
