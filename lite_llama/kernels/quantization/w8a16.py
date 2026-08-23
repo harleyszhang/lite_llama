@@ -1,29 +1,9 @@
-"""W8A16 GEMM: 8-bit weights, fp16 activations, fp32 accumulation.
+"""W8A16 GEMM: 8-bit weights (fp8-e4m3 or int8), fp16 activations, fp32 accumulation.
 
-The weight stays 8-bit all the way into the multiply-accumulate loop and is
-widened to fp16 *inside* the kernel, one tile at a time. A decode step is bound
-by how many bytes of weight it must stream, so halving the weight footprint
-roughly halves the step latency.
-
-Two weight formats share one kernel, selected by ``IS_FP8`` constexpr (Triton
-specialises at compile time, so the inner loop has no runtime branch):
-
-* **fp8 e4m3** — Qwen/DeepSeek FP8 checkpoints ship ``weight`` (e4m3 bytes)
-  next to ``weight_scale_inv`` (one fp32 scale per ``128×128`` block). Ampere
-  has no fp8 tensor cores, so the bytes travel as ``uint8`` and are widened by
-  bit surgery (:func:`dequant_fp8e4m3`) rather than by a hardware cast.
-* **int8** — symmetric per-output-channel or group-wise quantisation produced at
-  load time from an fp16 checkpoint, for models that ship no FP8 variant.
-
-Both are expressed as *one scale per ``(group_n, group_k)`` weight block*, so
-the kernel needs no format-specific addressing: per-channel int8 is simply
-``group_n=1, group_k=K``.
-
-Performance notes (A10, SM86):
-    Decode (M≤32): BLOCK_M=16, BLOCK_N=128 — weight-bound, minimise L2 misses.
-    Prefill (M>128): BLOCK_M=64, BLOCK_N=256 — compute-bound, maximise SMEM use.
-    BLOCK_K=128 always: one byte per weight element × 128 = 128 B, exactly one
-    memory transaction per output channel per k-step.
+The weight stays 8-bit into the multiply-accumulate loop and is widened to fp16
+one tile at a time. Two formats share one kernel via the IS_FP8 constexpr:
+fp8-e4m3 (Qwen/DeepSeek checkpoints, bit-surgery dequant) and symmetric int8
+(per-channel or group-wise, produced at load time).
 
 Usage:
     y = w8a16_matmul(x, qweight, scales, group_n=128, group_k=128)
