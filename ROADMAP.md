@@ -271,11 +271,12 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
 |---|---|---|---|
 | **v0.4** | 可信基线 | 修 TP 采样 RNG 不同步;acc.golden 强制门禁(GPU runner、禁静默 skip、扩 continuous/量化/VL/DP);perf.watchdog;AWQ/GPTQ 修复或撤下宣称 | 无卡时 CI 明确报"未验证"而非绿;TP=2 采样不 diverge |
 | **v0.5** | 自动化调优 | autotune(collect+search+persist)应用到 fused_moe / nopad / 量化 GEMM;w4a16 重写为 `tl.dot`;P1 megakernel 雏形(先融 RMSNorm+QKV) | 高频 shape 有落盘配置;w4a16 出前后对比数字 |
-| **v0.6** | 多后端 + overlap 骨架 | 地基 2(注册表+探测+选择+explain+acc.align);先做 linear;attention 接口拆薄;overlap 调度器抽象 + L1 跨 stream | 一条命令切后端并解释;缺库自动回退;L1 有 timeline 佐证 |
-| **v0.7** | 分页 KV | 地基 1,KV 布局可插拔并存迁移;请求级 alloc/free + watermark 准入;viz.flow;viz.structure(L1 文本树) + viz.memory(L1 静态预算表) | 两种布局 golden 都绿;decode 无 D2H 同步;请求结束 block 即回收;能导出结构树/显存预算表 |
-| **v0.8** | 调度能力 | chunked prefill + prefix caching;抢占(recompute/swap-out);调度 policy 化合并双引擎循环;P5 overlap 进 CUDA graph;MTP 接入 | 长 prompt 期间 decode 不停顿;共享前缀命中率可观测;缺块时能抢占而非拒绝 |
+| **v0.6** | 分页 KV | 地基 1,KV 布局可插拔并存迁移;请求级 alloc/free + watermark 准入;viz.flow;viz.structure(L1 文本树) + viz.memory(L1 静态预算表) | 两种布局 golden 都绿;decode 无 D2H 同步;请求结束 block 即回收;能导出结构树/显存预算表 |
+| **v0.7** | 调度能力 | chunked prefill + prefix caching;抢占(recompute/swap-out);调度 policy 化合并双引擎循环;P5 overlap 进 CUDA graph;MTP 接入 | 长 prompt 期间 decode 不停顿;共享前缀命中率可观测;缺块时能抢占而非拒绝 |
+| **v0.8** | 多后端 + overlap 骨架 | 地基 2(注册表+探测+选择+explain+acc.align);先做 linear;attention 接口拆薄;overlap 调度器抽象 + L1 跨 stream | 一条命令切后端并解释;缺库自动回退;L1 有 timeline 佐证 |
 | **v0.9** | 前沿架构 | 单层 harness(F1);MLA(DeepSeek-V2-Lite 端到端 + V3/V4 单层);DSA indexer;acc.bisect | HF 单层 max-abs-diff 达阈值;V3 单层 vs vLLM 对比数据 |
 | **v0.10** | 并行扩展 | 通信原语补全;EP(EP=2);DCP(DCP=2);perf.timeline + viz.schedule | Qwen3-MoE 上 EP 可跑并有数据 |
 | **v0.10.5** | 通信重叠 | L2 ping-pong + L3 分解 + L4 tile-signaling 原语;Nsight 对照报告 | overlap on/off 有对照数据 |
 | **v0.11** | 服务能力 + KV 传输 | `KVTransfer` 统一抽象;分层存储(CPU/磁盘 tier,服务 prefix cache 溢出);PD 分离 1P1D(对齐 TileRT KVConnector);CP/PCP;L5 MoE all-to-all 重叠;专家负载均衡 | 1P1D 端到端可演示;前缀溢出 CPU 后命中率不降 |
 | **v1.0** | 收口 | API 冻结、完整 benchmark 矩阵、文档站 | 公开 API 语义稳定 |
+ 
