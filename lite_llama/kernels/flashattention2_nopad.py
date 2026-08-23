@@ -1,16 +1,10 @@
-# https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
-# https://github.com/ELS-RD/kernl/blob/main/src/kernl/implementations/attention.py#L438
-# https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html
-
-
 """FlashAttention-2 (Triton) for variable-length, unpadded prefill batches.
 
-Serves the context phase: sequences are packed without padding and indexed by
-cumulative-length offsets, so no work is wasted on pad tokens. Uses the v2 work
-partition (parallelise over query blocks, rescale the softmax once at block end).
+Sequences are packed without padding and indexed by cumulative-length offsets.
+Uses the v2 work partition (parallelise over query blocks, rescale softmax once).
 
 Usage:
-    out = flash_attention2_no_pad(q, k, v, ...)   # unpadded (varlen) prefill
+    out = flash_attention2_no_pad(q, k, v, sm_scale, b_start_loc, b_seq_len, max_seq_len)
 """
 
 import torch

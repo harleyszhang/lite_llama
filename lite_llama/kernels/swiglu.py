@@ -1,9 +1,7 @@
-# reference: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/swiglu.py
-
 """SwiGLU activation as a fused Triton kernel.
 
-Computes ``silu(a) * b`` in one pass (the gated-MLP activation), reading the two
-projection halves and writing the product without a temporary in HBM.
+Computes silu(gate) * up in one pass, reading both projection halves and writing
+the product without a temporary in HBM.
 
 Usage:
     out = swiglu_forward(gate, up)

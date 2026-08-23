@@ -1,11 +1,7 @@
-# https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
-# https://github.com/ELS-RD/kernl/blob/main/src/kernl/implementations/attention.py#L438
-
 """FlashAttention-2 (Triton) for dense, fixed-length batches.
 
-The v2 refinement of tiled attention: parallelise across query blocks and defer the
-softmax denominator rescale to the end of each block, cutting non-matmul work
-versus v1. Expects dense ``[batch, heads, seq, head_dim]`` tensors.
+Parallelises across query blocks and defers the softmax denominator rescale to
+block end, cutting non-matmul work versus v1. Dense [batch, heads, seq, dim] input.
 
 Usage:
     out = flash_attention_v2(q, k, v)

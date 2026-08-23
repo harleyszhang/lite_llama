@@ -1,26 +1,11 @@
 """FP8 W8A8 GEMM: fp8-e4m3 weights + dynamic per-token fp8-e4m3 activations.
 
-True W8A8: the GEMM consumes both operands as fp8 — the weight is *not*
-dequantised to fp16 ahead of the matmul, and the activation is quantised per
-token on the fly (see
-:func:`lite_llama.models.quantization.params.quantize_fp8_per_token`).
-
-Two hardware paths share one kernel, selected by the ``NATIVE_FP8`` constexpr
-(Triton specialises at compile time, so the inner loop has no runtime branch):
-
-* **sm89+ (Ada, Hopper)** — native fp8 tensor cores: the e4m3 bytes are
-  bitcast to ``tl.float8e4nv`` and fed straight to ``tl.dot``.
-* **sm86 (A10) and older** — no fp8 MMA, so both operands are widened to fp16
-  by bit surgery (:func:`dequant_fp8e4m3`) inside the loop. The numerics are
-  still W8A8 — the activation *was* quantised to e4m3 — only the MMA runs
-  wider.
-
-The weight scale grid matches w8a16: one fp32 scale per ``(group_n, group_k)``
-block, folded into the accumulator at k-tile granularity. The activation scale
-is one fp32 per token (row), folded once after the k-loop.
+True W8A8: both operands are fp8 in the GEMM. On sm89+ native fp8 tensor cores
+are used; on sm86 (A10) both operands are widened to fp16 by bit surgery inside
+the loop. Activation is quantised per-token on the fly.
 
 Usage:
-    qx, x_scale = quantize_fp8_per_token(x)   # models.quantization.params
+    qx, x_scale = quantize_fp8_per_token(x)
     y = fp8_matmul(qx, x_scale, qweight, weight_scale_inv, group_n=1, group_k=K)
 """
 
