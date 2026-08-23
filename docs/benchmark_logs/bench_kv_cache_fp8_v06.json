@@ -1,0 +1,16 @@
+[
+  {
+    "kv_dtype": "auto",
+    "model_mem_gb": 18.89,
+    "kv_capacity": 147875,
+    "tps": 943.4,
+    "elapsed_s": 0.271
+  },
+  {
+    "kv_dtype": "fp8",
+    "model_mem_gb": 18.31,
+    "kv_capacity": 282435,
+    "tps": 859.5,
+    "elapsed_s": 0.298
+  }
+]
