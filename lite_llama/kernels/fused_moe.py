@@ -449,7 +449,12 @@ def fused_moe(
     topk_ids = topk_ids.to(torch.int32)
     flat_weights = topk_weights.reshape(-1).to(dtype).contiguous()
 
-    config = _launch_config(num_tokens, quant_mode)
+    # Autotune lookup: use persisted best config if available, else heuristic.
+    from .autotune import get_best_config
+    dtype_label = {_QUANT_NONE: "fp16", _QUANT_FP8: "fp8", _QUANT_INT8: "int8", _QUANT_INT4: "int4"}.get(quant_mode, "fp16")
+    config = get_best_config("fused_moe", m=num_tokens, n=two_inter, k=hidden, dtype=dtype_label)
+    if config is None:
+        config = _launch_config(num_tokens, quant_mode)
     sorted_ids, expert_ids, num_post = moe_align_block_size(
         topk_ids, config["BLOCK_M"], num_experts
     )
