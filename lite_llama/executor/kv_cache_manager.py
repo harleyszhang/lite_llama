@@ -164,6 +164,7 @@ class KVCacheManager:
         block_size=1,
         dtype=torch.float16,
         device="cuda",
+        watermark: float = 0.1,
     ):
         self.num_layers = num_layers
         self.num_kv_heads = num_kv_heads
@@ -175,6 +176,13 @@ class KVCacheManager:
         self.dtype = dtype
         self.device = device
         self.can_use_mem_size = gpu_num_blocks  # rows currently free
+
+        # Watermark: refuse new requests when free blocks drop below this fraction.
+        self._watermark_blocks = int(gpu_num_blocks * watermark)
+        logger.info(
+            "KV cache: %d blocks, watermark=%d blocks (%.0f%%)",
+            gpu_num_blocks, self._watermark_blocks, watermark * 100,
+        )
 
         # Row indices to hand out, and the per-row reference count.
         self.kv_mem_pos_indexs = torch.arange(
@@ -193,6 +201,21 @@ class KVCacheManager:
 
         # Initialize the gpu_kv_buffer
         self.init_kv_buffers(self.max_num_tokens, head_dim, num_kv_heads, num_layers, dtype, device)
+
+    def can_admit(self, need_blocks: int) -> bool:
+        """Check if a new request requiring *need_blocks* can be admitted.
+
+        Returns False when free capacity after allocation would drop below the
+        watermark, preventing cache pressure from causing eviction cascades.
+        This is a pure read — no allocation happens.
+        """
+        remaining = self.can_use_mem_size - need_blocks
+        return remaining >= self._watermark_blocks
+
+    @property
+    def utilization(self) -> float:
+        """Fraction of KV cache currently in use (0.0 empty, 1.0 full)."""
+        return 1.0 - (self.can_use_mem_size / self.max_num_tokens)
 
     def init_kv_buffers(
         self,
