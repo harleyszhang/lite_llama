@@ -85,7 +85,7 @@ def test_unservable_prompts_are_refused_at_submission(scheduler, prompt_len, why
 # Prefill scheduling
 # --------------------------------------------------------------------------- #
 def test_prefill_takes_priority_over_decode(scheduler):
-    """A queued arrival must not wait behind a whole generation."""
+    """A queued arrival gets prefilled alongside running decode (chunked prefill)."""
     scheduler.add_request(make_request("a"))
     scheduler.schedule()  # admits and prefills `a`
 
@@ -93,7 +93,8 @@ def test_prefill_takes_priority_over_decode(scheduler):
     output = scheduler.schedule()
 
     assert [r.request_id for r in output.prefill] == ["b"]
-    assert output.decode == []
+    # With chunked prefill, decode runs alongside prefill (not exclusive)
+    assert any(r.request_id == "a" for r in output.decode)
 
 
 def test_prefill_admits_in_arrival_order(scheduler):
