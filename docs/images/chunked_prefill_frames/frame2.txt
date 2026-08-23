@@ -1,0 +1,10 @@
+
+=== WITH Chunked Prefill (v0.7, chunk=512) ===
+
+Step 1: [PREFILL chunk 1/4 ████    ] + [DECODE A,B,C,D ████]
+Step 2: [PREFILL chunk 2/4 ████    ] + [DECODE A,B,C,D ████]
+Step 3: [PREFILL chunk 3/4 ████    ] + [DECODE A,B,C,D ████]
+Step 4: [PREFILL chunk 4/4 ████    ] + [DECODE A,B,C,D ████]
+
+✓ Decode runs EVERY step — no latency spike!
+✓ 2000-token prefill split into 4×512 chunks
