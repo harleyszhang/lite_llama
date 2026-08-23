@@ -1,18 +1,8 @@
 """Fused MoE: top-k routed experts as a Triton grouped GEMM.
 
-A simplified port of vLLM's ``fused_moe_kernel`` (fp16 in / fp32 accumulate; no
-bias or expert parallelism) that keeps vLLM's data protocol so the two can be
-cross-checked: ``sorted_token_ids`` (``token*top_k+slot`` sorted by expert,
-per-expert padded to ``BLOCK_M`` with a masked sentinel), ``expert_ids`` (expert
-per row-block) and ``num_tokens_post_padded`` (device length; overrun blocks exit,
-so the grid needs no host sync). Pipeline: ``moe_align_block_size`` -> GEMM1
-(gate_up) -> silu_and_mul -> GEMM2 (down, router weight folded in) -> ``moe_sum``.
-
-Expert weights may be fp16 or 8-bit (fp8-e4m3 / int8 with one scale per
-``group_n x group_k`` block, the same layout
-:mod:`lite_llama.kernels.quantization.w8a16` uses for dense linears). The 8-bit path is what
-puts a 30B MoE checkpoint on two 24 GB cards: only the *weights* are 8-bit, both
-GEMM inputs and the intermediate activation stay fp16.
+Pipeline: moe_align_block_size -> GEMM1 (gate_up) -> silu_and_mul -> GEMM2
+(down, router weight folded in) -> moe_sum. Supports fp16, fp8, int8, and int4
+packed expert weights with group-wise scales.
 
 Usage:
     out = fused_moe(hidden_states, w1, w2, topk_weights, topk_ids)
