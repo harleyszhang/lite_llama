@@ -1,0 +1,18 @@
+[
+  {
+    "model": "Qwen3-VL-4B-Instruct",
+    "config": "lite fp16",
+    "peak_mem_gb": 19.2073073387146,
+    "model_mem_gb": 8.99056339263916,
+    "kv_cache_tokens": 73676,
+    "token_match_rate": null,
+    "ttft_ms": 27.272097766399384,
+    "tpot_ms": 23.364482772728756,
+    "total_s": 1.49962916970253,
+    "steps": 64,
+    "batch": 4,
+    "gen_tokens": 256,
+    "tpot_p50_ms": 23.35655689239502,
+    "tps": 170.70886934720053
+  }
+]

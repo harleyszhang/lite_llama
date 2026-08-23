@@ -1,0 +1,58 @@
+[
+  {
+    "model": "Qwen3-0.6B",
+    "config": "HF fp16",
+    "peak_mem_gb": 1.1692590713500977,
+    "token_match_rate": null,
+    "ttft_ms": 30.125483870506287,
+    "tpot_ms": 27.79470230378802,
+    "total_s": 1.7811917290091515,
+    "steps": 64,
+    "batch": 4,
+    "gen_tokens": 256,
+    "tpot_p50_ms": 0.0,
+    "tps": 143.72399996625222
+  },
+  {
+    "model": "Qwen3-0.6B",
+    "config": "lite fp16",
+    "peak_mem_gb": 17.618209838867188,
+    "token_match_rate": 0.24752475247524752,
+    "ttft_ms": 17.200380563735962,
+    "tpot_ms": 4.134760903460639,
+    "total_s": 0.2780480645596981,
+    "steps": 64,
+    "batch": 4,
+    "gen_tokens": 256,
+    "tpot_p50_ms": 4.129275679588318,
+    "tps": 920.70412504179
+  },
+  {
+    "model": "Qwen3-0.6B",
+    "config": "lite int8",
+    "peak_mem_gb": 16.57967185974121,
+    "token_match_rate": 0.225,
+    "ttft_ms": 20.707864314317703,
+    "tpot_ms": 4.1519096564678915,
+    "total_s": 0.2826351523399353,
+    "steps": 64,
+    "batch": 4,
+    "gen_tokens": 256,
+    "tpot_p50_ms": 4.143889993429184,
+    "tps": 905.7613601159552
+  },
+  {
+    "model": "Qwen3-0.6B",
+    "config": "lite fp8",
+    "peak_mem_gb": 16.081331253051758,
+    "token_match_rate": 0.04455445544554455,
+    "ttft_ms": 45.312970876693726,
+    "tpot_ms": 8.349188026927767,
+    "total_s": 0.5717053301632404,
+    "steps": 64,
+    "batch": 4,
+    "gen_tokens": 256,
+    "tpot_p50_ms": 8.337028324604034,
+    "tps": 447.7831261900317
+  }
+]
