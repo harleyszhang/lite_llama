@@ -1,7 +1,7 @@
 """Rotary position embedding (RoPE) applied to q and k in a fused Triton kernel.
 
 Rotates each head's channel pairs by the per-position angle in place, consuming the
-``(cos, sin)`` tables built by :mod:`lite_llama.models.rotary_embedding`.
+``(cos, sin)`` tables built by :mod:`lite_llama.modules.rotary_embedding`.
 
 Usage:
     q, k = rope_emb_forward(q, k, cos, sin, batch_size, seq_len)

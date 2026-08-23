@@ -155,13 +155,13 @@ def test_decoder_sparse_step_skips_layers(tmp_path):
 
 def test_route_matches_hf(tmp_path):
     """``_route`` must reproduce HF's softmax-all -> top-k -> renormalise order."""
-    from lite_llama.models.qwen3_moe import Qwen3MoeSparseMoeBlock
+    from lite_llama.modules.moe import SparseMoeBlock
 
     torch.manual_seed(0)
     config = _model_config(
         tmp_path, hidden_size=64, num_experts=16, num_experts_per_tok=4, moe_intermediate_size=32
     )
-    block = Qwen3MoeSparseMoeBlock(config)
+    block = SparseMoeBlock(config)
     gate = torch.randn(config.num_experts, config.hidden_size)
     block.gate_weight.data.copy_(gate)
 

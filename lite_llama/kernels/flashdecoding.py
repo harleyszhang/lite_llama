@@ -19,6 +19,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .quantization.w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
+
 
 @triton.jit
 def _flash_decoding_stage1_kernel(
@@ -26,6 +28,8 @@ def _flash_decoding_stage1_kernel(
     K,
     V,
     qk_scale,
+    k_scale,  # fp8 KV cache 反量化标量(bit-trick 的 2**8 补偿已由调用方折入)
+    v_scale,
     b_req_tokens_table,
     B_Req_Idx,
     B_Seqlen,
@@ -53,6 +57,7 @@ def _flash_decoding_stage1_kernel(
     BLOCK_SEQ: tl.constexpr,  # 默认 128
     BLOCK_N: tl.constexpr,  # 默认 32
     BLOCK_DMODEL: tl.constexpr,
+    KV_FP8: tl.constexpr,  # KV cache 以 e4m3 字节存储(uint8 容器)
 ):
     """Flash Attention Stage1 Triton Kernel"""
     # 获取当前程序的 block 在各个维度上的索引
@@ -112,6 +117,12 @@ def _flash_decoding_stage1_kernel(
 
         k = tl.load(K + k_ptrs, mask=k_mask[:, None], other=0.0)
         v = tl.load(V + k_ptrs, mask=k_mask[:, None], other=0.0)
+
+        if KV_FP8:
+            # e4m3 字节经 bit surgery 直接升到 fp32(欠 2**8, 已折入 scale)。
+            # 屏蔽行的字节为 0 -> 0.0, 与 fp16 路径的 other=0.0 语义一致。
+            k = dequant_fp8e4m3(k).to(tl.float32) * k_scale
+            v = dequant_fp8e4m3(v).to(tl.float32) * v_scale
 
         # 计算 qk^T。逐元素乘积必须升到 fp32 再累加: prefill 路径走
         # ``tl.dot`` 的 fp32 累加器, 若这里保持 fp16 乘积, 64 项点积的舍入误差
@@ -174,6 +185,9 @@ def flash_decode_stage1(
     mid_o,
     mid_o_logexpsum,
     PARTITION_SIZE,
+    k_scale=1.0,  # fp8 KV cache 的 K 反量化标量(含 2**8 补偿)
+    v_scale=1.0,
+    kv_fp8=False,
 ):
     """
     # Mid_O: [batchs, num_heads, cdiv(seq_len, PARTITION_SIZE), head_dim],
@@ -201,6 +215,8 @@ def flash_decode_stage1(
         k,
         v,
         qk_scale,
+        k_scale,
+        v_scale,
         b_req_tokens_table,
         b_req_idx,
         b_seq_len,
@@ -216,6 +232,7 @@ def flash_decode_stage1(
         BLOCK_SEQ=PARTITION_SIZE,
         BLOCK_N=BLOCK_N_SIZE,
         BLOCK_DMODEL=head_dim,
+        KV_FP8=kv_fp8,
         num_warps=1,
         num_stages=2,
     )
@@ -323,6 +340,8 @@ def flash_decoding(
     b_req_idx,  # which cache slot each batch row belongs to
     b_seq_len,  # start locations and sequence lengths for kv cache in a batch
     max_actual_seq_len,
+    k_scale: float = 1.0,  # fp8 KV cache 的逐张量反量化标量(vLLM kv_scale 语义)
+    v_scale: float = 1.0,
 ):
     """Decode attention for one token per sequence.
 
@@ -337,11 +356,19 @@ def flash_decoding(
             this is what makes the lookup correct rather than coincidental.
         b_seq_len: ``[batch]`` history length per row, including this step's token.
         max_actual_seq_len: Longest row, which sizes the partition grid.
+        k_scale: Dequantisation scale of an fp8 key cache; ignored for fp16.
+        v_scale: Same for the value cache.
     """
     # q.view(-1, num_heads, head_dim)
     assert q.shape[-1] == k_cache.shape[-1] == v_cache.shape[-1]
     PARTITION_SIZE = 128  # 3090ti 显卡以上可设置为 256
     batchs, num_heads, head_dim = q.shape  # decode 阶段 q 的 seq_len = 1,
+
+    kv_fp8 = k_cache.dtype == torch.uint8
+    if kv_fp8:
+        # dequant_fp8e4m3 的 bit-trick 输出欠 2**8; 折进 scale, kernel 内免补偿
+        k_scale = k_scale * FP8_E4M3_BIT_TRICK_SCALE
+        v_scale = v_scale * FP8_E4M3_BIT_TRICK_SCALE
 
     # 最大可用分区数量计算
     max_num_partitions = (max_actual_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE
@@ -370,6 +397,9 @@ def flash_decoding(
         mid_o,
         mid_o_logexpsum,
         PARTITION_SIZE,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        kv_fp8=kv_fp8,
     )
 
     # decode stage 2: reduction among partitions

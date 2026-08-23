@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 class LinearQuantMethod(ABC):
-    """Per-format behaviour of a :class:`~lite_llama.models.linear.LinearBase`.
+    """Per-format behaviour of a :class:`~lite_llama.modules.linear.LinearBase`.
 
     The layer passes itself to every call, so the method stays stateless and
     one instance per layer is cheap.

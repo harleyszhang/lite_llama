@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 
 from ..distributed.parallel_state import all_reduce_tp, divide, get_tp_world_size
-from .quantization import QuantConfig, get_linear_method
+from ..models.quantization import QuantConfig, get_linear_method
 
 
 class LinearBase(nn.Module):

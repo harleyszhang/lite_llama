@@ -19,7 +19,17 @@ from typing import Any
 
 from transformers import AutoConfig, PretrainedConfig
 
+import torch
+
 from .quantization import QuantConfig
+
+#: KV-cache dtypes accepted by :attr:`ModelConfig.kv_cache_dtype` (vLLM spelling).
+#: The e4m3 bytes travel in a ``uint8`` container; the decode kernel widens them.
+KV_CACHE_DTYPES: dict[str, torch.dtype] = {
+    "auto": torch.float16,
+    "fp8": torch.uint8,
+    "fp8_e4m3": torch.uint8,
+}
 
 
 def read_model_type(checkpoints_dir: str | Path) -> str:
@@ -62,12 +72,21 @@ class ModelConfig:
             ``max_seq_len`` exceeds what the checkpoint was trained for.
     """
 
-    def __init__(self, hf_config: PretrainedConfig, max_seq_len: int = 2048) -> None:
+    def __init__(
+        self,
+        hf_config: PretrainedConfig,
+        max_seq_len: int = 2048,
+        kv_cache_dtype: str = "auto",
+    ) -> None:
         self.hf_config = hf_config
         # Vision-language configs nest the decoder under ``text_config``; text
         # models are their own text config.
         self.text_config: PretrainedConfig = getattr(hf_config, "text_config", hf_config)
         self.max_seq_len = max_seq_len
+        # Element type of the paged KV cache. ``"auto"`` keeps fp16; the fp8
+        # spellings store e4m3 bytes (in a ``uint8`` container) and make the
+        # decode kernel dequantise on read, halving the cache footprint.
+        self.kv_cache_dtype = kv_cache_dtype
         # Weight format the *checkpoint* is stored in, which decides both what the
         # model allocates and whether the loader may widen anything on the way in.
         # A runtime ``--quantization`` request is a separate, post-load step.
@@ -75,10 +94,20 @@ class ModelConfig:
         self.validate()
 
     @classmethod
-    def from_pretrained(cls, checkpoints_dir: str | Path, max_seq_len: int = 2048) -> ModelConfig:
+    def from_pretrained(
+        cls,
+        checkpoints_dir: str | Path,
+        max_seq_len: int = 2048,
+        kv_cache_dtype: str = "auto",
+    ) -> ModelConfig:
         """Load ``config.json`` from a checkpoint directory through ``AutoConfig``."""
         hf_config = AutoConfig.from_pretrained(str(checkpoints_dir), trust_remote_code=True)
-        return cls(hf_config, max_seq_len=max_seq_len)
+        return cls(hf_config, max_seq_len=max_seq_len, kv_cache_dtype=kv_cache_dtype)
+
+    @property
+    def kv_cache_torch_dtype(self) -> torch.dtype:
+        """Torch dtype of the KV-cache buffers, resolved from :attr:`kv_cache_dtype`."""
+        return KV_CACHE_DTYPES[self.kv_cache_dtype]
 
     # ---- identity --------------------------------------------------------- #
     @property
@@ -159,7 +188,7 @@ class ModelConfig:
 
     @property
     def rope_config(self) -> dict[str, Any]:
-        """Flat mapping consumed by :mod:`lite_llama.models.rotary_embedding`."""
+        """Flat mapping consumed by :mod:`lite_llama.modules.rotary_embedding`."""
         return {
             "head_dim": self.head_dim,
             "hidden_size": self.hidden_size,
@@ -171,6 +200,11 @@ class ModelConfig:
     # ---- validation ------------------------------------------------------- #
     def validate(self) -> None:
         """Reject configurations the kernels cannot serve."""
+        if self.kv_cache_dtype not in KV_CACHE_DTYPES:
+            raise ValueError(
+                f"kv_cache_dtype must be one of {sorted(KV_CACHE_DTYPES)}, "
+                f"got {self.kv_cache_dtype!r}"
+            )
         if self.num_heads % self.num_kv_heads != 0:
             raise ValueError(
                 f"num_heads ({self.num_heads}) must be divisible by "

@@ -2,7 +2,7 @@
 
 Two things make it more than "encode image, scatter embeddings". **mrope**: each
 vision token carries a ``(t, h, w)`` position and the rotary dims are split across
-those components (:class:`~lite_llama.models.rotary_embedding.MRotaryEmbedding`; the
+those components (:class:`~lite_llama.modules.rotary_embedding.MRotaryEmbedding`; the
 ``[3, batch, seq]`` ids come from the processor). **DeepStack**: the tower emits
 extra feature maps that are *added into* the LM hidden states at the vision-token
 positions after the first few layers — skipping it silently degrades quality.
@@ -26,7 +26,7 @@ from .interfaces import (
     MultiModalCausalLM,
     merge_multimodal_embeddings,
 )
-from .rotary_embedding import MRotaryEmbedding
+from ..modules.rotary_embedding import MRotaryEmbedding
 
 
 class Qwen3VLTextModel(CausalLM):

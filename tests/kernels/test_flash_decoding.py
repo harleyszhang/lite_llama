@@ -239,3 +239,95 @@ def test_two_rows_may_share_one_slot():
     """
     out, ref = _run([33, 33, 33], 4, 2, 64, req_idx=[0, 1, 1])
     torch.testing.assert_close(out.float(), ref.float(), rtol=_RTOL, atol=_ATOL)
+
+
+# --------------------------------------------------------------------------- #
+# fp8 KV cache (e4m3 bytes in a uint8 container)
+# --------------------------------------------------------------------------- #
+def _quantize_kv(k_cache, v_cache, k_scale=1.0, v_scale=1.0):
+    from lite_llama.models.quantization.params import quantize_fp8_per_tensor
+
+    return (
+        quantize_fp8_per_tensor(k_cache, k_scale),
+        quantize_fp8_per_tensor(v_cache, v_scale),
+    )
+
+
+def test_fp8_cache_dequantises_exactly():
+    """The uint8 cache must be widened to exactly the values torch's cast gives.
+
+    Runs the kernel twice on the same history — once as fp8 bytes, once as the
+    fp16 widening of those bytes — so any disagreement is the kernel's dequant,
+    not fp8 rounding. The bit-trick's 2**8 under-scale must be folded into the
+    caller-side scale or this fails by exactly 256x.
+    """
+    seq_lens = [37, 128]
+    q = torch.randn(len(seq_lens), 4, 64, device="cuda", dtype=torch.float16) * 0.3
+    k_cache, v_cache, table, b_seq_len = _cache_and_table(seq_lens, 2, 64)
+    scale = 1.0 / math.sqrt(64)
+    b_req_idx = torch.arange(len(seq_lens), dtype=torch.int32, device="cuda")
+
+    k8, v8 = _quantize_kv(k_cache, v_cache)
+    assert k8.dtype == torch.uint8 and k8.shape == k_cache.shape
+
+    out_fp8 = flash_decoding(
+        q, k8, v8, scale, table, b_req_idx, b_seq_len, max(seq_lens)
+    )
+    # Same numerics with the cache widened by torch instead of the kernel.
+    out_ref = flash_decoding(
+        q,
+        k8.view(torch.float8_e4m3fn).to(torch.float16),
+        v8.view(torch.float8_e4m3fn).to(torch.float16),
+        scale,
+        table,
+        b_req_idx,
+        b_seq_len,
+        max(seq_lens),
+    )
+    torch.testing.assert_close(out_fp8.float(), out_ref.float(), rtol=1e-3, atol=1e-3)
+
+
+def test_fp8_cache_applies_kv_scales():
+    """A scale folded in on write must be undone by the matching read scale."""
+    seq_lens = [64, 33]
+    q = torch.randn(len(seq_lens), 4, 64, device="cuda", dtype=torch.float16) * 0.3
+    k_cache, v_cache, table, b_seq_len = _cache_and_table(seq_lens, 2, 64)
+    scale = 1.0 / math.sqrt(64)
+    b_req_idx = torch.arange(len(seq_lens), dtype=torch.int32, device="cuda")
+
+    k8, v8 = _quantize_kv(k_cache, v_cache, k_scale=0.5, v_scale=2.0)
+    out = flash_decoding(
+        q, k8, v8, scale, table, b_req_idx, b_seq_len, max(seq_lens),
+        k_scale=0.5, v_scale=2.0,
+    )
+    ref = flash_decoding(
+        q,
+        k8.view(torch.float8_e4m3fn).to(torch.float16) * 0.5,
+        v8.view(torch.float8_e4m3fn).to(torch.float16) * 2.0,
+        scale,
+        table,
+        b_req_idx,
+        b_seq_len,
+        max(seq_lens),
+    )
+    torch.testing.assert_close(out.float(), ref.float(), rtol=1e-3, atol=1e-3)
+
+
+def test_fp8_cache_stays_within_e4m3_rounding_of_fp16():
+    """Against the fp16 cache, error may not exceed the format's own rounding.
+
+    e4m3 carries 3 mantissa bits (~6% worst-case per element); the softmax mix
+    averages most of it away, so attention output stays within ~10% of fp16.
+    """
+    seq_lens = [128]
+    q = torch.randn(len(seq_lens), 4, 64, device="cuda", dtype=torch.float16) * 0.3
+    k_cache, v_cache, table, b_seq_len = _cache_and_table(seq_lens, 2, 64)
+    scale = 1.0 / math.sqrt(64)
+    b_req_idx = torch.arange(len(seq_lens), dtype=torch.int32, device="cuda")
+
+    ref = flash_decoding(q, k_cache, v_cache, scale, table, b_req_idx, b_seq_len, 128)
+    k8, v8 = _quantize_kv(k_cache, v_cache)
+    out = flash_decoding(q, k8, v8, scale, table, b_req_idx, b_seq_len, 128)
+
+    err = (out.float() - ref.float()).abs().max()
+    assert err < 0.1 * ref.float().abs().max(), f"fp8 cache drifted {err} from fp16"
