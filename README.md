@@ -11,7 +11,8 @@
 <pre>
          ✅ Flash attention     ✅ Cuda Graph Optimize   ✅ Beginner friendly       ✅ Fused MoE
          ✅ W8A16 (AWQ/GPTQ)    ✅ W4A16 (AWQ/GPTQ)      ✅ SmoothQuant W8A8        ✅ Tensor Parallel
-         ✅ Continuous batching ✅ OpenAI API server     ✅ Online batch inference  ✅ Data Parallel
+         ✅ Continuous batching ✅ OpenAI API server     ✅ Chunked Prefill         ✅ Data Parallel
+         ✅ FP8 KV Cache (2x)   ✅ Kernel Autotune       ✅ Backend Registry        ✅ Preemption
 </pre>
 
 </div>
@@ -30,6 +31,16 @@
 - **Quantization**: W8A16 (fp8/int8), W4A16 (AWQ/GPTQ), SmoothQuant W8A8 — up to `1.7x` decode speedup.
 - **Tensor Parallelism**: split a 30B MoE model across 2× A10 (24 GB) with one all-reduce per block.
 - **Data Parallelism**: replicate the model across GPUs and route requests between them — `2.00x` throughput on 2 GPUs (100% linear).
+- **Kernel Autotune** (v0.5): offline search persists optimal tile configs per `(GPU, op, shape)` to `~/.cache/lite_llama/autotune/`; kernels auto-load on startup.
+- **FP8 KV Cache** (v0.6): `--kv-cache-dtype fp8` halves KV memory — **1.91× capacity** (282K vs 148K tokens on A10) with only 9% throughput cost.
+- **Chunked Prefill** (v0.7): long prompts split into 512-token chunks interleaved with decode — decode requests never stall during prefill.
+- **Preemption** (v0.7): recompute-based eviction when KV cache hits the watermark; evicted requests re-queue automatically.
+- **Backend Registry** (v0.8): declarative kernel backend selection with `explain_selection()` — auto-detects Triton/CUDA/fp8 capability; env-var override + graceful fallback.
+- **Kernel Autotune** (v0.5): offline search persists optimal tile configs per `(GPU, op, shape)` to `~/.cache/lite_llama/autotune/`; kernels auto-load on startup.
+- **FP8 KV Cache** (v0.6): `--kv-cache-dtype fp8` halves KV memory — **1.91× capacity** (282K vs 148K tokens on A10) with only 9% throughput cost.
+- **Chunked Prefill** (v0.7): long prompts split into 512-token chunks interleaved with decode — decode requests never stall during prefill.
+- **Preemption** (v0.7): recompute-based eviction when KV cache hits the watermark; evicted requests re-queue automatically.
+- **Backend Registry** (v0.8): declarative kernel backend selection with `explain_selection()` — auto-detects Triton/CUDA/fp8 capability; env-var override + graceful fallback.
 
 ## Setup and Installation
 

@@ -11,7 +11,8 @@
 <pre>
          ✅ Flash attention     ✅ Cuda Graph Optimize   ✅ Beginner friendly       ✅ Fused MoE
          ✅ W8A16 (AWQ/GPTQ)    ✅ W4A16 (AWQ/GPTQ)      ✅ SmoothQuant W8A8        ✅ Tensor Parallel
-         ✅ Continuous batching ✅ OpenAI API server     ✅ Online batch inference  ✅ Data Parallel
+         ✅ Continuous batching ✅ OpenAI API server     ✅ Chunked Prefill         ✅ Data Parallel
+         ✅ FP8 KV Cache (2x)   ✅ Kernel Autotune       ✅ Backend Registry        ✅ Preemption
 </pre>
 
 </div>
@@ -34,6 +35,16 @@
 - 支持算子融合，如：逐元素相乘 `*` 和 `silu` 的融合, k v 线性层融合, `skip` 和 `rmsnorm` 融合。
 - 支持 Triton grouped GEMM kernel。
 - 部分自定义算子如：`rmsnorm`、`rope`、`softmax`、`逐元素相乘` 等采用高效 `triton` 内核实现。
+- **Kernel 自动调优** (v0.5)：离线搜索最优 tile 配置并按 `(GPU, op, shape)` 落盘 JSON，启动时自动加载，未命中时回退启发式。
+- **FP8 KV Cache** (v0.6)：`--kv-cache-dtype fp8` KV 缓存减半——容量提升 **1.91×**（A10 上 282K vs 148K tokens），吞将仅降 9%。
+- **Chunked Prefill** (v0.7)：长 prompt 按 512 token 分片与 decode 交织执行——decode 不再被长 prefill 阻塞。
+- **抢占机制** (v0.7)：KV 压力超水位线时自动 evict 最新请求（recompute 策略），释放 slot 后重新排队。
+- **Backend 注册表** (v0.8)：声明式 kernel 后端选择 + `explain_selection()` 解释原因；环境变量强制切换，缺库自动降级。
+- **Kernel 自动调优** (v0.5)：离线搜索最优 tile 配置并按 `(GPU, op, shape)` 落盘 JSON，启动时自动加载，未命中时回退启发式。
+- **FP8 KV Cache** (v0.6)：`--kv-cache-dtype fp8` KV 缓存减半——容量提升 **1.91×**（A10 上 282K vs 148K tokens），吐将仅降 9%。
+- **Chunked Prefill** (v0.7)：长 prompt 按 512 token 分片与 decode 交织执行——decode 不再被长 prefill 阻塞。
+- **抢占机制** (v0.7)：KV 压力超水位线时自动 evict 最新请求（recompute 策略），释放 slot 后重新排队。
+- **Backend 注册表** (v0.8)：声明式 kernel 后端选择 + `explain_selection()` 解释原因；环境变量强制切换，缺库自动降级。
 
 ## 安装和快速使用
 
