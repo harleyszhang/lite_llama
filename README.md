@@ -2,16 +2,16 @@
 
 # Litellama
 
-**A light llama-like llm inference framework based on the triton kernel.**
+**A light llama-like llm inference framework based on the triton/cuda kernel.**
 
 [![en](https://img.shields.io/badge/lang-en-red.svg)](https://github.com/harleyszhang/lite_llama/blob/main/README.md)
 [![zh](https://img.shields.io/badge/lang-zh-yellow.svg)](https://github.com/harleyszhang/lite_llama/blob/main/README.zh.md)
-![PyPI - Python Version](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)
+![PyPI - Python Version](https://img.shields.io/badge/python-3.13-blue)
 
 <pre>
-         ✅ Flash attention    ✅ Cuda Graph Optimize    ✅ Beginner friendly    ✅ Fused MoE
-         ✅ W8A16 Quantization ✅ W4A16 (AWQ/GPTQ)      ✅ SmoothQuant W8A8     ✅ Tensor Parallel
-         ✅ Continuous batching ✅ OpenAI API server     ✅ Online batch inference
+         ✅ Flash attention     ✅ Cuda Graph Optimize   ✅ Beginner friendly       ✅ Fused MoE
+         ✅ W8A16 (AWQ/GPTQ)    ✅ W4A16 (AWQ/GPTQ)      ✅ SmoothQuant W8A8        ✅ Tensor Parallel
+         ✅ Continuous batching ✅ OpenAI API server     ✅ Online batch inference  ✅ Data Parallel
 </pre>
 
 </div>
@@ -19,14 +19,8 @@
 ## Features
 
 - Up to `4x` speedup over transformers, llama3 1B and 3B models.
-- **Online batch inference with continuous batching**: requests join and leave a running
-  batch, so an arrival never waits for the current generation to finish. On one A10 with
-  Qwen2.5-1.5B-Instruct and requests arriving 250 ms apart, throughput goes from 93 to
-  644 tok/s (`6.9x`) and mean latency from 19.1 s to 2.3 s (`8.3x`) — see
-  [docs/continuous_batching.md](./docs/continuous_batching.md).
-- **OpenAI-compatible server** (`lite-llama serve`): `/v1/completions` and
-  `/v1/chat/completions`, streaming included, so the official `openai` client works
-  unchanged — see [docs/online_serving.md](./docs/online_serving.md).
+- **Online batch inference with continuous batching**: requests join and leave a running batch, so an arrival never waits for the current generation to finish. On one A10 with Qwen2.5-1.5B-Instruct and requests arriving 250 ms apart, throughput goes from 93 to 644 tok/s (`6.9x`) and mean latency from 19.1 s to 2.3 s (`8.3x`) — see [docs/continuous_batching.md](./docs/continuous_batching.md).
+- **OpenAI-compatible server** (`lite-llama serve`): `/v1/completions` and `/v1/chat/completions`, streaming included, so the official `openai` client works unchanged — see [docs/online_serving.md](./docs/online_serving.md).
 - Supports the latest `llama3`, `Qwen2.5`, `Qwen3`, `Llava1.5`, `Qwen3-vl`, `Qwen3-MoE` model inference, `top-p` sampling, streaming output.
 - Supports GQA, decode stage support cuda graph optimization (with batch_size limitations).
 - Supports `flashattention1`, `flashattention2`, `flashdecoding` (supports `NopadAttention`).
@@ -41,13 +35,24 @@
 
 If you don't have a physical server, you can try using [virtal cloud remote server](https://growthdata.virtaicloud.com/t/hK).
 
-Requires Python 3.10+, CUDA-capable PyTorch 2.4+ and Triton 3.0+.
+Requires Python 3.13+, CUDA-capable PyTorch 2.13.0+ and Triton 3.7.1+.
 
 ```bash
 uv pip install -e .           # runtime deps
 uv pip install -e . --group dev
 pre-commit install
 ```
+
+Development:
+
+```bash
+make lint      # ruff check + ruff format --check
+make format    # ruff --fix + ruff format
+make test-cpu  # runs everything not marked gpu/weights
+make test-gpu  # requires CUDA
+```
+
+`pre-commit` bundles ruff, typos, markdownlint, actionlint, a filename-space guard, and a custom hook that rejects hard-coded absolute paths in library code. The `tests` GitHub Actions workflow runs the CPU test subset on 3.13+ for every PR; the `pre-commit` workflow runs every hook against the whole tree.
 
 ## Quick start
 
@@ -68,36 +73,9 @@ modelscope download Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 \
 
 Legacy `pytorch_model*.bin` checkpoints still load; safetensors wins when both are present.
 
-### Examples
+### Offline Batched Inference
 
-Qwen3-VL model, single pictures inference:
-
-```bash
-cd /home/honggao/projects/open_source/lite_llama
-python -m lite_llama.cli vl-chat \
-    --model-dir my_weight/Qwen3-VL-4B-Instruct \
-    --image docs/images/llava_test/dog.jpeg \
-    --prompt "What animal is in this picture? Answer in one sentence." \
-    --temperature 0.0 --max-gen-len 48
-```
-
-Qwen3-VL-4B-Instruct, Multi-image + Sampling mode:
-
-```bash
-# 多图 + 采样模式
-python -m lite_llama.cli vl-chat \
-    --model-dir my_weight/Qwen3-VL-4B-Instruct \
-    --image docs/images/llava_test/dog.jpeg docs/images/llava_test/dog2.png \
-    --prompt "Compare the animals in these pictures." \
-    --temperature 0.7 --top-p 0.9
-
-# 默认 prompt(Describe this image.)
-python -m lite_llama.cli vl-chat \
-    --model-dir my_weight/Qwen3-VL-4B-Instruct \
-    --image docs/images/llava_test/extreme_ironing.jpg
-```
-
-### Text generation
+Text generation:
 
 ```python
 from lite_llama import TextGenerator, SamplingParams
@@ -114,61 +92,7 @@ for step in gen.stream(["The capital of France is"], params):
     print(step[0], end="", flush=True)
 ```
 
-### Online batch inference
-
-Six requests, three slots. Watch the slot column: when a request finishes, the slot it
-held is decoding a queued request on the very next step.
-
-![continuous batching](./docs/images/continuous_batching.gif)
-
-Serve an OpenAI-compatible API:
-
-```bash
-pip install 'lite-llama[serve]'
-lite-llama serve --model-dir my_weight/Qwen2.5-1.5B-Instruct --port 8000
-```
-
-```bash
-curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model": "Qwen2.5-1.5B-Instruct",
-       "messages": [{"role": "user", "content": "Explain a GPU in one sentence."}],
-       "max_tokens": 64}'
-```
-
-Or drive the engine directly — every prompt is an independent request, and each carries
-its own sampling parameters:
-
-```python
-from lite_llama import ContinuousBatchingEngine, SamplingParams
-
-engine = ContinuousBatchingEngine.from_pretrained(
-    "my_weight/Qwen2.5-1.5B-Instruct", max_num_seqs=16
-)
-engine.add_request("Name the capital of Japan.", SamplingParams(max_gen_len=32))
-engine.add_request("Write a haiku about rain.", SamplingParams(temperature=0.8, max_gen_len=64))
-
-while engine.has_unfinished_requests():
-    for request in engine.step():
-        print(f"[{request.request_id}] {request.delta}", end="", flush=True)
-```
-
-Asynchronously, with concurrent coroutines sharing one batch:
-
-```python
-import asyncio
-from lite_llama import AsyncLLMEngine, SamplingParams
-
-async def main():
-    async with AsyncLLMEngine.from_pretrained("my_weight/Qwen2.5-1.5B-Instruct") as engine:
-        async def ask(prompt):
-            async for chunk in engine.generate(prompt, SamplingParams(max_gen_len=64)):
-                print(chunk.delta, end="", flush=True)
-        await asyncio.gather(ask("Hello"), ask("Goodbye"))
-
-asyncio.run(main())
-```
-
-### Image conditioned generation
+**Image conditioned generation**:
 
 ```python
 from PIL import Image
@@ -200,6 +124,33 @@ llava-1.5-7b-modelscope default inference:
 python -m lite_llama.cli chat --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8
 ```
 
+Qwen3-VL model, single pictures inference:
+
+```bash
+cd /home/honggao/projects/open_source/lite_llama
+python -m lite_llama.cli vl-chat \
+    --model-dir my_weight/Qwen3-VL-4B-Instruct \
+    --image docs/images/llava_test/dog.jpeg \
+    --prompt "What animal is in this picture? Answer in one sentence." \
+    --temperature 0.0 --max-gen-len 48
+```
+
+Qwen3-VL-4B-Instruct, Multi-image + Sampling mode:
+
+```bash
+# 多图 + 采样模式
+python -m lite_llama.cli vl-chat \
+    --model-dir my_weight/Qwen3-VL-4B-Instruct \
+    --image docs/images/llava_test/dog.jpeg docs/images/llava_test/dog2.png \
+    --prompt "Compare the animals in these pictures." \
+    --temperature 0.7 --top-p 0.9
+
+# 默认 prompt(Describe this image.)
+python -m lite_llama.cli vl-chat \
+    --model-dir my_weight/Qwen3-VL-4B-Instruct \
+    --image docs/images/llava_test/extreme_ironing.jpg
+```
+
 ### Evaluation
 
 After `cli.py` runs successfully, the terminal displays the interface as shown below, and you can enter your question in the terminal.
@@ -224,16 +175,61 @@ lite_llama per token latency: 1.369015 ms/token
 Transformers per token latency: 5.436221 ms/token
 ```
 
-### Quantization & Tensor Parallelism
+## Optimize Features
 
-lite_llama supports multiple weight quantization schemes and multi-GPU tensor
-parallelism. See [docs/quantization.md](docs/quantization.md) for the full guide.
+### Continuous Batching
 
-**FP8 checkpoint** (auto-detected from `config.json`):
+Six requests, three slots. Watch the slot column: when a request finishes, the slot it held is decoding a queued request on the very next step.
+
+![continuous batching](./docs/images/continuous_batching.gif)
+
+Serve an OpenAI-compatible API:
 
 ```bash
-python -m lite_llama.cli chat --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8
+pip install 'lite-llama[serve]'
+lite-llama serve --model-dir my_weight/Qwen2.5-1.5B-Instruct --port 8000
 ```
+
+```bash
+curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model": "Qwen2.5-1.5B-Instruct",
+       "messages": [{"role": "user", "content": "Explain a GPU in one sentence."}],
+       "max_tokens": 64}'
+```
+
+Or drive the engine directly — every prompt is an independent request, and each carries its own sampling parameters:
+
+```python
+from lite_llama import ContinuousBatchingEngine, SamplingParams
+
+engine = ContinuousBatchingEngine.from_pretrained(
+    "my_weight/Qwen2.5-1.5B-Instruct", max_num_seqs=16
+)
+engine.add_request("Name the capital of Japan.", SamplingParams(max_gen_len=32))
+engine.add_request("Write a haiku about rain.", SamplingParams(temperature=0.8, max_gen_len=64))
+
+while engine.has_unfinished_requests():
+    for request in engine.step():
+        print(f"[{request.request_id}] {request.delta}", end="", flush=True)
+```
+
+Asynchronously, with concurrent coroutines sharing one batch:
+
+```python
+import asyncio
+from lite_llama import AsyncLLMEngine, SamplingParams
+
+async def main():
+    async with AsyncLLMEngine.from_pretrained("my_weight/Qwen2.5-1.5B-Instruct") as engine:
+        async def ask(prompt):
+            async for chunk in engine.generate(prompt, SamplingParams(max_gen_len=64)):
+                print(chunk.delta, end="", flush=True)
+        await asyncio.gather(ask("Hello"), ask("Goodbye"))
+
+asyncio.run(main())
+```
+
+### Tensor Parallelism
 
 **Tensor parallelism** (30B MoE on 2× A10):
 
@@ -243,10 +239,41 @@ python -m lite_llama.cli chat \
     --tensor-parallel-size 2
 ```
 
+### Quantization
+
+lite_llama supports multiple weight quantization schemes (architecture aligned with [sglang](https://github.com/sgl-project/sglang)). See [docs/quantization.md](docs/quantization.md) for the full design and API.
+
+| Scheme | CLI Flag | Weight | Activation | Speedup vs HF |
+|--------|----------|--------|------------|---------------|
+| fp8 (checkpoint) | auto-detected | fp8-e4m3 | fp16 | 6.4× |
+| int8 (runtime) | `--quantization int8` | int8 | fp16 | 6.3× |
+| fp8 W8A8 (runtime) | `--quantization fp8` | fp8-e4m3 | fp8-e4m3 | 3.1× |
+| int4 AWQ/GPTQ | auto-detected | int4 | fp16 | — |
+| smoothquant | `--quantization smoothquant` | int8 | int8 | — |
+| fp8 KV cache | `--kv-cache-dtype fp8` | — | — | 2× KV capacity |
+
+**FP8 checkpoint** (auto-detected from `config.json`):
+
+```bash
+python -m lite_llama.cli chat --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8
+```
+
 **Runtime int8 quantisation** (halve memory of any fp16 model):
 
 ```bash
 python -m lite_llama.cli chat --model-dir my_weight/Qwen2.5-0.5B --quantization int8
+```
+
+**True W8A8 fp8** (no weight dequantisation, per-token fp8 activations):
+
+```bash
+python -m lite_llama.cli chat --model-dir my_weight/Qwen3-0.6B --quantization fp8
+```
+
+**FP8 KV cache** (halve decode memory footprint):
+
+```bash
+python -m lite_llama.cli chat --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype fp8
 ```
 
 **Vision-language models** (Qwen3-VL / LLaVA with TP + quantization):
@@ -263,24 +290,58 @@ python -m lite_llama.cli vl-chat \
     --image photo.jpg --quantization int8 --tensor-parallel-size 2
 ```
 
-| Model | FP16 TP=1 | FP16 TP=2 | INT8 TP=1 | INT8 TP=2 |
-|-------|-----------|-----------|-----------|----------|
-| Qwen3-VL-4B | 9.66 GB | 6.35 GB/GPU | 6.93 GB | 5.34 GB/GPU |
-| LLaVA-1.5-7B | 13.74 GB | 7.90 GB/GPU | 8.12 GB | 5.15 GB/GPU |
+#### Qwen3-0.6B Benchmark 
 
-Quantized inference demo (Qwen3-30B-A3B-FP8, tensor parallel × 2):
+Envirnment: (A10, batch=4, greedy)
 
-![quantization tp demo](./docs/images/qwen2.5-3b-output.gif)
+How to run Benchmarks:
+
+```bash
+# Single model
+python benchmarks/bench_quant.py --model-dir /data/shared/llm_weights/Qwen3-0.6B \
+    --schemes fp16 int8 fp8 --json docs/benchmark_logs/bench_quant_Qwen3-0.6B.json
+
+# All representative models (Qwen3-0.6B, 0.6B-FP8, VL-4B, 30B-MoE)
+python benchmarks/bench_quant.py --all
+```
+
+Quantization Benchmark Result (A10, Qwen3-0.6B, batch=4, seq_len=25, gen_len=64, greedy):
+
+| Config | Model Mem | KV Capacity | TPOT (ms) | TPS | vs HF fp16 |
+|--------|-----------|-------------|-----------|-----|------------|
+| HF fp16 (baseline) | 1.17 GB | — | 28.19 | 141.7 | 1.0× |
+| lite fp16 | 1.40 GB | 147,875 tok | 4.14 | 918.8 | **6.5×** |
+| lite int8 | 0.99 GB | 141,549 tok | 4.16 | 904.1 | **6.4×** |
+| lite int8-blockwise | 1.00 GB | 138,385 tok | 4.44 | 849.4 | **6.0×** |
+| lite fp8 (W8A8) | 0.99 GB | 139,153 tok | 8.35 | 448.1 | **3.2×** |
+| lite smoothquant (W8A8) | 0.99 GB | 135,642 tok | 3.70 | 983.8 | **6.9×** |
+
+> Model Mem = model weights only; KV Capacity = max cached tokens (paged pool fills remaining GPU memory).
+> Benchmark logs: [`docs/benchmark_logs/`](docs/benchmark_logs/)
+
+Quantization benchmark visualization (Qwen3-0.6B, A10, all schemes vs HF fp16):
+
+![quantization benchmark](./docs/images/quantization_benchmark.gif)
+
+#### Qwen3-VL-4B-Instruct Benchmark
+
+A10, batch=4, seq_len=25, gen_len=64, greedy benchmark result:
+
+| Config | Model Mem | KV Capacity | TPOT (ms) | TPS |
+|--------|-----------|-------------|-----------|-----|
+| lite fp16 | 8.99 GB | 73,676 tok | 23.36 | 170.7 |
+| lite int8 | 5.61 GB | 93,559 tok | 27.47 | 145.3 |
+| lite int8-blockwise | 5.71 GB | 92,748 tok | 27.97 | 142.7 |
+| lite fp8 (W8A8) | 5.61 GB | 93,345 tok | 59.25 | 67.4 |
+| lite smoothquant (W8A8) | 5.61 GB | 93,559 tok | 34.00 | 117.5 |
+
+> Vision tower stays fp16 (not quantised); only language model projections are quantised.
+
+![Qwen3-VL-4B quantization benchmark](./docs/images/Qwen3-VL-4B-Instruct_quantization_benchmark.gif)
 
 ### Data Parallelism
 
-Where tensor parallelism splits one model across GPUs, data parallelism replicates the
-whole model onto each GPU and routes the request stream between the replicas — for
-throughput once one card is saturated. Each prompt is dealt to a replica by a load
-balancer (round-robin or least-loaded), and the replicas decode their own batches
-concurrently. See [docs/data_parallel.md](docs/data_parallel.md) for the design (it
-mirrors vLLM's `DPEngineCoreProc` / `DPLBAsyncMPClient` and SGLang's
-`DataParallelController`) and the benchmarks.
+Where tensor parallelism splits one model across GPUs, data parallelism replicates the whole model onto each GPU and routes the request stream between the replicas — for throughput once one card is saturated. Each prompt is dealt to a replica by a load balancer (round-robin or least-loaded), and the replicas decode their own batches concurrently. See [docs/data_parallel.md](docs/data_parallel.md) for the design (it mirrors vLLM's `DPEngineCoreProc` / `DPLBAsyncMPClient` and SGLang's `DataParallelController`) and the benchmarks.
 
 ![data parallel](./docs/images/data_parallel.gif)
 
@@ -292,9 +353,7 @@ with DataParallelEngine(model="my_weight/Qwen2.5-1.5B-Instruct", data_parallel_s
     outputs = engine.generate(prompts, SamplingParams(temperature=0.0))
 ```
 
-On 2× A10 (Qwen2.5-1.5B-Instruct): **weak scaling 2.00x** (100% linear, 1790 → 3580
-tok/s), **strong scaling 1.67x** at batch 256, with byte-identical outputs. Compose it
-with TP — `data_parallel_size=2, tensor_parallel_size=2` — on a 4-GPU box.
+On 2× A10 (Qwen2.5-1.5B-Instruct): **weak scaling 2.00x** (100% linear, 1790 → 3580 tok/s), **strong scaling 1.67x** at batch 256, with byte-identical outputs. Compose it with TP — `data_parallel_size=2, tensor_parallel_size=2` — on a 4-GPU box.
 
 ## Architecture
 
@@ -343,22 +402,9 @@ lite_llama/
 └── utils/                   # chat templates, logger, image and path helpers
 ```
 
-File and class names follow vLLM's, so the two are easy to read side by side: `model_runner.py` matches `v1/worker/gpu_model_runner.py`, `kv_cache_manager.py` matches `v1/core/kv_cache_manager.py`, `continuous_engine.py` plus `scheduler.py` match `v1/engine/` plus `v1/core/sched/`,
-`async_engine.py` matches `AsyncLLMEngine`, `entrypoints/` matches `entrypoints/openai/`,
-`models/interfaces.py` and `models/registry.py` match `model_executor/models/`, and the weight-loading split (key mapping in `models/weights.py`, file reading in `executor/weight_utils.py`) mirrors vLLM's `model_executor/models/utils.py` versus `model_loader/weight_utils.py`.
+File and class names follow vLLM's, so the two are easy to read side by side: `model_runner.py` matches `v1/worker/gpu_model_runner.py`, `kv_cache_manager.py` matches `v1/core/kv_cache_manager.py`, `continuous_engine.py` plus `scheduler.py` match `v1/engine/` plus `v1/core/sched/`, `async_engine.py` matches `AsyncLLMEngine`, `entrypoints/` matches `entrypoints/openai/`, `models/interfaces.py` and `models/registry.py` match `model_executor/models/`, and the weight-loading split (key mapping in `models/weights.py`, file reading in `executor/weight_utils.py`) mirrors vLLM's `model_executor/models/utils.py` versus `model_loader/weight_utils.py`.
 
 The per-model files declare only their differences — bias flags, per-head qk-norm, mrope, or DeepStack layer injection — while all shared behaviour lives in `models/base.py`. A new architecture typically means one class body plus one `ModelRegistry` entry; its config is whatever `AutoConfig` already returns.
-
-## Development
-
-```bash
-make lint      # ruff check + ruff format --check
-make format    # ruff --fix + ruff format
-make test-cpu  # runs everything not marked gpu/weights
-make test-gpu  # requires CUDA
-```
-
-`pre-commit` bundles ruff, typos, markdownlint, actionlint, a filename-space guard, and a custom hook that rejects hard-coded absolute paths in library code. The `tests` GitHub Actions workflow runs the CPU test subset on 3.10+ for every PR; the `pre-commit` workflow runs every hook against the whole tree.
 
 ## Acknowledgement
 
@@ -370,6 +416,7 @@ make test-gpu  # requires CUDA
 - [openai-triton](https://triton-lang.org/main/getting-started/tutorials/)
 - [lightllm](https://github.com/ModelTC/lightllm)
 - [vllm](https://github.com/vllm-project/vllm)
+- [sglang](https://github.com/sgl-project/sglang)
 
 ## Citation
 

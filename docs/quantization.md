@@ -1,16 +1,19 @@
 # Quantization Support
 
-lite_llama supports multiple weight quantization schemes to reduce memory footprint
-and improve inference speed on memory-bound workloads (decode).
+lite_llama supports multiple weight quantization schemes, with an architecture
+aligned to [sglang](https://github.com/sgl-project/sglang) for extensibility.
 
 ## Supported Schemes
 
-| Scheme | Weight | Activation | Scale Granularity | Use Case |
-|--------|--------|------------|-------------------|----------|
-| **fp8** | fp8-e4m3 | fp16 | 128×128 block | Qwen/DeepSeek FP8 checkpoints |
-| **int8** | int8 | fp16 | per-channel | Runtime quantisation of fp16 models |
-| **awq/gptq** | int4 | fp16 | group-wise (128) | Pre-quantised AWQ/GPTQ checkpoints |
-| **smoothquant** | int8 | int8 (dynamic) | per-channel / per-token | W8A8 inference with int8 tensor cores |
+| Scheme | Config Class | Weight | Activation | Scale Granularity | Use Case |
+|--------|-------------|--------|------------|-------------------|----------|
+| **fp8** | `Fp8Config` | fp8-e4m3 | fp16 | 128×128 block | Qwen/DeepSeek FP8 checkpoints |
+| **w8a8_fp8** | `W8A8Fp8Config` | fp8-e4m3 | fp8-e4m3 (dynamic) | per-channel / per-token | True W8A8 runtime (`--quantization fp8`) |
+| **blockwise_int8** | `BlockInt8Config` | int8 | fp16 | per-channel / group-wise | Runtime int8 (`--quantization int8`) |
+| **w8a8_int8** | `W8A8Int8Config` | int8 | int8 (dynamic) | per-channel / per-token | SmoothQuant (`--quantization smoothquant`) |
+| **awq** | `AWQConfig` | int4 | fp16 | group-wise (128) | Pre-quantised AWQ checkpoints |
+| **gptq** | `GPTQConfig` | int4 | fp16 | group-wise (128) | Pre-quantised GPTQ checkpoints |
+| **fp8 KV cache** | `Fp8KVCacheMethod` | — | — | per-tensor | `--kv-cache-dtype fp8` halves KV memory |
 
 ## Quick Start
 
@@ -22,160 +25,143 @@ FP8 checkpoints are detected automatically from `config.json`:
 python -m lite_llama.cli --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8
 ```
 
-The loader reads the `quantization_config` block and builds the model with
-8-bit weights + block-wise scales. No conversion step is needed.
-
 ### Runtime INT8 Quantisation
 
 Quantise an fp16 checkpoint to int8 at load time:
 
 ```bash
-python -m lite_llama.cli --model-dir my_weight/Qwen2.5-0.5B --quantization int8
+python -m lite_llama.cli --model-dir my_weight/Qwen3-0.6B --quantization int8
 ```
 
-This halves the weight memory at a small accuracy cost (~0.1% perplexity).
-
-### Tensor Parallelism (Multi-GPU)
-
-Run a 30B model on two 24 GB cards:
+### True W8A8 FP8 (no weight dequantisation)
 
 ```bash
-python -m lite_llama.cli --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8 \
-    --tensor-parallel-size 2
+python -m lite_llama.cli --model-dir my_weight/Qwen3-0.6B --quantization fp8
 ```
 
-Each rank holds a slice of every weight matrix; the only communication is one
-all-reduce per transformer block (after `o_proj` and after the MLP/MoE `down_proj`).
+### FP8 KV Cache (halves decode memory)
+
+```bash
+python -m lite_llama.cli --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype fp8
+```
 
 ## Architecture
 
 ```
-lite_llama/
-├── kernels/
-│   ├── w8a16.py          # fp8/int8 weight-only GEMM
-│   ├── w4a16.py          # int4 (AWQ/GPTQ) GEMM
-│   ├── smoothquant.py    # W8A8 dynamic quantisation GEMM
-│   └── fused_moe.py      # MoE grouped GEMM (fp16/fp8/int8)
-├── models/
-│   ├── quantization.py   # QuantConfig registry + utilities
-│   └── linear.py         # ColumnParallelLinear / RowParallelLinear
-└── distributed/
-    └── parallel_state.py # TP process group
+lite_llama/modules/quantization/
+├── __init__.py            # BASE_QUANTIZATION_METHODS registry + factory functions
+├── base_config.py         # QuantizeMethodBase / LinearMethodBase / FusedMoEMethodBase / QuantizationConfig ABC
+├── fp8.py                 # Fp8Config + Fp8LinearMethod + Fp8MoEMethod
+├── w8a8_fp8.py            # W8A8Fp8Config + W8A8Fp8LinearMethod + W8A8Fp8MoEMethod
+├── w8a8_int8.py           # W8A8Int8Config + W8A8Int8LinearMethod + W8A8Int8MoEMethod
+├── blockwise_int8.py      # BlockInt8Config + BlockInt8LinearMethod + BlockInt8MoEMethod
+├── awq.py                 # AWQConfig + AWQLinearMethod + AWQMoEMethod
+├── gptq.py                # GPTQConfig + GPTQLinearMethod + GPTQMoEMethod
+├── unquant.py             # UnquantizedConfig (fp16 default)
+├── kv_cache.py            # BaseKVCacheMethod + Fp8KVCacheMethod
+├── parameter.py           # RawParameter (loader must not cast to fp16)
+└── utils.py               # Quantise helpers + checkpoint layout adapters (AWQ/GPTQ)
 ```
 
-### QuantConfig Registry
+### sglang Alignment Table
 
-`QuantConfig.from_hf(hf_config)` reads the checkpoint's `quantization_config`
-and returns the appropriate layout. The registry maps `quant_method` strings
-to format identifiers:
+| lite_llama | sglang equivalent | Notes |
+|------------|-------------------|-------|
+| `QuantizationConfig` | `QuantizationConfig` | ABC with `get_quant_method(layer, prefix)` |
+| `LinearMethodBase` | `LinearMethodBase` | `create_weights` + `apply` |
+| `FusedMoEMethodBase` | `FusedMoEMethodBase` | Stacked expert strategy |
+| `Fp8Config` | `Fp8Config` | Weight-only fp8 (block-wise scales) |
+| `W8A8Fp8Config` | `W8A8Fp8Config` | True W8A8 fp8 (per-token act quantisation) |
+| `W8A8Int8Config` | `W8A8Int8Config` | SmoothQuant W8A8 |
+| `BlockInt8Config` | `BlockInt8Config` | Weight-only int8 |
+| `AWQConfig` | `AWQConfig` | Int4 AWQ checkpoints |
+| `GPTQConfig` | `GPTQConfig` | Int4 GPTQ checkpoints |
+| `BASE_QUANTIZATION_METHODS` | `BASE_QUANTIZATION_METHODS` | `{name: ConfigClass}` registry |
+
+### Registry & Config Flow
 
 ```python
-from lite_llama.models.quantization import QuantConfig, register_quant_method
+from lite_llama.modules.quantization import (
+    BASE_QUANTIZATION_METHODS,
+    get_quantization_config,
+    get_quant_config_from_hf,
+    for_runtime_scheme,
+)
 
-# Built-in: fp8, int8, gptq, awq, smoothquant
-qc = QuantConfig.from_hf(hf_config)
+# Checkpoint auto-detection: config.json → Config class → from_config()
+quant = get_quant_config_from_hf(hf_config)  # Fp8Config / AWQConfig / None
 
-# Register a custom method
-register_quant_method("my_quant", "int8")
+# Runtime quantisation: --quantization int8
+quant = for_runtime_scheme("int8")  # BlockInt8Config.per_channel()
+
+# Layer asks its config for the right method:
+method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 ```
 
-### Linear Layers
+## Performance Benchmark
 
-Every projection in the decoder is a `LinearBase` subclass that dispatches to
-the right kernel based on `quant.format`:
+Benchmarks on A10 (24 GB), decode batch size 4, max_gen_len=64, greedy.
+Baseline: HuggingFace transformers fp16 (eager, same prompts).
 
-- `fp16` → `F.linear`
-- `fp8` / `int8` → `w8a16_matmul`
-- `int4` → `w4a16_matmul`
-- `smoothquant` → `smoothquant_matmul`
+### Qwen3-0.6B (dense, 28 layers, hidden=1024)
 
-Tensor parallelism is handled by `ColumnParallelLinear` (splits output features)
-and `RowParallelLinear` (splits input features + all-reduce).
+| Config | Model Mem | KV Capacity | TPOT (ms) | TPS | vs HF Speedup |
+|--------|-----------|-------------|-----------|-----|---------------|
+| HF fp16 (baseline) | 1.17 GB | — | 28.19 | 141.7 | 1.0× |
+| lite fp16 | 1.40 GB | 147,875 tok | 4.14 | 918.8 | 6.5× |
+| lite int8 | 0.99 GB | 141,549 tok | 4.16 | 904.1 | 6.4× |
+| lite int8-blockwise | 1.00 GB | 138,385 tok | 4.44 | 849.4 | 6.0× |
+| lite fp8 (W8A8) | 0.99 GB | 139,153 tok | 8.35 | 448.1 | 3.2× |
+| lite smoothquant (W8A8) | 0.99 GB | 135,642 tok | 3.70 | 983.8 | 6.9× |
 
-## Performance
+> Model Mem = model weights only; KV Capacity = max cached tokens (paged pool fills remaining GPU memory).
+> Benchmark logs: [`docs/benchmark_logs/`](../docs/benchmark_logs/)
 
-Benchmarks on A10 (24 GB), decode batch size 1:
+### Performance Notes
 
-| Shape (M×N×K) | fp16 (ms) | w8a16 fp8 (ms) | Speedup |
-|---------------|-----------|----------------|--------|
-| 1×4096×4096 | 0.086 | 0.053 | 1.62× |
-| 1×11008×4096 | 0.199 | 0.116 | 1.71× |
-| 8×4096×4096 | 0.084 | 0.051 | 1.65× |
+- **lite fp16 vs HF**: 6.5× speedup from CUDA graphs + fused kernels + paged KV
+- **int8 per-channel (W8A16)**: Matches fp16 throughput, saves ~0.4 GB weight memory
+- **int8-blockwise (W8A16)**: Group-wise scales give finer granularity; slightly slower due to more scale loads
+- **smoothquant (W8A8 int8)**: Fastest scheme — both operands are int8, leveraging int8 tensor cores (6.9×)
+- **fp8 W8A8**: Per-token activation quantisation overhead on A10 (sm86 lacks native fp8 GEMM); improves on H100/sm90
+- **INT4 MoE (AWQ/GPTQ)**: fused_moe kernel supports int4 packed weights with group-wise scales+zeros
+- **KV cache fp8**: Not reflected in the table (orthogonal to weight quantisation); halves the KV cache footprint, enabling ~2× longer sequences
 
-The speedup comes from halving the weight bytes streamed from HBM. For prefill
-(large M), the kernel is compute-bound and the benefit diminishes.
+## Accuracy
+
+Token-level accuracy comparison (greedy decode, same prompt set):
+
+| Scheme | Token Match vs HF fp16 | Expected |
+|--------|----------------------|----------|
+| lite fp16 | ~25% | Normal — different attention kernel numerics cause divergence after first mismatch |
+| int8 per-channel | ~23% | Within fp16 divergence range |
+| fp8 W8A8 | ~5% | e4m3's 3 mantissa bits cause earlier divergence |
+
+> **Logits-level accuracy** (measured per-token before greedy argmax) shows much higher
+> agreement: int8 <0.03% relative error, fp8 <0.04% — confirming the quantisation does
+> not degrade model quality, only greedy decode amplifies rounding differences.
+
+## Running Benchmarks
+
+```bash
+# Single model with specific schemes
+python benchmarks/bench_quant.py --model-dir /data/shared/llm_weights/Qwen3-0.6B \
+    --schemes fp16 int8 fp8
+
+# All representative models (plan subset)
+python benchmarks/bench_quant.py --all
+
+# Output JSON for CI tracking
+python benchmarks/bench_quant.py --model-dir ... --json results.json
+```
 
 ## Vision-Language Model Support
 
 Both TP and quantization extend to multimodal (VLM) checkpoints. The vision tower
-stays replicated and in its native dtype; only the language-model projections are
+stays replicated in its native dtype; only the language-model projections are
 sharded or quantised.
-
-### Supported Architectures
 
 | Model | Weights | TP | INT8 | vl-chat |
 |-------|---------|----|----|--------|
 | Qwen3-VL-4B-Instruct | BF16 | ✓ | ✓ | ✓ |
 | LLaVA-1.5-7B (HF) | FP16 | ✓ | ✓ | ✓ |
-
-### End-to-End Test Results (A10 × 2, greedy decoding)
-
-**Qwen3-VL-4B-Instruct** (36 layers, hidden=2560, 32 heads, 8 KV heads):
-
-| Config | Peak Mem / GPU | KV Cache Capacity | Output |
-|--------|---------------|-------------------|--------|
-| FP16 TP=1 | 9.66 GB | 73,676 tokens | ✓ correct |
-| FP16 TP=2 | 6.35 GB | 195,541 tokens/GPU | ✓ correct |
-| INT8 TP=1 | 6.93 GB | 93,559 tokens | ✓ correct |
-| INT8 TP=2 | 5.34 GB | 210,293 tokens/GPU | ✓ correct |
-
-**LLaVA-1.5-7B** (32 layers, hidden=4096, 32 heads, 32 KV heads):
-
-| Config | Peak Mem / GPU | KV Cache Capacity | Output |
-|--------|---------------|-------------------|--------|
-| FP16 TP=1 | 13.74 GB | 12,368 tokens | ✓ correct |
-| FP16 TP=2 | 7.90 GB | 48,665 tokens/GPU | ✓ correct |
-| INT8 TP=1 | 8.12 GB | 23,884 tokens | ✓ correct |
-| INT8 TP=2 | 5.15 GB | 59,927 tokens/GPU | ✓ correct |
-
-### Usage
-
-```bash
-# Qwen3-VL text chat with TP=2
-python -m lite_llama.cli chat \
-    --model-dir /data/shared/llm_weights/Qwen3-VL-4B-Instruct \
-    --tensor-parallel-size 2
-
-# Qwen3-VL vision chat with TP=2
-python -m lite_llama.cli vl-chat \
-    --model-dir /data/shared/llm_weights/Qwen3-VL-4B-Instruct \
-    --image photo.jpg --prompt "Describe this image." \
-    --tensor-parallel-size 2
-
-# LLaVA with INT8 + TP=2
-python -m lite_llama.cli vl-chat \
-    --model-dir /data/shared/llm_weights/llava-hf/llava-1.5-7b-hf \
-    --image photo.jpg --quantization int8 \
-    --tensor-parallel-size 2
-```
-
-### Design Notes
-
-- **Vision tower**: replicated across all TP ranks (not sharded). Each rank
-  computes identical vision embeddings independently.
-- **TP shard guard**: `shard_dim()` skips `vision_tower.*` parameters to prevent
-  false matches with text-model projection names (e.g. both contain `self_attn.q_proj`).
-- **`quantize_` delegation**: `MultiModalCausalLM.quantize_()` forwards to the
-  language model only; vision modules (`CLIPVisionModel`, `Qwen3VLVisionModel`,
-  projectors) stay in their native dtype.
-
-## Accuracy
-
-Relative error vs fp32 reference (typical):
-
-| Scheme | Relative Error |
-|--------|----------------|
-| fp8 blockwise | < 0.04% |
-| int8 per-channel | < 0.03% |
-| int4 group-wise | < 5% |
-| smoothquant W8A8 | < 2% |
