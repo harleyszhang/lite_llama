@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from lite_llama.models.config import ModelConfig
-from lite_llama.models.rotary_embedding import (
+from lite_llama.modules.rotary_embedding import (
     MRotaryEmbedding,
     RotaryEmbedding,
     compute_default_rope,

@@ -86,6 +86,9 @@ class QuantConfig:
         group_k: Input channels covered by one scale.
         ignored: HF module names the checkpoint left unquantised.
         is_dynamic: Whether activations are quantised at runtime (smoothquant).
+        method: The checkpoint's own ``quant_method`` name (``"awq"`` /
+            ``"gptq"``), which selects the checkpoint layout adapter; ``""``
+            for runtime schemes and non-int4 checkpoints.
     """
 
     format: str
@@ -93,6 +96,7 @@ class QuantConfig:
     group_k: int
     ignored: tuple[str, ...] = ()
     is_dynamic: bool = False
+    method: str = ""
 
     # ---- construction ----------------------------------------------------- #
     @classmethod
@@ -143,10 +147,20 @@ class QuantConfig:
     @classmethod
     def _from_int4(cls, params: dict, method: str, ignored: tuple[str, ...]) -> QuantConfig:
         # AWQ and GPTQ both use group-wise int4 with a configurable group size.
+        bits = int(params.get("bits", 4))
+        if bits != 4:
+            raise ValueError(f"only 4-bit {method} is supported, got {bits}")
+        if params.get("desc_act"):
+            # Activation ordering scatters each group over non-contiguous input
+            # channels; the w4a16 kernel assumes one group per contiguous block.
+            raise ValueError(
+                f"{method} with desc_act (activation ordering) is not supported; "
+                "repack the checkpoint with desc_act=False"
+            )
         group_size = int(params.get("group_size", 128))
         if group_size <= 0 or (group_size & (group_size - 1)) != 0:
             raise ValueError(f"group_size must be a positive power of 2, got {group_size}")
-        return cls(INT4, group_n=1, group_k=group_size, ignored=ignored)
+        return cls(INT4, group_n=1, group_k=group_size, ignored=ignored, method=method)
 
     @classmethod
     def _from_smoothquant(cls, params: dict, ignored: tuple[str, ...]) -> QuantConfig:

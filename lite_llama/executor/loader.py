@@ -38,7 +38,7 @@ def init_empty_parameters():
 
     Mirrors ``accelerate.init_empty_weights(include_buffers=False)``. Buffers must
     keep real storage because non-persistent ones such as
-    :attr:`~lite_llama.models.rotary_embedding.RotaryEmbedding.inv_freq` are absent
+    :attr:`~lite_llama.modules.rotary_embedding.RotaryEmbedding.inv_freq` are absent
     from checkpoints and are computed, not loaded.
     """
     original = nn.Module.register_parameter

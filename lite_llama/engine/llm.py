@@ -55,6 +55,8 @@ class LLM(LLMEngine):
             across processes, which cannot be done from inside one of them; use
             :class:`~lite_llama.engine.data_parallel.DataParallelEngine`, which owns
             the replicas and exposes the same ``generate``.
+        kv_cache_dtype: KV-cache element type — ``"auto"`` (fp16) or an fp8
+            spelling (``"fp8"`` / ``"fp8_e4m3"``), halving the cache footprint.
     """
 
     def __init__(
@@ -68,6 +70,7 @@ class LLM(LLMEngine):
         quantization: str | None = None,
         tensor_parallel_size: int = 1,
         data_parallel_size: int = 1,
+        kv_cache_dtype: str = "auto",
     ) -> None:
         if data_parallel_size != 1:
             raise ValueError(
@@ -93,6 +96,7 @@ class LLM(LLMEngine):
             use_cuda_graph=use_cuda_graph,
             quantization=quantization,
             tensor_parallel_size=tensor_parallel_size,
+            kv_cache_dtype=kv_cache_dtype,
         )
 
         # Strategy: only multimodal checkpoints get a preparer (and pay for the
