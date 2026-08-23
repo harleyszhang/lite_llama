@@ -22,6 +22,7 @@ import torch.nn as nn
 
 from . import weights
 from .base import CausalLM
+from .quantization._layout import adapt_int4_checkpoint
 
 #: lite_llama parameter prefix of the decoder stack inside a vision-language model.
 #: Also the marker in :attr:`MultiModalCausalLM.weight_prefixes` that says "hand the
@@ -138,6 +139,10 @@ class MultiModalCausalLM(nn.Module):
             if self.language_model.config.tie_word_embeddings
             else None
         )
+        quant = self.language_model.quant
+        if quant is not None and quant.is_int4:
+            # Same canonical-layout rewrite as CausalLM.load_weights.
+            checkpoint = adapt_int4_checkpoint(checkpoint, quant)
         weights.load_weights(
             self, checkpoint, self.translate_weight_key,
             tied=tied, shard=weights.tp_shard,

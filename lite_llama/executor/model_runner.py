@@ -65,6 +65,9 @@ class ModelRunner:
         self.head_dim = config.head_dim
         self.vocab_size = config.vocab_size
         self.max_seq_len = config.max_seq_len
+        # Element type of the paged KV cache: fp16 verbatim, or uint8 holding
+        # e4m3 bytes when the deployment asked for an fp8 cache.
+        kv_dtype = config.kv_cache_torch_dtype
 
         if max_gpu_num_blocks is None:
             # When decode graphs will be captured later, withhold their workspace
@@ -78,6 +81,7 @@ class ModelRunner:
                 num_layers=self.num_layers,
                 num_kv_heads=self.num_kv_heads,
                 head_dim=self.head_dim,
+                dtype=kv_dtype,
                 device=device,
                 reserved_bytes=reserved,
             )
@@ -93,6 +97,7 @@ class ModelRunner:
             num_kv_heads=self.num_kv_heads,
             head_dim=self.head_dim,
             gpu_num_blocks=max_gpu_num_blocks,
+            dtype=kv_dtype,
             device=device,
         )
         self.max_request_num = max(1, max_gpu_num_blocks // self.max_seq_len)
@@ -125,6 +130,7 @@ class ModelRunner:
         use_cuda_graph: bool = False,
         loader: ModelLoader | None = None,
         quantization: str | None = None,
+        kv_cache_dtype: str = "auto",
     ) -> ModelRunner:
         """Load config + weights and return a ready-to-run runner.
 
@@ -141,8 +147,11 @@ class ModelRunner:
                 fake in tests to build a runner without real weights.
             quantization: Weight quantisation to apply to an fp16 checkpoint
                 (``"int8"``); fp8 checkpoints carry their own and ignore this.
+            kv_cache_dtype: KV-cache element type — ``"auto"`` (fp16) or an fp8
+                spelling (``"fp8"`` / ``"fp8_e4m3"``), which halves the cache
+                footprint so twice as many tokens fit the same budget.
         """
-        config = ModelConfig.from_pretrained(checkpoints_dir, max_seq_len)
+        config = ModelConfig.from_pretrained(checkpoints_dir, max_seq_len, kv_cache_dtype)
         spec = ModelRegistry.resolve(config.model_type)
         model = (loader or DefaultModelLoader()).load_model(
             config, spec.load_class(), checkpoints_dir, device, quantization

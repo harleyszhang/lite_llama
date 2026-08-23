@@ -83,7 +83,7 @@ def expert_half(index: int, half_index: int) -> Destination:
 #: parameter name. Matched as a suffix of the checkpoint key's module path, so
 #: ``layers.7.self_attn.q_norm.weight`` becomes ``layers.7.self_attn.q_norm_weight``.
 #: The projections are absent because they are real submodules
-#: (:class:`~lite_llama.models.linear.LinearBase`) whose parameter names already
+#: (:class:`~lite_llama.modules.linear.LinearBase`) whose parameter names already
 #: match HF's.
 _FLATTENED: tuple[str, ...] = (
     "self_attn.q_norm",
@@ -114,8 +114,15 @@ _EXPERT_KEY = re.compile(
 
 #: Suffixes that separate a parameter from the module owning it. Ordered so the
 #: longest match wins: ``q_proj.weight_scale_inv`` belongs to ``q_proj``, not to
-#: ``q_proj.weight``.
-_PARAM_SUFFIXES: tuple[str, ...] = (".weight_scale_inv", "_scale_inv", ".weight", ".bias")
+#: ``q_proj.weight``. ``weight_scale``/``weight_zeros`` are the int4 grids.
+_PARAM_SUFFIXES: tuple[str, ...] = (
+    ".weight_scale_inv",
+    "_scale_inv",
+    ".weight_scale",
+    ".weight_zeros",
+    ".weight",
+    ".bias",
+)
 
 #: Module path suffix -> the dimension of the *incoming* checkpoint tensor that
 #: tensor parallelism splits. Column-parallel weights are cut along their output

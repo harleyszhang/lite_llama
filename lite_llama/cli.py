@@ -41,6 +41,7 @@ def _tp_mirror_worker(
     max_seq_len: int,
     max_gpu_num_blocks: int | None,
     quantization: str | None,
+    kv_cache_dtype: str = "auto",
     image_paths: list[str] | None = None,
     prompt_text: str | None = None,
 ) -> None:
@@ -72,6 +73,7 @@ def _tp_mirror_worker(
             device=f"cuda:{rank}",
             quantization=quantization,
             tensor_parallel_size=world_size,
+            kv_cache_dtype=kv_cache_dtype,
         )
     else:
         generator = TextGenerator(
@@ -82,6 +84,7 @@ def _tp_mirror_worker(
             use_cuda_graph=False,
             quantization=quantization,
             tensor_parallel_size=world_size,
+            kv_cache_dtype=kv_cache_dtype,
         )
     params = SamplingParams(temperature=0.0, max_gen_len=4096)
 
@@ -153,6 +156,15 @@ COMMON_OPTIONS: tuple[CliOption, ...] = (
         },
     ),
     CliOption(
+        "--kv-cache-dtype",
+        {
+            "choices": ["auto", "fp8", "fp8_e4m3"],
+            "default": "auto",
+            "help": "KV-cache element type: 'auto' keeps fp16; the fp8 spellings "
+            "store e4m3 bytes, halving the cache footprint (vLLM-style)",
+        },
+    ),
+    CliOption(
         "--tensor-parallel-size",
         {
             "type": int,
@@ -183,6 +195,7 @@ class EngineOptions:
     device: str = "cuda"
     use_cuda_graph: bool = False
     quantization: str | None = None
+    kv_cache_dtype: str = "auto"
     tensor_parallel_size: int = 1
 
     @classmethod
@@ -203,6 +216,7 @@ class EngineOptions:
             device=args.device,
             use_cuda_graph=getattr(args, "use_cuda_graph", False),
             quantization=getattr(args, "quantization", None),
+            kv_cache_dtype=getattr(args, "kv_cache_dtype", "auto"),
             tensor_parallel_size=getattr(args, "tensor_parallel_size", 1),
         )
 
@@ -215,6 +229,7 @@ class EngineOptions:
             use_cuda_graph=self.use_cuda_graph,
             quantization=self.quantization,
             tensor_parallel_size=self.tensor_parallel_size,
+            kv_cache_dtype=self.kv_cache_dtype,
         )
 
     def build_vision_generator(self) -> VisionGenerator:
@@ -226,6 +241,7 @@ class EngineOptions:
             device=self.device,
             quantization=self.quantization,
             tensor_parallel_size=self.tensor_parallel_size,
+            kv_cache_dtype=self.kv_cache_dtype,
         )
 
 
@@ -414,7 +430,7 @@ class ChatCommand(CliCommand):
             p = mp.Process(
                 target=_tp_mirror_worker,
                 args=(rank, world_size, opts.model_dir, opts.max_seq_len,
-                      opts.max_gpu_num_blocks, opts.quantization),
+                      opts.max_gpu_num_blocks, opts.quantization, opts.kv_cache_dtype),
                 daemon=True,
             )
             p.start()
@@ -434,6 +450,7 @@ class ChatCommand(CliCommand):
             use_cuda_graph=False,
             quantization=opts.quantization,
             tensor_parallel_size=world_size,
+            kv_cache_dtype=opts.kv_cache_dtype,
         )
         style = PrompterResolver.resolve(opts.model_dir, getattr(args, "prompt_style", None))
         prompter = PrompterResolver.build(style, generator.tokenizer)
@@ -585,7 +602,7 @@ class VlChatCommand(CliCommand):
             p = mp.Process(
                 target=_tp_mirror_worker,
                 args=(rank, world_size, opts.model_dir, opts.max_seq_len,
-                      opts.max_gpu_num_blocks, opts.quantization,
+                      opts.max_gpu_num_blocks, opts.quantization, opts.kv_cache_dtype,
                       args.image, prompt),
                 daemon=True,
             )
@@ -605,6 +622,7 @@ class VlChatCommand(CliCommand):
             device="cuda:0",
             quantization=opts.quantization,
             tensor_parallel_size=world_size,
+            kv_cache_dtype=opts.kv_cache_dtype,
         )
         params = CliCommand.build_sampling_params(args)
 
@@ -698,6 +716,7 @@ class ServeCommand(CliCommand):
             device=opts.device,
             use_cuda_graph=not args.no_cuda_graph,
             quantization=opts.quantization,
+            kv_cache_dtype=opts.kv_cache_dtype,
             chat_template=not args.no_chat_template,
         )
         print(f"Serving {config.model_name} on http://{args.host}:{args.port}")
@@ -753,6 +772,7 @@ class BatchCommand(CliCommand):
             max_gpu_num_blocks=opts.max_gpu_num_blocks,
             device=opts.device,
             quantization=opts.quantization,
+            kv_cache_dtype=opts.kv_cache_dtype,
         )
         prompter = (
             None
