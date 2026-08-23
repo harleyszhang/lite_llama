@@ -1,0 +1,17 @@
+{
+  "test": "tp2_sampling_rng_consistency",
+  "model": "/data/shared/llm_weights/Qwen3-0.6B",
+  "temperature": 0.7,
+  "seed": 42,
+  "fixed": {
+    "rank0": " a concept that is often discussed in philosophical circles, and it has been used to explain various aspects of human life. It is not only an expression of ideology but",
+    "rank1": " a concept that is often discussed in philosophical circles, and it has been used to explain various aspects of human life. It is not only an expression of ideology but",
+    "match": true
+  },
+  "bug_simulated": {
+    "rank0": " a concept that is debated, and the meaning of life can be found in the process of people's own lives. This means that the meaning of life has no",
+    "rank1": " the question that has very among but the same is life can be found in the application of being's life lives. If statement that people meaning of life is no",
+    "diverge": true
+  },
+  "verdict": "PASS"
+}
