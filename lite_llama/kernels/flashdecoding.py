@@ -1,18 +1,12 @@
 """FlashDecoding: single-token decode attention against the paged KV cache.
 
-Splits each sequence's KV history into partitions processed in parallel (stage 1
-emits per-partition softmax stats and partial outputs), then stage 2 combines them
-— turning the memory-bound decode step into a parallel reduction over context.
-
-The history of batch row ``i`` is found through ``b_req_tokens_table[b_req_idx[i]]``.
-That indirection matters: a batch row is a *position in this step's batch*, which
-under continuous batching has nothing to do with which cache slot the request
-owns. Reading the table by batch position instead — correct only while
-``b_req_idx == arange(batch)`` — makes a request silently attend over its
-neighbour's KV as soon as anyone leaves the batch.
+Splits each sequence's KV history into partitions processed in parallel (stage 1),
+then combines via a log-sum-exp reduction (stage 2). Supports both fp16 and fp8
+(e4m3) KV cache with per-tensor dequantisation scales.
 
 Usage:
     out = flash_decoding(q, k_cache, v_cache, scale, table, b_req_idx, b_seq_len, max_len)
+    out = flash_decoding(q, k_fp8, v_fp8, scale, table, idx, lens, max_len, k_scale=0.5, v_scale=0.5)
 """
 
 import torch
