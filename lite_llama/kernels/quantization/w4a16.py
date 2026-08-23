@@ -6,6 +6,13 @@ input channels. The kernel unpacks the int4 nibbles, applies the group-wise
 dequantisation, and multiplies by the fp16 activation — all inside the GEMM
 loop, so the weight never exists at fp16 in HBM.
 
+v0.5 rewrite: uses ``tl.dot`` for tensor-core acceleration (SM80+ fp16 HMMA).
+Each k-iteration processes one full group (group_size elements = BLOCK_K):
+  1. Load [BLOCK_N, group_size//8] packed int32 words
+  2. Unpack to [group_size, BLOCK_N] fp16 via bit shift
+  3. Apply dequant: (nibble - zero) * scale
+  4. ``tl.dot(a_tile, b_tile)`` accumulates on tensor cores
+
 Packing order (AWQ/GPTQ standard):
     int32 word w contains values for K indices [8*i, 8*i+7]:
         nibble_j = (w >> (4*j)) & 0xF,  j = 0..7
@@ -21,9 +28,11 @@ import torch
 import triton
 import triton.language as tl
 
+_PACK_FACTOR = 8
+
 
 # --------------------------------------------------------------------------- #
-# GEMM kernel - tiled version
+# GEMM kernel — per-group tl.dot (tensor core accelerated)
 # --------------------------------------------------------------------------- #
 @triton.jit
 def _w4a16_matmul_kernel(
@@ -34,14 +43,18 @@ def _w4a16_matmul_kernel(
     stride_cm, stride_cn,
     stride_sn, stride_sk,
     GROUP_SIZE: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     GROUP_M: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
-    """One ``[BLOCK_M, BLOCK_N]`` tile of ``C = A @ dequant(B).T``.
+    """One [BLOCK_M, BLOCK_N] tile of C = A @ dequant(B).T.
 
-    BLOCK_K must be a multiple of 8 (packing factor) and GROUP_SIZE.
+    Iterates K in steps of GROUP_SIZE (one quant group per iteration).
+    Each step: unpack [BLOCK_N, GROUP_SIZE//8] int32 -> [GROUP_SIZE, BLOCK_N] fp16,
+    dequant, then tl.dot accumulate.
     """
+    WORDS_PER_GROUP: tl.constexpr = GROUP_SIZE // 8
+
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_M)
     num_pid_n = tl.cdiv(N, BLOCK_N)
@@ -52,98 +65,72 @@ def _w4a16_matmul_kernel(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    offs_am = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) % M
-    offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
-    offs_k = tl.arange(0, BLOCK_K)
+    offs_m = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) % M
+    offs_n = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
 
-    # A pointers: [BLOCK_M, BLOCK_K]
-    a_ptrs = a_ptr + offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak
-
-    # B pointers: [BLOCK_N, BLOCK_K // 8] packed int32
-    offs_bk = tl.arange(0, BLOCK_K // 8)
-    b_ptrs = b_ptr + offs_bn[:, None] * stride_bn + offs_bk[None, :] * stride_bk
+    # A base pointer for this tile's rows
+    a_base = a_ptr + offs_m[:, None] * stride_am
+    # B base pointer for this tile's columns
+    b_base = b_ptr + offs_n[:, None] * stride_bn
 
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-    # Number of K-groups per BLOCK_K tile
-    groups_per_block = BLOCK_K // GROUP_SIZE
+    # Shift constants for unpacking 8 nibbles from one int32
+    shifts = (tl.arange(0, 8) * 4).to(tl.int32)  # [8]
 
-    for k_block in range(0, tl.cdiv(K, BLOCK_K)):
-        k_start = k_block * BLOCK_K
-        k_rem = K - k_start
+    num_groups = K // GROUP_SIZE
+    for g_idx in range(num_groups):
+        k_start = g_idx * GROUP_SIZE
 
-        # Load A tile: [BLOCK_M, BLOCK_K]
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < k_rem, other=0.0)
+        # Load A slice: [BLOCK_M, GROUP_SIZE]
+        offs_k = k_start + tl.arange(0, GROUP_SIZE)
+        a_tile = tl.load(
+            a_base + offs_k[None, :] * stride_ak,
+            mask=offs_k[None, :] < K,
+            other=0.0,
+        )
 
-        # Load B tile: [BLOCK_N, BLOCK_K // 8] packed int32
-        b_packed = tl.load(b_ptrs, mask=offs_bk[None, :] < (k_rem + 7) // 8, other=0)
+        # Load B packed: [BLOCK_N, WORDS_PER_GROUP] int32
+        offs_bk = (k_start // 8) + tl.arange(0, WORDS_PER_GROUP)
+        b_packed = tl.load(
+            b_base + offs_bk[None, :] * stride_bk,
+            mask=offs_n[:, None] < N,
+            other=0,
+        )  # [BLOCK_N, WORDS_PER_GROUP]
 
-        # Process each group within this block
-        for g in range(groups_per_block):
-            k_group_start = k_start + g * GROUP_SIZE
-            k_group_idx = k_group_start // GROUP_SIZE
+        # Unpack: [BLOCK_N, WORDS_PER_GROUP, 1] >> [1, 1, 8] -> [BLOCK_N, WORDS_PER_GROUP, 8]
+        b_expanded = (b_packed[:, :, None] >> shifts[None, None, :]) & 0xF
+        # Reshape to [BLOCK_N, GROUP_SIZE] then cast to float
+        b_flat = tl.reshape(b_expanded, (BLOCK_N, GROUP_SIZE)).to(tl.float32)
 
-            # Load scale and zero for this group: [BLOCK_N]
-            scale = tl.load(scale_ptr + offs_bn * stride_sn + k_group_idx * stride_sk,
-                           mask=offs_bn < N, other=1.0)
-            zero = tl.load(zero_ptr + offs_bn * stride_sn + k_group_idx * stride_sk,
-                          mask=offs_bn < N, other=0.0)
+        # Load scale and zero for this group: [BLOCK_N]
+        scale = tl.load(
+            scale_ptr + offs_n * stride_sn + g_idx * stride_sk,
+            mask=offs_n < N, other=1.0,
+        )
+        zero = tl.load(
+            zero_ptr + offs_n * stride_sn + g_idx * stride_sk,
+            mask=offs_n < N, other=0.0,
+        )
 
-            # Unpack and dequantize GROUP_SIZE int4 values
-            # Each group spans GROUP_SIZE // 8 packed words
-            words_per_group = GROUP_SIZE // 8
-            for w in range(words_per_group):
-                # Load one packed word per N: [BLOCK_N]
-                word_idx = g * words_per_group + w
-                packed_word = tl.load(b_ptr + offs_bn * stride_bn + (k_block * (BLOCK_K // 8) + word_idx) * stride_bk,
-                                     mask=offs_bn < N, other=0)
+        # Dequant: [BLOCK_N, GROUP_SIZE]
+        b_dequant = (b_flat - zero[:, None]) * scale[:, None]
 
-                # Unpack 8 int4 values
-                for nibble in tl.static_range(8):
-                    k_offset = w * 8 + nibble
-                    k_idx = g * GROUP_SIZE + k_offset
+        # Transpose to [GROUP_SIZE, BLOCK_N] for tl.dot
+        b_tile = tl.trans(b_dequant).to(tl.float16)  # [GROUP_SIZE, BLOCK_N]
 
-                    # Extract nibble
-                    int4_val = (packed_word >> (4 * nibble)) & 0xF
-
-                    # Dequantize
-                    dequant = (int4_val.to(tl.float32) - zero) * scale
-
-                    # Load A column for this K index
-                    a_col = tl.load(a_ptr + offs_am * stride_am + (k_start + k_idx) * stride_ak,
-                                   mask=offs_am < M, other=0.0)
-
-                    # Accumulate outer product
-                    accumulator += a_col[:, None] * dequant[None, :]
-
-        a_ptrs += BLOCK_K * stride_ak
-        b_ptrs += (BLOCK_K // 8) * stride_bk
+        # Accumulate: [BLOCK_M, GROUP_SIZE] @ [GROUP_SIZE, BLOCK_N]
+        accumulator += tl.dot(a_tile, b_tile)
 
     if HAS_BIAS:
-        accumulator += tl.load(bias_ptr + offs_bn, mask=offs_bn < N, other=0.0)[None, :]
+        accumulator += tl.load(bias_ptr + offs_n, mask=offs_n < N, other=0.0)[None, :]
 
+    # Store output
     offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     c_ptrs = c_ptr + offs_cm[:, None] * stride_cm + offs_cn[None, :] * stride_cn
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator.to(c_ptr.dtype.element_ty), mask=c_mask)
-
-
-# --------------------------------------------------------------------------- #
-# Launch configuration
-# --------------------------------------------------------------------------- #
-def _launch_config(num_tokens: int, group_size: int) -> dict:
-    """Tile shape for ``num_tokens`` rows of activations."""
-    # BLOCK_K must be a multiple of both 8 and group_size
-    block_k = max(8, group_size)
-    if num_tokens <= 32:
-        return {"BLOCK_M": 16, "BLOCK_N": 64, "BLOCK_K": block_k, "GROUP_M": 1,
-                "num_warps": 4, "num_stages": 2}
-    if num_tokens <= 128:
-        return {"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": block_k, "GROUP_M": 8,
-                "num_warps": 4, "num_stages": 2}
-    return {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": block_k, "GROUP_M": 8,
-            "num_warps": 4, "num_stages": 2}
 
 
 # --------------------------------------------------------------------------- #
@@ -159,6 +146,9 @@ def w4a16_matmul(
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """``x @ dequant(qweight).T (+ bias)`` with int4 weights unpacked in-kernel.
+
+    Uses tl.dot for tensor-core acceleration. Each GEMM iteration processes
+    one full quantisation group (group_size elements).
 
     Args:
         x: ``[..., K]`` fp16 activations. Leading dims are flattened.
@@ -177,7 +167,7 @@ def w4a16_matmul(
         raise ValueError(f"qweight must be int32 (packed int4), got {qweight.dtype}")
 
     n, k_packed = qweight.shape
-    k = k_packed * 8  # 8 int4 values per int32 word
+    k = k_packed * _PACK_FACTOR
     if x.shape[-1] != k:
         raise ValueError(f"x has {x.shape[-1]} cols but weight expects {k}")
     if k % group_size != 0:
@@ -190,8 +180,23 @@ def w4a16_matmul(
     m = a.shape[0]
     out = torch.empty((m, n), dtype=x.dtype, device=x.device)
 
-    cfg = _launch_config(m, group_size)
-    grid = (triton.cdiv(m, cfg["BLOCK_M"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
+    # Autotune lookup or heuristic fallback
+    from lite_llama.kernels.autotune import get_best_config
+    config = get_best_config("w4a16_matmul", m=m, n=n, k=k, dtype="int4")
+    if config is None:
+        if m <= 32:
+            config = {"BLOCK_M": 16, "BLOCK_N": 64, "GROUP_M": 1,
+                      "num_warps": 4, "num_stages": 2}
+        elif m <= 128:
+            config = {"BLOCK_M": 32, "BLOCK_N": 64, "GROUP_M": 8,
+                      "num_warps": 4, "num_stages": 2}
+        else:
+            config = {"BLOCK_M": 64, "BLOCK_N": 64, "GROUP_M": 8,
+                      "num_warps": 4, "num_stages": 2}
+
+    block_m = config["BLOCK_M"]
+    block_n = config["BLOCK_N"]
+    grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
 
     _w4a16_matmul_kernel[grid](
         a, qweight, out, scales, zeros, bias,
@@ -201,7 +206,11 @@ def w4a16_matmul(
         out.stride(0), out.stride(1),
         scales.stride(0), scales.stride(1),
         GROUP_SIZE=group_size,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        GROUP_M=config["GROUP_M"],
         HAS_BIAS=bias is not None,
-        **cfg,
+        num_warps=config["num_warps"],
+        num_stages=config["num_stages"],
     )
     return out.reshape(*leading, n)
