@@ -1,0 +1,10 @@
+
+=== WITHOUT Chunked Prefill (v0.6) ===
+
+Step 1: [PREFILL ████████████████████████████████] 2000 tokens (BLOCKING)
+         Decode requests A,B,C,D: ⏸ STALLED
+
+Step 2: [DECODE A] [DECODE B] [DECODE C] [DECODE D]
+         (finally running after full prefill)
+
+⚠ Decode latency spike: ~200ms during long prefill
