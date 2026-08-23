@@ -13,10 +13,20 @@ layouts that have historically broken independently:
 * ``batch_mixed`` -- a very short prompt beside a long one, which is what the
   packed-vs-padded prefill bug corrupted,
 * ``batch8`` -- eight sequences, enough to cross the CUDA-graph capture buckets.
+
+Extended coverage paths (exercised only when the matching capability is
+available; the test auto-skips individual cases when the engine lacks the
+required feature):
+
+* ``cb_*`` -- continuous-batching engine path,
+* ``quant_*`` -- runtime quantisation (int8 / fp8 / smoothquant).
 """
 
 from __future__ import annotations
 
+# --------------------------------------------------------------------------- #
+# Standard text cases (offline batch)
+# --------------------------------------------------------------------------- #
 CASES: list[tuple[str, list[str], int]] = [
     ("single", ["The future of artificial intelligence is"], 48),
     ("batch_uniform", ["How to learn python?", "How to learn c++?"], 32),
@@ -37,6 +47,35 @@ CASES: list[tuple[str, list[str], int]] = [
     ),
 ]
 
+# --------------------------------------------------------------------------- #
+# Continuous-batching cases (online engine path)
+# --------------------------------------------------------------------------- #
+CB_CASES: list[tuple[str, list[str], int]] = [
+    ("cb_single", ["Explain what a GPU is in one sentence."], 32),
+    (
+        "cb_interleaved",
+        [
+            "Name the capital of Japan.",
+            "Write a haiku about rain.",
+            "Summarise the theory of relativity in three sentences.",
+        ],
+        48,
+    ),
+]
+
+# --------------------------------------------------------------------------- #
+# Quantisation path cases (runtime int8/fp8/smoothquant)
+# --------------------------------------------------------------------------- #
+#: (scheme_name, prompts, max_gen_len). The test records separate baselines
+#: per scheme so a kernel change in one path does not invalidate the others.
+QUANT_CASES: list[tuple[str, list[str], int]] = [
+    ("quant_single", ["The capital of France is"], 32),
+    ("quant_batch", ["What is deep learning?", "Describe a neural network."], 32),
+]
+
+#: Runtime quantisation schemes exercised by the golden gate.
+QUANT_SCHEMES: tuple[str, ...] = ("int8", "fp8", "smoothquant")
+
 #: Repetition-penalty settings swept for every case. 1.0 is the plain path; 1.1
 #: exercises ``apply_repetition_penalty``, whose vectorised rewrite is exactly
 #: the kind of change that must not move a single token.
@@ -49,6 +88,7 @@ MAX_GPU_NUM_BLOCKS = 8192
 MAX_SEQ_LEN = 1024
 
 
-def case_key(name: str, penalty: float) -> str:
-    """Stable key for one (case, penalty) pair in the golden JSON."""
-    return name if penalty == 1.0 else f"{name}_rp{penalty}"
+def case_key(name: str, penalty: float, scheme: str = "") -> str:
+    """Stable key for one (case, penalty[, scheme]) combination in the golden JSON."""
+    key = name if penalty == 1.0 else f"{name}_rp{penalty}"
+    return f"{key}_{scheme}" if scheme else key

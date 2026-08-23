@@ -6,9 +6,18 @@
 
 用法::
 
-    # 录制当前 checkpoint 的基线(测试会自动按 checkpoint 名查找)
-    .venv/bin/python scripts/golden_tokens.py \\
+    # 录制单个 checkpoint 的基线
+    .venv/bin/python scripts/golden_tokens.py \
         --save tests/golden/data/Qwen2.5-0.5B.json
+
+    # 多模型批量重录
+    .venv/bin/python scripts/golden_tokens.py --batch-save \
+        --models my_weight/Qwen2.5-0.5B my_weight/Qwen3-0.6B
+
+    # 含量化路径的录制
+    .venv/bin/python scripts/golden_tokens.py \
+        --save tests/golden/data/Qwen3-0.6B_int8.json \
+        --model-dir my_weight/Qwen3-0.6B --quantization int8
 
     # 手动比对(可选;pytest 已覆盖)
     .venv/bin/python scripts/golden_tokens.py --check tests/golden/data/Qwen2.5-0.5B.json
@@ -26,43 +35,116 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from lite_llama import SamplingParams, TextGenerator
 from tests.golden.cases import (
     CASES,
+    CB_CASES,
     MAX_GPU_NUM_BLOCKS,
     MAX_SEQ_LEN,
     PENALTIES,
+    QUANT_CASES,
+    QUANT_SCHEMES,
     case_key,
 )
 
 
-def collect(model_dir: str, use_cuda_graph: bool) -> dict[str, list[str]]:
+def collect(
+    model_dir: str,
+    use_cuda_graph: bool,
+    quantization: str | None = None,
+    include_quant_cases: bool = False,
+) -> dict[str, list[str]]:
     """跑完所有 (用例 x repetition_penalty) 组合,返回 key -> 输出文本列表。"""
     gen = TextGenerator(
         checkpoints_dir=model_dir,
         max_seq_len=MAX_SEQ_LEN,
         max_gpu_num_blocks=MAX_GPU_NUM_BLOCKS,
         use_cuda_graph=use_cuda_graph,
+        quantization=quantization,
     )
     out: dict[str, list[str]] = {}
-    for name, prompts, max_gen_len in CASES:
+
+    # Standard text cases
+    cases = CASES
+    if include_quant_cases and quantization:
+        cases = QUANT_CASES
+
+    for name, prompts, max_gen_len in cases:
         for penalty in PENALTIES:
             params = SamplingParams(
                 temperature=0.0, max_gen_len=max_gen_len, repetition_penalty=penalty
             )
-            out[case_key(name, penalty)] = gen.generate(prompts, params)
+            key = case_key(name, penalty, scheme=quantization or "")
+            out[key] = gen.generate(prompts, params)
     return out
 
 
+def collect_all_schemes(
+    model_dir: str, use_cuda_graph: bool
+) -> dict[str, list[str]]:
+    """Record baselines for the fp16 path and all runtime quantisation schemes."""
+    # fp16 baseline (standard CASES)
+    results = collect(model_dir, use_cuda_graph)
+
+    # Quantisation-specific cases for each runtime scheme
+    for scheme in QUANT_SCHEMES:
+        try:
+            scheme_results = collect(
+                model_dir, use_cuda_graph=False, quantization=scheme, include_quant_cases=True
+            )
+            results.update(scheme_results)
+        except Exception as e:
+            print(f"WARNING: scheme {scheme!r} failed: {e}", file=sys.stderr)
+    return results
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model-dir", default="my_weight/Qwen2.5-0.5B")
     ap.add_argument("--save", help="录制基线到该 JSON 路径")
     ap.add_argument("--check", help="与该 JSON 基线比对")
     ap.add_argument("--cuda-graph", action="store_true", help="用 CUDA graph 路径采集")
+    ap.add_argument("--quantization", default=None, help="运行时量化方案 (int8/fp8/smoothquant)")
+    ap.add_argument(
+        "--batch-save", action="store_true",
+        help="多模型批量重录 (需配合 --models)",
+    )
+    ap.add_argument(
+        "--models", nargs="+", default=None,
+        help="多模型目录列表 (配合 --batch-save 使用)",
+    )
+    ap.add_argument(
+        "--all-schemes", action="store_true",
+        help="录制 fp16 + 所有运行时量化方案的基线",
+    )
+    ap.add_argument(
+        "--output-dir", default="tests/golden/data",
+        help="批量录制时输出目录 (默认 tests/golden/data)",
+    )
     args = ap.parse_args()
 
-    if not args.save and not args.check:
-        ap.error("需要 --save 或 --check 之一")
+    if args.batch_save:
+        models = args.models or [args.model_dir]
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for model in models:
+            model_name = Path(model).name
+            print(f"Recording golden for {model_name}...")
+            if args.all_schemes:
+                got = collect_all_schemes(model, args.cuda_graph)
+                path = output_dir / f"{model_name}_all.json"
+            else:
+                got = collect(model, args.cuda_graph, quantization=args.quantization)
+                suffix = f"_{args.quantization}" if args.quantization else ""
+                path = output_dir / f"{model_name}{suffix}.json"
+            path.write_text(json.dumps(got, ensure_ascii=False, indent=1) + "\n")
+            print(f"  saved {len(got)} cases -> {path}")
+        return 0
 
-    got = collect(args.model_dir, args.cuda_graph)
+    if not args.save and not args.check:
+        ap.error("需要 --save, --check 或 --batch-save 之一")
+
+    if args.all_schemes:
+        got = collect_all_schemes(args.model_dir, args.cuda_graph)
+    else:
+        got = collect(args.model_dir, args.cuda_graph, quantization=args.quantization)
 
     if args.save:
         path = Path(args.save)

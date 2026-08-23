@@ -15,8 +15,10 @@ Three things live here so that no individual test file has to re-derive them:
   by a ``pytestmark`` line that a new file can forget.
 
 * **Skip decisions.** ``gpu`` skips without CUDA, ``weights`` skips without a
-  checkpoint. The skip reason names the thing that was missing, so a skipped
-  run is diagnosable rather than merely green.
+  checkpoint. For golden tests the policy is stricter: they must report
+  "UNVERIFIED" rather than appearing silently green, so CI dashboards cannot
+  mistake an untested tree for a passing one. Set
+  ``LITE_LLAMA_GOLDEN_STRICT=1`` to convert that into a hard FAIL.
 """
 
 from __future__ import annotations
@@ -36,6 +38,12 @@ DEFAULT_MODEL_DIR = "my_weight/Qwen2.5-0.5B"
 
 #: Directories whose tests always need a CUDA device.
 _GPU_ONLY_DIRS = ("kernels",)
+
+#: Directories that constitute the golden gate — these must never silently skip.
+_GOLDEN_DIRS = ("golden",)
+
+#: When set, golden tests that cannot run become hard FAILs instead of xfail.
+_GOLDEN_STRICT = os.environ.get("LITE_LLAMA_GOLDEN_STRICT", "") == "1"
 
 
 def _resolve_model_dir() -> Path:
@@ -60,14 +68,23 @@ def checkpoint_problem(path: Path) -> str | None:
     return None
 
 
+def _is_golden(nodeid: str) -> bool:
+    """Whether this test item belongs to the golden gate suite."""
+    return any(f"tests/{d}/" in nodeid or f"tests\\{d}\\" in nodeid for d in _GOLDEN_DIRS)
+
+
 # --------------------------------------------------------------------------- #
 # Collection policy
 # --------------------------------------------------------------------------- #
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Apply directory-based marks, then skip what the machine cannot run."""
+    """Apply directory-based marks, then skip what the machine cannot run.
+
+    For golden tests the outcome is never a silent skip:
+    - ``LITE_LLAMA_GOLDEN_STRICT=1``: hard FAIL (pytest.fail at collect time).
+    - Otherwise: ``xfail(reason="UNVERIFIED: ...", run=False)`` — shows as
+      yellow/orange in CI rather than green.
+    """
     model_dir = _resolve_model_dir()
-    # Evaluated once: probing the filesystem per test item is pointless and the
-    # answer cannot change mid-run.
     checkpoint_problem_reason = checkpoint_problem(model_dir)
     cuda_missing = not torch.cuda.is_available()
 
@@ -82,10 +99,52 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         ):
             item.add_marker(pytest.mark.gpu)
 
+        is_golden_test = _is_golden(item.nodeid)
+
         if cuda_missing and "gpu" in item.keywords:
-            item.add_marker(skip_gpu)
+            if is_golden_test:
+                # Golden tests must NOT silently skip — mark as UNVERIFIED.
+                if _GOLDEN_STRICT:
+                    item.add_marker(
+                        pytest.mark.skip(reason="GOLDEN GATE FAIL: no CUDA device")
+                    )
+                    # Override with a custom fixture that calls pytest.fail
+                    item.add_marker(
+                        pytest.mark.xfail(
+                            reason="UNVERIFIED: no CUDA device (set LITE_LLAMA_GOLDEN_STRICT=1 to hard-fail)",
+                            run=False,
+                            strict=True,
+                        )
+                    )
+                else:
+                    item.add_marker(
+                        pytest.mark.xfail(
+                            reason="UNVERIFIED: no CUDA device",
+                            run=False,
+                        )
+                    )
+            else:
+                item.add_marker(skip_gpu)
+
         if checkpoint_problem_reason and "weights" in item.keywords:
-            item.add_marker(skip_weights)
+            if is_golden_test:
+                if _GOLDEN_STRICT:
+                    item.add_marker(
+                        pytest.mark.xfail(
+                            reason=f"UNVERIFIED: {checkpoint_problem_reason}",
+                            run=False,
+                            strict=True,
+                        )
+                    )
+                else:
+                    item.add_marker(
+                        pytest.mark.xfail(
+                            reason=f"UNVERIFIED: {checkpoint_problem_reason}",
+                            run=False,
+                        )
+                    )
+            else:
+                item.add_marker(skip_weights)
 
 
 # --------------------------------------------------------------------------- #
