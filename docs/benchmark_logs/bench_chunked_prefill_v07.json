@@ -1,0 +1,20 @@
+{
+  "no_chunk": {
+    "chunk_size": 0,
+    "prefill_steps": 1,
+    "decode_steps_during_prefill": 1,
+    "decode_not_blocked": true
+  },
+  "chunk_512": {
+    "chunk_size": 512,
+    "prefill_steps": 4,
+    "decode_steps_during_prefill": 4,
+    "decode_not_blocked": true
+  },
+  "chunk_256": {
+    "chunk_size": 256,
+    "prefill_steps": 8,
+    "decode_steps_during_prefill": 8,
+    "decode_not_blocked": true
+  }
+}
