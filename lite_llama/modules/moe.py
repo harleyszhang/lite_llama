@@ -26,7 +26,7 @@ import torch.nn.functional as F
 
 from ..distributed.parallel_state import all_reduce_tp, divide, get_tp_world_size
 from ..models.config import ModelConfig
-from ..models.quantization import QuantConfig, get_moe_method
+from .quantization import QuantizationConfig, UnquantizedFusedMoEMethod
 
 
 class SparseMoeBlock(nn.Module):
@@ -42,7 +42,7 @@ class SparseMoeBlock(nn.Module):
             pick costs far more than a rounded weight.
     """
 
-    def __init__(self, config: ModelConfig, quant: QuantConfig | None = None) -> None:
+    def __init__(self, config: ModelConfig, quant: QuantizationConfig | None = None) -> None:
         super().__init__()
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
@@ -63,7 +63,9 @@ class SparseMoeBlock(nn.Module):
         # ``mlp.experts.{gate_up_proj,down_proj}``; gate and up projections are
         # fused along dim 1, mirroring the fused K/V layout of attention. Their
         # storage format is the quant method's business, not this class's.
-        self.quant_method = get_moe_method(quant)
+        self.quant_method = (
+            quant.get_quant_method(self) if quant is not None else UnquantizedFusedMoEMethod()
+        )
         self.experts = nn.ParameterDict(self.quant_method.create_weights(self))
 
     def _route(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -95,12 +97,16 @@ class SparseMoeBlock(nn.Module):
         return out.reshape(*leading_shape, self.hidden_size)
 
     @torch.no_grad()
-    def quantize_experts_(self, quant: QuantConfig) -> None:
+    def quantize_experts_(self, quant) -> None:
         """Convert loaded fp16 expert weights to the requested scheme, in place
         (see :meth:`lite_llama.models.base.CausalLM.quantize_`)."""
         if self.quant is not None:
             return
-        method = get_moe_method(quant)
-        method.convert_from_fp16(self, quant)
+        # Legacy QuantConfig shim
+        if not isinstance(quant, QuantizationConfig):
+            from ..modules.linear import _convert_legacy_quant
+            quant = _convert_legacy_quant(quant)
+        method = quant.get_quant_method(self)
+        method.quantize_from_fp16(self, quant)
         self.quant = quant
         self.quant_method = method

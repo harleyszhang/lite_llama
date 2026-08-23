@@ -22,8 +22,8 @@ from ..kernels import (
     update_kv_buffer,
 )
 from ..models.config import ModelConfig
-from ..models.quantization import QuantConfig
-from ..models.quantization.params import quantize_fp8_per_tensor
+from .quantization import QuantizationConfig
+from .quantization.kv_cache import get_kv_cache_method
 from .linear import ColumnParallelLinear, RowParallelLinear
 
 # The prefill kernel evaluates exp2 rather than exp, so its softmax scale has to
@@ -63,6 +63,7 @@ class PagedAttention(nn.Module):
         self.kv_cache_dtype = kv_cache_dtype
         self.k_scale = k_scale
         self.v_scale = v_scale
+        self.kv_cache_method = get_kv_cache_method(kv_cache_dtype)
 
     def _write_cache(
         self,
@@ -71,12 +72,8 @@ class PagedAttention(nn.Module):
         atten_info,
         layer_index: int,
     ) -> None:
-        if self.kv_cache_dtype == torch.uint8:
-            # fp8 KV cache: e4m3 bytes travel in a uint8 container. Quantising
-            # on write keeps update_kv_buffer a pure byte scatter for both
-            # dtypes; the decode kernel widens on read.
-            xk = quantize_fp8_per_tensor(xk, self.k_scale)
-            xv = quantize_fp8_per_tensor(xv, self.v_scale)
+        if self.kv_cache_method is not None:
+            xk, xv = self.kv_cache_method.quantize_kv(xk, xv)
         # (tokens, 2 * num_kv_heads, head_dim) — K heads first, then V heads.
         combined_kv = torch.cat([xk, xv], dim=-2)
         update_kv_buffer(
@@ -170,7 +167,7 @@ class Attention(nn.Module):
         *,
         qkv_bias: bool = False,
         use_qk_norm: bool = False,
-        quant: QuantConfig | None = None,
+        quant: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         tp_size = get_tp_world_size()

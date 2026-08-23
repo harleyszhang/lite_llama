@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from ..kernels import swiglu_forward
 from ..models.config import ModelConfig
-from ..models.quantization import QuantConfig
+from .quantization import QuantizationConfig
 from .linear import ColumnParallelLinear, RowParallelLinear
 
 
@@ -19,7 +19,7 @@ class FusedMLP(nn.Module):
     are all-reduced.
     """
 
-    def __init__(self, config: ModelConfig, quant: QuantConfig | None = None) -> None:
+    def __init__(self, config: ModelConfig, quant: QuantizationConfig | None = None) -> None:
         super().__init__()
         hidden, inter = config.hidden_size, config.intermediate_size
         self.gate_proj = ColumnParallelLinear(hidden, inter, quant=quant, what="MLP intermediate")

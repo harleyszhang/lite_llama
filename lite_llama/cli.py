@@ -27,7 +27,7 @@ from PIL import Image
 
 from .engine import SamplingParams, TextGenerator, VisionGenerator
 from .models.config import read_model_type
-from .models.quantization import RUNTIME_SCHEMES
+from .modules.quantization import RUNTIME_SCHEMES
 from .utils.prompt_templates import ChatPrompter, get_prompter
 
 

@@ -5,7 +5,7 @@ The classes themselves answer only the *sharding* question — the Megatron rule
 that chaining a column-parallel layer into a row-parallel one (``gate/up`` then
 ``down``, ``q/k/v`` then ``o``) makes one all-reduce per block enough. The
 *storage* question — fp16 ``F.linear`` or which quantised kernel — is delegated
-to a quant-method object from :mod:`lite_llama.models.quantization.methods`,
+to a quant-method object from :mod:`lite_llama.modules.quantization`,
 so adding a scheme touches no layer code.
 
 Parameter names deliberately match HuggingFace (``weight``, ``weight_scale_inv``),
@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 
 from ..distributed.parallel_state import all_reduce_tp, divide, get_tp_world_size
-from ..models.quantization import QuantConfig, get_linear_method
+from .quantization import QuantizationConfig, UnquantizedLinearMethod
 
 
 class LinearBase(nn.Module):
@@ -46,13 +46,18 @@ class LinearBase(nn.Module):
         output_size: int,
         *,
         bias: bool = False,
-        quant: QuantConfig | None = None,
+        quant: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         self.input_size = input_size
         self.output_size = output_size
+        # Legacy QuantConfig shim (backward compat for tests)
+        if quant is not None and not isinstance(quant, QuantizationConfig):
+            quant = _convert_legacy_quant(quant)
         self.quant = quant
-        self.quant_method = get_linear_method(quant)
+        self.quant_method = (
+            quant.get_quant_method(self) if quant is not None else UnquantizedLinearMethod()
+        )
         self.quant_method.create_weights(self, input_size, output_size)
         self.bias = (
             nn.Parameter(torch.empty(output_size, dtype=torch.float16), requires_grad=False)
@@ -68,7 +73,7 @@ class LinearBase(nn.Module):
         return self.apply_linear(x)
 
     @torch.no_grad()
-    def quantize_(self, quant: QuantConfig) -> None:
+    def quantize_(self, quant) -> None:
         """Replace a loaded fp16 weight with its quantised form, in place.
 
         Used by the ``--quantization <scheme>`` path, where the checkpoint is
@@ -76,11 +81,16 @@ class LinearBase(nn.Module):
         fp16 storage is dropped as each layer is converted, so peak memory
         stays at the size of the fp16 checkpoint. Layers that were already
         quantised (an fp8 checkpoint) are left alone.
+
+        Accepts both new :class:`QuantizationConfig` and legacy :class:`QuantConfig`.
         """
         if self.quant is not None:
             return
-        method = get_linear_method(quant)
-        method.convert_from_fp16(self, quant)
+        # Legacy QuantConfig shim (backward compat)
+        if not isinstance(quant, QuantizationConfig):
+            quant = _convert_legacy_quant(quant)
+        method = quant.get_quant_method(self)
+        method.quantize_from_fp16(self, quant)
         self.quant = quant
         self.quant_method = method
 
@@ -115,7 +125,7 @@ class ColumnParallelLinear(LinearBase):
         output_size: int,
         *,
         bias: bool = False,
-        quant: QuantConfig | None = None,
+        quant: QuantizationConfig | None = None,
         what: str = "output features",
     ) -> None:
         world_size = get_tp_world_size()
@@ -146,7 +156,7 @@ class RowParallelLinear(LinearBase):
         output_size: int,
         *,
         bias: bool = False,
-        quant: QuantConfig | None = None,
+        quant: QuantizationConfig | None = None,
         what: str = "input features",
     ) -> None:
         if bias:
@@ -161,7 +171,7 @@ class RowParallelLinear(LinearBase):
         return all_reduce_tp(self.apply_linear(x))
 
 
-def _check_shard_alignment(quant: QuantConfig | None, local_size: int, what: str) -> None:
+def _check_shard_alignment(quant: QuantizationConfig | None, local_size: int, what: str) -> None:
     """Reject a split that would cut a quantisation scale block in half.
 
     Raises:
@@ -172,6 +182,30 @@ def _check_shard_alignment(quant: QuantConfig | None, local_size: int, what: str
     if quant is not None and not quant.shard_is_aligned(local_size):
         raise ValueError(
             f"tensor-parallel shard of {what} is {local_size} channels, which is not a "
-            f"multiple of the {quant.format} scale block ({quant.group_n}x{quant.group_k}); "
+            f"multiple of the {quant.get_name()} scale block ({quant.group_n}x{quant.group_k}); "
             "use a smaller tensor_parallel_size"
         )
+
+
+def _convert_legacy_quant(quant) -> QuantizationConfig:
+    """Convert a legacy :class:`QuantConfig` dataclass to a new :class:`QuantizationConfig`."""
+    from .quantization.blockwise_int8 import BlockInt8Config
+    from .quantization.awq import AWQConfig
+    from .quantization.fp8 import Fp8Config
+    from .quantization.w8a8_fp8 import W8A8Fp8Config
+    from .quantization.w8a8_int8 import W8A8Int8Config
+
+    fmt = quant.format
+    if fmt == "int8":
+        if quant.group_k < (1 << 30):
+            return BlockInt8Config(group_k=quant.group_k, ignored=quant.ignored)
+        return BlockInt8Config.per_channel()
+    if fmt == "fp8":
+        if quant.is_dynamic:
+            return W8A8Fp8Config(group_n=quant.group_n, group_k=quant.group_k, ignored=quant.ignored)
+        return Fp8Config(group_n=quant.group_n, group_k=quant.group_k, ignored=quant.ignored)
+    if fmt == "int4":
+        return AWQConfig(group_size=quant.group_k, ignored=quant.ignored)
+    if fmt == "smoothquant":
+        return W8A8Int8Config(ignored=quant.ignored)
+    raise ValueError(f"cannot convert legacy QuantConfig with format {fmt!r}")
