@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 
 from ..models.config import ModelConfig
-from ..models.quantization import RUNTIME_SCHEMES, QuantConfig, RawParameter
+from ..modules.quantization import RUNTIME_SCHEMES, RawParameter, for_runtime_scheme
 from ..utils.logger import get_logger
 from .weight_utils import hf_weights_iterator
 
@@ -154,7 +154,7 @@ class DefaultModelLoader:
             ValueError: On an unrecognised scheme name.
         """
         try:
-            quant = QuantConfig.for_runtime_scheme(quantization)
+            quant = for_runtime_scheme(quantization)
         except ValueError:
             raise ValueError(
                 f"cannot quantise an fp16 checkpoint to {quantization!r} at load time; "
@@ -163,8 +163,8 @@ class DefaultModelLoader:
             ) from None
         if not hasattr(model, "quantize_"):
             raise ValueError(f"{type(model).__name__} does not support runtime quantisation")
-        logger.info("Quantising weights to %s (%s, %sx%s scale blocks)",
-                    quantization, quant.format, quant.group_n, quant.group_k)
+        logger.info("Quantising weights to %s (%s)",
+                    quantization, quant.get_name())
         model.quantize_(quant)
 
     @staticmethod

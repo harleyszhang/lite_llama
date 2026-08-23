@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
-
-from transformers import AutoConfig, PretrainedConfig
+from typing import TYPE_CHECKING, Any
 
 import torch
+from transformers import AutoConfig, PretrainedConfig
 
-from .quantization import QuantConfig
+if TYPE_CHECKING:
+    from ..modules.quantization import QuantizationConfig
 
 #: KV-cache dtypes accepted by :attr:`ModelConfig.kv_cache_dtype` (vLLM spelling).
 #: The e4m3 bytes travel in a ``uint8`` container; the decode kernel widens them.
@@ -90,8 +90,14 @@ class ModelConfig:
         # Weight format the *checkpoint* is stored in, which decides both what the
         # model allocates and whether the loader may widen anything on the way in.
         # A runtime ``--quantization`` request is a separate, post-load step.
-        self.quant: QuantConfig | None = QuantConfig.from_hf(hf_config)
+        self.quant: "QuantizationConfig | None" = self._parse_quant(hf_config)
         self.validate()
+
+    @staticmethod
+    def _parse_quant(hf_config: PretrainedConfig):
+        """Lazy-import quantization parsing to avoid circular imports."""
+        from ..modules.quantization import get_quant_config_from_hf
+        return get_quant_config_from_hf(hf_config)
 
     @classmethod
     def from_pretrained(

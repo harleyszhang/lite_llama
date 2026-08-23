@@ -25,7 +25,7 @@ from pathlib import Path
 
 import torch
 
-from ..models.quantization import FP8_BLOCK, SCALE_SUFFIX
+from ..modules.quantization import FP8_BLOCK, SCALE_SUFFIX
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
