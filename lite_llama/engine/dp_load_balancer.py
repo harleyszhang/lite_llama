@@ -6,8 +6,8 @@ router — the same split SGLang draws between its ``DataParallelController`` an
 ``LoadBalanceMethod`` it is configured with (``round_robin`` / ``total_requests`` /
 ``total_tokens``), and vLLM between ``DPLBAsyncMPClient`` and its balancing.
 
-A balancer sees only two things: how many replicas exist, and \u2014 for the load-aware
-policies \u2014 how many requests each is currently carrying. It never touches a queue, a
+A balancer sees only two things: how many replicas exist, and for the load-aware
+policies how many requests each is currently carrying. It never touches a queue, a
 process or a tensor, which is what keeps it pure and unit-testable without a GPU.
 
 Usage:
@@ -65,8 +65,8 @@ class RoundRobinBalancer(LoadBalancer):
     The cheapest policy and the right default for offline batches, where the prompts
     are known together and no single one dominates. It is exactly SGLang's
     ``round_robin_scheduler`` minus the liveness skip (an offline pool has no replicas
-    dropping out mid-run). Striping the requests \u2014 rather than handing each replica a
-    contiguous slice \u2014 mixes long and short prompts evenly, so no one replica inherits
+    dropping out mid-run). Striping the requests rather than handing each replica a
+    contiguous slice mixes long and short prompts evenly, so no one replica inherits
     every long prompt from an already-sorted list.
     """
 
@@ -87,7 +87,7 @@ class LeastLoadedBalancer(LoadBalancer):
     count per replica, picks the minimum (lowest index breaks ties, so it matches
     round-robin when every replica is idle), and relies on :meth:`release` to
     decrement as requests complete. This is what pays off when prompt lengths are
-    skewed \u2014 a replica that drew several long prompts stops attracting new ones.
+    skewed a replica that drew several long prompts stops attracting new ones.
     """
 
     def __init__(self, dp_size: int) -> None:
