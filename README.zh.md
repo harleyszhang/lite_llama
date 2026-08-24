@@ -20,21 +20,15 @@
 ## 特性
 
 - 相比 HuggingFace `transformers`，Qwen3-0.6B 加速比最高达 **6.5×**（A10，greedy）——见下方 [benchmark 表](#qwen3-06b-benchmark)。
-- 支持最新的 `llama3`、`Qwen2.5`、`Qwen3`、`Qwen3-MoE`(如 Qwen3-30B-A3B,加载时将 FP8 block 量化权重反量化为 fp16)、`Qwen3-VL`、`Llava1.5` 模型推理，支持 `top-p` 采样, 支持流式输出。
-- 直接加载 HuggingFace checkpoint：配置走 `AutoConfig`,权重从 `*.safetensors` 流式读入,K/V 投影与 MoE 专家在加载时就地融合/堆叠,不需要离线权重转换,也没有私有权重格式。
-- **在线批量推理 + 连续批处理**：请求随时加入、结束即离开正在跑的 batch，新到达的请求
-  不必等当前这轮生成结束。单卡 A10 + Qwen2.5-1.5B-Instruct、16 个请求每 250 ms 到达一个：
-  吞吐 93 → 644 tok/s（`6.9x`），平均端到端延迟 19.1s → 2.3s（`8.3x`）。
-  设计与完整口径见 [docs/continuous_batching.md](docs/continuous_batching.md)。
-- **OpenAI 兼容 HTTP 服务**（`lite-llama serve`）：`/v1/completions` 与
-  `/v1/chat/completions`，含 SSE 流式，官方 `openai` 客户端可直接指过来。
-  见 [docs/online_serving.md](docs/online_serving.md)。
-- 支持 GQA、decode 阶段支持 cuda graph 优化（有 batch_size 限制）。
-- 支持 `flashattention1`、`flashattention2`、 `flashdecoding`(支持 `NopadAttention`)。
-- 支持 kv cache 的高效动态管理（分页式 `TokenAttention` slot）。
-- 支持算子融合，如：逐元素相乘 `*` 和 `silu` 的融合, k v 线性层融合, `skip` 和 `rmsnorm` 融合。
-- 支持 Triton grouped GEMM kernel。
-- 部分自定义算子如：`rmsnorm`、`rope`、`softmax`、`逐元素相乘` 等采用高效 `triton` 内核实现。
+- **在线批量推理 + 连续批处理**：请求随时加入、结束即离开正在跑的 batch，新到达的请求不必等当前这轮生成结束。单卡 A10 + Qwen2.5-1.5B-Instruct、16 个请求每 250 ms 到达一个：吞吐 93 → 644 tok/s（**6.9×**），平均端到端延迟 19.1s → 2.3s（**8.3×**）。设计与完整口径见 [docs/continuous_batching.md](docs/continuous_batching.md)。
+- **OpenAI 兼容 HTTP 服务**（`lite-llama serve`）：`/v1/completions` 与 `/v1/chat/completions`，含 SSE 流式，官方 `openai` 客户端可直接指过来。见 [docs/online_serving.md](docs/online_serving.md)。
+- 支持 `llama3`、`Qwen2.5/Qwen3`、`Qwen3-MoE`、`LLaVA-1.5`、`Qwen3-VL`；`top-p` / `top-k` 采样，流式输出。直接加载 HuggingFace checkpoint：配置走 `AutoConfig`，权重从 `*.safetensors` 流式读入，K/V 投影与 MoE 专家在加载时就地融合/堆叠，无需离线转换。
+- **CUDA graph**：decode 阶段 CUDA graph 捕获（有 batch_size 限制）。
+- **Attention 后端**：`flashattention2`、`flashdecoding`（含 `NopadAttention` 无 padding 序列 + GQA 支持）。分页式 `TokenAttention` slot 动态管理 KV cache。
+- **算子融合**：`silu` 逐元素乘、K/V 投影融合、skip-connection + `rmsnorm`。自定义 `triton` kernel：`rmsnorm`、`rope`、`softmax`、逐元素乘。
+- **量化**：W8A16 (fp8/int8)、W4A16 (AWQ/GPTQ)、SmoothQuant W8A8 —— 相比 HF fp16 decode 加速最高达 **6.9×**。
+- **Tensor Parallelism**：2× A10 (24 GB) 上切分 30B MoE 模型，每个 block 一次 all-reduce。
+- **Data Parallelism**：跨 GPU 复制模型并路由请求 —— 2 GPU 吞吐 **2.00×**（100% 线性）。
 - **Kernel 自动调优** (v0.5)：离线搜索最优 tile 配置并按 `(GPU, op, shape)` 落盘 JSON，启动时自动加载，未命中时回退启发式。
 - **FP8 KV Cache** (v0.6)：`--kv-cache-dtype fp8` KV 缓存减半——容量提升 **1.91×**（A10 上 282K vs 148K tokens），吞吐仅降 9%。
 - **Chunked Prefill** (v0.7)：长 prompt 按 512 token 分片，单 step prefill 工作量被封顶（2000 → 512 token，峰值降 3.9×）——decode 与 prefill 交织，而不再等一个完整 prompt。
