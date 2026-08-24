@@ -87,11 +87,18 @@ ROPE_INIT_FUNCTIONS: dict[str, Callable[..., tuple[torch.Tensor, float]]] = {
 class RotaryEmbedding(nn.Module):
     """Builds ``(cos, sin)`` for the given ``position_ids``.
 
+    When the flat config carries ``max_seq_len`` the ``(cos, sin)`` rows for every
+    position are precomputed once, and each step only gathers rows by position id
+    instead of redoing the outer product, the trigonometry and the cast. The
+    caches are non-persistent buffers allocated at construction, so their
+    addresses never change mid-run — which is what CUDA-graph replay needs — and
+    they follow the module onto the device with ``.to()`` like any buffer.
+
     Args:
         config: Flat RoPE settings — ``head_dim``, ``hidden_size``, ``num_heads``,
-            ``rope_theta``, ``rope_type`` and any variant-specific keys. Built by
-            :attr:`lite_llama.models.config.ModelConfig.rope_config`, which is
-            also where the transformers 4.x/5.x ``rope_scaling`` vs
+            ``rope_theta``, ``rope_type``, ``max_seq_len`` and any variant-specific
+            keys. Built by :attr:`lite_llama.models.config.ModelConfig.rope_config`,
+            which is also where the transformers 4.x/5.x ``rope_scaling`` vs
             ``rope_parameters`` difference is absorbed.
     """
 
@@ -110,6 +117,25 @@ class RotaryEmbedding(nn.Module):
         # Non-persistent: derived from the config, so it never belongs in a checkpoint.
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
+        # ModelConfig validates max_seq_len <= max_position_embeddings, so every
+        # position id the engine can produce lands inside the caches. A bare
+        # config without the key (unit tests) keeps the per-step computation
+        # as its fallback.
+        self.max_seq_len = int(config.get("max_seq_len", 0) or 0)
+        if self.max_seq_len > 0:
+            self._build_caches(device)
+
+    def _build_caches(self, device: torch.device | None) -> None:
+        """Precompute ``[max_seq_len, rotary_dim]`` cos/sin rows, scaling applied."""
+        positions = torch.arange(self.max_seq_len, device=device, dtype=torch.float32)
+        # Same outer product as the per-step path, evaluated once for every
+        # position; fp32 throughout so the fp16 cast later happens exactly
+        # where the fallback path does it.
+        freqs = torch.outer(positions, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer("cos_cache", emb.cos() * self.attention_scaling, persistent=False)
+        self.register_buffer("sin_cache", emb.sin() * self.attention_scaling, persistent=False)
+
     @torch.no_grad()
     def forward(
         self, x: torch.Tensor, position_ids: torch.Tensor
@@ -120,6 +146,18 @@ class RotaryEmbedding(nn.Module):
             x: Any tensor carrying the target dtype/device (typically the hidden states).
             position_ids: ``[batch, seq_len]`` absolute positions.
         """
+        if self.max_seq_len > 0:
+            return (
+                self.cos_cache[position_ids].to(dtype=x.dtype),
+                self.sin_cache[position_ids].to(dtype=x.dtype),
+            )
+        return self._compute_per_step(x, position_ids)
+
+    @torch.no_grad()
+    def _compute_per_step(
+        self, x: torch.Tensor, position_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The cache-free path: outer product + trigonometry on every call."""
         batch = position_ids.shape[0]
         inv_freq = self.inv_freq.to(device=x.device, dtype=torch.float32)
         inv_freq_expanded = inv_freq[None, :, None].expand(batch, -1, 1)

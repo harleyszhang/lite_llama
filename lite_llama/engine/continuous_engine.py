@@ -369,11 +369,13 @@ class ContinuousBatchingEngine:
         )
 
         self._slot_batch.begin_prefill(slots, prompt_lens)
-        logits = self.engine.model_runner.forward(input_ids, positions, None)
         # Prompts have different lengths, so each sequence's prediction sits at
-        # its own last real position rather than at the end of the padded row.
+        # its own last real position rather than at the end of the padded row;
+        # the model gathers exactly those rows before the lm_head GEMM.
         last = torch.tensor(prompt_lens, dtype=torch.long, device=self.device) - 1
-        logits = logits[torch.arange(len(group), device=self.device), last]
+        logits = self.engine.model_runner.forward(
+            input_ids, positions, None, logits_positions=last
+        )
 
         # A fresh batch has generated nothing, so there is no repetition window
         # yet and the penalty is a no-op regardless of configuration.

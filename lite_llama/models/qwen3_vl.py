@@ -144,6 +144,7 @@ class Qwen3VLForCausalLM(MultiModalCausalLM):
         position_ids: torch.Tensor,
         atten_info,
         multi_modal_inputs: dict[str, Any] | None = None,
+        logits_positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run one prefill or decode step, wiring DeepStack into the prefill pass."""
         inputs_embeds = None
@@ -174,4 +175,5 @@ class Qwen3VLForCausalLM(MultiModalCausalLM):
             atten_info=atten_info,
             inputs_embeds=inputs_embeds,
             layer_context=layer_context,
+            logits_positions=logits_positions,
         )

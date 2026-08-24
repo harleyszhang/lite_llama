@@ -55,6 +55,62 @@ def test_top_p_keeps_only_the_nucleus():
         assert token == 0
 
 
+def test_top_p_small_pool_matches_full_vocab_behaviour():
+    """A pool narrower than the vocabulary must not change the draw.
+
+    When the pool's mass exceeds ``top_p`` the nucleus is inside it, so the
+    small-``k`` shortcut and a full-vocabulary sort keep the same tokens. Here
+    the nucleus is a single token, which makes the check deterministic.
+    """
+    torch.manual_seed(0)
+    vocab = 400
+    logits = torch.randn(1, vocab) * 6  # concentrated: top token holds > 0.5
+    probs = torch.softmax(logits, dim=-1)
+
+    for _ in range(10):
+        token = sample_top_p(probs.clone(), top_p=probs.max().item() * 0.9, k=8).item()
+        assert token == probs.argmax().item()
+
+
+def test_top_p_pool_never_leaks_beyond_candidates():
+    """Every drawn id must be one of the pool's own ids."""
+    torch.manual_seed(0)
+    probs = torch.softmax(torch.randn(4, 500) * 3, dim=-1)
+    pool = set(probs.topk(16, dim=-1).indices.flatten().tolist())
+
+    tokens = sample_top_p(probs, top_p=0.99, k=16)
+    assert set(tokens.flatten().tolist()) <= pool
+
+
+def test_top_p_flat_distribution_keeps_whole_pool():
+    """A row flatter than the pool can cover must not crash or drop everything.
+
+    Uniform probabilities never accumulate ``top_p`` inside the pool, so the
+    fallback keeps every candidate — the draw stays inside the pool and the
+    renormalised sum stays at 1.
+    """
+    torch.manual_seed(0)
+    vocab = 2000
+    probs = torch.full((2, vocab), 1.0 / vocab)
+    pool = set(probs.topk(16, dim=-1).indices.flatten().tolist())
+
+    tokens = sample_top_p(probs, top_p=0.999, k=16)
+    assert set(tokens.flatten().tolist()) <= pool
+
+
+def test_top_p_accepts_per_row_thresholds():
+    """The [batch, 1] tensor form gives each row its own nucleus."""
+    probs = torch.tensor([[0.7, 0.2, 0.1], [0.4, 0.35, 0.25]])
+    top_p = torch.tensor([[0.1], [0.99]])
+    torch.manual_seed(0)
+
+    tokens = sample_top_p(probs.clone(), top_p)
+
+    assert tokens.shape == (2, 1)
+    assert tokens[0].item() == 0  # nucleus of one: the dominant token
+    assert 0 <= tokens[1].item() < 3  # nucleus covers the whole row
+
+
 def test_sampled_temperature_stays_within_vocab():
     sampler = Sampler()
     logits = torch.randn(4, 100)

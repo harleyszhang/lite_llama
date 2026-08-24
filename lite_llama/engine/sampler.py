@@ -113,28 +113,50 @@ def apply_repetition_penalty(
     return torch.where(seen[:, :vocab], penalised, logits)
 
 
-def sample_top_p(probs: torch.Tensor, top_p: float | torch.Tensor) -> torch.Tensor:
+# Nucleus sampling never touches most of the vocabulary: real model
+# distributions put far more than ``top_p`` mass on the top few dozen tokens,
+# so a 1024-wide pool makes the draw identical to a full-vocabulary sort in
+# every non-degenerate case while skipping the sort over the rest.
+_TOP_P_CANDIDATES = 1024
+
+
+def sample_top_p(
+    probs: torch.Tensor, top_p: float | torch.Tensor, k: int = _TOP_P_CANDIDATES
+) -> torch.Tensor:
     """Nucleus (top-p) sampling.
 
-    Keeps the smallest set of highest-probability tokens whose cumulative mass just
-    exceeds ``top_p``, renormalises, and samples one token from it.
+    Keeps the smallest set of highest-probability tokens whose cumulative mass
+    just exceeds ``top_p``, renormalises, and samples one token from it.
+
+    The candidates come from ``torch.topk`` over a ``k``-wide pool, which
+    returns probabilities already in descending order — no sort over the whole
+    vocabulary. Whenever the pool's total mass exceeds ``top_p`` the nucleus is
+    provably contained in it and the draw matches a full sort exactly; a
+    flatter distribution than that (extreme temperature) keeps the entire
+    pool, capping the nucleus at ``k`` tokens.
 
     Args:
         probs: ``[batch, vocab]`` probability distribution.
         top_p: Cumulative probability threshold; a ``[batch, 1]`` tensor gives
             each row its own threshold.
+        k: Candidate pool size, clamped to the vocabulary.
 
     Returns:
         ``[batch, 1]`` sampled token ids.
     """
-    sorted_probs, sorted_idx = torch.sort(probs, dim=-1, descending=True)
-    cumulative = torch.cumsum(sorted_probs, dim=-1)
+    k = min(k, probs.shape[-1])
+    top_probs, top_idx = torch.topk(probs, k, dim=-1)  # already descending
+    cumulative = torch.cumsum(top_probs, dim=-1)
     # Drop tokens once the mass *before* them already exceeds top_p.
-    drop_mask = cumulative - sorted_probs > top_p
-    sorted_probs[drop_mask] = 0.0
-    sorted_probs.div_(sorted_probs.sum(dim=-1, keepdim=True))
-    choice = torch.multinomial(sorted_probs, num_samples=1)
-    return torch.gather(sorted_idx, -1, choice)
+    drop_mask = cumulative - top_probs > top_p
+    # A row whose pool never accumulates top_p has no droppable tail inside
+    # it; keeping every candidate is the closest the pool can get to its
+    # nucleus.
+    drop_mask &= cumulative[:, -1:].gt(top_p)
+    top_probs.masked_fill_(drop_mask, 0.0)
+    top_probs.div_(top_probs.sum(dim=-1, keepdim=True))
+    choice = torch.multinomial(top_probs, num_samples=1)
+    return torch.gather(top_idx, -1, choice)
 
 
 @dataclass(frozen=True)
