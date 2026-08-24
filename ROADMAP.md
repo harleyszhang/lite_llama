@@ -11,6 +11,7 @@
 | F2 | 默认单卡路径全程单进程,`pdb` 可直达 kernel 调用点 | 已有 | v1 刻意多进程隔离,不会回退 |
 | F3 | 冷启动秒级(无 CUDA C++ 编译、无 torch.compile、graph 捕获可关) | 已有 | 他们为长驻服务优化,启动 30s–2min 不在乎 |
 | F4 | 后端缺失自动回退原生,永不硬失败 | 待建 | 他们缺库常直接报错退出 |
+| F5 | bf16 权重与 KV:参数与 cache dtype 脱离 fp16 硬编码(现散在 config/base/moe/attention 多处),由 checkpoint dtype 驱动 | 待建 | 他们早已全面支持;fp16-only 是我们刻意保持的最小精度面,补 bf16 需连带各量化 method 的 supported_dtypes 与 kernel cast 策略 |
 
 ## 性能维度(主动技术创新,非防守论点)
 
@@ -24,6 +25,7 @@
 | P4 | **MTP / 投机解码**:一次 forward 出多 token,降串行深度 | 待建 | 借 TileRT/DeepSeek MTP(mean accept ~3);draft 复用主 KV | decode 吞吐随接受长度近线性提升 |
 | P5 | **overlap 调度进 CUDA graph**:多 stream 的 计算+通信+拷贝 整体 capture | 待建 | 借 TRT-LLM overlap scheduler;replay 零 CPU 派发 | 多卡 decode CPU 侧 gap 归零 |
 | P6 | **自动调优 tile 配置落盘复用**(见工具 autotune 模块) | 待建 | 针对真实 shape 分布,自动生成而非手工 JSON | 高频 shape 命中最优 tile |
+| P7 | CUDA graph 惰性捕获:首遇 (batch, bucket) 组合再 capture,省启动时间与预留显存 | 待建 | 中途 capture 有运行中 OOM(KV profiler 的 workspace 按全网格预扣)与首步尾延迟风险,vLLM 同样是启动时全量 capture | 启动时间与显存预留双降 |
 
 ## 架构设计维度
 
@@ -109,7 +111,7 @@
 
 **① 一个逻辑算子**:收敛成固定清单,只定义"算什么",id 用 `<group>.<name>`:
 `attention.prefill / attention.decode / linear / moe / rmsnorm / rope / kv_write / sample`。
-现有 `flashattention.py`(死代码)、`flashattentionv2.py`(死代码)、`flashattention2_nopad.py`、`flashdecoding.py` 命名混乱的根因就是缺这层——它们其实是 `attention.prefill` / `attention.decode` 两个逻辑算子的不同实现。
+现有 `flashattention2_nopad.py`、`flashdecoding.py` 命名混乱的根因就是缺这层——它们其实是 `attention.prefill` / `attention.decode` 两个逻辑算子的不同实现(legacy v1/v2 学习型 kernel 已移入 `benchmarks/kernels/`,随本迁移一并删除)。
 
 **② 一个签名(ABC,吃语义张量,不含 layout)**:所有实现共享同一 `forward()` 签名与语义,`forward_native`(纯 PyTorch/参考实现)是**正确性基准**,必须存在。这一模式项目已有雏形——`models/quantization/methods/base.py` 的 `LinearQuantMethod.apply(layer, x)`,推广到全部算子即可。layout 差异(DeepGEMM 要转置权重、FlashInfer 要自己的 KV 布局)不进签名,进元数据。
 
@@ -127,7 +129,7 @@ kernels/
     external/     # 可选,import 失败即 is_available()=False
       linear_deepgemm.py  attention_flashinfer.py
 ```
-迁移=纯搬运+删两个死 attention 文件。
+迁移=纯搬运+删 `benchmarks/kernels/` 下两个 legacy attention 文件。
 
 **④ 一份元数据清单(声明式,集中一处,torch-free)**:借 sglang `KernelSpec`——注册时只存 `target="module:attr"` 字符串,**惰性 import**,注册全程不加载 torch/kernel(保证冷启动秒级、CPU 机器可 `import`)。每份实现声明:
 

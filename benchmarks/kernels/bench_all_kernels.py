@@ -7,8 +7,11 @@ import triton
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 from fused_mlp_silu import FusedMLP, mlp_silu, torch_mlp_silu, triton_torch_mlp_silu
 
-from lite_llama.kernels.flashattention import flash_attention_v1
-from lite_llama.kernels.flashattentionv2 import flash_attention_v2
+# Legacy attention kernels kept beside their benchmark: nothing in the package
+# calls them anymore, so they live here rather than shipping as dead weight in
+# ``lite_llama.kernels``.
+from flashattention import flash_attention_v1
+from flashattentionv2 import flash_attention_v2
 
 try:
     # This is https://github.com/NVIDIA/apex, NOT the apex on PyPi, so it
