@@ -129,7 +129,7 @@ class SlotBatch:
         # positions, so the grid must be exactly as wide as the widest chunk
         # for cur_select_index to line up with the flattened token grid.
         max_prompt_len = max(
-            end - start for start, end in zip(seq_starts, seq_lens)
+            end - start for start, end in zip(seq_starts, seq_lens, strict=True)
         )
         if max_prompt_len > self.max_seq_len:
             raise ValueError(
@@ -184,7 +184,7 @@ class SlotBatch:
             the caller discards the trailing rows' logits.
         """
         starts, ends = list(seq_starts), list(seq_lens)
-        chunk_lens = [end - start for start, end in zip(starts, ends)]
+        chunk_lens = [end - start for start, end in zip(starts, ends, strict=True)]
         if max(ends) > self.max_seq_len:
             raise ValueError(
                 f"sequence length {max(ends)} exceeds max_seq_len {self.max_seq_len}"
