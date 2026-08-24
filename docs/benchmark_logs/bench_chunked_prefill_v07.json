@@ -1,20 +1,13 @@
 {
-  "no_chunk": {
-    "chunk_size": 0,
-    "prefill_steps": 1,
-    "decode_steps_during_prefill": 1,
-    "decode_not_blocked": true
+  "benchmark": "chunked_prefill_scheduler",
+  "description": "Real Scheduler driven with one 2000-token prompt arriving into a 4-request decode batch. Metric is peak prefill tokens carried by a single scheduler step (what co-scheduled decode requests wait behind).",
+  "long_prompt_len": 2000,
+  "num_short_decode_requests": 4,
+  "results": {
+    "max_chunk_size_0": {"prefill_steps": 1, "peak_step_prefill_tokens": 2000, "decode_reqs_per_step": 4},
+    "max_chunk_size_512": {"prefill_steps": 4, "peak_step_prefill_tokens": 512, "decode_reqs_per_step": 4},
+    "max_chunk_size_256": {"prefill_steps": 8, "peak_step_prefill_tokens": 256, "decode_reqs_per_step": 4}
   },
-  "chunk_512": {
-    "chunk_size": 512,
-    "prefill_steps": 4,
-    "decode_steps_during_prefill": 4,
-    "decode_not_blocked": true
-  },
-  "chunk_256": {
-    "chunk_size": 256,
-    "prefill_steps": 8,
-    "decode_steps_during_prefill": 8,
-    "decode_not_blocked": true
-  }
+  "peak_prefill_reduction_512": "3.9x",
+  "note": "decode runs in both modes; chunking bounds per-step prefill work, reducing decode tail latency."
 }

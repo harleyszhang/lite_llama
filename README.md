@@ -33,12 +33,7 @@
 - **Data Parallelism**: replicate the model across GPUs and route requests between them — `2.00x` throughput on 2 GPUs (100% linear).
 - **Kernel Autotune** (v0.5): offline search persists optimal tile configs per `(GPU, op, shape)` to `~/.cache/lite_llama/autotune/`; kernels auto-load on startup.
 - **FP8 KV Cache** (v0.6): `--kv-cache-dtype fp8` halves KV memory — **1.91× capacity** (282K vs 148K tokens on A10) with only 9% throughput cost.
-- **Chunked Prefill** (v0.7): long prompts split into 512-token chunks interleaved with decode — decode requests never stall during prefill.
-- **Preemption** (v0.7): recompute-based eviction when KV cache hits the watermark; evicted requests re-queue automatically.
-- **Backend Registry** (v0.8): declarative kernel backend selection with `explain_selection()` — auto-detects Triton/CUDA/fp8 capability; env-var override + graceful fallback.
-- **Kernel Autotune** (v0.5): offline search persists optimal tile configs per `(GPU, op, shape)` to `~/.cache/lite_llama/autotune/`; kernels auto-load on startup.
-- **FP8 KV Cache** (v0.6): `--kv-cache-dtype fp8` halves KV memory — **1.91× capacity** (282K vs 148K tokens on A10) with only 9% throughput cost.
-- **Chunked Prefill** (v0.7): long prompts split into 512-token chunks interleaved with decode — decode requests never stall during prefill.
+- **Chunked Prefill** (v0.7): long prompts split into 512-token chunks so per-step prefill work is bounded (2000→512 tokens, 3.9x lower peak) — decode requests interleave instead of waiting behind a whole prompt.
 - **Preemption** (v0.7): recompute-based eviction when KV cache hits the watermark; evicted requests re-queue automatically.
 - **Backend Registry** (v0.8): declarative kernel backend selection with `explain_selection()` — auto-detects Triton/CUDA/fp8 capability; env-var override + graceful fallback.
 
