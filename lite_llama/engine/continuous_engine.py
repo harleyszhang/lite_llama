@@ -189,7 +189,7 @@ class _PrefillPass(_StepPass):
         rows = [
             request.prompt_token_ids[start:end]
             + [self._pad_id] * (width - (end - start))
-            for (request, _), start, end in zip(chunks, starts, ends)
+            for (request, _), start, end in zip(chunks, starts, ends, strict=True)
         ]
         input_ids = torch.tensor(rows, dtype=torch.long, device=self._device)
         # Padded columns run past a row's real position, but attention never
