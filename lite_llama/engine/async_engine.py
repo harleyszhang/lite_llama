@@ -45,12 +45,20 @@ class StreamedOutput:
             did not complete a character.
         text: The completion so far, including ``delta``.
         finish_reason: ``None`` while generating, else why it stopped.
+        prompt_tokens: Prompt size as the engine tokenised it.
+        completion_tokens: Tokens sampled so far, this chunk included.
     """
 
     request_id: str
     delta: str
     text: str
     finish_reason: str | None
+    # Defaults keep hand-built chunks (tests, fakes) valid; the worker always
+    # fills these from the engine's own bookkeeping so a caller reporting
+    # usage never has to re-encode the text — which would be slow and lossy at
+    # token boundaries.
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
     @property
     def is_finished(self) -> bool:
@@ -269,6 +277,8 @@ class AsyncLLMEngine:
                     delta=request.delta,
                     text=request.text,
                     finish_reason=request.finish_reason,
+                    prompt_tokens=request.prompt_len,
+                    completion_tokens=len(request.output_token_ids),
                 )
             )
 

@@ -6,8 +6,9 @@ attention that reads the cache several layers later. Neither has a natural
 "looks wrong" signature.
 
 * ``update_kv_buffer`` scatters freshly computed K/V rows into the pool:
-  ``KV_Buffer[Select_Index[i]] = KV_Values[i]``. The rows it must *not* touch
-  matter as much as the ones it writes, so untouched rows are asserted too.
+  K lands in the first ``num_kv_heads`` rows of ``KV_Buffer[Select_Index[i]]``
+  and V in the second half. The rows it must *not* touch matter as much as the
+  ones it writes, so untouched rows are asserted too.
 * ``update_kv_index`` records where a token landed:
   ``req_to_token_indexs[b_req_idx[i]][b_seq_len[i] - 1] = select_index[i]``.
   The ``- 1`` is the whole subtlety: ``b_seq_len`` is the length *including* the
@@ -40,10 +41,11 @@ def test_scatter_writes_selected_rows(num_tokens, num_kv_heads, head_dim):
     combined_heads = 2 * num_kv_heads  # K heads then V heads share one tensor
 
     values = torch.randn(num_tokens, combined_heads, head_dim, device="cuda", dtype=torch.float16)
+    k, v = values[:, :num_kv_heads], values[:, num_kv_heads:]
     buffer = torch.zeros(pool_rows, combined_heads, head_dim, device="cuda", dtype=torch.float16)
     select = torch.randperm(pool_rows, device="cuda")[:num_tokens].to(torch.int32)
 
-    update_kv_buffer(values, select, buffer)
+    update_kv_buffer(k, v, select, buffer)
 
     torch.testing.assert_close(buffer[select.long()], values)
 
@@ -55,11 +57,12 @@ def test_scatter_leaves_other_rows_untouched():
     pass the positive assertion above while trampling a neighbour's history.
     """
     pool_rows, heads, head_dim = 64, 4, 64
-    buffer = torch.full((pool_rows, heads, head_dim), 7.0, device="cuda", dtype=torch.float16)
-    values = torch.randn(4, heads, head_dim, device="cuda", dtype=torch.float16)
+    buffer = torch.full((pool_rows, 2 * heads, head_dim), 7.0, device="cuda", dtype=torch.float16)
+    values = torch.randn(4, 2 * heads, head_dim, device="cuda", dtype=torch.float16)
+    k, v = values[:, :heads], values[:, heads:]
     select = torch.tensor([10, 20, 30, 40], dtype=torch.int32, device="cuda")
 
-    update_kv_buffer(values, select, buffer)
+    update_kv_buffer(k, v, select, buffer)
 
     untouched = torch.ones(pool_rows, dtype=torch.bool, device="cuda")
     untouched[select.long()] = False
@@ -73,11 +76,12 @@ def test_scatter_to_non_monotonic_destinations():
     selection is sorted or contiguous.
     """
     heads, head_dim = 2, 64
-    buffer = torch.zeros(32, heads, head_dim, device="cuda", dtype=torch.float16)
-    values = torch.randn(4, heads, head_dim, device="cuda", dtype=torch.float16)
+    buffer = torch.zeros(32, 2 * heads, head_dim, device="cuda", dtype=torch.float16)
+    values = torch.randn(4, 2 * heads, head_dim, device="cuda", dtype=torch.float16)
+    k, v = values[:, :heads], values[:, heads:]
     select = torch.tensor([31, 3, 17, 0], dtype=torch.int32, device="cuda")
 
-    update_kv_buffer(values, select, buffer)
+    update_kv_buffer(k, v, select, buffer)
 
     for src, dst in enumerate(select.tolist()):
         torch.testing.assert_close(buffer[dst], values[src])
@@ -144,15 +148,16 @@ def test_scatter_then_gather_round_trips():
     convention they share.
     """
     heads, head_dim, pool_rows = 4, 64, 128
-    buffer = torch.zeros(pool_rows, heads, head_dim, device="cuda", dtype=torch.float16)
+    buffer = torch.zeros(pool_rows, 2 * heads, head_dim, device="cuda", dtype=torch.float16)
     table = torch.full((2, 8), -1, dtype=torch.int32, device="cuda")
 
-    values = torch.randn(2, heads, head_dim, device="cuda", dtype=torch.float16)
+    values = torch.randn(2, 2 * heads, head_dim, device="cuda", dtype=torch.float16)
+    k, v = values[:, :heads], values[:, heads:]
     select_index = torch.tensor([77, 12], dtype=torch.int32, device="cuda")
     b_req_idx = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
     b_seq_len = torch.tensor([3, 6], dtype=torch.int32, device="cuda")
 
-    update_kv_buffer(values, select_index, buffer)
+    update_kv_buffer(k, v, select_index, buffer)
     update_kv_index(table, b_req_idx, b_seq_len, select_index)
 
     # Follow the table back to the pool, exactly as flash_decoding does.

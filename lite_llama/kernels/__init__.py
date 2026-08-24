@@ -14,7 +14,7 @@ from .flashdecoding import flash_decoding
 from .fused_moe import fused_moe, moe_align_block_size
 from .rope_emb import rope_emb_forward
 from .skip_rmsnorm import skip_rmsnorm
-from .swiglu import swiglu_forward
+from .swiglu import swiglu_forward, swiglu_forward_fused
 from .update_kv_buffer import update_kv_buffer
 from .update_kv_index import update_kv_index
 from .quantization import w4a16_matmul, w8a16_matmul, smoothquant_matmul
@@ -30,6 +30,7 @@ __all__ = [
     "rope_emb_forward",
     "skip_rmsnorm",
     "swiglu_forward",
+    "swiglu_forward_fused",
     "tanh",
     "update_kv_buffer",
     "update_kv_index",

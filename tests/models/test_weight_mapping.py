@@ -32,8 +32,8 @@ from lite_llama.models import weights
     [
         # Untouched: these already carry lite_llama parameter names.
         ("embed_tokens.weight", "embed_tokens.weight"),
-        ("layers.3.mlp.gate_proj.weight", "layers.3.mlp.gate_proj.weight"),
-        ("layers.3.mlp.up_proj.weight", "layers.3.mlp.up_proj.weight"),
+        ("layers.3.mlp.gate_proj.weight", "layers.3.mlp.gate_up_proj.weight"),
+        ("layers.3.mlp.up_proj.weight", "layers.3.mlp.gate_up_proj.weight"),
         ("layers.3.mlp.down_proj.weight", "layers.3.mlp.down_proj.weight"),
         # Flattened: the module level is folded into the parameter name.
         ("norm.weight", "norm_weight"),
@@ -74,6 +74,27 @@ def test_k_and_v_fill_opposite_halves():
     v_dest(param).fill_(2)
     assert torch.equal(param[:4], torch.ones(4, 3))
     assert torch.equal(param[4:], torch.full((4, 3), 2.0))
+
+
+def test_gate_and_up_fill_opposite_halves():
+    """The dense MLP's gate/up pair is fused exactly like the attention K/V pair."""
+    param = torch.zeros(8, 3)
+    _, gate_dest = weights.translate_text_key("layers.0.mlp.gate_proj.weight")
+    _, up_dest = weights.translate_text_key("layers.0.mlp.up_proj.weight")
+
+    gate_dest(param).fill_(1)
+    up_dest(param).fill_(2)
+    assert torch.equal(param[:4], torch.ones(4, 3))
+    assert torch.equal(param[4:], torch.full((4, 3), 2.0))
+
+
+def test_dense_gate_up_fusion_misses_the_moe_router_and_experts():
+    """Only the dense ``mlp.gate_proj`` may fuse; the MoE siblings keep their names."""
+    assert weights.translate_text_key("layers.0.mlp.gate.weight")[0] == "layers.0.mlp.gate_weight"
+    assert (
+        weights.translate_text_key("layers.0.mlp.experts.7.gate_proj.weight")[0]
+        == "layers.0.mlp.experts.gate_up_proj"
+    )
 
 
 def test_expert_gate_and_up_fill_opposite_halves_of_their_own_slice():

@@ -172,20 +172,30 @@ class ModelRunner:
         the tail of sequence ``i - 1``, silently corrupting every sequence
         after the first in a mixed-length batch.
 
+        Written with one masked gather + one ``index_put_`` rather than a Python
+        loop over sequences: the loop cost a host round-trip per sequence
+        (``.cpu().tolist()`` on both index tensors) plus a kernel launch per row.
+
         Returns:
             ``b_start_loc``: start offset of each sequence in the flattened batch.
         """
-        b_seq_len_list = b_seq_len.cpu().tolist()
-        b_req_idx_list = b_req_idx.cpu().tolist()
-        b_start_loc = torch.zeros(len(b_seq_len_list), dtype=torch.int32, device=self.device)
+        n = b_seq_len.shape[0]
+        rows = torch.arange(n, device=self.device)
+        cols = torch.arange(max_prompt_len, device=self.device)
+        # [n, max_prompt_len] — True where the padded column is a real token.
+        valid = cols.unsqueeze(0) < b_seq_len.view(-1, 1)
+        # Flattened source offsets into the padded allocation, row-major.
+        src = alloc_index[(rows * max_prompt_len).unsqueeze(1) + cols.unsqueeze(0)]
 
-        for i, seq_len in enumerate(b_seq_len_list):
-            start = i * max_prompt_len
-            b_start_loc[i] = start
-            self.atten_info.b_req_tokens_table[b_req_idx_list[i], :seq_len] = alloc_index[
-                start : start + seq_len
-            ]
-        return b_start_loc
+        table = self.atten_info.b_req_tokens_table
+        table.index_put_(
+            (
+                b_req_idx.view(-1, 1).expand(n, max_prompt_len)[valid],
+                cols.unsqueeze(0).expand(n, max_prompt_len)[valid],
+            ),
+            src[valid],
+        )
+        return (rows * max_prompt_len).to(torch.int32)
 
     def prefill_alloc_kv_cache(self, max_prompt_len, actual_prompt_lens, b_req_idx) -> torch.Tensor:
         """Reserve cache rows for the whole prompt batch.
@@ -323,19 +333,33 @@ class ModelRunner:
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
         multi_modal_inputs: dict[str, Any] | None = None,
+        logits_positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run one model step.
 
         Dispatches to a captured CUDA graph when the current step is a decode
         (``seq_len == 1``) whose ``(batch_size, max_actual_seq_len)`` matches one
         of the captured buckets; otherwise runs eager.
+
+        Args:
+            input_ids: ``[batch, seq_len]`` token ids.
+            position_ids: Absolute positions for this step.
+            multi_modal_inputs: Processor outputs for a multimodal prefill.
+            logits_positions: Optional ``[batch]`` per-sequence position whose
+                logits the caller wants. Given (a prefill), the model gathers
+                those hidden states *before* the lm_head GEMM and returns
+                ``[batch, vocab]`` instead of ``[batch, seq_len, vocab]`` —
+                for a long prompt that skips seq_len-1 of the vocabulary
+                projections. ``None`` (decode, graph replay) returns full logits.
         """
         if self.spec.is_multimodal:
-            return self.model(input_ids, position_ids, self.atten_info, multi_modal_inputs)
+            return self.model(
+                input_ids, position_ids, self.atten_info, multi_modal_inputs, logits_positions
+            )
 
         if self._graph_manager is not None:
             replayed = self._graph_manager.try_replay(input_ids, position_ids, self.atten_info)
             if replayed is not None:
                 return replayed
 
-        return self.model(input_ids, position_ids, self.atten_info)
+        return self.model(input_ids, position_ids, self.atten_info, logits_positions=logits_positions)
