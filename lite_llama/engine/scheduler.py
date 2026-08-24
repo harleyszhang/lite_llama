@@ -5,15 +5,23 @@ and which cache slot each holds. Chunked prefill splits long prompts so decode
 steps interleave with prefill chunks — preventing head-of-line blocking where a
 4K-token prompt stalls all running decode requests for hundreds of ms.
 
-Key features (v0.7):
-    - Chunked prefill: long prompts split into max_chunk_size token chunks.
+Scheduling is *committing* (mirrors vLLM v1): :meth:`Scheduler.schedule` advances
+each prefilling request's ``num_computed_tokens`` the moment it schedules a chunk
+of it, so the engine never reports execution progress back to the scheduler. The
+scheduler may therefore assume a returned chunk ran; a caller who crashed mid-step
+re-derives everything from the request objects, which are the single source of
+truth for prefill state.
+
+Key features:
+    - Chunked prefill: long prompts split into max_chunk_size token chunks;
+      several partial prefills may share one step within the token budget.
     - Preemption: requests can be evicted when KV pressure hits the watermark.
     - Prefix caching (hash-based): shared prompt prefixes reuse cached KV.
 
 Usage:
     sched = Scheduler(SchedulerConfig(max_num_seqs=16, max_chunk_size=512), num_slots=64)
     sched.add_request(Request(...))
-    output = sched.schedule()  # may return a chunked prefill + decode batch
+    output = sched.schedule()  # chunk progress already advanced on return
 """
 
 from __future__ import annotations
@@ -56,6 +64,9 @@ class Request:
         params: Per-request sampling configuration.
         max_new_tokens: Generation cap, resolved against the context window at
             admission so the scheduler never has to consult the engine.
+        num_computed_tokens: Prompt tokens whose KV is already in the cache —
+            the cached prefix plus every chunk scheduled so far. The next chunk
+            of this request starts at exactly this offset.
         arrival_time: ``time.monotonic()`` when the request entered the queue.
         status: Lifecycle position.
         slot: Cache slot while running, ``None`` otherwise.
@@ -72,6 +83,7 @@ class Request:
     prompt_token_ids: list[int]
     params: SamplingParams
     max_new_tokens: int = 0
+    num_computed_tokens: int = 0
     arrival_time: float = field(default_factory=time.monotonic)
     status: RequestStatus = RequestStatus.WAITING
     slot: int | None = None
@@ -103,6 +115,11 @@ class Request:
         """Whether the generation cap still allows another token."""
         return len(self.output_token_ids) < self.max_new_tokens
 
+    @property
+    def prefill_done(self) -> bool:
+        """Whether the whole prompt is in the cache, i.e. decode may proceed."""
+        return self.num_computed_tokens >= self.prompt_len
+
 
 @dataclass(frozen=True)
 class SchedulerConfig:
@@ -112,7 +129,8 @@ class SchedulerConfig:
         max_seq_len: Context window; also the per-slot cache capacity.
         max_num_seqs: Ceiling on concurrently running requests.
         max_num_batched_tokens: Ceiling on the padded token count of one
-            prefill group.
+            prefill group. Measured on *chunks*, not whole prompts: with
+            chunked prefill a step's grid is as wide as its longest chunk.
         max_chunk_size: Maximum tokens per prefill chunk. When a prompt is
             longer than this, it is split into chunks and interleaved with
             decode steps (chunked prefill). Set to 0 to disable chunking.
@@ -136,15 +154,21 @@ class SchedulerConfig:
 class SchedulerOutput:
     """What one engine step should run.
 
-    With chunked prefill both lists can be populated simultaneously:
-    prefill chunks run alongside the decode batch in the same step.
+    Prefill and decode coexist in one step: the engine executes the prefill
+    pass, then the decode pass, so chunked prefill never stalls decode.
+
+    Attributes:
+        prefill: Requests receiving prefill work this step, in batch order.
+        decode: Requests receiving one decode token this step.
+        prefill_chunk_lens: Tokens to process per prefill request. A request
+            whose chunk completes its prompt produces its first sampled token
+            this step; a partial chunk produces none.
+        preempted: Requests evicted this step (for logging/metrics).
     """
 
     prefill: list[Request] = field(default_factory=list)
     decode: list[Request] = field(default_factory=list)
-    # For chunked prefill: how many tokens to process per prefilling request.
     prefill_chunk_lens: list[int] = field(default_factory=list)
-    # Requests that were preempted this step (for logging/metrics).
     preempted: list[Request] = field(default_factory=list)
 
     @property
@@ -152,16 +176,49 @@ class SchedulerOutput:
         return not self.prefill and not self.decode
 
 
+class _NullPrefixCache:
+    """Null Object standing in for a disabled :class:`PrefixCache`.
+
+    Lets the admission path run one branch-free version of itself whether or
+    not prefix caching is on; the no-op answers are exactly what the
+    ``if cache is None`` branches used to compute.
+    """
+
+    def query(self, token_ids: list[int]) -> int:
+        return 0
+
+    def register(self, token_ids: list[int]) -> None:
+        pass
+
+    def release(self, token_ids: list[int]) -> None:
+        pass
+
+    @property
+    def hit_rate(self) -> float:
+        return 0.0
+
+
+def _discard(requests: list[Request], request: Request) -> None:
+    """Remove ``request`` from ``requests`` by identity, preserving order.
+
+    :class:`Request` is a value-equal dataclass, so ``list.remove`` could drop a
+    *different* request whose fields happen to match; identity is the only safe
+    key once two live requests can carry equal prompts.
+    """
+    for index, candidate in enumerate(requests):
+        if candidate is request:
+            del requests[index]
+            return
+
+
 class Scheduler:
     """FCFS admission with chunked prefill and preemption support.
 
-    v0.7 features:
-      - Chunked prefill: long prompts split into chunks of max_chunk_size tokens.
-        Decode steps interleave with prefill chunks, so running requests are not
-        blocked by a single long prompt.
-      - Preemption: when no free slots remain, the most recently admitted request
-        is evicted (recompute strategy) to make room for new admissions.
-      - Prefix cache readiness: Request.prefix_hash is computed for future use.
+    The scheduling step is a three-stage template (mirrors vLLM v1's
+    ``schedule``): resume in-flight partial prefills, admit queued requests
+    into whatever budget and slots remain, then collect the decode batch.
+    Every stage advances ``num_computed_tokens`` on the request itself as it
+    commits work, which is why no external ``advance`` protocol exists.
 
     Args:
         config: Admission and chunking limits.
@@ -184,19 +241,11 @@ class Scheduler:
         self._waiting: deque[Request] = deque()
         self._running: list[Request] = []
         self._free_slots: list[int] = list(reversed(range(num_slots)))
-
-        # Chunked prefill state: requests mid-prefill (partial prompt processed)
-        self._chunking: list[Request] = []
-        # Tracks how many prompt tokens have been processed for each chunking request
-        self._chunk_progress: dict[str, int] = {}
-
-        # Prefix cache: reuse KV of shared prompt prefixes (vLLM-style block hashing).
-        # ``None`` when disabled so the hot path pays nothing.
-        self._prefix_cache: PrefixCache | None = (
-            PrefixCache(block_size=16) if config.enable_prefix_cache else None
+        # Null Object when disabled, so the hot path pays no branches for the
+        # feature being off.
+        self._prefix_cache: PrefixCache | _NullPrefixCache = (
+            PrefixCache(block_size=16) if config.enable_prefix_cache else _NullPrefixCache()
         )
-
-        # Preemption counter for metrics
         self.num_preemptions: int = 0
 
     # ------------------------------------------------------------------ queue #
@@ -243,132 +292,146 @@ class Scheduler:
     def schedule(self) -> SchedulerOutput:
         """Decide this step's work: chunked prefill + decode batch.
 
-        With chunked prefill enabled, a long prompt is split into chunks. Each
-        step processes at most max_chunk_size tokens of prefill, interleaved with
-        the full decode batch. This prevents head-of-line blocking.
+        Prefill and decode coexist: partial prefill chunks for some requests
+        and decode tokens for the rest run in the same step, so a long prompt
+        stretches over several steps without freezing anyone's decode. Chunk
+        progress is committed here — the returned output describes work already
+        accounted for in each request's ``num_computed_tokens``.
         """
-        # Step 1: Try to admit new requests (may preempt under oversubscription)
-        prefill_group, preempted = self._schedule_prefill()
+        prefill: list[Request] = []
+        chunk_lens: list[int] = []
 
-        # Step 2: Compute chunk lengths for prefilling requests
-        chunk_lens = []
-        for req in prefill_group:
-            remaining = req.prompt_len - self._chunk_progress.get(req.request_id, 0)
-            chunk = min(remaining, self.config.max_chunk_size) if self.config.max_chunk_size > 0 else remaining
+        # Stage 1: resume requests whose prefill is still in flight. Their
+        # slot and KV are held, so they come before new admissions — FCFS by
+        # arrival, and re-admitting a new request first would starve them.
+        for request in self._running:
+            if request.prefill_done:
+                continue
+            chunk = self._chunk_of(request)
+            prefill.append(request)
             chunk_lens.append(chunk)
+            request.num_computed_tokens += chunk
 
-        # Step 3: The decode batch is always the full set of running requests
-        # that have completed their prefill.
-        decode_batch = [r for r in self._running if r not in prefill_group and r not in self._chunking]
+        # Stage 2: admit queued requests into the remaining budget and slots.
+        preempted = self._admit(prefill, chunk_lens)
 
-        return SchedulerOutput(
-            prefill=prefill_group,
-            decode=decode_batch,
-            prefill_chunk_lens=chunk_lens,
-            preempted=preempted,
-        )
+        # Stage 3: the decode batch is every running request that finished
+        # prefill before this step. Requests whose prefill completes *this*
+        # step produce their first token in the prefill pass and join decode
+        # on the next one; partial prefills produce nothing yet.
+        in_prefill = {id(request) for request in prefill}
+        decode = [
+            request
+            for request in self._running
+            if request.prefill_done and id(request) not in in_prefill
+        ]
 
-    def advance_chunks(self, prefill_group: list[Request], chunk_lens: list[int]) -> None:
-        """Call after a step to advance chunk progress for prefilling requests.
+        return SchedulerOutput(prefill=prefill, decode=decode,
+                               prefill_chunk_lens=chunk_lens, preempted=preempted)
 
-        Requests whose prefill is complete move to the running (decode) state.
-        """
-        for req, chunk_len in zip(prefill_group, chunk_lens):
-            progress = self._chunk_progress.get(req.request_id, 0) + chunk_len
-            self._chunk_progress[req.request_id] = progress
-            if progress >= req.prompt_len:
-                # Prefill complete — move to decode batch
-                self._chunk_progress.pop(req.request_id, None)
-                if req in self._chunking:
-                    self._chunking.remove(req)
+    def _admit(self, prefill: list[Request], chunk_lens: list[int]) -> list[Request]:
+        """Admit waiting requests, committing their first chunk (or whole prompt).
 
-    def _schedule_prefill(self) -> tuple[list[Request], list[Request]]:
-        """Admit queued requests, with chunked prefill and optional preemption.
-
-        When ``max_chunk_size > 0``, large prompts are tracked in ``_chunking``
-        and processed incrementally. Under oversubscription (preemption enabled),
-        a full slot pool is freed by evicting the youngest running request that
-        has already produced a token (recompute strategy); the just-recomputed
-        request is protected until it decodes once, which bounds the cycle and
-        prevents two requests from preempting each other forever.
+        A newly admitted request's first chunk is its uncached remainder capped
+        at ``max_chunk_size``; short prompts therefore finish prefill in this
+        very step, while long ones re-enter through Stage 1 on later steps.
 
         Returns:
-            ``(prefill_group, preempted)`` for this step.
+            Requests preempted to make room, for reporting.
         """
-        group: list[Request] = []
         preempted: list[Request] = []
-        longest = 0
-        capacity = self.max_num_seqs - len(self._running)
+        longest = max(chunk_lens, default=0)
 
-        # First: continue any in-progress chunked prefills
-        for req in list(self._chunking):
-            group.append(req)
-            remaining = req.prompt_len - self._chunk_progress.get(req.request_id, 0)
-            longest = max(longest, min(remaining, self.config.max_chunk_size or remaining))
-
-        # Then: admit new waiting requests
-        while self._waiting and len(group) < capacity + len(self._chunking):
-            # Fix the request we intend to admit *before* any preemption, so the
-            # victim (re-queued at the front for recompute) cannot jump ahead of
-            # it and starve it.
+        while self._waiting:
+            capacity = self.max_num_seqs - len(self._running)
+            if capacity <= 0:
+                break
             candidate = self._waiting[0]
-
             if not self._free_slots:
-                # Oversubscription: free a slot by preempting the youngest
-                # *decoding* victim that has produced >=1 token (the progress
-                # quantum). A request still prefilling or freshly recomputed is
-                # never chosen, so the cycle always makes forward progress.
-                if not self.config.enable_preemption:
+                preempted_victim = self._maybe_preempt(candidate, prefill)
+                if preempted_victim is None:
                     break
-                victim = self._pick_preemption_victim(group)
-                if victim is None:
-                    break
-                self._preempt(victim)
-                preempted.append(victim)
+                preempted.append(preempted_victim)
 
-            padded = max(longest, candidate.prompt_len) * (len(group) + 1)
-            if group and padded > self.config.max_num_batched_tokens:
+            # The grid cost of adding this request is its chunk, not its whole
+            # prompt: with chunking, a 4K prompt occupies one chunk column per
+            # step, which is exactly what the budget should price.
+            chunk = self._first_chunk_of(candidate)
+            padded = max(longest, chunk) * (len(prefill) + 1)
+            if prefill and padded > self.config.max_num_batched_tokens:
                 break
 
-            self._waiting.remove(candidate)
+            self._waiting.popleft()
             candidate.slot = self._free_slots.pop()
             candidate.status = RequestStatus.RUNNING
             self._running.append(candidate)
-            group.append(candidate)
 
             # Prefix cache: reuse KV of any leading blocks already cached, then
-            # register this prompt so later requests with the same prefix hit it.
-            cached = 0
-            if self._prefix_cache is not None:
-                cached = self._prefix_cache.query(candidate.prompt_token_ids)
-                # Never skip the whole prompt: at least one token must be
-                # prefilled to produce the first logits, exactly as vLLM keeps
-                # the last block uncached.
-                cached = min(cached, candidate.prompt_len - 1)
-                candidate.num_cached_tokens = cached
-                self._prefix_cache.register(candidate.prompt_token_ids)
-            # Prefill starts past the cached prefix.
-            self._chunk_progress[candidate.request_id] = cached
+            # register this prompt so later requests with the same prefix hit
+            # it. Never skip the whole prompt: at least one token must be
+            # prefilled to produce the first logits, exactly as vLLM keeps the
+            # last block uncached.
+            cached = min(self._prefix_cache.query(candidate.prompt_token_ids),
+                         candidate.prompt_len - 1)
+            candidate.num_cached_tokens = cached
+            self._prefix_cache.register(candidate.prompt_token_ids)
+            # num_computed_tokens tracks KV *actually resident in the slot*:
+            # the hash cache is bookkeeping until block copy lands, so prefill
+            # still starts at 0 and cached stays advisory (future KV-copy path
+            # will fast-forward computed past the copied prefix).
+            candidate.num_computed_tokens = 0
 
-            # Track chunked prefill if the *uncached* remainder exceeds a chunk.
-            chunk_size = self.config.max_chunk_size
-            if chunk_size > 0 and (candidate.prompt_len - cached) > chunk_size:
-                self._chunking.append(candidate)
+            prefill.append(candidate)
+            chunk_lens.append(chunk)
+            candidate.num_computed_tokens += chunk
+            longest = max(longest, chunk)
 
-            longest = max(longest, candidate.prompt_len - cached)
+        return preempted
 
-        return group, preempted
+    def _chunk_of(self, request: Request) -> int:
+        """Next chunk for a request whose prefill is already under way."""
+        remaining = request.prompt_len - request.num_computed_tokens
+        size = self.config.max_chunk_size
+        return remaining if size <= 0 else min(remaining, size)
 
-    def _pick_preemption_victim(self, group: list[Request]) -> Request | None:
+    def _first_chunk_of(self, request: Request) -> int:
+        """First chunk for a fresh admission: the whole prompt, chunk-capped.
+
+        Prefix-cache hits do not shrink this chunk: the cached KV is not yet
+        copied into the slot (see :meth:`_admit`), so every token still has to
+        run through prefill.
+        """
+        size = self.config.max_chunk_size
+        return request.prompt_len if size <= 0 else min(request.prompt_len, size)
+
+    def _maybe_preempt(self, newcomer: Request, prefill: list[Request]) -> Request | None:
+        """Free a slot for ``newcomer`` by evicting a running request, if allowed.
+
+        The victim is the youngest running request eligible for preemption;
+        ``None`` means nobody may be evicted and admission stops. Fixing the
+        intended newcomer before any preemption (as the caller does by peeking
+        the queue head) keeps a re-queued victim from jumping ahead of it.
+        """
+        if not self.config.enable_preemption:
+            return None
+        victim = self._pick_preemption_victim(prefill)
+        if victim is None:
+            return None
+        self._preempt(victim)
+        return victim
+
+    def _pick_preemption_victim(self, prefill: list[Request]) -> Request | None:
         """Youngest running request eligible for preemption, or None.
 
-        Eligible = still decoding (not mid-prefill), not part of this step's
-        prefill group, and past the progress quantum (>=1 output token). The
-        quantum is what stops a just-recomputed request from being evicted again
-        before it makes progress, so the recompute cycle cannot livelock.
+        Eligible = past prefill (evicting a partial prefill would discard real
+        KV work), not part of this step's prefill group, and past the progress
+        quantum (>=1 output token). The quantum stops a just-recomputed
+        request from being evicted again before it makes progress, so the
+        recompute cycle cannot livelock.
         """
+        scheduled = {id(request) for request in prefill}
         for request in reversed(self._running):
-            if request in self._chunking or request in group:
+            if not request.prefill_done or id(request) in scheduled:
                 continue
             if len(request.output_token_ids) >= 1:
                 return request
@@ -386,11 +449,10 @@ class Scheduler:
             self._free_slots.append(request.slot)
             request.slot = None
         request.status = RequestStatus.WAITING
-        request.output_token_ids.clear()
-        # Recompute restarts prefill from scratch (minus any cached prefix).
-        self._chunk_progress.pop(request.request_id, None)
+        request.num_computed_tokens = 0
         request.num_cached_tokens = 0
-        self._running = [r for r in self._running if r is not request]
+        request.output_token_ids.clear()
+        self._discard_running(request)
         self._waiting.appendleft(request)  # re-queue at front, keeps FCFS age
         self.num_preemptions += 1
 
@@ -404,19 +466,19 @@ class Scheduler:
         if request.slot is not None:
             self._free_slots.append(request.slot)
             request.slot = None
-        # Identity comparison: two distinct requests may carry the same id if a
-        # caller reuses one, and removing the wrong object would leak a slot.
-        self._running = [r for r in self._running if r is not request]
-        self._chunk_progress.pop(request.request_id, None)
+        self._discard_running(request)
         # Drop this request's hold on its cached prefix blocks. A shared prefix
         # survives as long as any other live request still references it.
-        if self._prefix_cache is not None:
-            self._prefix_cache.release(request.prompt_token_ids)
+        self._prefix_cache.release(request.prompt_token_ids)
+
+    def _discard_running(self, request: Request) -> None:
+        """Remove ``request`` from the running list by identity."""
+        _discard(self._running, request)
 
     @property
     def prefix_cache_hit_rate(self) -> float:
         """Fraction of queried prompt tokens served from the prefix cache."""
-        return self._prefix_cache.hit_rate if self._prefix_cache is not None else 0.0
+        return self._prefix_cache.hit_rate
 
     # ------------------------------------------------------------------ status #
     @property

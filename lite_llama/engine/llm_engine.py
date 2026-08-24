@@ -333,17 +333,15 @@ class LLMEngine:
         self.tokenizer = self._load_tokenizer(tokenizer_path or checkpoints_dir)
         self.sampler = Sampler()
         self.max_seq_len = self.model_runner.max_seq_len
-        # Full stop-token set (tokenizer EOS + everything generation_config
-        # declares). Each session records "eos" / "repeat" / "length" per
-        # sequence into ``last_stop_reasons`` so callers can explain why
-        # decoding ended.
+
         self.stop_token_ids = load_stop_token_ids(checkpoints_dir, self.tokenizer)
         self.last_stop_reasons: list[str] | None = None
 
     @staticmethod
     def _load_tokenizer(path: str) -> AutoTokenizer:
-        # LLaVA ships a slow tokenizer whose fast variant changes special-token
-        # handling, so it must load with use_fast=False.
+        """LLaVA ships a slow tokenizer whose fast variant changes special-token
+        handling, so it must load with use_fast=False.
+        """
         use_fast = "llava" not in get_model_name_from_path(path).lower()
         return AutoTokenizer.from_pretrained(path, use_fast=use_fast, trust_remote_code=True)
 

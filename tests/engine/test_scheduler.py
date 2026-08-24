@@ -9,7 +9,7 @@ Ten test classes, each owning one concern:
 
     TestRequestAdmission      — generation cap, unservable refusal, slot ceiling
     TestPrefillScheduling     — FCFS order, token budget, padded grid gating
-    TestChunkedPrefill        — chunk splitting, advance_chunks, decode interleave
+    TestChunkedPrefill        — chunk splitting, committed progress, decode interleave
     TestDecodeScheduling      — full decode coverage, idle no-op
     TestSlotAccounting        — distinct slots, finish/free, leak detection
     TestPreemption            — opt-in oversubscription, progress quantum, fairness
@@ -58,7 +58,7 @@ def make_request_with_tokens(
 
 
 def _decode_once(output: SchedulerOutput) -> None:
-    """Give every decoding request one token, then advance prefill chunks."""
+    """Give every decoding request one token (chunks advance in schedule)."""
     for r in output.decode:
         r.output_token_ids.append(999)
 
@@ -212,18 +212,16 @@ class TestChunkedPrefill:
         expected = [32, 32, 32, 4]  # 100 = 32*3 + 4
         actual = []
         for _ in range(4):
-            out = sched.schedule()
+            out = sched.schedule()  # commits the chunk on the request itself
             actual += out.prefill_chunk_lens
-            sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
         assert actual == expected
 
-    def test_advance_chunks_moves_request_to_decode(self, chunked_scheduler):
-        """After all chunks are processed, the request leaves the chunking list."""
+    def test_final_chunk_moves_request_to_decode(self, chunked_scheduler):
+        """After the last chunk commits, the request leaves the prefill group."""
         sched = chunked_scheduler
         sched.add_request(make_request("long", prompt_len=100))
         for _ in range(4):
-            out = sched.schedule()
-            sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
+            sched.schedule()
         # After 4 chunks (32*3+4=100), the request is no longer chunking.
         out = sched.schedule()
         assert not any(r.request_id == "long" for r in out.prefill)
@@ -234,7 +232,6 @@ class TestChunkedPrefill:
         sched = chunked_scheduler
         sched.add_request(make_request("short-a", prompt_len=10))
         sched.schedule()  # prefill short-a completely
-        sched.advance_chunks([], [])
         # short-a is now decoding; long-b starts chunking.
         sched.add_request(make_request("long-b", prompt_len=100))
         out = sched.schedule()
@@ -375,7 +372,6 @@ class TestPreemption:
         for _ in range(4):
             out = sched.schedule()
             _decode_once(out)
-            sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
         assert sched.num_preemptions == 0
 
     def test_oversubscription_admits_beyond_slots(self):
@@ -389,7 +385,6 @@ class TestPreemption:
             for r in out.decode:
                 seen.add(r.request_id)
             _decode_once(out)
-            sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
         # All three requests get decode turns despite only two slots.
         assert seen == {"r0", "r1", "r2"}
         assert sched.num_preemptions >= 1
@@ -404,7 +399,6 @@ class TestPreemption:
             out = sched.schedule()
             preempted_ids += [r.request_id for r in out.preempted]
             _decode_once(out)
-            sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
         assert preempted_ids  # at least one preemption was surfaced
 
     def test_progress_quantum_prevents_livelock(self):
@@ -421,7 +415,6 @@ class TestPreemption:
             out = sched.schedule()
             total_tokens += len(out.decode)
             _decode_once(out)
-            sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
         # Real forward progress: many tokens produced, not a stalled ping-pong.
         assert total_tokens >= 6
 
@@ -436,7 +429,6 @@ class TestPreemption:
             for r in out.decode:
                 decode_counts[r.request_id] += 1
             _decode_once(out)
-            sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
         # Every request got at least one decode turn.
         assert all(count > 0 for count in decode_counts.values())
 
@@ -460,10 +452,8 @@ class TestSchedulerOutput:
         sched.add_request(make_request("a", prompt_len=120))
         out = sched.schedule()
         assert out.prefill_chunk_lens == [50]  # first chunk = 50 of 120
-        sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
         out = sched.schedule()
         assert out.prefill_chunk_lens == [50]  # second chunk
-        sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
         out = sched.schedule()
         assert out.prefill_chunk_lens == [20]  # last chunk = 20
 
@@ -490,7 +480,6 @@ class TestSchedulerOutput:
                 assert all(r.status is RequestStatus.WAITING for r in out.preempted)
                 break
             _decode_once(out)
-            sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
         assert found_preemption, "expected at least one preemption step"
 
 
@@ -641,7 +630,6 @@ class TestPrefixCacheIntegration:
             out = sched.schedule()
             for r in out.decode:
                 r.output_token_ids.append(999)
-            sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
             if out.preempted:
                 for p in out.preempted:
                     assert p.num_cached_tokens == 0
