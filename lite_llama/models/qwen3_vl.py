@@ -148,7 +148,7 @@ class Qwen3VLForCausalLM(MultiModalCausalLM):
         """Run one prefill or decode step, wiring DeepStack into the prefill pass."""
         inputs_embeds = None
         layer_context = None
-        is_prefill = input_ids.shape[1] > 1
+        is_prefill = atten_info.is_prefill
 
         if is_prefill and multi_modal_inputs:
             self._deepstack_embeds = None

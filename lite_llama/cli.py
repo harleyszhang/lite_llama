@@ -34,6 +34,39 @@ from .utils.prompt_templates import ChatPrompter, get_prompter
 # --------------------------------------------------------------------------- #
 # TP worker (module-level so mp can pickle it)
 # --------------------------------------------------------------------------- #
+def _pack_sampling_params(params: SamplingParams):
+    """Serialize :class:`SamplingParams` into one tensor for the TP broadcast.
+
+    ``max_gen_len`` is ``None``-aware: ``-1`` encodes ``None`` on the wire.
+    ``stop_on_repeat`` rides along as 0/1 so workers mirror rank 0's stop
+    behaviour exactly — mismatched stop conditions are how TP chat deadlocks
+    (one rank keeps forwarding while the other has already left the loop).
+    """
+    import torch
+
+    return torch.tensor(
+        [
+            params.temperature,
+            params.top_p,
+            params.repetition_penalty,
+            -1.0 if params.max_gen_len is None else float(params.max_gen_len),
+            1.0 if params.stop_on_repeat else 0.0,
+        ],
+        dtype=torch.float64,
+    )
+
+
+def _unpack_sampling_params(values) -> SamplingParams:
+    """Rebuild the :class:`SamplingParams` packed by :func:`_pack_sampling_params`."""
+    return SamplingParams(
+        temperature=float(values[0]),
+        top_p=float(values[1]),
+        repetition_penalty=float(values[2]),
+        max_gen_len=None if values[3] < 0 else int(values[3]),
+        stop_on_repeat=bool(values[4]),
+    )
+
+
 def _tp_mirror_worker(
     rank: int,
     world_size: int,
@@ -86,8 +119,6 @@ def _tp_mirror_worker(
             tensor_parallel_size=world_size,
             kv_cache_dtype=kv_cache_dtype,
         )
-    params = SamplingParams(temperature=0.0, max_gen_len=4096)
-
     # Mirror loop: wait for rank 0's broadcast, generate, discard output.
     while True:
         flag = torch.zeros(1, dtype=torch.int64, device=f"cuda:{rank}")
@@ -98,6 +129,12 @@ def _tp_mirror_worker(
         dist.broadcast(length, src=0)
         tok_tensor = torch.zeros(length.item(), dtype=torch.int64, device=f"cuda:{rank}")
         dist.broadcast(tok_tensor, src=0)
+        # Rank 0's real sampling params, never a local guess: both sides must
+        # stop at the same step, or one rank waits on an all-reduce that never
+        # comes (NCCL deadlock).
+        values = torch.zeros(5, dtype=torch.float64, device=f"cuda:{rank}")
+        dist.broadcast(values, src=0)
+        params = _unpack_sampling_params(values.cpu())
 
         prompt = generator.engine.tokenizer.decode(tok_tensor.tolist())
         if image_paths:
@@ -463,22 +500,27 @@ class ChatCommand(CliCommand):
             except (EOFError, KeyboardInterrupt):
                 user_input = "exit"
 
-            # Broadcast flag: 1=generate, 0=exit.
-            flag_val = 0 if user_input in ("", "exit") else 1
-            flag = torch.tensor([flag_val], dtype=torch.int64, device="cuda:0")
-            dist.broadcast(flag, src=0)
-            if flag_val == 0:
-                break
+            # An empty line stays local — same as the single-GPU chat path — so a
+            # stray Enter cannot end the session; only "exit"/EOF broadcasts out.
             if not user_input:
                 continue
+            exiting = user_input.lower() == "exit"
 
-            # Tokenize and broadcast prompt tokens to workers.
+            # Broadcast flag: 1=generate, 0=exit.
+            flag = torch.tensor([0 if exiting else 1], dtype=torch.int64, device="cuda:0")
+            dist.broadcast(flag, src=0)
+            if exiting:
+                break
+
+            # Tokenize and broadcast prompt tokens + sampling params to workers.
             formatted = prompter.insert_prompt(user_input) if prompter else user_input
             tokens = generator.tokenizer.encode(formatted)
             tok_tensor = torch.tensor(tokens, dtype=torch.int64, device="cuda:0")
             length = torch.tensor([len(tokens)], dtype=torch.int64, device="cuda:0")
             dist.broadcast(length, src=0)
             dist.broadcast(tok_tensor, src=0)
+            params_tensor = _pack_sampling_params(params).to("cuda:0")
+            dist.broadcast(params_tensor, src=0)
 
             # All ranks generate together (all-reduces synchronize).
             prompt_text = generator.tokenizer.decode(tokens)

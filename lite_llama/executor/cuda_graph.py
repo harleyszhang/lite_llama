@@ -92,8 +92,10 @@ class CUDAGraphRunner:
         self.atten_info.cur_select_index = torch.zeros(batch_size, dtype=torch.int32, device=device)
         self.atten_info.b_seq_len = torch.zeros(batch_size, dtype=torch.long, device=device)
         self.atten_info.b_req_idx = torch.arange(batch_size, dtype=torch.long, device=device)
+
         # A Python int, so it is baked in: it fixes flash_decoding's mid_o shape and grid.
         self.atten_info.max_actual_seq_len = seq_len_bucket
+        self.atten_info.is_prefill = False
 
         self._graph: torch.cuda.CUDAGraph | None = None
         self._output: torch.Tensor | None = None

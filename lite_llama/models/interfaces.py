@@ -168,14 +168,15 @@ class MultiModalCausalLM(nn.Module):
         Args:
             input_ids: ``[batch, seq_len]``; ``seq_len == 1`` selects the decode path.
             position_ids: ``[batch, seq_len]`` absolute positions.
-            atten_info: KV-cache bookkeeping for this step.
+            atten_info: KV-cache bookkeeping for this step; ``atten_info.is_prefill``
+                decides prefill vs decode, so a single-token prompt is still a
+                prefill.
             multi_modal_inputs: Processor outputs (``pixel_values`` and friends).
                 Only consumed during prefill; ignored while decoding because the
                 vision tokens are already in the KV cache.
         """
         inputs_embeds = None
-        is_prefill = input_ids.shape[1] > 1
-        if is_prefill and multi_modal_inputs:
+        if atten_info.is_prefill and multi_modal_inputs:
             vision_embeds = self.encode_vision(**multi_modal_inputs)
             inputs_embeds = self.get_input_embeddings(input_ids)
             inputs_embeds = merge_multimodal_embeddings(
