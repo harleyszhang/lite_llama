@@ -98,21 +98,39 @@ class SlotBatch:
         self._host_lens: list[int] = []
 
     # ------------------------------------------------------------------ steps #
-    def begin_prefill(self, slots: Sequence[int], prompt_lens: Sequence[int]) -> None:
+    def begin_prefill(
+        self,
+        slots: Sequence[int],
+        seq_starts: Sequence[int],
+        seq_lens: Sequence[int],
+    ) -> None:
         """Point the attention metadata at a padded prefill grid for ``slots``.
 
-        The model flattens its ``[n, max_prompt_len]`` token grid row-major, so
-        sequence ``i``'s token ``j`` must land in slot ``slots[i]``'s row ``j``.
-        Positions past a sequence's own prompt are padding: they do write junk K/V
-        into rows ``[prompt_len, max_prompt_len)`` of that slot, but attention
-        never reads past ``b_seq_len``, and the sequence's own decode steps
-        overwrite exactly those rows in order.
+        The model flattens its ``[n, width]`` token grid row-major, so sequence
+        ``i``'s grid column ``j`` must land in slot ``slots[i]``'s cache row
+        ``seq_starts[i] + j``: chunked prefill resumes mid-prompt, so each row
+        starts at its own absolute position instead of at 0.
+
+        ``seq_lens[i]`` is the sequence's *total* cached length after this chunk
+        (start + chunk), which is what bounds attention — positions past a
+        sequence's own real tokens are padding: they do write junk K/V into
+        rows ``[seq_lens, start + width)`` of that slot, but attention never
+        reads past ``b_seq_len``, and later steps overwrite exactly those rows
+        in order.
 
         Args:
             slots: Slot id per sequence, as handed out by the scheduler.
-            prompt_lens: Real (unpadded) prompt length per sequence.
+            seq_starts: First cache row each sequence's chunk writes.
+            seq_lens: Total cached length per sequence once the chunk lands
+                (its prefix within the slot plus this chunk).
         """
-        max_prompt_len = max(prompt_lens)
+        # Grid width is the widest *chunk* in the group, not the span between
+        # the earliest start and the latest end — rows start at their own
+        # positions, so the grid must be exactly as wide as the widest chunk
+        # for cur_select_index to line up with the flattened token grid.
+        max_prompt_len = max(
+            end - start for start, end in zip(seq_starts, seq_lens)
+        )
         if max_prompt_len > self.max_seq_len:
             raise ValueError(
                 f"prompt length {max_prompt_len} exceeds max_seq_len {self.max_seq_len}"
@@ -120,18 +138,95 @@ class SlotBatch:
 
         n = len(slots)
         b_req_idx = self._to_device(slots)
+        starts = self._to_device(seq_starts)
         table = self._atten.b_req_tokens_table
 
         self._atten.b_req_idx = b_req_idx
-        self._atten.b_seq_len = self._to_device(prompt_lens)
-        self._atten.max_actual_seq_len = max_prompt_len
+        self._atten.b_seq_len = self._to_device(seq_lens)
+        self._atten.max_actual_seq_len = max(seq_lens)
         self._atten.is_prefill = True
-        self._atten.cur_select_index = table[b_req_idx, :max_prompt_len].reshape(-1)
+        # Grid column j of row i maps to cache row starts[i] + j — an outer
+        # sum rather than the flat identity used when every chunk started at 0.
+        cols = starts.unsqueeze(1) + torch.arange(
+            max_prompt_len, device=self.device
+        ).unsqueeze(0)
+        self._atten.cur_select_index = table[b_req_idx.unsqueeze(1), cols].reshape(-1)
         self._atten.b_start_loc = self._row_offsets[:n] * max_prompt_len
 
         # A prefill always changes the running set, so the decode after it has to
         # rebuild its own metadata rather than increment this.
         self._host_slots, self._host_lens = [], []
+
+    def begin_extend(
+        self,
+        slots: Sequence[int],
+        seq_starts: Sequence[int],
+        seq_lens: Sequence[int],
+    ) -> int:
+        """Point the attention metadata at one decode row per *token* of the chunks.
+
+        The prefill kernel is pure self-attention over the current grid — it
+        cannot see K/V that earlier chunks already wrote into the slot — so a
+        chunk resuming mid-prompt runs through the decode kernel instead: each
+        (request, position) pair becomes one row, its K/V lands at its cache row
+        ``position``, and its query attends over the slot's rows ``[0, position +
+        1)``. That is exactly causal extend semantics, paid at one row per token.
+        Rows are one token wide, so batch padding keeps the whole pass on the
+        captured decode graphs, exactly like a decode step.
+
+        Args:
+            slots: Slot id per chunk, as handed out by the scheduler.
+            seq_starts: First cache row each chunk writes.
+            seq_lens: Total cached length per sequence once the chunk lands.
+
+        Returns:
+            The row count actually submitted to the model, filler rows included;
+            the caller discards the trailing rows' logits.
+        """
+        starts, ends = list(seq_starts), list(seq_lens)
+        chunk_lens = [end - start for start, end in zip(starts, ends)]
+        if max(ends) > self.max_seq_len:
+            raise ValueError(
+                f"sequence length {max(ends)} exceeds max_seq_len {self.max_seq_len}"
+            )
+
+        rows_slot, rows_len = self._flatten_rows(slots, starts, chunk_lens)
+
+        # Filler rows pad onto a captured decode graph, same trick as decode.
+        # Their fake length tracks the longest real cache so the bucket choice
+        # matches; the junk K/V they write stays inside the filler slot.
+        filler_len = min(max(ends), self.max_seq_len)
+        if self._filler_slot is not None:
+            pad = self._runner.graph_batch_size(len(rows_slot)) - len(rows_slot)
+            if pad > 0:
+                rows_slot = torch.cat(
+                    [
+                        rows_slot,
+                        torch.full((pad,), self._filler_slot, dtype=rows_slot.dtype, device=self.device),
+                    ]
+                )
+                rows_len = torch.cat(
+                    [
+                        rows_len,
+                        torch.full((pad,), filler_len, dtype=rows_len.dtype, device=self.device),
+                    ]
+                )
+
+        table = self._atten.b_req_tokens_table
+        self._b_req_idx = rows_slot
+        self._b_seq_len = rows_len
+        self._atten.b_req_idx = rows_slot
+        self._atten.b_seq_len = rows_len
+        self._atten.max_actual_seq_len = max(ends)
+        self._atten.is_prefill = False
+        # Row `seq_len - 1` is the cache row this row's fresh K/V lands in.
+        self._atten.cur_select_index = table[rows_slot, rows_len - 1]
+        self._atten.b_start_loc = None
+
+        # A prefill always changes the running set, so the decode after it has
+        # to rebuild its own metadata rather than increment this.
+        self._host_slots, self._host_lens = [], []
+        return len(rows_slot)
 
     def begin_decode(self, slots: Sequence[int], seq_lens: Sequence[int]) -> int:
         """Point the attention metadata at one decode step and report the batch size.
@@ -179,15 +274,45 @@ class SlotBatch:
         """Cache length per row of the batch most recently submitted to the model.
 
         Includes any filler rows, so it is shaped for the model call rather than
-        for the caller's request list. Decode positions fall straight out of it:
-        a token written to cache row ``seq_len - 1`` sits at that same absolute
-        position in the sequence.
+        for the caller's request list. Positions fall straight out of it — a
+        token written to cache row ``seq_len - 1`` sits at that same absolute
+        position in the sequence — which serves both a decode step and the
+        one-row-per-token extend batch.
         """
         if self._b_seq_len is None:
             raise RuntimeError("begin_decode() must run before seq_lens is read")
         return self._b_seq_len
 
     # -------------------------------------------------------------- internals #
+    def _flatten_rows(
+        self,
+        slots: Sequence[int],
+        starts: Sequence[int],
+        chunk_lens: Sequence[int],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Expand ``(slot, start, len)`` triples into one row per token.
+
+        Returns ``(row_slots, row_lens)`` where row ``r`` of request ``i``'s
+        stretch has ``row_slots[r] == slots[i]`` and ``row_lens[r]`` equals its
+        absolute position plus one — the cache length once its own K/V lands,
+        which is both what the decode kernel reads and, minus one, the row it
+        writes. Built with gathers rather than a per-token Python loop so the
+        host cost stays flat in the chunk size.
+        """
+        lens = self._to_device(chunk_lens)
+        # Host sum of a list the caller already held: no .item() round-trip.
+        total = sum(chunk_lens)
+        # Which request each flattened row belongs to, then the row's offset
+        # from where that request's stretch begins in the flat index space.
+        row_req = torch.repeat_interleave(
+            torch.arange(len(slots), device=self.device), lens
+        )
+        stretch_starts = torch.cumsum(lens, 0) - lens
+        within = torch.arange(total, device=self.device) - stretch_starts[row_req]
+        row_lens = self._to_device(starts)[row_req] + within + 1
+        row_slots = self._to_device(slots)[row_req]
+        return row_slots, row_lens
+
     def _pad(self, slots: Sequence[int], seq_lens: Sequence[int]) -> tuple[list[int], list[int]]:
         """Grow the batch to the next captured CUDA-graph size, if there is one.
 
