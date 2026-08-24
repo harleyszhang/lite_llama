@@ -15,12 +15,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .activations import silu
 from .utils import calculate_settings
-
-
-@triton.jit
-def silu(x):
-    return x * tl.sigmoid(x)
 
 
 @triton.jit
