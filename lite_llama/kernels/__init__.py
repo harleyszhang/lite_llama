@@ -8,7 +8,7 @@ phase against the paged KV buffer. ``w8a16_matmul`` and the quantised branch of
 ``fused_moe`` serve the 8-bit-weight models.
 """
 
-from .activations import gelu, leaky_relu, relu, tanh
+from .activations import gelu, leaky_relu, relu, silu, tanh
 from .flashattention2_nopad import flash_attention2_no_pad
 from .flashdecoding import flash_decoding
 from .fused_moe import fused_moe, moe_align_block_size
@@ -28,6 +28,7 @@ __all__ = [
     "moe_align_block_size",
     "relu",
     "rope_emb_forward",
+    "silu",
     "skip_rmsnorm",
     "swiglu_forward",
     "swiglu_forward_fused",

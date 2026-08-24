@@ -16,6 +16,7 @@ import torch
 import triton
 import triton.language as tl
 
+from .activations import silu
 from .utils import torch_to_triton_dtype
 from .quantization.w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
 
@@ -347,10 +348,10 @@ def _silu_and_mul_kernel(
     pid_n = tl.program_id(1)
     offs = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     mask = offs < N
-    # sigmoid in fp32 for accuracy, matching the standalone swiglu kernel.
+    # silu evaluates its sigmoid in fp32, matching the dense swiglu kernel.
     gate = tl.load(x_ptr + pid_m * stride_xm + offs, mask=mask, other=0.0).to(tl.float32)
     up = tl.load(x_ptr + pid_m * stride_xm + N + offs, mask=mask, other=0.0).to(tl.float32)
-    out = gate * tl.sigmoid(gate) * up
+    out = silu(gate) * up
     tl.store(out_ptr + pid_m * N + offs, out.to(out_ptr.dtype.element_ty), mask=mask)
 
 
