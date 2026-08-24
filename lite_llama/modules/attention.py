@@ -244,8 +244,10 @@ class Attention(nn.Module):
         batch_size, seq_len, _ = x.shape
         xq, xk, xv = self._project_qkv(x, position_embeddings)
 
-        # seq_len == 1 means we are decoding and can read the whole cached history.
-        attn_output = self.attn(xq, xk, xv, atten_info, layer_index, is_prefill=seq_len > 1)
+        # The phase comes from whoever prepared the metadata, not from seq_len:
+        # a single-token prompt is still a prefill, and guessing ``seq_len > 1``
+        # would route it through the decode kernel by accident.
+        attn_output = self.attn(xq, xk, xv, atten_info, layer_index, is_prefill=atten_info.is_prefill)
         # Back to the residual-stream layout before the output projection.
         attn_output = attn_output.view(batch_size, seq_len, self.q_size)
         return self.o_proj(attn_output)

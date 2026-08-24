@@ -338,18 +338,32 @@ class DataParallelEngine:
 
         texts: list[str | None] = [None] * len(prompts)
         reasons: list[str | None] = [None] * len(prompts)
+        failure: RuntimeError | None = None
         for _ in range(dispatched):
             kind, batch_id, payload = self._await_message()
             if kind == "error":
-                raise RuntimeError(f"data-parallel replica failed on request:\n{payload}")
+                # Drain the rest of this round before raising: the sibling replicas
+                # have already (or are about to) put their "done" messages into the
+                # shared queue, and anything left there would be misread as a result
+                # by the next generate() call.
+                if failure is None:
+                    failure = RuntimeError(f"data-parallel replica failed on request:\n{payload}")
+                continue
+            if failure is not None:
+                continue  # a sibling's results; this call is failing anyway
             for index, text, reason in payload:
                 texts[index] = text
                 reasons[index] = reason
 
-        # Every request on a replica is done, so let a load-aware balancer forget them.
+        # Every request on a replica is done, so let a load-aware balancer forget
+        # them. Runs on the error path too: skipping it would leak inflight counts
+        # forever on the least-loaded balancer.
         for replica, indices in enumerate(buckets):
             for _ in indices:
                 self._balancer.release(replica)
+
+        if failure is not None:
+            raise failure
 
         return [
             RequestOutput(prompt=prompt, outputs=[CompletionOutput(0, text or "", reason)])
