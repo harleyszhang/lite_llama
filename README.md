@@ -19,23 +19,24 @@
 
 ## Features
 
-- Up to `4x` speedup over transformers, llama3 1B and 3B models.
-- **Online batch inference with continuous batching**: requests join and leave a running batch, so an arrival never waits for the current generation to finish. On one A10 with Qwen2.5-1.5B-Instruct and requests arriving 250 ms apart, throughput goes from 93 to 644 tok/s (`6.9x`) and mean latency from 19.1 s to 2.3 s (`8.3x`) — see [docs/continuous_batching.md](./docs/continuous_batching.md).
-- **OpenAI-compatible server** (`lite-llama serve`): `/v1/completions` and `/v1/chat/completions`, streaming included, so the official `openai` client works unchanged — see [docs/online_serving.md](./docs/online_serving.md).
-- Supports the latest `llama3`, `Qwen2.5`, `Qwen3`, `Llava1.5`, `Qwen3-vl`, `Qwen3-MoE` model inference, `top-p` sampling, streaming output.
-- Supports GQA, decode stage support cuda graph optimization (with batch_size limitations).
-- Supports `flashattention1`, `flashattention2`, `flashdecoding` (supports `NopadAttention`).
-- Support efficient dynamic management of kv cache (`auto tokenattnetion`).
-- Support fusion of operators, e.g. fusion of `*` and `silu` for element-by-element multiplication, k v linear layer fusion, fusion of `skip` and `rmsnorm`.
-- Some custom operators such as `rmsnorm`, `rope`, `softmax`, `element-by-element-multiplication`, etc. are implemented using the efficient `triton` kernel.
-- **Quantization**: W8A16 (fp8/int8), W4A16 (AWQ/GPTQ), SmoothQuant W8A8 — up to `1.7x` decode speedup.
+- Up to **6.5×** speedup over HuggingFace `transformers` (Qwen3-0.6B, A10, greedy) — see the [benchmark table](#qwen3-06b-benchmark) below.
+- **Online batch inference with continuous batching**: requests join and leave a running batch, so an arrival never waits for the current generation to finish. On one A10 with Qwen2.5-1.5B-Instruct and requests arriving 250 ms apart, throughput goes from 93 → 644 tok/s (**6.9×**) and mean latency from 19.1 s → 2.3 s (**8.3×**) — see [docs/continuous_batching.md](./docs/continuous_batching.md).
+- **OpenAI-compatible server** (`lite-llama serve`): `/v1/completions` and `/v1/chat/completions` with streaming — the official `openai` client works unchanged. See [docs/online_serving.md](./docs/online_serving.md).
+- Supports `llama3`, `Qwen2.5`, `Qwen3`, `Qwen3-MoE`, `LLaVA-1.5`, `Qwen3-VL`; `top-p` / `top-k` sampling and streaming output.
+- GQA support; decode-stage CUDA graph capture (within batch-size limits).
+- Attention backends: `flashattention1`, `flashattention2`, `flashdecoding` (with `NopadAttention` for unpadded sequences).
+- Dynamic KV-cache management via paged `TokenAttention` slots.
+- Operator fusion: `silu` multiply, K/V projection fusion, skip-connection + `rmsnorm`.
+- Custom `triton` kernels for `rmsnorm`, `rope`, `softmax`, and element-wise multiply.
+- **Quantization**: W8A16 (fp8/int8), W4A16 (AWQ/GPTQ), SmoothQuant W8A8 — up to **6.9×** decode speedup over HF fp16.
 - **Tensor Parallelism**: split a 30B MoE model across 2× A10 (24 GB) with one all-reduce per block.
-- **Data Parallelism**: replicate the model across GPUs and route requests between them — `2.00x` throughput on 2 GPUs (100% linear).
+- **Data Parallelism**: replicate the model across GPUs and route requests between them — **2.00×** throughput on 2 GPUs (100% linear).
 - **Kernel Autotune** (v0.5): offline search persists optimal tile configs per `(GPU, op, shape)` to `~/.cache/lite_llama/autotune/`; kernels auto-load on startup.
 - **FP8 KV Cache** (v0.6): `--kv-cache-dtype fp8` halves KV memory — **1.91× capacity** (282K vs 148K tokens on A10) with only 9% throughput cost.
-- **Chunked Prefill** (v0.7): long prompts split into 512-token chunks so per-step prefill work is bounded (2000→512 tokens, 3.9x lower peak) — decode requests interleave instead of waiting behind a whole prompt.
-- **Preemption** (v0.7): recompute-based eviction when KV cache hits the watermark; evicted requests re-queue automatically.
-- **Backend Registry** (v0.8): declarative kernel backend selection with `explain_selection()` — auto-detects Triton/CUDA/fp8 capability; env-var override + graceful fallback.
+- **Chunked Prefill** (v0.7): long prompts split into 512-token chunks so per-step prefill work is bounded (2000 → 512 tokens, 3.9× lower peak) — decode requests interleave instead of waiting behind a whole prompt.
+- **Prefix Caching** (v0.7): block-hash chained prefix reuse — shared system prompts are prefilled once and reused by later requests; LRU-evicted under capacity pressure (aligned with vLLM's `BlockPool`).
+- **Preemption** (v0.7): opt-in recompute-based eviction (`enable_preemption`) when the running set exceeds slot capacity; evicted requests re-queue with a progress quantum that prevents livelock.
+- **Backend Registry** (v0.8): declarative kernel-backend selection with probe + `explain_selection()`; environment-variable override and graceful degradation when a backend's dependency is missing.
 
 ## Setup and Installation
 
