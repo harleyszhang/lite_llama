@@ -3,6 +3,12 @@
 Rotates each head's channel pairs by the per-position angle in place, consuming the
 ``(cos, sin)`` tables built by :mod:`lite_llama.modules.rotary_embedding`.
 
+Each token is located through ``stride(0)`` alone, so q and k may be *column slices of
+a fused qkv buffer*: their heads still sit next to each other, only the distance from
+one token to the next is larger. Such a tensor is rotated where it lies instead of being
+copied out and back, which is what keeps the fused QKV projection
+(:class:`~lite_llama.modules.linear.QKVParallelLinear`) a net win.
+
 Usage:
     q, k = rope_emb_forward(q, k, cos, sin, batch_size, seq_len)
 """
@@ -83,11 +89,24 @@ def _triton_rope_emb(
     tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
 
 
+def _rows_are_contiguous(tensor) -> bool:
+    """Whether ``head * head_dim + channel`` addresses a token's row correctly.
+
+    The kernel walks tokens with ``stride(0)`` and heads with ``head_dim``, so anything
+    whose heads are adjacent within a row qualifies — including a slice of a fused
+    ``[q | k | v]`` output, whose row stride is simply wider than its row.
+    """
+    return tensor.stride(2) == 1 and tensor.stride(1) == tensor.shape[2]
+
+
 def rope_emb_forward(q, k, cos, sin, batch_size, seq_len):
     """
     q: (batch_size * seq_len, n_q_heads, head_dim)
     k: (batch_size * seq_len, n_k_heads, head_dim)
     cos, sin: (batch_size, seq_len, head_dim)
+
+    q and k are rotated in place and returned; a tensor whose heads are not adjacent
+    within a row is materialised first, in which case the copy is what comes back.
     """
     N, n_qh, HEAD_DIM = q.shape
     _, n_kh, _ = k.shape
@@ -103,8 +122,8 @@ def rope_emb_forward(q, k, cos, sin, batch_size, seq_len):
     else:
         num_warps = 4
 
-    q = q.contiguous()
-    k = k.contiguous()
+    q = q if _rows_are_contiguous(q) else q.contiguous()
+    k = k if _rows_are_contiguous(k) else k.contiguous()
     cos = cos.contiguous()
     sin = sin.contiguous()
 

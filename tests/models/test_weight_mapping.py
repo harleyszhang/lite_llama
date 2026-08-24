@@ -41,18 +41,18 @@ from lite_llama.models import weights
         ("layers.3.input_layernorm.weight", "layers.3.input_layernorm_weight"),
         ("layers.3.post_attention_layernorm.weight", "layers.3.post_attention_layernorm_weight"),
         # Projections are submodules (LinearBase), so their parameters use dots.
-        ("layers.3.self_attn.q_proj.weight", "layers.3.self_attn.q_proj.weight"),
-        ("layers.3.self_attn.q_proj.bias", "layers.3.self_attn.q_proj.bias"),
         ("layers.3.self_attn.o_proj.weight", "layers.3.self_attn.o_proj.weight"),
         ("layers.3.self_attn.q_norm.weight", "layers.3.self_attn.q_norm_weight"),
         ("layers.3.self_attn.k_norm.weight", "layers.3.self_attn.k_norm_weight"),
         # MoE router. Must not be confused with the dense ``mlp.gate_proj``.
         ("layers.3.mlp.gate.weight", "layers.3.mlp.gate_weight"),
-        # Fused pairs.
-        ("layers.3.self_attn.k_proj.weight", "layers.3.self_attn.kv_proj.weight"),
-        ("layers.3.self_attn.v_proj.weight", "layers.3.self_attn.kv_proj.weight"),
-        ("layers.3.self_attn.k_proj.bias", "layers.3.self_attn.kv_proj.bias"),
-        ("layers.3.self_attn.v_proj.bias", "layers.3.self_attn.kv_proj.bias"),
+        # Fused triple: all three attention projections land in one parameter.
+        ("layers.3.self_attn.q_proj.weight", "layers.3.self_attn.qkv_proj.weight"),
+        ("layers.3.self_attn.k_proj.weight", "layers.3.self_attn.qkv_proj.weight"),
+        ("layers.3.self_attn.v_proj.weight", "layers.3.self_attn.qkv_proj.weight"),
+        ("layers.3.self_attn.q_proj.bias", "layers.3.self_attn.qkv_proj.bias"),
+        ("layers.3.self_attn.k_proj.bias", "layers.3.self_attn.qkv_proj.bias"),
+        ("layers.3.self_attn.v_proj.bias", "layers.3.self_attn.qkv_proj.bias"),
         # Stacked experts.
         ("layers.3.mlp.experts.7.gate_proj.weight", "layers.3.mlp.experts.gate_up_proj"),
         ("layers.3.mlp.experts.7.up_proj.weight", "layers.3.mlp.experts.gate_up_proj"),
@@ -64,26 +64,46 @@ def test_translate_text_key_names_the_right_parameter(key: str, expected: str):
     assert name == expected
 
 
-def test_k_and_v_fill_opposite_halves():
-    """Both map to one parameter, so the halves are the only thing keeping them apart."""
+def test_q_k_and_v_fill_three_blocks_of_unequal_width():
+    """All three map to one parameter, and grouped-query attention makes q wider.
+
+    Nothing in an 8-row parameter says where q ends; each arriving tensor's own row
+    count is what places it. Four q rows and two each of k and v is the GQA case that a
+    single ``//`` over the fused width would get wrong.
+    """
     param = torch.zeros(8, 3)
+    _, q_dest = weights.translate_text_key("layers.0.self_attn.q_proj.weight")
     _, k_dest = weights.translate_text_key("layers.0.self_attn.k_proj.weight")
     _, v_dest = weights.translate_text_key("layers.0.self_attn.v_proj.weight")
 
-    k_dest(param).fill_(1)
-    v_dest(param).fill_(2)
+    q_dest(param, torch.empty(4, 3)).fill_(1)
+    k_dest(param, torch.empty(2, 3)).fill_(2)
+    v_dest(param, torch.empty(2, 3)).fill_(3)
     assert torch.equal(param[:4], torch.ones(4, 3))
-    assert torch.equal(param[4:], torch.full((4, 3), 2.0))
+    assert torch.equal(param[4:6], torch.full((2, 3), 2.0))
+    assert torch.equal(param[6:], torch.full((2, 3), 3.0))
+
+
+def test_qkv_blocks_are_equal_width_without_gqa():
+    """Multi-head attention is the same rule with all three row counts equal."""
+    param = torch.zeros(6, 3)
+    dests = [
+        weights.translate_text_key(f"layers.0.self_attn.{leaf}_proj.weight")[1]
+        for leaf in ("q", "k", "v")
+    ]
+    for index, dest in enumerate(dests):
+        dest(param, torch.empty(2, 3)).fill_(index + 1)
+    assert torch.equal(param[:, 0], torch.tensor([1.0, 1.0, 2.0, 2.0, 3.0, 3.0]))
 
 
 def test_gate_and_up_fill_opposite_halves():
-    """The dense MLP's gate/up pair is fused exactly like the attention K/V pair."""
+    """The dense MLP's gate/up pair splits the parameter down the middle instead."""
     param = torch.zeros(8, 3)
     _, gate_dest = weights.translate_text_key("layers.0.mlp.gate_proj.weight")
     _, up_dest = weights.translate_text_key("layers.0.mlp.up_proj.weight")
 
-    gate_dest(param).fill_(1)
-    up_dest(param).fill_(2)
+    gate_dest(param, torch.empty(4, 3)).fill_(1)
+    up_dest(param, torch.empty(4, 3)).fill_(2)
     assert torch.equal(param[:4], torch.ones(4, 3))
     assert torch.equal(param[4:], torch.full((4, 3), 2.0))
 
@@ -103,8 +123,8 @@ def test_expert_gate_and_up_fill_opposite_halves_of_their_own_slice():
     _, gate = weights.translate_text_key("layers.0.mlp.experts.1.gate_proj.weight")
     _, up = weights.translate_text_key("layers.0.mlp.experts.1.up_proj.weight")
 
-    gate(param).fill_(1)
-    up(param).fill_(2)
+    gate(param, torch.empty(2, 5)).fill_(1)
+    up(param, torch.empty(2, 5)).fill_(2)
     assert torch.equal(param[1, :2], torch.ones(2, 5))
     assert torch.equal(param[1, 2:], torch.full((2, 5), 2.0))
     # Other experts untouched.
@@ -174,7 +194,7 @@ def test_missing_parameter_is_reported_by_name():
 
 
 def test_half_written_fused_parameter_is_rejected():
-    """Only half of a fused K/V arriving is the failure a key-set check cannot see."""
+    """Only part of a fused parameter arriving is the failure a key-set check cannot see."""
     with pytest.raises(ValueError, match=r"partially written.*fused"):
         weights.load_weights(_TwoParams(), _stream(drop=("fused_high",)), _translate)
 
