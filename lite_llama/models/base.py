@@ -29,6 +29,7 @@ from ..modules import (
     LinearBase,
     ParallelLMHead,
     RotaryEmbedding,
+    SparseMoeBlock,
     VocabParallelEmbedding,
 )
 from ..modules.quantization import QuantizationConfig, adapt_int4_checkpoint
@@ -196,10 +197,8 @@ class CausalLM(nn.Module):
         quantised (an fp8 checkpoint) are left alone.
         """
         for module in self.modules():
-            if isinstance(module, LinearBase):
+            if isinstance(module, (LinearBase, SparseMoeBlock)):
                 module.quantize_(quant)
-            elif hasattr(module, "quantize_experts_"):
-                module.quantize_experts_(quant)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

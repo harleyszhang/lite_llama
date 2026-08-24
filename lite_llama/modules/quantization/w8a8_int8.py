@@ -89,7 +89,7 @@ class W8A8Int8LinearMethod(LinearMethodBase):
     def apply(self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         return smoothquant_matmul(
             x, layer.weight, layer.weight_scale_inv,
-            bias=bias if bias is not None else layer.bias,
+            bias=bias,
         )
 
     def quantize_from_fp16(self, layer: nn.Module, config: "QuantizationConfig") -> None:

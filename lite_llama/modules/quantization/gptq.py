@@ -117,7 +117,7 @@ class GPTQLinearMethod(LinearMethodBase):
             layer.weight_scale,
             layer.weight_zeros,
             group_size=layer.quant.group_k,
-            bias=bias if bias is not None else layer.bias,
+            bias=bias,
         )
 
     def quantize_from_fp16(self, layer: nn.Module, config: "QuantizationConfig") -> None:
