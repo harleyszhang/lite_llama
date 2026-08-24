@@ -19,7 +19,7 @@
 
 ## 特性
 
-- 相比 transformers, llama3 1B 和 3B 模型加速比最高达 `4x` 倍。
+- 相比 HuggingFace `transformers`，Qwen3-0.6B 加速比最高达 **6.5×**（A10，greedy）——见下方 [benchmark 表](#qwen3-06b-benchmark)。
 - 支持最新的 `llama3`、`Qwen2.5`、`Qwen3`、`Qwen3-MoE`(如 Qwen3-30B-A3B,加载时将 FP8 block 量化权重反量化为 fp16)、`Qwen3-VL`、`Llava1.5` 模型推理，支持 `top-p` 采样, 支持流式输出。
 - 直接加载 HuggingFace checkpoint：配置走 `AutoConfig`,权重从 `*.safetensors` 流式读入,K/V 投影与 MoE 专家在加载时就地融合/堆叠,不需要离线权重转换,也没有私有权重格式。
 - **在线批量推理 + 连续批处理**：请求随时加入、结束即离开正在跑的 batch，新到达的请求
@@ -31,14 +31,15 @@
   见 [docs/online_serving.md](docs/online_serving.md)。
 - 支持 GQA、decode 阶段支持 cuda graph 优化（有 batch_size 限制）。
 - 支持 `flashattention1`、`flashattention2`、 `flashdecoding`(支持 `NopadAttention`)。
-- 支持 kv cache 的高效动态管理（`auto tokenattnetion`）。
+- 支持 kv cache 的高效动态管理（分页式 `TokenAttention` slot）。
 - 支持算子融合，如：逐元素相乘 `*` 和 `silu` 的融合, k v 线性层融合, `skip` 和 `rmsnorm` 融合。
 - 支持 Triton grouped GEMM kernel。
 - 部分自定义算子如：`rmsnorm`、`rope`、`softmax`、`逐元素相乘` 等采用高效 `triton` 内核实现。
 - **Kernel 自动调优** (v0.5)：离线搜索最优 tile 配置并按 `(GPU, op, shape)` 落盘 JSON，启动时自动加载，未命中时回退启发式。
 - **FP8 KV Cache** (v0.6)：`--kv-cache-dtype fp8` KV 缓存减半——容量提升 **1.91×**（A10 上 282K vs 148K tokens），吞吐仅降 9%。
-- **Chunked Prefill** (v0.7)：长 prompt 按 512 token 分片，单 step prefill 工作量被封顶（2000→512 token，峰值降 3.9x）——decode 与 prefill 交织，而不再等一个完整 prompt。
-- **抢占机制** (v0.7)：KV 压力超水位线时自动 evict 最新请求（recompute 策略），释放 slot 后重新排队。
+- **Chunked Prefill** (v0.7)：长 prompt 按 512 token 分片，单 step prefill 工作量被封顶（2000 → 512 token，峰值降 3.9×）——decode 与 prefill 交织，而不再等一个完整 prompt。
+- **Prefix Caching** (v0.7)：block-hash 链式前缀复用——共享 system prompt 只 prefill 一次，后续请求直接复用；容量不足时 LRU 驱逐（对标 vLLM `BlockPool`）。
+- **抢占机制** (v0.7)：opt-in 超订驱逐（`enable_preemption`），running set 超过 slot 容量时 evict 最年轻请求（recompute 策略）；进度配额防活锁，被驱逐请求自动重新排队。
 - **Backend 注册表** (v0.8)：声明式 kernel 后端选择 + `explain_selection()` 解释原因；环境变量强制切换，缺库自动降级。
 
 ## 安装和快速使用
