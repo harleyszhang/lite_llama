@@ -52,13 +52,27 @@ class TestPrefixCache:
         cache.register([0, 1, 2, 3, 4, 5])  # 1 full block + 2 leftover
         assert cache.query([0, 1, 2, 3, 4, 5]) == 4  # only the full block
 
-    def test_release_evicts(self):
+    def test_release_keeps_blocks_cached_for_later_hits(self):
+        """Blocks survive release (LRU persistence); only capacity pressure evicts."""
         cache = PrefixCache(block_size=4)
         tokens = list(range(8))
         cache.register(tokens)
         cache.release(tokens)
-        assert cache.query(tokens) == 0
-        assert cache.num_cached_blocks == 0
+        # Blocks stay resident (LRU) even after the holder releases.
+        assert cache.query(tokens) == 8
+        assert cache.num_cached_blocks == 2
+        assert cache.num_evictable_blocks == 2  # zero ref_cnt
+
+    def test_capacity_evicts_lru_unreferenced_blocks(self):
+        """Capacity-bounded cache evicts LRU unreferenced blocks on overflow."""
+        cache = PrefixCache(block_size=4, capacity=2)
+        tokens_a = list(range(8))     # 2 blocks
+        tokens_b = list(range(8, 16)) # 2 different blocks
+        cache.register(tokens_a)
+        cache.release(tokens_a)       # ref_cnt -> 0, stays resident
+        cache.register(tokens_b)      # adds 2 more -> 4 > capacity 2 -> evicts a's
+        assert cache.query(tokens_a) == 0  # evicted
+        assert cache.query(tokens_b) == 8  # still resident
 
     def test_refcount_survives_one_release(self):
         cache = PrefixCache(block_size=4)
@@ -74,6 +88,61 @@ class TestPrefixCache:
         cache.register(tokens)
         cache.query(tokens)  # 16/16 cached
         assert cache.hit_rate == 1.0
+
+    def test_referenced_blocks_are_never_evicted(self):
+        """A live holder protects its blocks even under capacity pressure."""
+        cache = PrefixCache(block_size=4, capacity=1)
+        held = list(range(8))          # 2 blocks, kept referenced
+        other = list(range(100, 108))  # 2 blocks
+        cache.register(held)           # ref_cnt = 1, must survive
+        cache.register(other)
+        cache.release(other)           # only these are evictable
+        cache.register(list(range(200, 208)))  # force more pressure
+        # The referenced prefix is still fully hittable.
+        assert cache.query(held) == 8
+        assert cache.num_referenced_blocks >= 2
+
+    def test_register_returns_preexisting_hit_length(self):
+        """register() reports the reuse the caller gets, so callers need no 2nd query."""
+        cache = PrefixCache(block_size=4)
+        tokens = list(range(16))
+        assert cache.register(tokens) == 0   # cold
+        assert cache.register(tokens) == 16  # warm: full prefix already cached
+
+    def test_hash_seed_isolates_caches(self):
+        """Different seeds must not cross-hit on identical token ids."""
+        a = PrefixCache(block_size=4, hash_seed=1)
+        b = PrefixCache(block_size=4, hash_seed=2)
+        tokens = list(range(16))
+        a.register(tokens)
+        assert a.query(tokens) == 16
+        assert b.query(tokens) == 0
+
+    def test_reset_clears_blocks_and_stats(self):
+        cache = PrefixCache(block_size=4)
+        tokens = list(range(16))
+        cache.register(tokens)
+        cache.query(tokens)
+        cache.reset()
+        assert cache.num_cached_blocks == 0
+        assert cache.hit_rate == 0.0
+        assert cache.stats.num_requests == 0
+
+    def test_stats_counters(self):
+        cache = PrefixCache(block_size=4)
+        tokens = list(range(16))
+        cache.register(tokens)
+        cache.query(tokens)
+        assert cache.stats.num_requests == 1
+        assert cache.stats.queried_tokens == 16
+        assert cache.stats.hit_tokens == 16
+
+    def test_eviction_counter(self):
+        cache = PrefixCache(block_size=4, capacity=1)
+        cache.register(list(range(8)))
+        cache.release(list(range(8)))
+        cache.register(list(range(100, 108)))
+        assert cache.stats.evictions >= 1
 
 
 # --------------------------------------------------------------------------- #
