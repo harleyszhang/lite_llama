@@ -64,23 +64,36 @@ _SHUTDOWN = None
 
 
 def _dp_worker(
+    global_rank: int,
     dp_rank: int,
+    tp_rank: int,
     dp_size: int,
     tp_size: int,
     engine_kwargs: dict[str, Any],
     request_queue: mp.Queue,
     result_queue: mp.Queue,
 ) -> None:
-    """One replica: build an engine on its own GPU, then serve requests until told to stop.
+    """One rank of the grid: build an engine on its own GPU, then serve until told to stop.
+
+    There is one process per *cell* of the ``dp_size x tp_size`` grid, not one per
+    replica. That is forced by ``init_parallel``: with ``tp_size > 1`` it rendezvouses a
+    world of ``dp_size * tp_size`` ranks, so spawning only ``dp_size`` processes hangs
+    forever waiting for ranks nobody started. Each cell occupies device ``global_rank``.
+
+    Within a replica the ranks are *mirrors*: they receive the same request message and
+    run the same forward, staying in step through the TP collectives (the sampled token
+    is broadcast from TP rank 0). Only the replica's leader (``tp_rank == 0``) reports a
+    result, because the coordinator expects exactly one answer per replica.
 
     Runs in a spawned process, so it takes only picklable arguments and imports torch
-    itself. It occupies device ``dp_rank * tp_size`` (the first rank of its slice of
-    the grid). Every outcome is reported through ``result_queue`` — including a failed
-    build, which arrives as an ``"error"`` message so the coordinator raises instead of
-    blocking on a worker that will never answer.
+    itself. Every startup outcome is reported through ``result_queue`` — including a
+    failed build, which arrives as an ``"error"`` message so the coordinator raises
+    instead of blocking on a worker that will never answer.
 
     Args:
-        dp_rank: Which replica this process is.
+        global_rank: This process's rank in ``[0, dp_size * tp_size)``, and its device.
+        dp_rank: Which replica this process belongs to.
+        tp_rank: Which rank inside that replica; ``0`` is the reporting leader.
         dp_size: Total replicas (for the parallel-state grid).
         tp_size: TP ranks per replica (1 for pure DP).
         engine_kwargs: Forwarded verbatim to :class:`LLM`, minus ``device``.
@@ -93,14 +106,14 @@ def _dp_worker(
     from ..distributed.parallel_state import init_parallel
     from .llm import LLM
 
+    is_leader = tp_rank == 0
     try:
-        device_index = dp_rank * tp_size
-        torch.cuda.set_device(device_index)
-        init_parallel(global_rank=device_index, tp_size=tp_size, dp_size=dp_size)
-        llm = LLM(device=f"cuda:{device_index}", **engine_kwargs)
-        result_queue.put(("ready", dp_rank, None))
+        torch.cuda.set_device(global_rank)
+        init_parallel(global_rank=global_rank, tp_size=tp_size, dp_size=dp_size)
+        llm = LLM(device=f"cuda:{global_rank}", **engine_kwargs)
+        result_queue.put(("ready", global_rank, None))
     except Exception:
-        result_queue.put(("error", dp_rank, traceback.format_exc()))
+        result_queue.put(("error", global_rank, traceback.format_exc()))
         return
 
     while True:
@@ -110,13 +123,30 @@ def _dp_worker(
         batch_id, indices, prompts, params = message
         try:
             outputs = llm.generate(prompts, params)
-            payload = [
-                (i, out.text, out.outputs[0].finish_reason)
-                for i, out in zip(indices, outputs, strict=True)
-            ]
-            result_queue.put(("done", batch_id, payload))
         except Exception:
-            result_queue.put(("error", batch_id, traceback.format_exc()))
+            detail = traceback.format_exc()
+            if is_leader:
+                result_queue.put(("error", batch_id, detail))
+                continue
+            # A follower must not put a second message on the queue for one dispatch:
+            # the coordinator counts messages, and the extra one would be misread as a
+            # result by the next generate(). Exiting is the signal instead — the
+            # coordinator's liveness poll turns the leader's stalled collective into a
+            # RuntimeError naming this dead process.
+            _log.error("tp rank %d of replica %d failed:\n%s", tp_rank, dp_rank, detail)
+            return
+        if not is_leader:
+            continue
+        result_queue.put(
+            (
+                "done",
+                batch_id,
+                [
+                    (i, out.text, out.outputs[0].finish_reason)
+                    for i, out in zip(indices, outputs, strict=True)
+                ],
+            )
+        )
 
 
 class DataParallelEngine:
@@ -128,8 +158,10 @@ class DataParallelEngine:
     subclass for that reason: it owns no model, no KV cache and no sampler, only the
     worker processes and a :class:`~lite_llama.engine.dp_load_balancer.LoadBalancer`.
 
-    Replica ``i`` takes device ``cuda:{i * tensor_parallel_size}``, matching the rank
-    grid in :mod:`lite_llama.distributed.parallel_state`.
+    Replica ``i`` spans devices ``[i * tp, (i+1) * tp)`` and is served by that many
+    processes — one per cell of the rank grid in
+    :mod:`lite_llama.distributed.parallel_state`. The replica's leader is the process on
+    its first device; it is the one that answers.
 
     Args:
         model: HuggingFace checkpoint directory, as for :class:`LLM`.
@@ -180,6 +212,7 @@ class DataParallelEngine:
         self.model = model
         self.data_parallel_size = data_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
+        self.world_size = needed
         self._balancer = make_load_balancer(load_balancer, data_parallel_size)
         self._engine_kwargs = {
             "model": model,
@@ -193,22 +226,26 @@ class DataParallelEngine:
         # "spawn" is required: a forked child inherits a CUDA context that cannot be
         # re-initialised on another device.
         ctx = mp.get_context("spawn")
-        self._request_queues = [ctx.Queue() for _ in range(data_parallel_size)]
+        # One queue per *grid cell*, not per replica: the followers of a TP replica must
+        # each receive the request message to run the same forward as their leader.
+        self._request_queues = [ctx.Queue() for _ in range(needed)]
         self._result_queue: mp.Queue = ctx.Queue()
         self._workers = [
             ctx.Process(
                 target=_dp_worker,
                 args=(
-                    dp_rank,
+                    global_rank,
+                    global_rank // tensor_parallel_size,
+                    global_rank % tensor_parallel_size,
                     data_parallel_size,
                     tensor_parallel_size,
                     self._engine_kwargs,
-                    self._request_queues[dp_rank],
+                    self._request_queues[global_rank],
                     self._result_queue,
                 ),
                 daemon=True,
             )
-            for dp_rank in range(data_parallel_size)
+            for global_rank in range(needed)
         ]
         for worker in self._workers:
             worker.start()
@@ -248,18 +285,19 @@ class DataParallelEngine:
                     ) from None
 
     def _await_ready(self) -> None:
-        """Block until every replica reports a built engine, or raise."""
-        pending = set(range(self.data_parallel_size))
+        """Block until every rank of the grid reports a built engine, or raise."""
+        pending = set(range(self.world_size))
         while pending:
-            kind, dp_rank, detail = self._await_message(STARTUP_TIMEOUT_S)
+            kind, global_rank, detail = self._await_message(STARTUP_TIMEOUT_S)
             if kind == "error":
                 self.shutdown()
-                raise RuntimeError(f"data-parallel replica {dp_rank} failed to start:\n{detail}")
-            pending.discard(dp_rank)
+                raise RuntimeError(f"data-parallel rank {global_rank} failed to start:\n{detail}")
+            pending.discard(global_rank)
         _log.info(
-            "data parallel ready: %d replicas x TP %d (%s)",
+            "data parallel ready: %d replicas x TP %d = %d ranks (%s)",
             self.data_parallel_size,
             self.tensor_parallel_size,
+            self.world_size,
             type(self._balancer).__name__,
         )
 
@@ -279,20 +317,44 @@ class DataParallelEngine:
             self._tokenizer = LLMEngine._load_tokenizer(self.model)
         return self._tokenizer
 
-    def _route(self, prompts: list[str]) -> list[list[int]]:
+    def _estimate_tokens(self, prompts: list[str]) -> list[int]:
+        """Token count per prompt — the unit a token-aware balancer needs.
+
+        Prompt *characters* are not prompt tokens: the ratio swings from ~1 for CJK to
+        ~6 for whitespace-heavy code, so routing on ``len(prompt)`` silently mis-sizes
+        every non-English batch. The tokenizer is the only honest answer, and it is
+        called once for the whole batch.
+
+        Returns zeros — and never touches the tokenizer — when the configured policy
+        does not read the estimate, so ``round_robin`` stays free.
+        """
+        if not self._balancer.needs_token_estimate:
+            return [0] * len(prompts)
+        encoded = self.tokenizer(prompts, add_special_tokens=True)["input_ids"]
+        return [len(ids) for ids in encoded]
+
+    def _route(self, estimates: list[int]) -> list[list[int]]:
         """Ask the balancer which replica each prompt goes to.
 
         Returns one index list per replica: replica ``r`` should generate
         ``[prompts[i] for i in result[r]]``. Grouping the per-request decisions back
         into one sub-batch per replica keeps each replica doing a single efficient
         batched forward, while the *choice* stays a per-request policy — so swapping in
-        the least-loaded balancer changes the split without touching this code.
+        a load-aware balancer changes the split without touching this code.
+
+        Args:
+            estimates: Prompt lengths in tokens, from :meth:`_estimate_tokens`.
         """
         buckets: list[list[int]] = [[] for _ in range(self.data_parallel_size)]
-        for index, prompt in enumerate(prompts):
-            replica = self._balancer.select(estimated_tokens=len(prompt))
+        for index, estimated_tokens in enumerate(estimates):
+            replica = self._balancer.select(estimated_tokens=estimated_tokens)
             buckets[replica].append(index)
         return buckets
+
+    def _replica_queues(self, replica: int) -> list[mp.Queue]:
+        """Every rank of ``replica``, leader first — all of them must get the request."""
+        base = replica * self.tensor_parallel_size
+        return self._request_queues[base : base + self.tensor_parallel_size]
 
     def generate(
         self,
@@ -324,16 +386,17 @@ class DataParallelEngine:
         if not prompts:
             return []
 
-        buckets = self._route(prompts)
+        estimates = self._estimate_tokens(prompts)
+        buckets = self._route(estimates)
         dispatched = 0
         for replica, indices in enumerate(buckets):
             if not indices:
                 continue
             batch_id = self._next_batch_id
             self._next_batch_id += 1
-            self._request_queues[replica].put(
-                (batch_id, indices, [prompts[i] for i in indices], params)
-            )
+            message = (batch_id, indices, [prompts[i] for i in indices], params)
+            for request_queue in self._replica_queues(replica):
+                request_queue.put(message)
             dispatched += 1
 
         texts: list[str | None] = [None] * len(prompts)
@@ -356,11 +419,11 @@ class DataParallelEngine:
                 reasons[index] = reason
 
         # Every request on a replica is done, so let a load-aware balancer forget
-        # them. Runs on the error path too: skipping it would leak inflight counts
-        # forever on the least-loaded balancer.
+        # them — subtracting the same estimate that was added. Runs on the error path
+        # too: skipping it would leak in-flight load forever.
         for replica, indices in enumerate(buckets):
-            for _ in indices:
-                self._balancer.release(replica)
+            for index in indices:
+                self._balancer.release(replica, estimated_tokens=estimates[index])
 
         if failure is not None:
             raise failure
