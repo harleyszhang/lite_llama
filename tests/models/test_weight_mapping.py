@@ -32,12 +32,12 @@ from lite_llama.models import weights
     [
         # Untouched: these already carry lite_llama parameter names.
         ("embed_tokens.weight", "embed_tokens.weight"),
+        ("lm_head.weight", "lm_head.weight"),
         ("layers.3.mlp.gate_proj.weight", "layers.3.mlp.gate_up_proj.weight"),
         ("layers.3.mlp.up_proj.weight", "layers.3.mlp.gate_up_proj.weight"),
         ("layers.3.mlp.down_proj.weight", "layers.3.mlp.down_proj.weight"),
         # Flattened: the module level is folded into the parameter name.
         ("norm.weight", "norm_weight"),
-        ("lm_head.weight", "lm_head_weight"),
         ("layers.3.input_layernorm.weight", "layers.3.input_layernorm_weight"),
         ("layers.3.post_attention_layernorm.weight", "layers.3.post_attention_layernorm_weight"),
         # Projections are submodules (LinearBase), so their parameters use dots.

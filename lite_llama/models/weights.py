@@ -108,9 +108,10 @@ _FUSED_KV: dict[str, int] = {"self_attn.k_proj": 0, "self_attn.v_proj": 1}
 _FUSED_GATE_UP: dict[str, int] = {"mlp.gate_proj": 0, "mlp.up_proj": 1}
 
 #: Keys outside the decoder stack, matched exactly rather than by suffix.
+#: ``lm_head.weight`` is absent because :class:`~lite_llama.modules.vocab_parallel.
+#: ParallelLMHead` is a real submodule whose parameter is already called that.
 _TOP_LEVEL: dict[str, str] = {
     "norm.weight": "norm_weight",
-    "lm_head.weight": "lm_head_weight",
 }
 
 #: ``layers.N.mlp.experts.E.{gate,up,down}_proj.{weight,weight_scale_inv}`` in an
@@ -137,8 +138,11 @@ _PARAM_SUFFIXES: tuple[str, ...] = (
 #: tensor parallelism splits. Column-parallel weights are cut along their output
 #: rows (dim 0), row-parallel ones along the contracted columns (dim 1); a stacked
 #: expert parameter is fed one expert at a time, so its own leading expert axis
-#: does not appear here.
+#: does not appear here. The two vocabulary tensors are ``[vocab, hidden]``, so
+#: splitting the vocabulary is also a dim-0 cut.
 _SHARD_DIM: tuple[tuple[str, int], ...] = (
+    ("embed_tokens", 0),
+    ("lm_head", 0),
     ("self_attn.q_proj", 0),
     ("self_attn.kv_proj", 0),
     ("self_attn.o_proj", 1),
@@ -261,10 +265,14 @@ def load_weights(
         weights: ``(checkpoint key, tensor)`` pairs, in any order.
         translate: Maps a checkpoint key to its destination, or ``None`` to skip
             it (HF bookkeeping tensors, keys belonging to another submodule).
-        tied: ``{target parameter: source parameter}`` pairs to fill by copy when
-            the checkpoint omits the target. Checkpoints with
+        tied: ``{target parameter: source parameter}`` pairs to satisfy by *aliasing*
+            when the checkpoint omits the target. Checkpoints with
             ``tie_word_embeddings: true`` ship no ``lm_head.weight`` at all, and
-            lite_llama keeps it as its own parameter.
+            lite_llama keeps it as its own parameter, so it is pointed at the
+            embedding table rather than given a copy of it — which is both half the
+            memory and the only way ``lm_head.weight is embed_tokens.weight`` can hold
+            once the two are sharded. A checkpoint that *does* ship the target wins:
+            the tie is a fallback, not an override.
         shard: Narrows each incoming tensor to the slice this tensor-parallel rank
             owns; :func:`tp_shard` for the models that support TP, ``None`` for
             those that do not (the vision towers are replicated).
@@ -298,10 +306,22 @@ def load_weights(
 
     for target_name, source_name in (tied or {}).items():
         if filled.get(target_name) == 0:
-            params[target_name].data.copy_(params[source_name].data)
+            _alias_parameter(model, target_name, params[source_name])
             filled[target_name] = params[target_name].numel()
 
     _verify_coverage(params, filled)
+
+
+def _alias_parameter(model: nn.Module, dotted_name: str, source: nn.Parameter) -> None:
+    """Rebind ``model.<dotted_name>`` to ``source``, freeing what was there.
+
+    ``nn.Module`` deduplicates shared parameters, so after this the aliased name no
+    longer appears in ``named_parameters()`` — which is the point: there is one tensor,
+    and reporting it twice would double every memory total computed from that iterator.
+    """
+    path, _, leaf = dotted_name.rpartition(".")
+    owner = model.get_submodule(path) if path else model
+    setattr(owner, leaf, source)
 
 
 def _verify_coverage(params: Mapping[str, nn.Parameter], filled: Mapping[str, int]) -> None:

@@ -234,3 +234,52 @@ def test_sampler_applies_penalty_before_choosing():
     assert sampler.sample(logits.clone(), params, generated=None).item() == 0
     # 10 / 5 = 2 now loses to the untouched 9, so the choice must flip.
     assert sampler.sample(logits.clone(), params, generated=span).item() == 1
+
+
+# --------------------------------------------------------------------------- #
+# apply_repetition_penalty under vocabulary parallelism
+#
+# With a sharded head each rank sees ``[batch, vocab / tp]`` and must penalise only the
+# ids it owns, translated into local columns. No process group is needed to test that:
+# the offset is an argument, so the sharded behaviour is reproducible on one CPU.
+# --------------------------------------------------------------------------- #
+def test_a_token_owned_by_another_rank_is_left_alone():
+    """Rank 0 of a 4-wide split must not touch its columns because rank 1 generated a
+    token: an offset ignored here penalises ``id`` instead of ``id - offset``, which is a
+    penalty applied to an unrelated token."""
+    logits = torch.tensor([[4.0, 4.0]])
+    span = _span([[3]], [[True]])  # rank 1's territory when the offset is 0..1
+
+    torch.testing.assert_close(
+        apply_repetition_penalty(logits.clone(), span, 2.0, vocab_offset=0), logits
+    )
+
+
+def test_the_offset_translates_global_ids_into_local_columns():
+    """Rank 1 holds ids 2..3, so generating id 3 must move its *second* column."""
+    logits = torch.tensor([[4.0, 4.0]])
+    out = apply_repetition_penalty(logits, _span([[3]], [[True]]), 2.0, vocab_offset=2)
+
+    assert out[0].tolist() == pytest.approx([4.0, 2.0])
+
+
+def test_the_shards_together_reproduce_the_unsharded_penalty():
+    """The property that matters: concatenating every rank's penalised slice must equal
+    penalising the full row once. Each id has to be claimed by exactly one rank."""
+    torch.manual_seed(0)
+    batch, vocab, tp_size = 4, 32, 4
+    local = vocab // tp_size
+    logits = torch.randn(batch, vocab)
+    span = GeneratedSpan(
+        token_ids=torch.randint(0, vocab, (batch, 6)), mask=torch.rand(batch, 6) > 0.3
+    )
+
+    expected = apply_repetition_penalty(logits.clone(), span, 1.5)
+    shards = [
+        apply_repetition_penalty(
+            logits[:, rank * local : (rank + 1) * local].clone(), span, 1.5, rank * local
+        )
+        for rank in range(tp_size)
+    ]
+
+    torch.testing.assert_close(torch.cat(shards, dim=-1), expected)
