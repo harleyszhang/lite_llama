@@ -23,6 +23,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .prefix_cache import PrefixCache
 from .sampler import SamplingParams
 
 
@@ -80,6 +81,9 @@ class Request:
     finish_reason: str | None = None
     first_token_time: float | None = None
     finish_time: float | None = None
+    #: Leading prompt tokens served from the prefix cache; their KV is reused,
+    #: so prefill starts from this offset instead of from 0.
+    num_cached_tokens: int = 0
 
     @property
     def prompt_len(self) -> int:
@@ -173,6 +177,12 @@ class Scheduler:
         self._chunking: list[Request] = []
         # Tracks how many prompt tokens have been processed for each chunking request
         self._chunk_progress: dict[str, int] = {}
+
+        # Prefix cache: reuse KV of shared prompt prefixes (vLLM-style block hashing).
+        # ``None`` when disabled so the hot path pays nothing.
+        self._prefix_cache: PrefixCache | None = (
+            PrefixCache(block_size=16) if config.enable_prefix_cache else None
+        )
 
         # Preemption counter for metrics
         self.num_preemptions: int = 0
@@ -297,13 +307,26 @@ class Scheduler:
             self._running.append(candidate)
             group.append(candidate)
 
-            # Track chunked prefill if prompt exceeds chunk size
-            chunk_size = self.config.max_chunk_size
-            if chunk_size > 0 and candidate.prompt_len > chunk_size:
-                self._chunking.append(candidate)
-                self._chunk_progress[candidate.request_id] = 0
+            # Prefix cache: reuse KV of any leading blocks already cached, then
+            # register this prompt so later requests with the same prefix hit it.
+            cached = 0
+            if self._prefix_cache is not None:
+                cached = self._prefix_cache.query(candidate.prompt_token_ids)
+                # Never skip the whole prompt: at least one token must be
+                # prefilled to produce the first logits, exactly as vLLM keeps
+                # the last block uncached.
+                cached = min(cached, candidate.prompt_len - 1)
+                candidate.num_cached_tokens = cached
+                self._prefix_cache.register(candidate.prompt_token_ids)
+            # Prefill starts past the cached prefix.
+            self._chunk_progress[candidate.request_id] = cached
 
-            longest = max(longest, candidate.prompt_len)
+            # Track chunked prefill if the *uncached* remainder exceeds a chunk.
+            chunk_size = self.config.max_chunk_size
+            if chunk_size > 0 and (candidate.prompt_len - cached) > chunk_size:
+                self._chunking.append(candidate)
+
+            longest = max(longest, candidate.prompt_len - cached)
 
         return group
 
@@ -331,6 +354,16 @@ class Scheduler:
         # Identity comparison: two distinct requests may carry the same id if a
         # caller reuses one, and removing the wrong object would leak a slot.
         self._running = [r for r in self._running if r is not request]
+        self._chunk_progress.pop(request.request_id, None)
+        # Drop this request's hold on its cached prefix blocks. A shared prefix
+        # survives as long as any other live request still references it.
+        if self._prefix_cache is not None:
+            self._prefix_cache.release(request.prompt_token_ids)
+
+    @property
+    def prefix_cache_hit_rate(self) -> float:
+        """Fraction of queried prompt tokens served from the prefix cache."""
+        return self._prefix_cache.hit_rate if self._prefix_cache is not None else 0.0
 
     # ------------------------------------------------------------------ status #
     @property
