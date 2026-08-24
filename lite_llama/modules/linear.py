@@ -1,18 +1,22 @@
 """Linear layers: one place that knows about both quantisation and sharding.
 
-Every projection in the decoder goes through one of the three classes here.
+Every projection in the decoder goes through one of the four classes here.
 The classes themselves answer only the *sharding* question — the Megatron rule
 that chaining a column-parallel layer into a row-parallel one (``gate/up`` then
-``down``, ``q/k/v`` then ``o``) makes one all-reduce per block enough. The
+``down``, ``qkv`` then ``o``) makes one all-reduce per block enough. The
 *storage* question — fp16 ``F.linear`` or which quantised kernel — is delegated
 to a quant-method object from :mod:`lite_llama.modules.quantization`,
 so adding a scheme touches no layer code.
+
+:class:`QKVParallelLinear` is the one class that is not a plain division: with
+grouped-query attention the query and key/value blocks have different head counts,
+so each is split by its own rule and the fused weight is assembled from the two.
 
 Parameter names deliberately match HuggingFace (``weight``, ``weight_scale_inv``),
 so :mod:`lite_llama.models.weights` needs no rule for them.
 
 Usage:
-    self.q_proj = ColumnParallelLinear(hidden, q_size, quant=quant)
+    self.qkv_proj = QKVParallelLinear(hidden, num_heads, num_kv_heads, head_dim)
     self.o_proj = RowParallelLinear(q_size, hidden, quant=quant)
 """
 
@@ -135,6 +139,87 @@ class ColumnParallelLinear(LinearBase):
         self.full_output_size = output_size
 
 
+class QKVParallelLinear(LinearBase):
+    """The query, key and value projections as one column-parallel weight.
+
+    Three GEMMs over the same activation become one over ``[q | k | v]`` stacked
+    along the output dimension. The arithmetic is identical; what changes is that
+    the activation is read once and one kernel launch replaces three. On the decode
+    path that is most of the cost — the GEMMs are memory-bound and skinny, and TP
+    disables CUDA graphs, so launch overhead is not hidden by a replay.
+
+    The reason this is a class and not ``ColumnParallelLinear(hidden, q + 2*kv)`` is
+    that the blocks are **not split by the same rule**. Grouped-query attention gives
+    a model more query heads than key/value heads (Qwen3-8B: 32 vs 8), so a rank takes
+    ``num_heads / tp`` query heads and ``num_kv_heads / tp`` key/value heads and the two
+    boundaries are independent. One cut of ``q + 2 * kv`` is blind to where q ends: it
+    hands the low ranks nothing but query heads and the high ranks nothing but key/value
+    heads. The local width comes out the same either way, so nothing downstream objects.
+
+    The local layout is ``[q | k | v]``, in that order. Each block keeps its heads
+    adjacent inside a token's row, so :meth:`split` never has to copy: RoPE rotates the
+    q and k blocks where they lie and the KV-cache write addresses them by stride.
+
+    Args:
+        hidden_size: Contracted width (not split).
+        num_heads: Total query heads, split ``tp`` ways.
+        num_kv_heads: Total key/value heads, split ``tp`` ways.
+        head_dim: Width of one head; never split.
+        bias: Whether q/k/v carry a bias (Qwen2 does); sharded with the weight.
+        quant: Quantisation layout, or ``None`` for fp16.
+
+    Raises:
+        ValueError: If either head count does not divide across the ranks, or if a
+            block's local width is not a whole number of quantisation scale blocks.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        *,
+        bias: bool = False,
+        quant: QuantizationConfig | None = None,
+    ) -> None:
+        world_size = get_tp_world_size()
+        local_heads = divide(num_heads, world_size, "attention heads")
+        local_kv_heads = divide(num_kv_heads, world_size, "key/value heads")
+        q_size = local_heads * head_dim
+        kv_size = local_kv_heads * head_dim
+        # Checked per block, not on the total: a fused width can be a whole number of
+        # scale blocks while the query block alone is not.
+        _check_shard_alignment(quant, q_size, "query features")
+        _check_shard_alignment(quant, kv_size, "key/value features")
+        super().__init__(hidden_size, q_size + 2 * kv_size, bias=bias, quant=quant)
+        self.num_heads = local_heads
+        self.num_kv_heads = local_kv_heads
+        self.head_dim = head_dim
+        self.q_size = q_size
+        self.kv_size = kv_size
+        self.full_output_size = (num_heads + 2 * num_kv_heads) * head_dim
+
+    def split(self, qkv: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Cut a fused output into ``(q, k, v)`` views along the last dimension.
+
+        Views, not copies. Each one keeps the fused row stride, which every kernel
+        downstream accepts, so undoing the fusion costs nothing.
+        """
+        return torch.split(qkv, (self.q_size, self.kv_size, self.kv_size), dim=-1)
+
+    def project(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """One GEMM, then three views — the call every attention block wants."""
+        return self.split(self.apply_linear(x))
+
+    def extra_repr(self) -> str:
+        fmt = self.quant.format if self.quant else "fp16"
+        return (
+            f"in={self.input_size}, q_heads={self.num_heads}, kv_heads={self.num_kv_heads}, "
+            f"head_dim={self.head_dim}, bias={self.bias is not None}, {fmt}"
+        )
+
+
 class RowParallelLinear(LinearBase):
     """Splits the contracted features across ranks and all-reduces the result.
 
@@ -160,7 +245,9 @@ class RowParallelLinear(LinearBase):
         what: str = "input features",
     ) -> None:
         if bias:
-            raise ValueError("RowParallelLinear cannot carry a bias: it would be added once per rank")
+            raise ValueError(
+                "RowParallelLinear cannot carry a bias: it would be added once per rank"
+            )
         world_size = get_tp_world_size()
         local_in = divide(input_size, world_size, what)
         _check_shard_alignment(quant, local_in, what)

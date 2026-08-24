@@ -76,7 +76,7 @@ CASES: dict[str, tuple[dict, str]] = {
         "transformers:LlamaForCausalLM",
     ),
     # Qwen2 is the only family with a bias on q/k/v, so it is also the only one
-    # that exercises the fused ``kv_proj_bias``.
+    # that exercises the fused ``qkv_proj.bias``.
     "qwen2": (
         {"model_type": "qwen2", **_TEXT_BODY, "tie_word_embeddings": True},
         "transformers:Qwen2ForCausalLM",
@@ -213,15 +213,16 @@ def test_decoder_weights_land_in_the_right_place(model_type: str, tmp_path: Path
     same(f"{hf}embed_tokens.weight", f"{lite}embed_tokens.weight")
     same(f"{hf}norm.weight", f"{lite}norm_weight")
 
-    kv = config.kv_size
+    q, kv = config.q_size, config.kv_size
     for i in range(config.num_layers):
         attn, lite_attn = f"{hf}layers.{i}.self_attn", f"{lite}layers.{i}.self_attn"
-        same(f"{attn}.q_proj.weight", f"{lite_attn}.q_proj.weight")
         same(f"{attn}.o_proj.weight", f"{lite_attn}.o_proj.weight")
-        # The fused halves are the whole reason a mapping layer exists: swapping
-        # them keeps every shape and every count valid.
-        same(f"{attn}.k_proj.weight", f"{lite_attn}.kv_proj.weight", (slice(0, kv),))
-        same(f"{attn}.v_proj.weight", f"{lite_attn}.kv_proj.weight", (slice(kv, 2 * kv),))
+        # The fused blocks are the whole reason a mapping layer exists: under GQA they
+        # have different widths, yet permuting them keeps every shape and every count
+        # valid, so only an element-wise check can tell them apart.
+        same(f"{attn}.q_proj.weight", f"{lite_attn}.qkv_proj.weight", (slice(0, q),))
+        same(f"{attn}.k_proj.weight", f"{lite_attn}.qkv_proj.weight", (slice(q, q + kv),))
+        same(f"{attn}.v_proj.weight", f"{lite_attn}.qkv_proj.weight", (slice(q + kv, q + 2 * kv),))
 
         norms = f"{attn}.q_norm.weight" in state
         assert norms == (f"{lite_attn}.q_norm_weight" in params)
@@ -230,17 +231,21 @@ def test_decoder_weights_land_in_the_right_place(model_type: str, tmp_path: Path
             same(f"{attn}.k_norm.weight", f"{lite_attn}.k_norm_weight")
 
         # Qwen2 is the only family here with a q/k/v bias, i.e. the only one that
-        # exercises the fused ``kv_proj.bias``.
+        # exercises the fused ``qkv_proj.bias``.
         if f"{attn}.q_proj.bias" in state:
-            same(f"{attn}.q_proj.bias", f"{lite_attn}.q_proj.bias")
-            same(f"{attn}.k_proj.bias", f"{lite_attn}.kv_proj.bias", (slice(0, kv),))
-            same(f"{attn}.v_proj.bias", f"{lite_attn}.kv_proj.bias", (slice(kv, 2 * kv),))
+            same(f"{attn}.q_proj.bias", f"{lite_attn}.qkv_proj.bias", (slice(0, q),))
+            same(f"{attn}.k_proj.bias", f"{lite_attn}.qkv_proj.bias", (slice(q, q + kv),))
+            same(
+                f"{attn}.v_proj.bias",
+                f"{lite_attn}.qkv_proj.bias",
+                (slice(q + kv, q + 2 * kv),),
+            )
 
         mlp, lite_mlp = f"{hf}layers.{i}.mlp", f"{lite}layers.{i}.mlp"
         if f"{mlp}.gate.weight" not in state:  # dense SwiGLU
             inter = config.intermediate_size
-            # gate/up fuse exactly like K/V: two checkpoint tensors, one
-            # parameter, halves the only thing keeping them apart.
+            # gate/up fuse like the attention blocks, except the two halves are
+            # equal, so the width alone places them.
             same(
                 f"{mlp}.gate_proj.weight",
                 f"{lite_mlp}.gate_up_proj.weight",
