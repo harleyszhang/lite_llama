@@ -141,7 +141,7 @@ class OpenAIServer:
         return CompletionResponse(
             model=self.model_name,
             choices=[CompletionChoice(text=final.text, finish_reason=final.finish_reason)],
-            usage=self._usage(prompt, final.text),
+            usage=self._usage(final),
         )
 
     async def _stream_completion(self, prompt: str, params: SamplingParams) -> AsyncIterator[str]:
@@ -173,7 +173,7 @@ class OpenAIServer:
                     finish_reason=final.finish_reason,
                 )
             ],
-            usage=self._usage(prompt, final.text),
+            usage=self._usage(final),
         )
 
     async def _stream_chat(self, prompt: str, params: SamplingParams) -> AsyncIterator[str]:
@@ -204,14 +204,17 @@ class OpenAIServer:
             return "\n".join(message.content for message in body.messages)
         return self._prompter.apply([{"role": m.role, "content": m.content} for m in body.messages])
 
-    def _usage(self, prompt: str, completion: str) -> UsageInfo:
-        tokenizer = self.engine.tokenizer
-        prompt_tokens = len(tokenizer.encode(prompt, add_special_tokens=True))
-        completion_tokens = len(tokenizer.encode(completion, add_special_tokens=False))
+    def _usage(self, final: StreamedOutput) -> UsageInfo:
+        """Report the token counts the engine already keeps.
+
+        Re-encoding the texts would be both slower and subtly wrong: decode does
+        not round-trip through encode at token boundaries, so the honest numbers
+        are the ones the engine tokenised and sampled.
+        """
         return UsageInfo(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens,
+            prompt_tokens=final.prompt_tokens,
+            completion_tokens=final.completion_tokens,
+            total_tokens=final.prompt_tokens + final.completion_tokens,
         )
 
 

@@ -1,9 +1,11 @@
 """HuggingFace checkpoint keys -> lite_llama parameters.
 
-lite_llama loads HF checkpoints as-is; only a key translation is needed because two
+lite_llama loads HF checkpoints as-is; only a key translation is needed because three
 structural choices differ from HF: **fused K/V** (``k_proj``+``v_proj`` concatenated
-into ``kv_proj.weight`` for a one-launch cache write) and **stacked MoE experts**
-(``3*num_experts`` matrices packed into three tensors for grouped-GEMM experts).
+into ``kv_proj.weight`` for a one-launch cache write), **fused gate/up** (the dense
+MLP's ``gate_proj``+``up_proj`` concatenated into ``gate_up_proj.weight`` so the
+forward pass is one GEMM) and **stacked MoE experts** (``3*num_experts`` matrices
+packed into three tensors for grouped-GEMM experts).
 The rest is naming (bare ``nn.Parameter`` vs ``nn.Linear``). Rules are expressed as
 *destinations* (parameter + the view to fill); :func:`load_weights` then verifies
 every parameter is covered exactly once, so a missed key fails loudly, not silently.
@@ -12,7 +14,9 @@ A second table, :data:`_SHARD_DIM`, says how each weight is cut for tensor
 parallelism. It is written in terms of the *incoming* tensor rather than the
 parameter, which is what makes one entry cover the weight and its quantisation
 scales at once (a scale grid is the same matrix at a coarser resolution) and also
-the fused/stacked parameters, whose own axes are shifted by the fusing.
+the fused/stacked parameters, whose own axes are shifted by the fusing — the fused
+gate/up (like K/V) is split *within* each half, so a rank's slice of ``gate_proj``
+lands in its slice of the fused parameter rather than next to the other ranks'.
 
 Usage:
     load_weights(model, hf_weights_iterator(path), model.translate_weight_key)
@@ -98,6 +102,11 @@ _FLATTENED: tuple[str, ...] = (
 #: HF module path suffix -> which half of the fused ``kv_proj`` it fills.
 _FUSED_KV: dict[str, int] = {"self_attn.k_proj": 0, "self_attn.v_proj": 1}
 
+#: HF module path suffix -> which half of the dense MLP's fused ``gate_up_proj``
+#: it fills. The MoE experts' gate/up are fused separately (see ``_EXPERT_KEY``)
+#: and never reach this table.
+_FUSED_GATE_UP: dict[str, int] = {"mlp.gate_proj": 0, "mlp.up_proj": 1}
+
 #: Keys outside the decoder stack, matched exactly rather than by suffix.
 _TOP_LEVEL: dict[str, str] = {
     "norm.weight": "norm_weight",
@@ -135,8 +144,7 @@ _SHARD_DIM: tuple[tuple[str, int], ...] = (
     ("self_attn.o_proj", 1),
     ("mlp.experts.gate_up_proj", 0),
     ("mlp.experts.down_proj", 1),
-    ("mlp.gate_proj", 0),
-    ("mlp.up_proj", 0),
+    ("mlp.gate_up_proj", 0),
     ("mlp.down_proj", 1),
 )
 
@@ -174,6 +182,9 @@ def translate_text_key(key: str) -> Target:
     for suffix, index in _FUSED_KV.items():
         if module.endswith(suffix):
             return f"{module[: -len(suffix)]}self_attn.kv_proj.{leaf}", half(index)
+    for suffix, index in _FUSED_GATE_UP.items():
+        if module.endswith(suffix):
+            return f"{module[: -len(suffix)]}mlp.gate_up_proj.{leaf}", half(index)
     for suffix in _FLATTENED:
         if module.endswith(suffix):
             return f"{module}_{leaf}", whole

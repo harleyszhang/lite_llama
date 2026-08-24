@@ -220,6 +220,7 @@ class CausalLM(nn.Module):
         atten_info,
         inputs_embeds: torch.Tensor | None = None,
         layer_context: dict[str, Any] | None = None,
+        logits_positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run the decoder stack and project to vocabulary logits.
 
@@ -232,9 +233,17 @@ class CausalLM(nn.Module):
                 only used for shape information. Multimodal models pass the
                 merged text+vision embeddings here.
             layer_context: Optional per-step payload handed to :meth:`_after_layer`.
+            logits_positions: Optional ``[batch]`` position per sequence whose
+                logits the caller wants. Given, the hidden states are gathered
+                at exactly those positions *before* the lm_head projection and
+                the return is ``[batch, vocab_size]`` — a prefill of a 2 048-token
+                prompt then pays one vocabulary row instead of 2 048. ``None``
+                projects every position (decode steps want their single row
+                anyway, so the gather would save nothing).
 
         Returns:
-            ``[batch, seq_len, vocab_size]`` logits.
+            ``[batch, seq_len, vocab_size]`` logits, or ``[batch, vocab_size]``
+            when ``logits_positions`` was given.
         """
         hidden_states = (
             inputs_embeds if inputs_embeds is not None else self.get_input_embeddings(input_ids)
@@ -255,4 +264,9 @@ class CausalLM(nn.Module):
         hidden_states, _ = skip_rmsnorm(
             hidden_states, residual, self.norm_weight, self.rms_norm_eps
         )
+        if logits_positions is not None:
+            # Prompts differ in length, so each sequence's next-token prediction
+            # sits at its own last real position; pick it before the GEMM.
+            rows = torch.arange(hidden_states.shape[0], device=hidden_states.device)
+            hidden_states = hidden_states[rows, logits_positions]
         return F.linear(hidden_states, self.lm_head_weight)

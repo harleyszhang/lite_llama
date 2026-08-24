@@ -162,6 +162,7 @@ class MultiModalCausalLM(nn.Module):
         position_ids: torch.Tensor,
         atten_info,
         multi_modal_inputs: dict[str, Any] | None = None,
+        logits_positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run one prefill or decode step.
 
@@ -174,6 +175,9 @@ class MultiModalCausalLM(nn.Module):
             multi_modal_inputs: Processor outputs (``pixel_values`` and friends).
                 Only consumed during prefill; ignored while decoding because the
                 vision tokens are already in the KV cache.
+            logits_positions: Optional ``[batch]`` positions whose logits the
+                caller wants; forwarded to the language model so the lm_head
+                GEMM runs only on the requested rows.
         """
         inputs_embeds = None
         if atten_info.is_prefill and multi_modal_inputs:
@@ -188,4 +192,5 @@ class MultiModalCausalLM(nn.Module):
             position_ids=position_ids,
             atten_info=atten_info,
             inputs_embeds=inputs_embeds,
+            logits_positions=logits_positions,
         )

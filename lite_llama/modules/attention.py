@@ -74,10 +74,9 @@ class PagedAttention(nn.Module):
     ) -> None:
         if self.kv_cache_method is not None:
             xk, xv = self.kv_cache_method.quantize_kv(xk, xv)
-        # (tokens, 2 * num_kv_heads, head_dim) — K heads first, then V heads.
-        combined_kv = torch.cat([xk, xv], dim=-2)
+
         update_kv_buffer(
-            combined_kv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index]
+            xk, xv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index]
         )
 
     def context_forward(
