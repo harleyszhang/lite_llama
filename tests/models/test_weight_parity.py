@@ -331,24 +331,31 @@ def test_lm_head_shipped_by_the_checkpoint_is_used_verbatim(model_type: str, tmp
     params = dict(load_lite_model(config, tmp_path).named_parameters())
     lite = _text_prefix(model_type)
 
-    assert torch.equal(params[f"{lite}lm_head_weight"].data, state["lm_head.weight"].half())
+    assert torch.equal(params[f"{lite}lm_head.weight"].data, state["lm_head.weight"].half())
 
 
 @pytest.mark.parametrize("model_type", ["qwen2", "qwen3", "qwen3_vl"])
-def test_tied_checkpoint_without_lm_head_still_loads(model_type: str, tmp_path: Path):
+def test_tied_checkpoint_without_lm_head_shares_the_embedding_tensor(
+    model_type: str, tmp_path: Path
+):
     """The published Qwen2.5 / Qwen3 / Qwen3-VL checkpoints genuinely omit ``lm_head.weight``.
 
-    lite_llama keeps ``lm_head_weight`` as a real parameter, so the tie has to be
-    materialised at load time or the coverage check rejects the gap.
+    The loader answers with an *alias* rather than a copy, so the assertion is identity,
+    not equality: one tensor read two ways costs one vocabulary table instead of two,
+    and under vocabulary parallelism a copy could not even stay consistent.
     """
     state, config = write_hf_checkpoint(tmp_path, model_type)
     assert config.tie_word_embeddings
     del state["lm_head.weight"]
     _save(state, tmp_path)
 
-    params = dict(load_lite_model(config, tmp_path).named_parameters())
+    model = load_lite_model(config, tmp_path)
     lite = _text_prefix(model_type)
-    assert torch.equal(params[f"{lite}lm_head_weight"], params[f"{lite}embed_tokens.weight"])
+    head = model.get_parameter(f"{lite}lm_head.weight")
+    assert head is model.get_parameter(f"{lite}embed_tokens.weight")
+    # ``named_parameters`` de-duplicates shared tensors, so the head disappears from it:
+    # that is the memory saving showing up in the introspection surface.
+    assert f"{lite}lm_head.weight" not in dict(model.named_parameters())
 
 
 @pytest.mark.parametrize("model_type", sorted(CASES))
