@@ -11,7 +11,13 @@ Import the public API from here:
 """
 
 from .attention import Attention, PagedAttention
-from .linear import ColumnParallelLinear, LinearBase, ReplicatedLinear, RowParallelLinear
+from .linear import (
+    ColumnParallelLinear,
+    LinearBase,
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from .mlp import FusedMLP
 from .moe import SparseMoeBlock
 from .rotary_embedding import MRotaryEmbedding, RotaryEmbedding
@@ -25,6 +31,7 @@ __all__ = [
     "MRotaryEmbedding",
     "PagedAttention",
     "ParallelLMHead",
+    "QKVParallelLinear",
     "ReplicatedLinear",
     "RotaryEmbedding",
     "RowParallelLinear",
