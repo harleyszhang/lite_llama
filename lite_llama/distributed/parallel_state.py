@@ -76,6 +76,7 @@ def init_parallel(
     tp_size: int = 1,
     dp_size: int = 1,
     master_port: int = 29500,
+    backend: str | None = None,
 ) -> None:
     """Place this process in the ``dp_size x tp_size`` rank grid.
 
@@ -92,6 +93,9 @@ def init_parallel(
         tp_size: Ranks per replica (weights split across them).
         dp_size: Number of replicas (requests split across them).
         master_port: TCP port for the TP rendezvous (rank 0 listens).
+        backend: ``torch.distributed`` backend; ``None`` picks ``nccl`` on a machine
+            with GPUs and ``gloo`` without, which is what lets the sharded layers and
+            the vocabulary-parallel sampler be verified on CPU.
 
     Raises:
         ValueError: If the sizes are not positive, or ``global_rank`` falls outside
@@ -105,16 +109,17 @@ def init_parallel(
     if tp_size <= 1:
         return
 
+    backend = backend or ("nccl" if torch.cuda.is_available() else "gloo")
     world_size = tp_size * dp_size
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", str(master_port))
     if not dist.is_initialized():
-        dist.init_process_group(backend="nccl", rank=global_rank, world_size=world_size)
+        dist.init_process_group(backend=backend, rank=global_rank, world_size=world_size)
     # Every rank must create every group, in the same order, even the ones it is not
     # a member of: ``new_group`` is itself a collective over the whole world.
     for replica in range(dp_size):
         members = list(range(replica * tp_size, (replica + 1) * tp_size))
-        group = dist.new_group(members, backend="nccl")
+        group = dist.new_group(members, backend=backend)
         if replica == _DP_RANK:
             _TP_GROUP = group
     _log.info(
@@ -132,6 +137,7 @@ def init_tensor_parallel(
     rank: int = 0,
     world_size: int = 1,
     master_port: int = 29500,
+    backend: str | None = None,
 ) -> None:
     """Initialise a TP-only world: one replica whose ranks are ``[0, world_size)``.
 
@@ -142,8 +148,15 @@ def init_tensor_parallel(
         rank: This process's rank within the TP group.
         world_size: Number of TP ranks.
         master_port: TCP port for the rendezvous (rank 0 listens).
+        backend: See :func:`init_parallel`.
     """
-    init_parallel(global_rank=rank, tp_size=world_size, dp_size=1, master_port=master_port)
+    init_parallel(
+        global_rank=rank,
+        tp_size=world_size,
+        dp_size=1,
+        master_port=master_port,
+        backend=backend,
+    )
 
 
 def destroy_parallel() -> None:
@@ -211,6 +224,38 @@ def all_reduce_tp(tensor: torch.Tensor) -> torch.Tensor:
         return tensor
     dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=_TP_GROUP)
     return tensor
+
+
+def all_reduce_max_tp(tensor: torch.Tensor) -> torch.Tensor:
+    """Element-wise maximum of ``tensor`` across this replica's TP ranks, in place.
+
+    The other half of a vocabulary-parallel ``log_softmax``: each rank holds a slice of
+    the vocabulary, so the row maximum that keeps ``exp`` from overflowing has to be the
+    maximum over *all* slices. One float per row crosses the wire, not one per token id.
+
+    No-op when ``tp_world_size == 1``.
+    """
+    if _TP_WORLD_SIZE <= 1:
+        return tensor
+    dist.all_reduce(tensor, op=dist.ReduceOp.MAX, group=_TP_GROUP)
+    return tensor
+
+
+def all_gather_tp(tensor: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """Concatenate every TP rank's ``tensor`` along ``dim``, rank order.
+
+    Used for the small candidate tensors of vocabulary-parallel sampling — the ``k``
+    best ``(logit, id)`` pairs per rank — where the transfer is ``O(k * tp)`` and
+    independent of the vocabulary size. Every rank must pass the same shape.
+
+    Returns ``tensor`` itself when ``tp_world_size == 1``.
+    """
+    if _TP_WORLD_SIZE <= 1:
+        return tensor
+    tensor = tensor.contiguous()
+    parts = [torch.empty_like(tensor) for _ in range(_TP_WORLD_SIZE)]
+    dist.all_gather(parts, tensor, group=_TP_GROUP)
+    return torch.cat(parts, dim=dim)
 
 
 def broadcast_tp(tensor: torch.Tensor, src: int = 0) -> torch.Tensor:

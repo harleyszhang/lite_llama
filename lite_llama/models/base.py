@@ -20,10 +20,16 @@ from typing import Any, ClassVar
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from ..kernels import skip_rmsnorm
-from ..modules import Attention, FusedMLP, LinearBase, RotaryEmbedding
+from ..modules import (
+    Attention,
+    FusedMLP,
+    LinearBase,
+    ParallelLMHead,
+    RotaryEmbedding,
+    VocabParallelEmbedding,
+)
 from ..modules.quantization import QuantizationConfig, adapt_int4_checkpoint
 from . import weights
 from .config import ModelConfig
@@ -55,9 +61,7 @@ class DecoderLayer(nn.Module):
         self.post_attention_layernorm_weight = nn.Parameter(
             torch.ones(config.hidden_size, dtype=torch.float16)
         )
-        self.self_attn = Attention(
-            config, qkv_bias=qkv_bias, use_qk_norm=use_qk_norm, quant=quant
-        )
+        self.self_attn = Attention(config, qkv_bias=qkv_bias, use_qk_norm=use_qk_norm, quant=quant)
         # MoE 变体由 CausalLM._build_mlp 注入 SparseMoeBlock;默认 dense SwiGLU
         self.mlp = mlp if mlp is not None else FusedMLP(config, quant)
 
@@ -113,10 +117,11 @@ class CausalLM(nn.Module):
         self.quant = config.quant
         dtype = torch.float16
 
-        # Vocabulary tensors stay replicated and fp16: the embedding is a gather
-        # (no arithmetic to split) and sharding either of them would buy ~0.3 GB
-        # per rank at the price of two more collectives on every step.
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, dtype=dtype)
+        # The vocabulary tensors are split along the vocabulary itself (see
+        # :mod:`lite_llama.modules.vocab_parallel`): they are the largest pair of
+        # weights in a large-vocabulary model, the decode-step head GEMM scales with
+        # them, and a tied model cannot honestly shard one without the other.
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size, dtype)
         self.layers = nn.ModuleList(
             DecoderLayer(
                 config,
@@ -128,9 +133,7 @@ class CausalLM(nn.Module):
             for i in range(config.num_layers)
         )
         self.norm_weight = nn.Parameter(torch.ones(config.hidden_size, dtype=dtype))
-        self.lm_head_weight = nn.Parameter(
-            torch.empty(config.vocab_size, config.hidden_size, dtype=dtype)
-        )
+        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size, dtype)
 
         self.rotary_emb = self.rotary_class(config.rope_config)
         self.rms_norm_eps = config.rms_norm_eps
@@ -177,7 +180,7 @@ class CausalLM(nn.Module):
             self,
             checkpoint,
             self.translate_weight_key,
-            tied={"lm_head_weight": "embed_tokens.weight"}
+            tied={"lm_head.weight": "embed_tokens.weight"}
             if self.config.tie_word_embeddings
             else None,
             shard=weights.tp_shard,
@@ -243,7 +246,9 @@ class CausalLM(nn.Module):
 
         Returns:
             ``[batch, seq_len, vocab_size]`` logits, or ``[batch, vocab_size]``
-            when ``logits_positions`` was given.
+            when ``logits_positions`` was given. Under tensor parallelism the
+            vocabulary dimension is this rank's slice; the sampler completes the
+            distribution from a scalar per row instead of gathering logits.
         """
         hidden_states = (
             inputs_embeds if inputs_embeds is not None else self.get_input_embeddings(input_ids)
@@ -269,4 +274,4 @@ class CausalLM(nn.Module):
             # sits at its own last real position; pick it before the GEMM.
             rows = torch.arange(hidden_states.shape[0], device=hidden_states.device)
             hidden_states = hidden_states[rows, logits_positions]
-        return F.linear(hidden_states, self.lm_head_weight)
+        return self.lm_head(hidden_states)

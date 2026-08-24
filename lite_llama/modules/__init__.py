@@ -15,6 +15,7 @@ from .linear import ColumnParallelLinear, LinearBase, ReplicatedLinear, RowParal
 from .mlp import FusedMLP
 from .moe import SparseMoeBlock
 from .rotary_embedding import MRotaryEmbedding, RotaryEmbedding
+from .vocab_parallel import ParallelLMHead, VocabParallelEmbedding, vocab_shard
 
 __all__ = [
     "Attention",
@@ -23,8 +24,11 @@ __all__ = [
     "LinearBase",
     "MRotaryEmbedding",
     "PagedAttention",
+    "ParallelLMHead",
     "ReplicatedLinear",
     "RotaryEmbedding",
     "RowParallelLinear",
     "SparseMoeBlock",
+    "VocabParallelEmbedding",
+    "vocab_shard",
 ]
