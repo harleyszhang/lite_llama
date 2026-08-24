@@ -1,22 +1,27 @@
 """HuggingFace checkpoint keys -> lite_llama parameters.
 
 lite_llama loads HF checkpoints as-is; only a key translation is needed because three
-structural choices differ from HF: **fused K/V** (``k_proj``+``v_proj`` concatenated
-into ``kv_proj.weight`` for a one-launch cache write), **fused gate/up** (the dense
-MLP's ``gate_proj``+``up_proj`` concatenated into ``gate_up_proj.weight`` so the
-forward pass is one GEMM) and **stacked MoE experts** (``3*num_experts`` matrices
+structural choices differ from HF: **fused QKV** (``q_proj``+``k_proj``+``v_proj``
+concatenated into ``qkv_proj.weight``, one GEMM per attention block), **fused gate/up**
+(the dense MLP's ``gate_proj``+``up_proj`` concatenated into ``gate_up_proj.weight`` so
+the forward pass is one GEMM) and **stacked MoE experts** (``3*num_experts`` matrices
 packed into three tensors for grouped-GEMM experts).
 The rest is naming (bare ``nn.Parameter`` vs ``nn.Linear``). Rules are expressed as
 *destinations* (parameter + the view to fill); :func:`load_weights` then verifies
 every parameter is covered exactly once, so a missed key fails loudly, not silently.
 
+A destination is handed the arriving tensor as well as the parameter, which is what
+makes the unequal ``[q | k | v]`` blocks expressible: the parameter alone only fixes
+``q = total - 2 * kv``, and the arriving tensor supplies the missing width. No head
+geometry has to be threaded into the translator.
+
 A second table, :data:`_SHARD_DIM`, says how each weight is cut for tensor
 parallelism. It is written in terms of the *incoming* tensor rather than the
 parameter, which is what makes one entry cover the weight and its quantisation
 scales at once (a scale grid is the same matrix at a coarser resolution) and also
-the fused/stacked parameters, whose own axes are shifted by the fusing — the fused
-gate/up (like K/V) is split *within* each half, so a rank's slice of ``gate_proj``
-lands in its slice of the fused parameter rather than next to the other ranks'.
+the fused/stacked parameters, whose own axes are shifted by the fusing — q, k and v
+arrive separately, so ``qkv_proj``'s one entry splits each of them by its own head
+count and a rank's blocks land next to each other rather than next to other ranks'.
 
 Usage:
     load_weights(model, hf_weights_iterator(path), model.translate_weight_key)
@@ -32,8 +37,9 @@ import torch.nn as nn
 
 from ..distributed.parallel_state import get_tp_rank, get_tp_world_size
 
-#: Selects the region of a parameter that one checkpoint tensor fills.
-Destination = Callable[[torch.Tensor], torch.Tensor]
+#: Selects the region of a parameter that one checkpoint tensor fills, given both the
+#: parameter and that tensor.
+Destination = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 #: ``(parameter name, destination)``, or ``None`` for a key the model ignores.
 Target = tuple[str, Destination] | None
@@ -45,17 +51,40 @@ Translator = Callable[[str], Target]
 Sharder = Callable[[str, torch.Tensor], torch.Tensor]
 
 
-def whole(param: torch.Tensor) -> torch.Tensor:
+def whole(param: torch.Tensor, incoming: torch.Tensor) -> torch.Tensor:
     """The whole parameter: the common case."""
     return param
 
 
 def half(index: int) -> Destination:
-    """Half ``index`` of a parameter fused along dim 0 (the K/V pair)."""
+    """Half ``index`` of a parameter fused along dim 0 (the gate/up pair)."""
 
-    def select(param: torch.Tensor) -> torch.Tensor:
+    def select(param: torch.Tensor, incoming: torch.Tensor) -> torch.Tensor:
         size = param.shape[0] // 2
         return param.narrow(0, index * size, size)
+
+    return select
+
+
+def qkv_segment(index: int) -> Destination:
+    """Block ``index`` of the fused ``[q | k | v]`` parameter, ``0`` being q.
+
+    The three blocks are not the same width — grouped-query attention gives q more
+    heads — and the parameter alone does not say where the boundaries are: a total of
+    ``T`` only fixes ``q = T - 2 * kv``. The arriving tensor closes the gap, since its
+    own row count *is* the width of the block it fills. That keeps the head geometry in
+    :class:`~lite_llama.modules.linear.QKVParallelLinear`, where it belongs, instead of
+    duplicating it in this table.
+
+    It works unchanged for the quantisation scale grids, whose rows are the same blocks
+    counted in groups of ``group_n`` instead of channels.
+    """
+
+    def select(param: torch.Tensor, incoming: torch.Tensor) -> torch.Tensor:
+        rows = incoming.shape[0]
+        total = param.shape[0]
+        offset = (0, total - 2 * rows, total - rows)[index]
+        return param.narrow(0, offset, rows)
 
     return select
 
@@ -63,7 +92,7 @@ def half(index: int) -> Destination:
 def expert(index: int) -> Destination:
     """The slice of a stacked ``[num_experts, ...]`` parameter owned by one expert."""
 
-    def select(param: torch.Tensor) -> torch.Tensor:
+    def select(param: torch.Tensor, incoming: torch.Tensor) -> torch.Tensor:
         return param[index]
 
     return select
@@ -72,7 +101,7 @@ def expert(index: int) -> Destination:
 def expert_half(index: int, half_index: int) -> Destination:
     """Half ``half_index`` of expert ``index``'s slice of a stacked gate/up parameter."""
 
-    def select(param: torch.Tensor) -> torch.Tensor:
+    def select(param: torch.Tensor, incoming: torch.Tensor) -> torch.Tensor:
         rows = param.shape[1] // 2
         return param[index].narrow(0, half_index * rows, rows)
 
@@ -99,8 +128,12 @@ _FLATTENED: tuple[str, ...] = (
     "mlp.gate",
 )
 
-#: HF module path suffix -> which half of the fused ``kv_proj`` it fills.
-_FUSED_KV: dict[str, int] = {"self_attn.k_proj": 0, "self_attn.v_proj": 1}
+#: HF module path suffix -> which block of the fused ``qkv_proj`` it fills.
+_FUSED_QKV: dict[str, int] = {
+    "self_attn.q_proj": 0,
+    "self_attn.k_proj": 1,
+    "self_attn.v_proj": 2,
+}
 
 #: HF module path suffix -> which half of the dense MLP's fused ``gate_up_proj``
 #: it fills. The MoE experts' gate/up are fused separately (see ``_EXPERT_KEY``)
@@ -143,8 +176,7 @@ _PARAM_SUFFIXES: tuple[str, ...] = (
 _SHARD_DIM: tuple[tuple[str, int], ...] = (
     ("embed_tokens", 0),
     ("lm_head", 0),
-    ("self_attn.q_proj", 0),
-    ("self_attn.kv_proj", 0),
+    ("self_attn.qkv_proj", 0),
     ("self_attn.o_proj", 1),
     ("mlp.experts.gate_up_proj", 0),
     ("mlp.experts.down_proj", 1),
@@ -183,9 +215,9 @@ def translate_text_key(key: str) -> Target:
         )
 
     module, _, leaf = key.rpartition(".")
-    for suffix, index in _FUSED_KV.items():
+    for suffix, index in _FUSED_QKV.items():
         if module.endswith(suffix):
-            return f"{module[: -len(suffix)]}self_attn.kv_proj.{leaf}", half(index)
+            return f"{module[: -len(suffix)]}self_attn.qkv_proj.{leaf}", qkv_segment(index)
     for suffix, index in _FUSED_GATE_UP.items():
         if module.endswith(suffix):
             return f"{module[: -len(suffix)]}mlp.gate_up_proj.{leaf}", half(index)
@@ -201,7 +233,7 @@ def shard_dim(param_name: str) -> int | None:
     Vision-tower parameters (``vision_tower.*``) are never sharded — the vision
     encoder is replicated across TP ranks. The suffix-based match would otherwise
     falsely trigger on vision keys that share names with text projections
-    (e.g. ``self_attn.q_proj``).
+    (e.g. ``self_attn.o_proj``).
     """
     if param_name.startswith("vision_tower."):
         return None
@@ -295,7 +327,7 @@ def load_weights(
 
         if shard is not None:
             tensor = shard(name, tensor)
-        view = destination(param.data)
+        view = destination(param.data, tensor)
         if view.shape != tensor.shape:
             raise ValueError(
                 f"checkpoint key {key!r} has shape {tuple(tensor.shape)} but "
@@ -328,7 +360,7 @@ def _verify_coverage(params: Mapping[str, nn.Parameter], filled: Mapping[str, in
     """Fail naming the offending parameters rather than with a bare count.
 
     Three distinguishable failures: nothing wrote a parameter (a rename rule stopped
-    matching), something wrote only part of it (one half of a fused K/V arrived), or
+    matching), something wrote only part of it (one block of a fused QKV arrived), or
     something wrote more than fits (two keys competing for the same destination).
     """
     missing = sorted(name for name, count in filled.items() if count == 0)

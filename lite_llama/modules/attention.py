@@ -13,7 +13,6 @@ import math
 import torch
 import torch.nn as nn
 
-from ..distributed.parallel_state import divide, get_tp_world_size
 from ..kernels import (
     flash_attention2_no_pad,
     flash_decoding,
@@ -22,9 +21,9 @@ from ..kernels import (
     update_kv_buffer,
 )
 from ..models.config import ModelConfig
+from .linear import QKVParallelLinear, RowParallelLinear
 from .quantization import QuantizationConfig
 from .quantization.kv_cache import get_kv_cache_method
-from .linear import ColumnParallelLinear, RowParallelLinear
 
 # The prefill kernel evaluates exp2 rather than exp, so its softmax scale has to
 # absorb log2(e). The decode kernel uses exp directly and takes the plain scale.
@@ -75,9 +74,7 @@ class PagedAttention(nn.Module):
         if self.kv_cache_method is not None:
             xk, xv = self.kv_cache_method.quantize_kv(xk, xv)
 
-        update_kv_buffer(
-            xk, xv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index]
-        )
+        update_kv_buffer(xk, xv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
 
     def context_forward(
         self,
@@ -148,10 +145,12 @@ class PagedAttention(nn.Module):
 class Attention(nn.Module):
     """Fused-QKV self-attention with RoPE and optional per-head q/k normalisation.
 
-    Under tensor parallelism the heads are dealt out across ranks: q/k/v are
-    column-parallel (each rank owns ``num_heads / tp`` query heads and the KV heads
-    that go with them, so its KV cache is that much smaller too) and ``o_proj`` is
-    row-parallel, contributing this block's only all-reduce.
+    q, k and v are one :class:`~lite_llama.modules.linear.QKVParallelLinear` weight, so
+    the block runs two GEMMs rather than three. Under tensor parallelism the heads are
+    dealt out across ranks: that layer is column-parallel (each rank owns
+    ``num_heads / tp`` query heads and the KV heads that go with them, so its KV cache
+    is that much smaller too) and ``o_proj`` is row-parallel, contributing this block's
+    only all-reduce.
 
     Args:
         config: Model config supplying the head geometry.
@@ -169,30 +168,27 @@ class Attention(nn.Module):
         quant: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
-        tp_size = get_tp_world_size()
-        self.num_heads = divide(config.num_heads, tp_size, "attention heads")
-        self.num_kv_heads = divide(config.num_kv_heads, tp_size, "key/value heads")
         self.head_dim = config.head_dim
         self.hidden_size = config.hidden_size
-        # Attention width is independent of the residual stream width (Qwen3),
-        # and these are this rank's share of it.
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
         self.rms_norm_eps = config.rms_norm_eps
         self.use_qk_norm = use_qk_norm
 
-        self.q_proj = ColumnParallelLinear(
-            self.hidden_size, config.q_size, bias=qkv_bias, quant=quant, what="query features"
-        )
-        # K and V fused along dim 0 so one split yields both. Each rank assembles
-        # its own fused pair from its slice of k_proj and of v_proj.
-        self.kv_proj = ColumnParallelLinear(
-            self.hidden_size,
-            2 * config.kv_size,
+        self.qkv_proj = QKVParallelLinear(
+            config.hidden_size,
+            config.num_heads,
+            config.num_kv_heads,
+            config.head_dim,
             bias=qkv_bias,
             quant=quant,
-            what="key/value features",
         )
+        # This rank's share of the head geometry, read back from the layer that owns
+        # the weight rather than divided a second time here. Attention width is
+        # independent of the residual stream width (Qwen3).
+        self.num_heads = self.qkv_proj.num_heads
+        self.num_kv_heads = self.qkv_proj.num_kv_heads
+        self.q_size = self.qkv_proj.q_size
+        self.kv_size = self.qkv_proj.kv_size
+
         self.o_proj = RowParallelLinear(
             config.q_size, self.hidden_size, quant=quant, what="query features"
         )
@@ -215,9 +211,7 @@ class Attention(nn.Module):
         batch_size, seq_len, _ = x.shape
         x = x.view(-1, self.hidden_size)
 
-        xq = self.q_proj(x)
-        xkv = self.kv_proj(x)
-        xk, xv = torch.split(xkv, self.kv_size, dim=-1)
+        xq, xk, xv = self.qkv_proj.project(x)
 
         num_tokens = batch_size * seq_len
         xq = xq.view(num_tokens, self.num_heads, self.head_dim)
@@ -246,7 +240,9 @@ class Attention(nn.Module):
         # The phase comes from whoever prepared the metadata, not from seq_len:
         # a single-token prompt is still a prefill, and guessing ``seq_len > 1``
         # would route it through the decode kernel by accident.
-        attn_output = self.attn(xq, xk, xv, atten_info, layer_index, is_prefill=atten_info.is_prefill)
+        attn_output = self.attn(
+            xq, xk, xv, atten_info, layer_index, is_prefill=atten_info.is_prefill
+        )
         # Back to the residual-stream layout before the output projection.
         attn_output = attn_output.view(batch_size, seq_len, self.q_size)
         return self.o_proj(attn_output)

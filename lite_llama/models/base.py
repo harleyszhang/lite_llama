@@ -6,8 +6,9 @@ Everything else (KV-cache write, the prefill/decode kernel split, SwiGLU MLP,
 pre-norm residual wiring, the forward skeleton) is assembled here once in
 :class:`DecoderLayer` / :class:`CausalLM` from the building blocks in
 :mod:`lite_llama.modules`; concrete models only declare their differences.
-K and V are stored fused as ``kv_proj.weight`` so decode writes both cache halves
-in one launch (:mod:`lite_llama.models.weights` owns the key translation).
+Q, K and V are stored fused as ``qkv_proj.weight`` so each block runs one
+projection GEMM instead of three (:mod:`lite_llama.models.weights` owns the key
+translation that folds the checkpoint's three tensors into it).
 
 Usage:
     class LlamaModel(CausalLM): ...   # built via ModelRegistry + ModelLoader

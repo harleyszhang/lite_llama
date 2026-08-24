@@ -79,7 +79,7 @@ def compute_memory_budget(
 
     # Model weights: embedding + layers + lm_head
     embed_params = vocab_size * hidden_size
-    # Per layer: q_proj + kv_proj + o_proj + fused gate_up_proj + down_proj + norms
+    # Per layer: fused qkv_proj + o_proj + fused gate_up_proj + down_proj + norms
     qkv_params = hidden_size * (num_heads + 2 * num_kv_heads) * head_dim
     o_params = num_heads * head_dim * hidden_size
     ffn_params = hidden_size * intermediate_size * 3  # fused gate + up + down
@@ -124,18 +124,27 @@ def export_memory_budget(
 ) -> str:
     """Export memory budget as a markdown table string."""
     budget = compute_memory_budget(
-        num_layers, hidden_size, intermediate_size, num_heads,
-        num_kv_heads, head_dim, vocab_size, num_kv_blocks,
-        weight_dtype, kv_dtype, max_batch_size, max_seq_len,
+        num_layers,
+        hidden_size,
+        intermediate_size,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        vocab_size,
+        num_kv_blocks,
+        weight_dtype,
+        kv_dtype,
+        max_batch_size,
+        max_seq_len,
     )
 
     lines = [
         "| Component | Size | Percentage |",
         "|-----------|------|------------|",
-        f"| Model Weights | {budget.model_weights_gb:.2f} GB | {budget.model_weights_bytes/budget.total_bytes*100:.1f}% |",
-        f"| KV Cache ({kv_dtype}) | {budget.kv_cache_gb:.2f} GB | {budget.kv_cache_bytes/budget.total_bytes*100:.1f}% |",
-        f"| Activations | {budget.activation_bytes/(1024**3):.2f} GB | {budget.activation_bytes/budget.total_bytes*100:.1f}% |",
-        f"| CUDA Graph | {budget.cuda_graph_bytes/(1024**3):.2f} GB | {budget.cuda_graph_bytes/budget.total_bytes*100:.1f}% |",
+        f"| Model Weights | {budget.model_weights_gb:.2f} GB | {budget.model_weights_bytes / budget.total_bytes * 100:.1f}% |",
+        f"| KV Cache ({kv_dtype}) | {budget.kv_cache_gb:.2f} GB | {budget.kv_cache_bytes / budget.total_bytes * 100:.1f}% |",
+        f"| Activations | {budget.activation_bytes / (1024**3):.2f} GB | {budget.activation_bytes / budget.total_bytes * 100:.1f}% |",
+        f"| CUDA Graph | {budget.cuda_graph_bytes / (1024**3):.2f} GB | {budget.cuda_graph_bytes / budget.total_bytes * 100:.1f}% |",
         f"| **Total** | **{budget.total_gb:.2f} GB** | 100% |",
     ]
     return "\n".join(lines)
