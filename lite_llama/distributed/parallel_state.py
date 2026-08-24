@@ -242,7 +242,13 @@ def all_reduce_min(value: int) -> int:
     """
     if _TP_WORLD_SIZE <= 1:
         return value
-    device = torch.device(f"cuda:{_TP_RANK}") if torch.cuda.is_available() else None
+    # The tensor must land on *this process's* device, which is not ``_TP_RANK``:
+    # under DP x TP the process owns device ``dp_rank * tp_size + tp_rank``, and under
+    # ``CUDA_VISIBLE_DEVICES`` the ordinal is remapped again. Asking torch which device
+    # the process already selected is the only spelling that is right in every case;
+    # the old ``cuda:{_TP_RANK}`` made replica 1 all-reduce from replica 0's card.
+    on_gpu = torch.cuda.is_available()
+    device = torch.device("cuda", torch.cuda.current_device()) if on_gpu else None
     tensor = torch.tensor([value], dtype=torch.int64, device=device)
     dist.all_reduce(tensor, op=dist.ReduceOp.MIN, group=_TP_GROUP)
     return int(tensor.item())
