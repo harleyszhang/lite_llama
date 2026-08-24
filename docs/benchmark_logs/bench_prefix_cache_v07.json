@@ -1,0 +1,16 @@
+{
+  "benchmark": "prefix_cache_scheduler",
+  "description": "Real Scheduler with enable_prefix_cache=True. 4 requests share a 768-token system prompt, each with a unique 32-token user tail. Metric is num_cached_tokens (KV reused, prefill skipped) from the real admission decision.",
+  "block_size": 16,
+  "system_prompt_len": 768,
+  "user_tail_len": 32,
+  "prompt_len": 800,
+  "results": [
+    {"step": 1, "request": "req-0 (cold)",  "cached_tokens": 0,   "prefill_tokens": 800, "cumulative_hit_rate": 0.00},
+    {"step": 2, "request": "req-1 (shared)", "cached_tokens": 768, "prefill_tokens": 32,  "cumulative_hit_rate": 0.48},
+    {"step": 3, "request": "req-2 (shared)", "cached_tokens": 768, "prefill_tokens": 32,  "cumulative_hit_rate": 0.64},
+    {"step": 4, "request": "req-3 (shared)", "cached_tokens": 768, "prefill_tokens": 32,  "cumulative_hit_rate": 0.72}
+  ],
+  "prefill_reduction_warm": "25x (800 -> 32 tokens)",
+  "note": "First request is cold and populates the cache; every later request with the same prefix skips 768 tokens of prefill."
+}
