@@ -13,17 +13,30 @@ v0.7.0 升级调度器为 chunked-prefill 架构（参考 vLLM Scheduler v2）�
 
 ## 1. Feature: Chunked Prefill
 
-**修复前（v0.6）：** 一个 2000-token prompt 的 prefill 阶段独占整个引擎，4 个正在
-decode 的请求全部停顿，TPOT 出现 spike。
+**v0.6 行为：** 一个 2000-token prompt 的 prefill 在**单个 step 内一次做完**。同 step 里的 decode 请求必须等这 2000 token 的 attention/GEMM 全部算完才能拿到自己的下一个 token，TPOT 出现 spike。
 
-**修复后（v0.7）：** prefill 按 `max_chunk_size=512` 分片，每步处理 512 tokens，
-decode batch 每步都在运行。
+**v0.7 行为：** prefill 按 `max_chunk_size=512` 分片，单 step 承载的 prefill 工作量被封顶，decode 的等待时间由 chunk 大小决定，而不再由 prompt 长度决定。
 
-| 配置 | Prefill 步数 | Decode 步数 (期间) | 阻塞 |
-|------|-------------|-------------------|------|
-| no_chunk (v0.6) | 1 | 1 | 全量一次，decode 等待 |
-| chunk_512 (v0.7) | 4 | 4 | 无阻塞，每步都 decode |
-| chunk_256 | 8 | 8 | 更细粒度交织 |
+### 可视化：同一份 scheduler 代码，只改 `max_chunk_size`
+
+![chunked prefill](images/chunked_prefill.gif)
+
+> GIF 由 `scripts/gen_chunked_prefill_gif.py` 驱动**真实 Scheduler** 录制，逐 step 打印调度决策。先播 `chunking OFF`，再播 `chunking ON`。
+
+### 实测数据（真实 scheduler 输出）
+
+| 配置 | Prefill 步数 | 单 step 峰值 prefill token | 每步 decode 请求数 |
+|------|-------------|--------------------------|------------------|
+| `max_chunk_size=0` (v0.6) | 1 | **2000** | 4 |
+| `max_chunk_size=512` (v0.7) | 4 | **512** | 4 |
+| `max_chunk_size=256` | 8 | **256** | 4 |
+
+**关键结论：** decode 在两种模式下都在跑（prefill 与 decode 本就并存），真正的收益是
+**单 step 最坏 prefill 工作量下降 3.9x**（2000 → 512 token）。decode 请求的尾延迟因此
+从「等一个完整 prompt」变成「等一个 chunk」。
+
+> 复现：`python scripts/gen_chunked_prefill_gif.py`
+> 逐 step 原始输出与 benchmark 日志：[`docs/benchmark_logs/bench_chunked_prefill_v07.json`](benchmark_logs/bench_chunked_prefill_v07.json)
 
 **使用方式：**
 
@@ -37,8 +50,6 @@ config = SchedulerConfig(
 )
 sched = Scheduler(config, num_slots=64)
 ```
-
-> Benchmark 日志: [`docs/benchmark_logs/bench_chunked_prefill_v07.json`](benchmark_logs/bench_chunked_prefill_v07.json)
 
 ## 2. Feature: Preemption (Recompute Strategy)
 
