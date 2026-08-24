@@ -124,13 +124,13 @@ def test_every_checkpoint_key_reaches_a_parameter(mapping):
 def test_every_parameter_is_covered(mapping):
     """The mirror image: a parameter no key targets would keep its uninitialised memory.
 
-    ``lm_head_weight`` is exempt for tied checkpoints — they genuinely ship no
-    ``lm_head``, and the loader fills it from the embedding table instead.
+    ``lm_head.weight`` is exempt for tied checkpoints — they genuinely ship no
+    ``lm_head``, and the loader aliases the embedding table onto it instead.
     """
     _, translated, params, config = mapping
     covered = set(translated.values())
     if config.tie_word_embeddings:
-        covered |= {name for name in params if name.endswith("lm_head_weight")}
+        covered |= {name for name in params if name.endswith("lm_head.weight")}
     assert not params - covered, f"uncovered parameters: {sorted(params - covered)[:5]}"
 
 

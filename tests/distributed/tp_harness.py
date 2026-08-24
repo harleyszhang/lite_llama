@@ -1,0 +1,155 @@
+"""Run a payload on a real tensor-parallel process group so sharded layers can be tested.
+
+Sharded layers cannot be checked by inspection: the interesting failures — a mask that
+lets another rank's rows into the sum, an offset that shifts token ids by one shard —
+produce plausible numbers rather than exceptions, and only surface when two ranks
+disagree. So these tests run the *real* code on the *real* collectives.
+
+Design: spawn one process per rank, bind it to its own CUDA device, initialise
+``parallel_state`` over **nccl** on a free port, run ``payload(rank)`` and post the
+answer back over a queue. Three consequences worth knowing:
+
+* **spawn, not fork.** The vocabulary-parallel lookup is a Triton kernel, and CUDA
+  cannot be re-initialised in a forked child — so payloads must be importable
+  module-level functions rather than closures.
+* **the parent stays clean.** Every rank lives in its own process, so a hung or crashed
+  rank cannot leak a ``tp_size=4`` grid into ``parallel_state`` for the rest of the
+  session, where every layer reads it at construction time.
+* **device count is the ceiling.** Use :func:`needs_gpus` to skip a ``tp_size`` this
+  machine cannot host; asking for more ranks than devices would put two ranks on one
+  card and make the timings, though not the numbers, meaningless.
+
+Payloads must return plain Python data (numbers, lists, strings): a returned CUDA tensor
+would have to survive its owning process, which it does not. ``.tolist()`` costs nothing
+at test sizes.
+
+Usage:
+    @needs_gpus(2)
+    def test_something():
+        shards = run_on_tp_ranks(my_module_level_payload, tp_size=2)
+"""
+
+from __future__ import annotations
+
+import os
+import queue as queue_module
+import socket
+import time
+import traceback
+from collections.abc import Callable
+from typing import Any
+
+import pytest
+import torch
+import torch.multiprocessing as mp
+
+from lite_llama.distributed import parallel_state as ps
+
+
+def free_port() -> int:
+    """A port the OS says is free, so parallel test runs never collide on 29500."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def needs_gpus(count: int):
+    """Mark a test as needing ``count`` real devices, one per rank."""
+    return pytest.mark.skipif(
+        torch.cuda.device_count() < count,
+        reason=f"needs {count} CUDA devices, found {torch.cuda.device_count()}",
+    )
+
+
+def _worker(
+    payload: Callable[[int], Any],
+    rank: int,
+    tp_size: int,
+    dp_size: int,
+    port: int,
+    results: mp.Queue,
+) -> None:
+    """One rank: take a device, join the grid, run the payload, report answer or traceback.
+
+    The device is claimed *before* ``init_parallel`` because nccl binds the calling
+    thread's current device at rendezvous; leaving every rank on device 0 is the classic
+    way to get a hang instead of a result. The traceback travels as text rather than
+    being raised: an exception in a child process is invisible to pytest, and a rank that
+    dies silently leaves its peers blocked in a collective with nothing to explain why.
+    """
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)  # not setdefault: an inherited value is stale
+    try:
+        torch.cuda.set_device(rank)
+        ps.init_parallel(
+            global_rank=rank, tp_size=tp_size, dp_size=dp_size, master_port=port, backend="nccl"
+        )
+        results.put((rank, payload(rank), None))
+    except BaseException:  # reported to the parent, which re-raises it verbatim
+        results.put((rank, None, traceback.format_exc()))
+    finally:
+        ps.destroy_parallel()
+
+
+def run_on_tp_ranks(
+    payload: Callable[[int], Any],
+    tp_size: int,
+    *,
+    dp_size: int = 1,
+    timeout: float = 300.0,
+) -> list[Any]:
+    """Run ``payload(rank)`` on every rank of a ``dp_size x tp_size`` nccl grid.
+
+    Args:
+        payload: Module-level function (spawn has to pickle it) called once per rank with
+            its global rank; must return plain Python data.
+        tp_size: Ranks per replica.
+        dp_size: Number of replicas.
+        timeout: Seconds to wait for all ranks. Exceeding it means a collective
+            mismatch — a rank calling a collective its peers do not is a deadlock, not a
+            wrong answer, so it has to fail as a bounded test rather than hang the suite.
+
+    Returns:
+        One result per global rank, in rank order.
+
+    Raises:
+        AssertionError: If any rank raised; the message carries that rank's traceback.
+        TimeoutError: If some rank never reported.
+    """
+    world_size = tp_size * dp_size
+    if torch.cuda.device_count() < world_size:
+        raise RuntimeError(f"{world_size} ranks need {world_size} devices, one each")
+
+    context = mp.get_context("spawn")
+    results: mp.Queue = context.Queue()
+    port = free_port()
+    workers = [
+        context.Process(
+            target=_worker, args=(payload, rank, tp_size, dp_size, port, results), daemon=True
+        )
+        for rank in range(world_size)
+    ]
+    collected: dict[int, Any] = {}
+    for worker in workers:
+        worker.start()
+    try:
+        deadline = time.monotonic() + timeout
+        while len(collected) < world_size:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                missing = sorted(set(range(world_size)) - set(collected))
+                raise TimeoutError(f"ranks {missing} did not report within {timeout}s")
+            try:
+                rank, value, error = results.get(timeout=left)
+            except queue_module.Empty:
+                continue
+            if error is not None:
+                raise AssertionError(f"rank {rank} failed:\n{error}")
+            collected[rank] = value
+    finally:
+        for worker in workers:
+            worker.join(timeout=10)
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(timeout=10)
+    return [collected[rank] for rank in range(world_size)]

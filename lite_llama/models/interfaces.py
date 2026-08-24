@@ -132,7 +132,7 @@ class MultiModalCausalLM(nn.Module):
         """
         tied = (
             {
-                f"{LANGUAGE_MODEL_PREFIX}lm_head_weight": (
+                f"{LANGUAGE_MODEL_PREFIX}lm_head.weight": (
                     f"{LANGUAGE_MODEL_PREFIX}embed_tokens.weight"
                 )
             }
@@ -144,8 +144,11 @@ class MultiModalCausalLM(nn.Module):
             # Same canonical-layout rewrite as CausalLM.load_weights.
             checkpoint = adapt_int4_checkpoint(checkpoint, quant)
         weights.load_weights(
-            self, checkpoint, self.translate_weight_key,
-            tied=tied, shard=weights.tp_shard,
+            self,
+            checkpoint,
+            self.translate_weight_key,
+            tied=tied,
+            shard=weights.tp_shard,
         )
 
     @torch.no_grad()
