@@ -29,13 +29,13 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 from .prefix_cache import PrefixCache
 from .sampler import SamplingParams
 
 
-class RequestStatus(str, Enum):
+class RequestStatus(StrEnum):
     """Where a request sits in its lifecycle.
 
     ``WAITING`` requests hold no cache slot; ``RUNNING`` ones own exactly one and
