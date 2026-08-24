@@ -36,13 +36,8 @@
 - 支持 Triton grouped GEMM kernel。
 - 部分自定义算子如：`rmsnorm`、`rope`、`softmax`、`逐元素相乘` 等采用高效 `triton` 内核实现。
 - **Kernel 自动调优** (v0.5)：离线搜索最优 tile 配置并按 `(GPU, op, shape)` 落盘 JSON，启动时自动加载，未命中时回退启发式。
-- **FP8 KV Cache** (v0.6)：`--kv-cache-dtype fp8` KV 缓存减半——容量提升 **1.91×**（A10 上 282K vs 148K tokens），吞将仅降 9%。
-- **Chunked Prefill** (v0.7)：长 prompt 按 512 token 分片与 decode 交织执行——decode 不再被长 prefill 阻塞。
-- **抢占机制** (v0.7)：KV 压力超水位线时自动 evict 最新请求（recompute 策略），释放 slot 后重新排队。
-- **Backend 注册表** (v0.8)：声明式 kernel 后端选择 + `explain_selection()` 解释原因；环境变量强制切换，缺库自动降级。
-- **Kernel 自动调优** (v0.5)：离线搜索最优 tile 配置并按 `(GPU, op, shape)` 落盘 JSON，启动时自动加载，未命中时回退启发式。
-- **FP8 KV Cache** (v0.6)：`--kv-cache-dtype fp8` KV 缓存减半——容量提升 **1.91×**（A10 上 282K vs 148K tokens），吐将仅降 9%。
-- **Chunked Prefill** (v0.7)：长 prompt 按 512 token 分片与 decode 交织执行——decode 不再被长 prefill 阻塞。
+- **FP8 KV Cache** (v0.6)：`--kv-cache-dtype fp8` KV 缓存减半——容量提升 **1.91×**（A10 上 282K vs 148K tokens），吞吐仅降 9%。
+- **Chunked Prefill** (v0.7)：长 prompt 按 512 token 分片，单 step prefill 工作量被封顶（2000→512 token，峰值降 3.9x）——decode 与 prefill 交织，而不再等一个完整 prompt。
 - **抢占机制** (v0.7)：KV 压力超水位线时自动 evict 最新请求（recompute 策略），释放 slot 后重新排队。
 - **Backend 注册表** (v0.8)：声明式 kernel 后端选择 + `explain_selection()` 解释原因；环境变量强制切换，缺库自动降级。
 
