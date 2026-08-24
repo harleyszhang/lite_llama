@@ -6,10 +6,7 @@
 
 ## Summary
 
-v0.8.0 引入 kernel backend 注册表系统（对标 vLLM `kernels/__init__.py` 的
-`choose_*_kernel` 模式）：每个后端声明探测函数和优先级，框架启动时自动探测硬件/库
-可用性，选择优先级最高的可用后端，并通过 `explain_selection()` 输出完整决策过程。
-环境变量可强制切换后端，指定未知后端时自动降级而非崩溃。
+v0.8.0 引入 kernel backend 注册表系统（对标 vLLM `kernels/__init__.py` 的 `choose_*_kernel` 模式）：每个后端声明探测函数和优先级，框架启动时自动探测硬件/库可用性，选择优先级最高的可用后端，并通过 `explain_selection()` 输出完整决策过程。环境变量可强制切换后端，指定未知后端时自动降级而非崩溃。
 
 ## 1. Feature: Kernel Backend Registry
 
@@ -41,8 +38,7 @@ class Backend:
 
 ![backend registry](images/backend_registry.gif)
 
-GIF 由 `scripts/gen_backend_registry_gif.py` 驱动**真实 BackendRegistry** 录制，
-每一行都是本机 `explain_selection()` 的实际输出，逐行展示探测过程。四个场景：
+GIF 由 `scripts/gen_backend_registry_gif.py` 驱动**真实 BackendRegistry** 录制，每一行都是本机 `explain_selection()` 的实际输出，逐行展示探测过程。四个场景：
 
 1. `--op linear`：A10 (sm86) 上 `fp8_native` 探测为 N/A，`triton_quant` 按优先级胜出
 2. `--op attention`：选中 Triton FlashAttention-2，而非 torch SDPA
@@ -61,13 +57,11 @@ Backend 'linear' selection:
   -> triton_quant
 ```
 
-**缺库自动回退：** `fp8_native` 在 A10 (sm86) 上探测为 N/A（需 sm89+），自动降级到
-`triton_quant`；无 Triton 环境时进一步降级到 `torch_linear`。
+**缺库自动回退：** `fp8_native` 在 A10 (sm86) 上探测为 N/A（需 sm89+），自动降级到 `triton_quant`；无 Triton 环境时进一步降级到 `torch_linear`。
 
 ## 2. Feature: Overlap 调度器抽象 (L1 骨架)
 
-注册表中新增 `overlap` op 类型，为后续 L1 跨 stream 计算/通信重叠提供探测基础。
-当前 A10 环境下 `cuda_stream` 后端已就绪 (priority=100)，L1 timeline 实现留待后续版本。
+注册表中新增 `overlap` op 类型，为后续 L1 跨 stream 计算/通信重叠提供探测基础。当前 A10 环境下 `cuda_stream` 后端已就绪 (priority=100)，L1 timeline 实现留待后续版本。
 
 ## 3. 测试结果
 
@@ -85,9 +79,6 @@ Backend selection on A10: triton_quant (linear), triton_flash_v2 (attention)
 | 新建 | `scripts/gen_backend_registry_gif.py` |
 | 新建 | `docs/images/backend_registry.gif` |
 | 修改 | `pyproject.toml` (0.7.0 → 0.8.0) |
-
-> Chunked Prefill 的功能与可视化属于 v0.7，见
-> [`docs/release-v0.7.0.md`](release-v0.7.0.md)（含 `chunked_prefill.gif`）。
 
 ## Upgrade
 
