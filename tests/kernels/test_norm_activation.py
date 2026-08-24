@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.kernels import skip_rmsnorm, swiglu_forward
+from lite_llama.kernels import skip_rmsnorm, swiglu_forward, swiglu_forward_fused
 from tests import reference
 
 _RTOL, _ATOL = 2e-2, 2e-2
@@ -120,6 +120,44 @@ def test_swiglu_zero_gate_gives_zero():
     gate = torch.zeros(1, 4, 128, device="cuda", dtype=torch.float16)
     up = torch.randn(1, 4, 128, device="cuda", dtype=torch.float16)
     out = swiglu_forward(gate, up)
+    assert torch.count_nonzero(out) == 0
+
+
+# --------------------------------------------------------------------------- #
+# swiglu_forward_fused
+#
+# The merged gate/up GEMM emits one [..., 2 * inter] tensor; this variant must
+# read the halves out of it without the caller splitting them first.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param((1, 1, 256), id="single-token"),
+        pytest.param((2, 16, 4864), id="qwen2-intermediate"),
+        pytest.param((1, 5, 300), id="non-power-of-two"),
+    ],
+)
+def test_swiglu_fused_matches_split_reference(shape):
+    """The fused layout must agree with activating the halves separately."""
+    gate = torch.randn(shape, device="cuda", dtype=torch.float16)
+    up = torch.randn(shape, device="cuda", dtype=torch.float16)
+    fused = torch.cat([gate, up], dim=-1)
+
+    out = swiglu_forward_fused(fused)
+    ref = swiglu_forward(gate, up)
+
+    torch.testing.assert_close(out.float(), ref.float(), rtol=_RTOL, atol=_ATOL)
+    assert out.shape == gate.shape
+    assert fused.shape[-1] == 2 * gate.shape[-1]  # input consumed in place, no split
+
+
+def test_swiglu_fused_zero_gate_gives_zero():
+    """A zero gate half must annihilate the up half even in the fused layout."""
+    inter = 128
+    fused = torch.cat(
+        [torch.zeros(1, 4, inter), torch.randn(1, 4, inter)], dim=-1
+    ).to(device="cuda", dtype=torch.float16)
+    out = swiglu_forward_fused(fused)
     assert torch.count_nonzero(out) == 0
 
 

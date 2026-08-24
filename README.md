@@ -9,10 +9,13 @@
 ![PyPI - Python Version](https://img.shields.io/badge/python-3.13-blue)
 
 <pre>
-         ✅ Flash attention     ✅ Cuda Graph Optimize   ✅ Beginner friendly       ✅ Fused MoE
-         ✅ W8A16 (AWQ/GPTQ)    ✅ W4A16 (AWQ/GPTQ)      ✅ SmoothQuant W8A8        ✅ Tensor Parallel
-         ✅ Continuous batching ✅ OpenAI API server     ✅ Chunked Prefill         ✅ Data Parallel
-         ✅ FP8 KV Cache (2x)   ✅ Kernel Autotune       ✅ Backend Registry        ✅ Preemption
+<b>Acceleration Features</b>
+         ✅ Flash attention     ✅ Cuda Graph Optimize   ✅ Chunked Prefill         ✅ Prefix Caching
+         ✅ W8A16 (fp8/int8)    ✅ W4A16 (AWQ/GPTQ)      ✅ SmoothQuant W8A8        ✅ FP8 KV Cache (2×)
+         ✅ Kernel Autotune     ✅ Fused MoE             ✅ Tensor Parallel         ✅ Data Parallel
+
+<b>Framework Design</b>
+         ✅ Continuous batching ✅ OpenAI API server     ✅ Preemption              ✅ Ops Backend Registry
 </pre>
 
 </div>
