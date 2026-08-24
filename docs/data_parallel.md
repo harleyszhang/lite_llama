@@ -28,23 +28,36 @@ TP 用延迟换"装得下"，DP 用显存（每卡一份权重）换吞吐。
 | 协调器（拉起 worker、路由、回收结果） | `DataParallelEngine` | engine core client | `DataParallelController` |
 
 把"选副本"单独拎成一个策略对象、而不是塞进协调器里，是这次相较早期单体实现的关键改动：
-路由是**每请求一次**的决策，换一个策略（轮询 → 最少负载）不动协调器一行代码。
+路由是**每请求一次**的决策，换一个策略（轮询 → 按 token 数）不动协调器一行代码。
 
-- **worker**（`_dp_worker`）在 spawn 出的子进程里 `import torch`，按 `dp_rank * tp_size`
-  绑定自己的卡，建一个 `LLM`，然后从队列取请求、生成、把结果发回。建模失败也走结果队列
-  （一条 `"error"` 消息），协调器因此会**报错而不是死等**一个永远不会应答的 worker。
+- **worker**（`_dp_worker`）是网格里的**一个 cell**，不是一个副本：spawn 出的子进程里
+  `import torch`、按 `global_rank` 绑卡、建一个 `LLM`，然后从自己的队列取请求、生成、把结果
+  发回。建模失败也走结果队列（一条 `"error"` 消息），协调器因此会**报错而不是死等**一个永远
+  不会应答的 worker。
 - **协调器**（`DataParallelEngine`）本进程里**什么模型都不加载**——它只有 worker 进程和
   一个 balancer，所以它刻意**不是** `LLM` 的子类：没有权重、没有 KV cache、没有 sampler。
 
 ## 请求怎么路由
 
-`dp_load_balancer.py` 里是两个纯策略对象，不碰队列、进程和张量，因此在 CPU 上毫秒级可测：
+`dp_load_balancer.py` 里是三个纯策略对象，不碰队列、进程和张量，因此在 CPU 上毫秒级可测。
+名字直接沿用 SGLang 的 `LoadBalanceMethod` 拼写，认识一边就认识另一边：
 
 - **`round_robin`**（默认）：0,1,0,1… 轮流发，不管每个请求跑多久。离线批处理的正确默认——
   所有 prompt 一起到，没有哪条特别长。用条带式（0,2,4,… 给副本 0）而不是切连续区间，是为了
   把长短请求均匀打散，避免一个已排好序的列表把所有长 prompt 都堆给同一个副本。
-- **`least_loaded`**：发给当前在飞请求最少的副本（SGLang `total_requests` 的离线版）。所有
-  副本空闲时它退化成轮询（低下标优先），所以能安全地做默认的替身；prompt 长度悬殊时才体现价值。
+- **`total_requests`**：发给当前在飞**请求数**最少的副本。所有副本空闲时它退化成轮询
+  （低下标优先），所以能安全地做默认的替身。
+- **`total_tokens`**：发给当前在飞**token 数**最少的副本。prefill 的开销与 prompt 长度成正比，
+  长度悬殊时"请求数"是错的计量单位——两条 4k prompt 不等于两条 40 token 的负载。
+
+三个策略共享同一个 tie-break（低下标优先），因此冷启动时输出完全一致的 0,1,2… 序列。
+
+**关于 token 估计的诚实契约。** 只有 `total_tokens` 真的读 `estimated_tokens`，它通过类属性
+`needs_token_estimate = True` 声明这件事；协调器据此决定要不要花一次 tokenizer 开销。早期实现
+在这里有两个互相掩盖的问题：`select(estimated_tokens=...)` 的形参**根本没被用过**，而调用方传
+进去的又是 `len(prompt)`——**字符数当 token 数**。中英混排 1:1、缩进密集的代码 1:6，这个比例
+本身就不是常数，任何非英文 batch 都会被算错。现在路由层用 tokenizer 一次性数完整批，而不需要
+估计的策略连 tokenizer 都不加载。
 
 协调器把每请求的选择**按副本聚回一个子 batch**，这样每个副本仍然只做一次高效的成批前向，
 而**选择**本身保持逐请求的策略——换 balancer 就换了切分，路由代码一行不动。
@@ -56,6 +69,17 @@ TP 用延迟换"装得下"，DP 用显存（每卡一份权重）换吞吐。
 `init_parallel` 只有在 `tp_size > 1` 时才真正 rendezvous 建 NCCL 进程组——纯 DP 的副本之间
 不共享任何张量，没什么好同步的，NCCL 完全不碰。这也是为什么纯 DP 用普通的 `multiprocessing`
 队列而不是 NCCL：worker 从不读另一个 worker 的张量。
+
+**进程数按 cell 算，不按副本算。** `tp_size > 1` 时 `init_parallel` rendezvous 的是
+`dp_size × tp_size` 个 rank 的世界，所以只 spawn `dp_size` 个进程会**永久挂死**在等待从未
+启动的 rank 上——一个协调器的任何超时都解释不了的失败。协调器因此为每个 cell 起一个进程、
+配一个独立的请求队列：一个副本内的 tp ranks 是**镜像**，收到同一条请求消息、跑同一次前向，
+靠 TP 集合通信保持同步（采样出的 token 从 tp rank 0 广播）；只有副本的 leader（`tp_rank == 0`）
+回结果，因为协调器每个副本只等一条应答。
+
+这条网格约束在 CPU 上就能断言（`test_dp_times_tp_spawns_one_process_per_grid_cell`），不需要
+四张卡：把 `mp.get_context` 换成假的进程/队列，直接检查 4 个 cell 的 `(global_rank, dp_rank,
+tp_rank)` 与队列不共享。
 
 ## 实测数据
 
@@ -115,8 +139,8 @@ GEMM 的 M 维，同一条 prompt 在 batch 32 里和在 batch 16 里 fp16 累�
 | 文件 | 数量 | 需要 |
 | --- | ---: | --- |
 | `tests/distributed/test_parallel_state.py` | 15 | CPU（网格纯函数） |
-| `tests/distributed/test_dp_load_balancer.py` | 8 | CPU（策略纯函数） |
-| `tests/distributed/test_data_parallel.py` | 8 + 8 | CPU（路由/构造）+ GPU（需 2 卡端到端） |
+| `tests/distributed/test_dp_load_balancer.py` | 21 | CPU（策略纯函数） |
+| `tests/distributed/test_data_parallel.py` | 12 + 8 | CPU（路由/网格/构造）+ GPU（需 2 卡端到端） |
 
 ## 当前边界
 
@@ -127,7 +151,10 @@ GEMM 的 M 维，同一条 prompt 在 batch 32 里和在 batch 16 里 fp16 累�
 - **每卡一份完整权重。** 这是 DP 的定义，不是限制——放不下单卡就要叠加 TP
   （`tensor_parallel_size > 1`），两者按网格组合。
 - **副本独立 profile 各自的 KV cache。** `all_reduce_min` 只在副本内的 TP 组里取最小值，
-  DP 副本之间不参与，所以忙卡上的副本可以自持一份更小的 cache。
+  DP 副本之间不参与，所以忙卡上的副本可以自持一份更小的 cache。规约张量落在
+  `torch.cuda.current_device()` 上而不是 `cuda:{tp_rank}`：DP×TP 下进程占的是
+  `dp_rank * tp_size + tp_rank` 号卡，`CUDA_VISIBLE_DEVICES` 还会再重映射一次，用 tp rank
+  当设备号会让副本 1 从副本 0 的卡上发起规约。
 
 ## 相关文档
 
