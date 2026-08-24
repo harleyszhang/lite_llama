@@ -26,7 +26,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         )
 
     def apply(self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-        return F.linear(x, layer.weight, bias if bias is not None else layer.bias)
+        return F.linear(x, layer.weight, bias)
 
 
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase):

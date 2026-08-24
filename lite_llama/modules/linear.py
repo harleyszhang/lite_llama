@@ -55,9 +55,6 @@ class LinearBase(nn.Module):
         super().__init__()
         self.input_size = input_size
         self.output_size = output_size
-        # Legacy QuantConfig shim (backward compat for tests)
-        if quant is not None and not isinstance(quant, QuantizationConfig):
-            quant = _convert_legacy_quant(quant)
         self.quant = quant
         self.quant_method = (
             quant.get_quant_method(self) if quant is not None else UnquantizedLinearMethod()
@@ -71,13 +68,13 @@ class LinearBase(nn.Module):
 
     def apply_linear(self, x: torch.Tensor) -> torch.Tensor:
         """The multiply itself, without any tensor-parallel communication."""
-        return self.quant_method.apply(self, x)
+        return self.quant_method.apply(self, x, self.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.apply_linear(x)
 
     @torch.no_grad()
-    def quantize_(self, quant) -> None:
+    def quantize_(self, quant: QuantizationConfig) -> None:
         """Replace a loaded fp16 weight with its quantised form, in place.
 
         Used by the ``--quantization <scheme>`` path, where the checkpoint is
@@ -85,14 +82,9 @@ class LinearBase(nn.Module):
         fp16 storage is dropped as each layer is converted, so peak memory
         stays at the size of the fp16 checkpoint. Layers that were already
         quantised (an fp8 checkpoint) are left alone.
-
-        Accepts both new :class:`QuantizationConfig` and legacy :class:`QuantConfig`.
         """
         if self.quant is not None:
             return
-        # Legacy QuantConfig shim (backward compat)
-        if not isinstance(quant, QuantizationConfig):
-            quant = _convert_legacy_quant(quant)
         method = quant.get_quant_method(self)
         method.quantize_from_fp16(self, quant)
         self.quant = quant
@@ -272,27 +264,3 @@ def _check_shard_alignment(quant: QuantizationConfig | None, local_size: int, wh
             f"multiple of the {quant.get_name()} scale block ({quant.group_n}x{quant.group_k}); "
             "use a smaller tensor_parallel_size"
         )
-
-
-def _convert_legacy_quant(quant) -> QuantizationConfig:
-    """Convert a legacy :class:`QuantConfig` dataclass to a new :class:`QuantizationConfig`."""
-    from .quantization.blockwise_int8 import BlockInt8Config
-    from .quantization.awq import AWQConfig
-    from .quantization.fp8 import Fp8Config
-    from .quantization.w8a8_fp8 import W8A8Fp8Config
-    from .quantization.w8a8_int8 import W8A8Int8Config
-
-    fmt = quant.format
-    if fmt == "int8":
-        if quant.group_k < (1 << 30):
-            return BlockInt8Config(group_k=quant.group_k, ignored=quant.ignored)
-        return BlockInt8Config.per_channel()
-    if fmt == "fp8":
-        if quant.is_dynamic:
-            return W8A8Fp8Config(group_n=quant.group_n, group_k=quant.group_k, ignored=quant.ignored)
-        return Fp8Config(group_n=quant.group_n, group_k=quant.group_k, ignored=quant.ignored)
-    if fmt == "int4":
-        return AWQConfig(group_size=quant.group_k, ignored=quant.ignored)
-    if fmt == "smoothquant":
-        return W8A8Int8Config(ignored=quant.ignored)
-    raise ValueError(f"cannot convert legacy QuantConfig with format {fmt!r}")

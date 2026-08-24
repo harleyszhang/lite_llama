@@ -100,7 +100,7 @@ class W8A8Fp8LinearMethod(LinearMethodBase):
             layer.weight_scale_inv,
             group_n=config.group_n,
             group_k=min(config.group_k, layer.input_size),
-            bias=bias if bias is not None else layer.bias,
+            bias=bias,
         )
 
     def quantize_from_fp16(self, layer: nn.Module, config: "QuantizationConfig") -> None:
