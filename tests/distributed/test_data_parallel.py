@@ -19,7 +19,9 @@ The end-to-end tier needs two GPUs; it skips rather than fails on one.
 
 from __future__ import annotations
 
+import queue
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import torch
@@ -88,7 +90,8 @@ class _RouteHarness:
     """Minimal object carrying just what ``DataParallelEngine._route`` reads.
 
     ``_route`` only touches ``data_parallel_size`` and ``_balancer``, so a full engine
-    (and its GPUs) is unnecessary to test how prompts are bucketed.
+    (and its GPUs) is unnecessary to test how prompts are bucketed. It is handed token
+    *estimates*, one per prompt, which is what the router computes up front.
     """
 
     def __init__(self, dp_size: int, policy: str = "round_robin"):
@@ -101,20 +104,134 @@ class _RouteHarness:
 
 
 def test_route_buckets_round_robin():
-    buckets = _RouteHarness(dp_size=2).route(["a", "b", "c", "d", "e"])
+    buckets = _RouteHarness(dp_size=2).route([1, 1, 1, 1, 1])
     assert buckets == [[0, 2, 4], [1, 3]]
 
 
 def test_route_covers_every_prompt_exactly_once():
-    buckets = _RouteHarness(dp_size=3).route([str(i) for i in range(10)])
+    buckets = _RouteHarness(dp_size=3).route([1] * 10)
     assigned = sorted(i for bucket in buckets for i in bucket)
     assert assigned == list(range(10))
 
 
 def test_route_leaves_idle_replicas_empty():
     """Fewer prompts than replicas is legal: the extra replicas get nothing."""
-    buckets = _RouteHarness(dp_size=4).route(["a", "b"])
+    buckets = _RouteHarness(dp_size=4).route([1, 1])
     assert buckets == [[0], [1], [], []]
+
+
+def test_route_sends_a_long_prompt_and_the_short_ones_apart():
+    """With ``total_tokens``, prompt length — not arrival order — decides the split.
+
+    This is the routing-level consequence of the balancer reading the estimate: the
+    three short prompts must not be striped onto the replica already holding 1k tokens.
+    """
+    buckets = _RouteHarness(dp_size=2, policy="total_tokens").route([1000, 10, 10, 10])
+    assert buckets == [[0], [1, 2, 3]]
+
+
+# --------------------------------------------------------------------------- #
+# The process grid (no GPU work)
+# --------------------------------------------------------------------------- #
+def test_token_estimates_are_skipped_when_no_policy_reads_them():
+    """``round_robin`` must never load a tokenizer — the estimate would be dead cost.
+
+    Reaching ``self.tokenizer`` on the harness would raise ``AttributeError``, so this
+    asserts the short circuit rather than the number.
+    """
+    harness = _RouteHarness(dp_size=2)
+    estimates = DataParallelEngine._estimate_tokens(harness, ["a", "bb", "ccc"])
+    assert estimates == [0, 0, 0]
+
+
+def test_replica_queues_hand_the_request_to_every_rank_of_the_replica():
+    """A TP replica is several processes, and all of them must run the same forward.
+
+    Sending only to the leader is the shape of the DP x TP hang: the followers sit on an
+    empty queue while the leader blocks in a collective waiting for them.
+    """
+
+    class _Grid:
+        tensor_parallel_size = 2
+        _request_queues: ClassVar[list[str]] = ["r0t0", "r0t1", "r1t0", "r1t1"]
+        _replica_queues = DataParallelEngine._replica_queues
+
+    grid = _Grid()
+    assert grid._replica_queues(0) == ["r0t0", "r0t1"]
+    assert grid._replica_queues(1) == ["r1t0", "r1t1"]
+
+
+class _FakeQueue:
+    """In-process stand-in for ``mp.Queue`` — enough for the coordinator's handshake."""
+
+    def __init__(self) -> None:
+        self.items: list = []
+
+    def put(self, item) -> None:
+        self.items.append(item)
+
+    def get(self, timeout: float | None = None):
+        if not self.items:
+            raise queue.Empty
+        return self.items.pop(0)
+
+
+class _FakeProcess:
+    """Records the arguments a worker *would* have been spawned with, then reports ready."""
+
+    spawned: ClassVar[list[tuple]] = []
+
+    def __init__(self, target, args, daemon) -> None:
+        self.args = args
+        self._alive = True
+
+    def start(self) -> None:
+        _FakeProcess.spawned.append(self.args)
+        self.args[-1].put(("ready", self.args[0], None))  # result_queue
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def join(self, timeout: float | None = None) -> None:
+        self._alive = False
+
+    def terminate(self) -> None:
+        self._alive = False
+
+
+def test_dp_times_tp_spawns_one_process_per_grid_cell(monkeypatch: pytest.MonkeyPatch):
+    """A 2x2 grid must be four processes, ranked ``dp_rank * tp_size + tp_rank``.
+
+    This is the deadlock in assertion form. ``init_parallel(tp_size=2, dp_size=2)``
+    rendezvouses a world of four, so spawning two processes hangs forever on ranks that
+    were never started — a failure no timeout in the coordinator can explain. Asserting
+    the grid needs no GPU at all, which is the point: the bug reproduces on a laptop.
+    """
+    from lite_llama.engine import data_parallel as dp_module
+
+    _FakeProcess.spawned = []
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 4)
+    monkeypatch.setattr(
+        dp_module.mp,
+        "get_context",
+        lambda method: type("_Ctx", (), {"Queue": _FakeQueue, "Process": _FakeProcess})(),
+    )
+
+    engine = DataParallelEngine(model="unused", data_parallel_size=2, tensor_parallel_size=2)
+
+    assert engine.world_size == 4
+    assert len(_FakeProcess.spawned) == 4
+    # (global_rank, dp_rank, tp_rank) per cell, in rank order.
+    assert [args[:3] for args in _FakeProcess.spawned] == [
+        (0, 0, 0),
+        (1, 0, 1),
+        (2, 1, 0),
+        (3, 1, 1),
+    ]
+    # Each cell owns its own request queue; sharing one would race the mirrors.
+    assert len({id(args[6]) for args in _FakeProcess.spawned}) == 4
+
+    engine.shutdown()
 
 
 # --------------------------------------------------------------------------- #
@@ -177,7 +294,7 @@ class TestTwoReplicas:
 
         reference = LLM(model=str(model_dir), max_seq_len=512, max_gpu_num_blocks=_KV_TOKENS)
         try:
-            for bucket in engine._route(_PROMPTS):
+            for bucket in engine._route(engine._estimate_tokens(_PROMPTS)):
                 expected = reference.generate([_PROMPTS[i] for i in bucket], _GREEDY)
                 for index, out in zip(bucket, expected, strict=True):
                     assert dp_texts[index] == out.text
@@ -193,12 +310,16 @@ class TestTwoReplicas:
 @pytest.mark.gpu
 @pytest.mark.weights
 @requires_two_gpus
-def test_least_loaded_engine_also_covers_every_prompt(model_dir: Path):
-    """The least-loaded policy must route just as completely as round-robin."""
+def test_total_tokens_engine_also_covers_every_prompt(model_dir: Path):
+    """The token-aware policy must route just as completely as round-robin.
+
+    It is the only policy that tokenises in the coordinator process, so this is also the
+    end-to-end check that the estimate path works against a real tokenizer.
+    """
     with DataParallelEngine(
         model=str(model_dir),
         data_parallel_size=2,
-        load_balancer="least_loaded",
+        load_balancer="total_tokens",
         max_seq_len=512,
         max_gpu_num_blocks=_KV_TOKENS,
     ) as engine:

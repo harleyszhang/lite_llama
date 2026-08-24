@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.common import PROMPTS, expand_prompts
 from lite_llama import LLM, DataParallelEngine, SamplingParams
+from lite_llama.engine.dp_load_balancer import LOAD_BALANCERS
 
 #: Greedy, with the repetition guard and early-repeat exit off: a benchmark must not
 #: have its token count decided by a heuristic that fires on some rows and not others.
@@ -190,9 +191,9 @@ def main() -> None:
         help="Prompts: total across replicas (strong) or per replica (weak)",
     )
     parser.add_argument("--scaling", default="weak", choices=["strong", "weak"])
-    parser.add_argument(
-        "--load-balancer", default="round_robin", choices=["round_robin", "least_loaded"]
-    )
+    # Taken from the registry rather than spelled out, so a new policy is benchmarkable
+    # the moment it is registered.
+    parser.add_argument("--load-balancer", default="round_robin", choices=list(LOAD_BALANCERS))
     parser.add_argument("--gen-len", type=int, default=128)
     parser.add_argument("--iters", type=int, default=2, help="Timed repeats (median reported)")
     parser.add_argument("--max-seq-len", type=int, default=1024)
