@@ -22,12 +22,10 @@
 - Up to **6.5×** speedup over HuggingFace `transformers` (Qwen3-0.6B, A10, greedy) — see the [benchmark table](#qwen3-06b-benchmark) below.
 - **Online batch inference with continuous batching**: requests join and leave a running batch, so an arrival never waits for the current generation to finish. On one A10 with Qwen2.5-1.5B-Instruct and requests arriving 250 ms apart, throughput goes from 93 → 644 tok/s (**6.9×**) and mean latency from 19.1 s → 2.3 s (**8.3×**) — see [docs/continuous_batching.md](./docs/continuous_batching.md).
 - **OpenAI-compatible server** (`lite-llama serve`): `/v1/completions` and `/v1/chat/completions` with streaming — the official `openai` client works unchanged. See [docs/online_serving.md](./docs/online_serving.md).
-- Supports `llama3`, `Qwen2.5`, `Qwen3`, `Qwen3-MoE`, `LLaVA-1.5`, `Qwen3-VL`; `top-p` / `top-k` sampling and streaming output.
-- GQA support; decode-stage CUDA graph capture (within batch-size limits).
-- Attention backends: `flashattention1`, `flashattention2`, `flashdecoding` (with `NopadAttention` for unpadded sequences).
-- Dynamic KV-cache management via paged `TokenAttention` slots.
-- Operator fusion: `silu` multiply, K/V projection fusion, skip-connection + `rmsnorm`.
-- Custom `triton` kernels for `rmsnorm`, `rope`, `softmax`, and element-wise multiply.
+- Supports `llama3`, `Qwen2.5/Qwen3`, `Qwen3-MoE`, `LLaVA-1.5`, `Qwen3-VL`; `top-p` / `top-k` sampling and streaming output.
+- **CUDA graph**: decode-stage CUDA graph capture (within batch-size limits).
+- **Attention backends**: `flashattention2`, `flashdecoding` (with `NopadAttention` for unpadded sequences and GQA support). Dynamic KV-cache management via paged `TokenAttention` slots.
+- **Operator fusion**: `silu` multiply, K/V projection fusion, skip-connection + `rmsnorm`. Custom `triton` kernels for `rmsnorm`, `rope`, `softmax`, and element-wise multiply.
 - **Quantization**: W8A16 (fp8/int8), W4A16 (AWQ/GPTQ), SmoothQuant W8A8 — up to **6.9×** decode speedup over HF fp16.
 - **Tensor Parallelism**: split a 30B MoE model across 2× A10 (24 GB) with one all-reduce per block.
 - **Data Parallelism**: replicate the model across GPUs and route requests between them — **2.00×** throughput on 2 GPUs (100% linear).
@@ -40,7 +38,7 @@
 
 ## Setup and Installation
 
-If you don't have a physical server, you can try using [virtal cloud remote server](https://growthdata.virtaicloud.com/t/hK).
+> If you don't have a physical server, you can try using [virtal cloud remote server](https://growthdata.virtaicloud.com/t/hK).
 
 Requires Python 3.13+, CUDA-capable PyTorch 2.13.0+ and Triton 3.7.1+.
 
