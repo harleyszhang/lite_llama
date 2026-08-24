@@ -97,15 +97,11 @@ class SparseMoeBlock(nn.Module):
         return out.reshape(*leading_shape, self.hidden_size)
 
     @torch.no_grad()
-    def quantize_experts_(self, quant) -> None:
+    def quantize_(self, quant: QuantizationConfig) -> None:
         """Convert loaded fp16 expert weights to the requested scheme, in place
         (see :meth:`lite_llama.models.base.CausalLM.quantize_`)."""
         if self.quant is not None:
             return
-        # Legacy QuantConfig shim
-        if not isinstance(quant, QuantizationConfig):
-            from ..modules.linear import _convert_legacy_quant
-            quant = _convert_legacy_quant(quant)
         method = quant.get_quant_method(self)
         method.quantize_from_fp16(self, quant)
         self.quant = quant
