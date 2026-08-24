@@ -125,6 +125,7 @@ class SlotBatch:
         self._atten.b_req_idx = b_req_idx
         self._atten.b_seq_len = self._to_device(prompt_lens)
         self._atten.max_actual_seq_len = max_prompt_len
+        self._atten.is_prefill = True
         self._atten.cur_select_index = table[b_req_idx, :max_prompt_len].reshape(-1)
         self._atten.b_start_loc = self._row_offsets[:n] * max_prompt_len
 
@@ -163,6 +164,7 @@ class SlotBatch:
         self._atten.b_req_idx = self._b_req_idx
         self._atten.b_seq_len = self._b_seq_len
         self._atten.max_actual_seq_len = max(seq_lens)
+        self._atten.is_prefill = False
         # Row `seq_len - 1` of each slot's region: where this step's K/V goes.
         self._atten.cur_select_index = table[self._b_req_idx, self._b_seq_len - 1]
         self._atten.b_start_loc = None

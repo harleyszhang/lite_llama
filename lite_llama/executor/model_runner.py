@@ -201,6 +201,7 @@ class ModelRunner:
         )
         self.atten_info.b_seq_len = actual_prompt_lens
         self.atten_info.max_actual_seq_len = max_prompt_len
+        self.atten_info.is_prefill = True
         self.atten_info.b_start_loc = self._init_req_tokens_table(
             b_req_idx, actual_prompt_lens, self.atten_info.cur_select_index, max_prompt_len
         )
@@ -218,6 +219,7 @@ class ModelRunner:
         self.atten_info.cur_select_index = self.kv_cache_manager.alloc_kvcache_index(batch_size)
         self.atten_info.b_seq_len += 1
         self.atten_info.max_actual_seq_len += 1
+        self.atten_info.is_prefill = False
         update_kv_index(
             self.atten_info.b_req_tokens_table,
             self.atten_info.b_req_idx,
