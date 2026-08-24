@@ -298,3 +298,96 @@ def test_has_room_tracks_the_generation_cap(scheduler):
     assert request.has_room
     request.output_token_ids.append(2)
     assert not request.has_room
+
+
+# --------------------------------------------------------------------------- #
+# Preemption (recompute, opt-in oversubscription)
+# --------------------------------------------------------------------------- #
+def _oversubscribed(num_slots: int = 2, max_num_seqs: int = 3) -> Scheduler:
+    return Scheduler(
+        SchedulerConfig(
+            max_seq_len=_MAX_SEQ_LEN,
+            max_num_seqs=max_num_seqs,
+            max_num_batched_tokens=1 << 20,
+            max_chunk_size=0,
+            enable_preemption=True,
+        ),
+        num_slots=num_slots,
+    )
+
+
+def _decode_once(output):
+    """Give every decoding request one token, then advance prefill chunks."""
+    for r in output.decode:
+        r.output_token_ids.append(999)
+
+
+def test_preemption_disabled_by_default():
+    """Without enable_preemption the batch stays slot-capped and nothing evicts."""
+    sched = Scheduler(
+        SchedulerConfig(max_seq_len=_MAX_SEQ_LEN, max_num_seqs=8),
+        num_slots=2,
+    )
+    for i in range(3):
+        sched.add_request(make_request(f"r{i}"))
+    for _ in range(4):
+        out = sched.schedule()
+        _decode_once(out)
+        sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
+    assert sched.num_preemptions == 0
+
+
+def test_oversubscription_admits_beyond_slots_via_preemption():
+    """max_num_seqs may exceed slots; the extra request runs by preempting."""
+    sched = _oversubscribed(num_slots=2, max_num_seqs=3)
+    for i in range(3):
+        sched.add_request(make_request(f"r{i}"))
+
+    seen: set[str] = set()
+    for _ in range(6):
+        out = sched.schedule()
+        for r in out.decode:
+            seen.add(r.request_id)
+        _decode_once(out)
+        sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
+
+    # All three requests get decode turns despite only two slots.
+    assert seen == {"r0", "r1", "r2"}
+    assert sched.num_preemptions >= 1
+
+
+def test_preempted_request_is_reported_in_output():
+    """SchedulerOutput.preempted names who was evicted this step."""
+    sched = _oversubscribed(num_slots=2, max_num_seqs=3)
+    for i in range(3):
+        sched.add_request(make_request(f"r{i}"))
+
+    preempted_ids: list[str] = []
+    for _ in range(5):
+        out = sched.schedule()
+        preempted_ids += [r.request_id for r in out.preempted]
+        _decode_once(out)
+        sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
+
+    assert preempted_ids  # at least one preemption was surfaced
+
+
+def test_progress_quantum_prevents_livelock():
+    """A just-recomputed request is protected until it decodes once.
+
+    Without the quantum, two requests could preempt each other every step and
+    neither would ever emit a token.
+    """
+    sched = _oversubscribed(num_slots=2, max_num_seqs=3)
+    for i in range(3):
+        sched.add_request(make_request(f"r{i}"))
+
+    total_tokens = 0
+    for _ in range(9):
+        out = sched.schedule()
+        total_tokens += len(out.decode)
+        _decode_once(out)
+        sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
+
+    # Real forward progress: many tokens produced, not a stalled ping-pong.
+    assert total_tokens >= 6
