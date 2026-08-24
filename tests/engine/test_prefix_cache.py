@@ -475,7 +475,6 @@ class TestSchedulerIntegration:
             out = sched.schedule()
             for r in out.decode:
                 r.output_token_ids.append(999)
-            sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
             if out.preempted:
                 # Preempted requests must have their cached tokens reset.
                 for p in out.preempted:
@@ -488,10 +487,7 @@ class TestSchedulerIntegration:
         sched = self._sched(max_chunk_size=64)
         shared = list(range(128))  # 8 blocks of 16
         sched.add_request(_req("a", shared))
-        sched.schedule()
-        sched.advance_chunks(*(
-            (lambda out: (out.prefill, out.prefill_chunk_lens))(sched.schedule())
-        ))
+        sched.schedule()  # commits a's first chunk and registers its prompt
         # req b shares prefix — its uncached remainder is smaller.
         sched.add_request(_req("b", shared + list(range(1000, 1064))))
         out = sched.schedule()

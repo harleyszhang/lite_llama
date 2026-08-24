@@ -109,7 +109,14 @@ def reference(model_dir) -> dict[str, str]:
     return texts
 
 
-def build_engine(model_dir, *, max_num_seqs=8, use_cuda_graph=False, max_seq_len=_MAX_SEQ_LEN):
+def build_engine(
+    model_dir,
+    *,
+    max_num_seqs=8,
+    use_cuda_graph=False,
+    max_seq_len=_MAX_SEQ_LEN,
+    max_chunk_size=0,
+):
     return ContinuousBatchingEngine(
         LLMEngine(
             str(model_dir),
@@ -117,7 +124,11 @@ def build_engine(model_dir, *, max_num_seqs=8, use_cuda_graph=False, max_seq_len
             max_gpu_num_blocks=_KV_BLOCKS,
             use_cuda_graph=use_cuda_graph,
         ),
-        SchedulerConfig(max_seq_len=max_seq_len, max_num_seqs=max_num_seqs),
+        SchedulerConfig(
+            max_seq_len=max_seq_len,
+            max_num_seqs=max_num_seqs,
+            max_chunk_size=max_chunk_size,
+        ),
     )
 
 
@@ -247,6 +258,90 @@ def test_cuda_graph_replay_matches_eager(model_dir, reference):
         assert_no_foreign_tail(texts, {p: reference[p] for p in prompts})
     finally:
         del graphed
+        _free()
+
+
+# --------------------------------------------------------------------------- #
+# Chunked prefill
+# --------------------------------------------------------------------------- #
+_LONG_PROMPT = PROMPTS[2]  # ~10 tokens: three chunks at max_chunk_size=4
+_PREFIX = 40  # chars of opening prose that must survive chunking
+
+
+def test_a_chunked_prompt_keeps_its_continuation(model_dir, reference):
+    """Splitting a prompt across steps must not derail its continuation.
+
+    ``max_chunk_size=4`` forces the prompt through three prefill steps; every
+    chunk after the first resumes mid-prompt and runs through the extend rows,
+    where each token's query must attend over the already-cached prefix. A
+    dropped prefix would change the very first sampled token, so the opening is
+    compared against the unchunked reference. Late tokens keep the looser
+    ownership check: the chunked and one-shot paths tile their reductions
+    differently, so a rare top-2 logit flip is inherent, not a defect.
+    """
+    chunked = build_engine(model_dir, max_chunk_size=4)
+    try:
+        request = chunked.add_request(_LONG_PROMPT, GREEDY)
+        chunked.step()
+        assert 0 < request.num_computed_tokens < request.prompt_len, "must actually chunk"
+        drain(chunked)
+
+        expected = reference[_LONG_PROMPT]
+        assert request.text[:_PREFIX] == expected[:_PREFIX]
+        assert_no_foreign_tail({_LONG_PROMPT: request.text}, {_LONG_PROMPT: expected})
+    finally:
+        del chunked
+        _free()
+
+
+def test_chunked_prefill_survives_cuda_graph_replay(model_dir, reference):
+    """Extend rows are one token wide, so they too can land on a captured graph.
+
+    The filler rows that pad an odd row count onto the captured grid point at
+    the reserved slot and carry a fake length; their logits are discarded. The
+    continuation must survive that padding unchanged in its opening.
+    """
+    graphed = build_engine(model_dir, use_cuda_graph=True, max_chunk_size=4)
+    try:
+        request = graphed.add_request(_LONG_PROMPT, GREEDY)
+        drain(graphed)
+
+        expected = reference[_LONG_PROMPT]
+        assert request.text[:_PREFIX] == expected[:_PREFIX]
+        assert_no_foreign_tail({_LONG_PROMPT: request.text}, {_LONG_PROMPT: expected})
+    finally:
+        del graphed
+        _free()
+
+
+def test_one_step_carries_prefill_extend_and_decode(model_dir, reference):
+    """A resumed chunk, a new prefill and a decode share a single step.
+
+    With A decoding, B mid-prompt and C freshly queued, one step runs all three
+    attention shapes: the grid route for C's first chunk, the extend route for
+    B's resumed chunk, and a decode for A. Everyone must still answer their own
+    prompt, and B's chunked continuation must match the unchunked opening.
+    """
+    engine = build_engine(model_dir, max_chunk_size=4)
+    try:
+        a = engine.add_request(PROMPTS[0], GREEDY)  # short: prefill completes in step 1
+        b = engine.add_request(_LONG_PROMPT, GREEDY)  # long: chunks across steps
+        engine.step()  # both first chunks; A completes, B stays partial
+        assert 0 < b.num_computed_tokens < b.prompt_len
+
+        c = engine.add_request(PROMPTS[1], GREEDY)
+        engine.step()  # B resumes (extend), C prefills its first chunk (grid), A decodes
+        assert c.num_computed_tokens > 0, "C admitted and prefilled in the shared step"
+        assert b.num_computed_tokens == 8, "B advanced by exactly one chunk"
+        drain(engine)
+
+        texts = {r.prompt: r.text for r in (a, b, c)}
+        assert all(texts.values())
+        assert all(r.finish_reason for r in (a, b, c))
+        assert_no_foreign_tail(texts, reference)
+        assert b.text[:_PREFIX] == reference[_LONG_PROMPT][:_PREFIX]
+    finally:
+        del engine
         _free()
 
 
