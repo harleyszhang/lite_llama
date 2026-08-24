@@ -92,6 +92,34 @@ def test_rotary_embedding_returns_expected_shape_on_cpu(tmp_path):
     assert sin.shape == (1, 16, 64)
 
 
+def test_cached_table_matches_per_step_computation(tmp_path):
+    """The precomputed cache must return what recomputing per step returns.
+
+    A cache row is built from the same fp32 outer product the fallback runs,
+    so the two paths must agree bit-for-bit; drifting apart would silently
+    rotate positions wrongly only for models built with a max_seq_len.
+    """
+    config = _rope_config_from_json(tmp_path)  # carries max_seq_len=64
+    cached = RotaryEmbedding(config)
+    assert cached.max_seq_len == 64
+    bare = RotaryEmbedding({k: v for k, v in config.items() if k != "max_seq_len"})
+
+    x = torch.randn(1, 8, 256)
+    position_ids = torch.arange(40, 48).unsqueeze(0)  # mid-table offsets
+    for got, want in zip(cached(x, position_ids), bare(x, position_ids), strict=True):
+        torch.testing.assert_close(got, want)
+
+
+def test_cache_follows_module_onto_the_device_and_dtype(tmp_path):
+    """The ``.to()`` must move the caches like any buffer, or the gather would miss."""
+    rope = RotaryEmbedding(_rope_config_from_json(tmp_path))
+    rope.to(torch.float16)
+    assert rope.cos_cache.dtype == torch.float16
+    x = torch.randn(1, 4, 256, dtype=torch.float16)
+    cos, sin = rope(x, torch.arange(4).unsqueeze(0))
+    assert cos.dtype == torch.float16
+
+
 def test_mrope_reduces_to_plain_rope_when_mrope_section_is_absent(tmp_path):
     """Without an mrope_section MRotaryEmbedding must delegate to the plain path."""
     config = _rope_config_from_json(tmp_path)

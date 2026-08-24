@@ -115,7 +115,6 @@ class _DecodeSession:
             )
         ]
         self._position_deltas = self._mrope_position_deltas()
-        self._row_index = torch.arange(self.batch_size, device=device)
 
     def _mrope_position_deltas(self) -> torch.Tensor | None:
         """Per-sequence offset from token count to last mrope position.
@@ -163,14 +162,12 @@ class _DecodeSession:
                 input_ids,
                 step_positions,
                 self._multi_modal_inputs if is_prefill else None,
+                # Each sequence's next-token logits sit at its own last real
+                # prompt position; asking the model to gather them before the
+                # lm_head GEMM keeps the projection to one row per sequence.
+                logits_positions=self._prompt_lens_gpu.view(-1) - 1 if is_prefill else None,
             )
             self._allocated.append(engine.model_runner.decode_alloc_kv_cache(self.batch_size))
-
-            if is_prefill:
-                # After prefill the last real token differs per sequence when
-                # prompt lengths differ, so pick each sequence's own last
-                # position. Decode steps have seq_len == 1 and need no gather.
-                logits = logits[self._row_index, self._prompt_lens_gpu.view(-1) - 1]
 
             generated = None
             if params.repetition_penalty != 1.0:

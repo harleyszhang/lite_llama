@@ -82,6 +82,8 @@ class FakeEngine:
                 delta=delta,
                 text=text,
                 finish_reason="eos" if last else None,
+                prompt_tokens=len(self.tokenizer.encode(prompt)),
+                completion_tokens=index + 1,
             )
 
     async def generate_text(self, prompt, sampling_params=None, request_id=None):
@@ -147,6 +149,32 @@ def test_completion_reports_token_usage(client):
     assert usage["prompt_tokens"] == 3
     assert usage["completion_tokens"] == len(_REPLY.split())
     assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+
+
+def test_usage_counts_come_from_the_engine_not_a_reencode():
+    """Decode does not round-trip through encode, so usage must be the engine's
+    own counts rather than whatever encoding the texts again happens to give.
+    The fixed counts below deliberately disagree with both texts' word counts.
+    """
+
+    class FixedCountsEngine(FakeEngine):
+        async def generate(self, prompt, sampling_params=None, request_id=None):
+            self.seen.append((prompt, sampling_params))
+            yield StreamedOutput(
+                request_id=request_id or "fake",
+                delta=self._reply,
+                text=self._reply,
+                finish_reason="eos",
+                prompt_tokens=7,
+                completion_tokens=11,
+            )
+
+    with make_client(FixedCountsEngine()) as client:
+        usage = client.post(
+            "/v1/completions", json={"model": _MODEL, "prompt": "Hello"}
+        ).json()["usage"]
+
+    assert usage == {"prompt_tokens": 7, "completion_tokens": 11, "total_tokens": 18}
 
 
 def test_completion_passes_the_prompt_through_untemplated(client, engine):

@@ -200,6 +200,9 @@ class ModelConfig:
             "hidden_size": self.hidden_size,
             "num_heads": self.num_heads,
             "partial_rotary_factor": getattr(self.text_config, "partial_rotary_factor", 1.0),
+            # Lets the RoPE layer precompute one (cos, sin) row per position;
+            # validate() keeps this >= every position id the engine can feed.
+            "max_seq_len": self.max_seq_len,
             **self.rope_parameters,
         }
 

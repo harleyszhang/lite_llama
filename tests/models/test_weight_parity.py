@@ -238,8 +238,20 @@ def test_decoder_weights_land_in_the_right_place(model_type: str, tmp_path: Path
 
         mlp, lite_mlp = f"{hf}layers.{i}.mlp", f"{lite}layers.{i}.mlp"
         if f"{mlp}.gate.weight" not in state:  # dense SwiGLU
-            for projection in ("gate_proj", "up_proj", "down_proj"):
-                same(f"{mlp}.{projection}.weight", f"{lite_mlp}.{projection}.weight")
+            inter = config.intermediate_size
+            # gate/up fuse exactly like K/V: two checkpoint tensors, one
+            # parameter, halves the only thing keeping them apart.
+            same(
+                f"{mlp}.gate_proj.weight",
+                f"{lite_mlp}.gate_up_proj.weight",
+                (slice(0, inter),),
+            )
+            same(
+                f"{mlp}.up_proj.weight",
+                f"{lite_mlp}.gate_up_proj.weight",
+                (slice(inter, 2 * inter),),
+            )
+            same(f"{mlp}.down_proj.weight", f"{lite_mlp}.down_proj.weight")
             continue
 
         # transformers >= 5 stacks the experts into the same ``[E, 2*inter, hidden]``

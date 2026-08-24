@@ -81,10 +81,10 @@ def derive_shapes(model_dir: str) -> dict[str, list[tuple[int, int, int, str]]]:
     for seq in [64, 128, 256, 512, 1024]:
         shapes["flash_attn_nopad"].append((seq, head_dim, head_dim, "fp16"))
 
-    # Dense GEMM shapes (gate_proj, up_proj, down_proj)
+    # Dense GEMM shapes (fused gate_up_proj, down_proj)
     for m in m_values:
-        # gate/up: [M, intermediate, hidden] (w4a16 for AWQ/GPTQ)
-        shapes["w4a16_matmul"].append((m, intermediate, hidden, "int4"))
+        # gate/up fused: [M, 2*intermediate, hidden] (w4a16 for AWQ/GPTQ)
+        shapes["w4a16_matmul"].append((m, 2 * intermediate, hidden, "int4"))
         # down: [M, hidden, intermediate]
         shapes["w4a16_matmul"].append((m, hidden, intermediate, "int4"))
 

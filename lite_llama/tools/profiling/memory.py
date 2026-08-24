@@ -79,10 +79,10 @@ def compute_memory_budget(
 
     # Model weights: embedding + layers + lm_head
     embed_params = vocab_size * hidden_size
-    # Per layer: qkv_proj + o_proj + gate_proj + up_proj + down_proj + norms
+    # Per layer: q_proj + kv_proj + o_proj + fused gate_up_proj + down_proj + norms
     qkv_params = hidden_size * (num_heads + 2 * num_kv_heads) * head_dim
     o_params = num_heads * head_dim * hidden_size
-    ffn_params = hidden_size * intermediate_size * 3  # gate + up + down
+    ffn_params = hidden_size * intermediate_size * 3  # fused gate + up + down
     norm_params = hidden_size * 2  # input_norm + post_norm
     per_layer_params = qkv_params + o_params + ffn_params + norm_params
     total_params = embed_params + num_layers * per_layer_params + vocab_size * hidden_size
