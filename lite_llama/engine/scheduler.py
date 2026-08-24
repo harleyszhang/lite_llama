@@ -117,6 +117,11 @@ class SchedulerConfig:
             longer than this, it is split into chunks and interleaved with
             decode steps (chunked prefill). Set to 0 to disable chunking.
         enable_prefix_cache: Whether to use hash-based prefix caching.
+        enable_preemption: When True, ``max_num_seqs`` is honoured as a desired
+            concurrency even beyond the slot count: an oversubscribed batch
+            time-shares slots by preempting (recompute) the youngest running
+            request to admit an older waiting one. When False (default) the
+            batch is capped at the slot count and nothing is ever evicted.
     """
 
     max_seq_len: int = 2048
@@ -124,6 +129,7 @@ class SchedulerConfig:
     max_num_batched_tokens: int = 8192
     max_chunk_size: int = 512
     enable_prefix_cache: bool = False
+    enable_preemption: bool = False
 
 
 @dataclass(frozen=True)
@@ -167,7 +173,13 @@ class Scheduler:
             raise ValueError(f"need at least one cache slot, got {num_slots}")
         self.config = config
         self.num_slots = num_slots
-        self.max_num_seqs = min(config.max_num_seqs, num_slots)
+        # Preemption lets the running set exceed the slot count (slots are
+        # time-shared via recompute); otherwise concurrency is slot-capped.
+        self.max_num_seqs = (
+            config.max_num_seqs
+            if config.enable_preemption
+            else min(config.max_num_seqs, num_slots)
+        )
 
         self._waiting: deque[Request] = deque()
         self._running: list[Request] = []
@@ -235,8 +247,8 @@ class Scheduler:
         step processes at most max_chunk_size tokens of prefill, interleaved with
         the full decode batch. This prevents head-of-line blocking.
         """
-        # Step 1: Try to admit new requests (may preempt if no slots)
-        prefill_group = self._schedule_prefill()
+        # Step 1: Try to admit new requests (may preempt under oversubscription)
+        prefill_group, preempted = self._schedule_prefill()
 
         # Step 2: Compute chunk lengths for prefilling requests
         chunk_lens = []
@@ -253,6 +265,7 @@ class Scheduler:
             prefill=prefill_group,
             decode=decode_batch,
             prefill_chunk_lens=chunk_lens,
+            preempted=preempted,
         )
 
     def advance_chunks(self, prefill_group: list[Request], chunk_lens: list[int]) -> None:
@@ -269,14 +282,21 @@ class Scheduler:
                 if req in self._chunking:
                     self._chunking.remove(req)
 
-    def _schedule_prefill(self) -> list[Request]:
+    def _schedule_prefill(self) -> tuple[list[Request], list[Request]]:
         """Admit queued requests, with chunked prefill and optional preemption.
 
-        When max_chunk_size > 0, large prompts are tracked in _chunking and
-        processed incrementally. If no slots are available, the youngest running
-        request is preempted (recompute strategy).
+        When ``max_chunk_size > 0``, large prompts are tracked in ``_chunking``
+        and processed incrementally. Under oversubscription (preemption enabled),
+        a full slot pool is freed by evicting the youngest running request that
+        has already produced a token (recompute strategy); the just-recomputed
+        request is protected until it decodes once, which bounds the cycle and
+        prevents two requests from preempting each other forever.
+
+        Returns:
+            ``(prefill_group, preempted)`` for this step.
         """
         group: list[Request] = []
+        preempted: list[Request] = []
         longest = 0
         capacity = self.max_num_seqs - len(self._running)
 
@@ -288,20 +308,29 @@ class Scheduler:
 
         # Then: admit new waiting requests
         while self._waiting and len(group) < capacity + len(self._chunking):
-            if not self._free_slots:
-                # Preemption: evict youngest running request to free a slot
-                if self._running and len(self._running) > 1:
-                    victim = self._running[-1]
-                    self._preempt(victim)
-                else:
-                    break
-
+            # Fix the request we intend to admit *before* any preemption, so the
+            # victim (re-queued at the front for recompute) cannot jump ahead of
+            # it and starve it.
             candidate = self._waiting[0]
+
+            if not self._free_slots:
+                # Oversubscription: free a slot by preempting the youngest
+                # *decoding* victim that has produced >=1 token (the progress
+                # quantum). A request still prefilling or freshly recomputed is
+                # never chosen, so the cycle always makes forward progress.
+                if not self.config.enable_preemption:
+                    break
+                victim = self._pick_preemption_victim(group)
+                if victim is None:
+                    break
+                self._preempt(victim)
+                preempted.append(victim)
+
             padded = max(longest, candidate.prompt_len) * (len(group) + 1)
             if group and padded > self.config.max_num_batched_tokens:
                 break
 
-            self._waiting.popleft()
+            self._waiting.remove(candidate)
             candidate.slot = self._free_slots.pop()
             candidate.status = RequestStatus.RUNNING
             self._running.append(candidate)
@@ -328,17 +357,41 @@ class Scheduler:
 
             longest = max(longest, candidate.prompt_len - cached)
 
-        return group
+        return group, preempted
+
+    def _pick_preemption_victim(self, group: list[Request]) -> Request | None:
+        """Youngest running request eligible for preemption, or None.
+
+        Eligible = still decoding (not mid-prefill), not part of this step's
+        prefill group, and past the progress quantum (>=1 output token). The
+        quantum is what stops a just-recomputed request from being evicted again
+        before it makes progress, so the recompute cycle cannot livelock.
+        """
+        for request in reversed(self._running):
+            if request in self._chunking or request in group:
+                continue
+            if len(request.output_token_ids) >= 1:
+                return request
+        return None
 
     def _preempt(self, request: Request) -> None:
-        """Evict a running request back to the waiting queue (recompute strategy)."""
+        """Evict a running request back to the waiting queue (recompute strategy).
+
+        The KV built so far is dropped: on re-admission the prompt is prefilled
+        again from its cached-prefix offset. Generated tokens are cleared so the
+        request restarts decoding from where recompute leaves off (its already
+        emitted tokens are preserved by the engine's output buffer, not here).
+        """
         if request.slot is not None:
             self._free_slots.append(request.slot)
             request.slot = None
         request.status = RequestStatus.WAITING
         request.output_token_ids.clear()
+        # Recompute restarts prefill from scratch (minus any cached prefix).
+        self._chunk_progress.pop(request.request_id, None)
+        request.num_cached_tokens = 0
         self._running = [r for r in self._running if r is not request]
-        self._waiting.appendleft(request)  # re-queue at front
+        self._waiting.appendleft(request)  # re-queue at front, keeps FCFS age
         self.num_preemptions += 1
 
     def finish(self, request: Request, reason: str) -> None:
