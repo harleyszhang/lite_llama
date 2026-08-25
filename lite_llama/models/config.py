@@ -25,10 +25,19 @@ if TYPE_CHECKING:
 
 #: KV-cache dtypes accepted by :attr:`ModelConfig.kv_cache_dtype` (vLLM spelling).
 #: The e4m3 bytes travel in a ``uint8`` container; the decode kernel widens them.
+#: ``"auto"`` is not in the map — it resolves to :attr:`ModelConfig.dtype` at
+#: read time so the cache always matches the checkpoint's element type.
 KV_CACHE_DTYPES: dict[str, torch.dtype] = {
-    "auto": torch.float16,
     "fp8": torch.uint8,
     "fp8_e4m3": torch.uint8,
+}
+
+#: Spellings ``torch_dtype`` may carry in a checkpoint's ``config.json``:
+#: transformers 4.x writes a string, 5.x may already store a ``torch.dtype``.
+_TORCH_DTYPES: dict[str, torch.dtype] = {
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "float32": torch.float32,
 }
 
 
@@ -83,20 +92,22 @@ class ModelConfig:
         # models are their own text config.
         self.text_config: PretrainedConfig = getattr(hf_config, "text_config", hf_config)
         self.max_seq_len = max_seq_len
-        # Element type of the paged KV cache. ``"auto"`` keeps fp16; the fp8
-        # spellings store e4m3 bytes (in a ``uint8`` container) and make the
-        # decode kernel dequantise on read, halving the cache footprint.
+        # Element type of the paged KV cache. ``"auto"`` follows the checkpoint's
+        # dtype (see :attr:`dtype`); the fp8 spellings store e4m3 bytes (in a
+        # ``uint8`` container) and make the decode kernel dequantise on read,
+        # halving the cache footprint.
         self.kv_cache_dtype = kv_cache_dtype
         # Weight format the *checkpoint* is stored in, which decides both what the
         # model allocates and whether the loader may widen anything on the way in.
         # A runtime ``--quantization`` request is a separate, post-load step.
-        self.quant: "QuantizationConfig | None" = self._parse_quant(hf_config)
+        self.quant: QuantizationConfig | None = self._parse_quant(hf_config)
         self.validate()
 
     @staticmethod
     def _parse_quant(hf_config: PretrainedConfig):
         """Lazy-import quantization parsing to avoid circular imports."""
         from ..modules.quantization import get_quant_config_from_hf
+
         return get_quant_config_from_hf(hf_config)
 
     @classmethod
@@ -111,8 +122,25 @@ class ModelConfig:
         return cls(hf_config, max_seq_len=max_seq_len, kv_cache_dtype=kv_cache_dtype)
 
     @property
+    def dtype(self) -> torch.dtype:
+        """Element type of the checkpoint's tensors; bf16 when undeclared.
+
+        Every parameter and the KV cache (under ``"auto"``) are allocated in
+        this dtype, so bf16 checkpoints finally stop being narrowed to fp16.
+        A checkpoint that declares ``float32`` is *downgraded* to bf16: the
+        Triton kernels accumulate in fp32 but only load 16-bit inputs, and a
+        full-fp32 deployment was never possible in lite_llama anyway.
+        """
+        raw = getattr(self.text_config, "torch_dtype", None)
+        if isinstance(raw, torch.dtype):
+            return torch.bfloat16 if raw == torch.float32 else raw
+        return _TORCH_DTYPES.get(str(raw), torch.bfloat16)
+
+    @property
     def kv_cache_torch_dtype(self) -> torch.dtype:
         """Torch dtype of the KV-cache buffers, resolved from :attr:`kv_cache_dtype`."""
+        if self.kv_cache_dtype == "auto":
+            return self.dtype
         return KV_CACHE_DTYPES[self.kv_cache_dtype]
 
     # ---- identity --------------------------------------------------------- #
@@ -209,10 +237,10 @@ class ModelConfig:
     # ---- validation ------------------------------------------------------- #
     def validate(self) -> None:
         """Reject configurations the kernels cannot serve."""
-        if self.kv_cache_dtype not in KV_CACHE_DTYPES:
+        accepted = {"auto", *KV_CACHE_DTYPES}
+        if self.kv_cache_dtype not in accepted:
             raise ValueError(
-                f"kv_cache_dtype must be one of {sorted(KV_CACHE_DTYPES)}, "
-                f"got {self.kv_cache_dtype!r}"
+                f"kv_cache_dtype must be one of {sorted(accepted)}, got {self.kv_cache_dtype!r}"
             )
         if self.num_heads % self.num_kv_heads != 0:
             raise ValueError(

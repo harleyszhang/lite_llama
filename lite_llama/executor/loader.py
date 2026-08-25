@@ -27,9 +27,10 @@ from .weight_utils import hf_weights_iterator
 
 logger = get_logger(__name__)
 
-#: Every lite_llama parameter is fp16: that is what the Triton kernels are
-#: written for, and checkpoints are cast on copy.
-PARAM_DTYPE = torch.float16
+#: Parameters take the checkpoint's own element type (``config.dtype``) — bf16
+#: unless the checkpoint declares otherwise. Kept as a named constant only for
+#: the rare caller that builds a model with no config at hand.
+PARAM_DTYPE = torch.bfloat16
 
 
 @contextlib.contextmanager
@@ -140,12 +141,17 @@ class DefaultModelLoader:
         logger.info("Building %s skeleton on the meta device", model_cls.__name__)
         with init_empty_parameters():
             model = model_cls(config)
-        materialise_parameters(model, device)
+        materialise_parameters(model, device, dtype=config.dtype)
 
         # An already-quantised checkpoint is copied in byte for byte; only an
-        # fp16 model wants the FP8 blocks widened on the way through.
+        # unquantised model wants the FP8 blocks widened on the way through.
         model.load_weights(
-            hf_weights_iterator(checkpoints_dir, device, dequantize_fp8=config.quant is None)
+            hf_weights_iterator(
+                checkpoints_dir,
+                device,
+                dequantize_fp8=config.quant is None,
+                dequant_dtype=config.dtype,
+            )
         )
         if quantization and config.quant is None:
             self._quantize(model, quantization)

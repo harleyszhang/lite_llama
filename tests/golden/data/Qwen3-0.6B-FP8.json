@@ -1,0 +1,44 @@
+{
+ "single": [
+  " a topic that has sparked considerable debate and speculation in the scientific community. As we look ahead, the potential for AI to revolutionize various industries is undeniable, but the ethical implications of its development remain a pressing concern. The question of whether AI"
+ ],
+ "single_rp1.1": [
+  " a topic that has sparked considerable debate and speculation in the scientific community. As we look ahead, it's clear that AI is becoming more integrated into everyday life, from smart home devices to personalized recommendations on social media platforms. However, despite this"
+ ],
+ "batch_uniform": [
+  " What are the best practices for learning Python?\n\nAs a language learner, I want to learn Python. I have a basic understanding of programming and want to learn more",
+  " What are the best practices for learning C++?\n\nAs a C++ developer, you need to learn C++. But how to learn it? What are the best"
+ ],
+ "batch_uniform_rp1.1": [
+  " What are the best practices for learning Python?\n\nAs a language learner, I want to learn Python. How can I start? What are the best practices for learning",
+  " What are the best practices for learning C++?\n\nAs a language learner, I want to learn C++. I have no experience with programming. How can I start"
+ ],
+ "batch_mixed": [
+  "Question\nOkay, so I need to figure out how to solve this problem. Let me start by reading the problem again to make sure I understand it. The",
+  " the Roman Empire was one of the most powerful empires in the world. However, the Roman Empire was not always a perfect empire. The Roman Empire was not"
+ ],
+ "batch_mixed_rp1.1": [
+  "Question\nOkay, so I need to figure out how to solve this problem. Let me start by reading the question again carefully. The problem is asking for the",
+  " the Roman Empire was one of the most powerful empires in history. However, it is not without its challenges and problems. The Roman Empire faced many difficulties,"
+ ],
+ "batch8": [
+  " to find a balance between the two things that are important to me. I want to know if there are any specific ways to achieve this balance, and if there",
+  " but it is not the best choice for the current time. What is the reason for this? What is the best choice for the current time? What is the",
+  " What is the main purpose of the war? What were the key events that led to the war? What were the major battles of the war? What were the",
+  " the answer is the president of the United States, but the question is phrased in a way that makes it seem like it's asking for a specific person",
+  " - Stack Overflow\nHow to learn c++, give me some code example.\nStack Overflow\nQuestions\nUsers\nStack Overflow\nHow to learn c++, give me",
+  " I need to learn how to code in Python, but I don't know where to start. I need to learn how to code in Python, but I don",
+  " architecture, and explain how to use it in a practical scenario?\n\nFirst, I need to know the basic knowledge of the user, so I should ask them to",
+  ", and explain the difference between CNN and RNN?\n\nI need to know how to learn CNN, and how to learn RNN. Also, explain the difference"
+ ],
+ "batch8_rp1.1": [
+  " to find a balance between the two things that are important. I think that the first thing is to be able to do something in life, and the second thing",
+  " but it is not the best choice for some applications. What are the reasons? Why do you think that VGG is still used in practice, even though it",
+  " What is the main purpose of the war? Why did it happen? What were the key events and outcomes?\nAnswer:\n\nThe American Civil War was a conflict between",
+  " the answer is 180. but why? what are the reasons behind this?\nThe question seems to be a bit of a trick or a riddle",
+  " - Stack Overflow\nHow to learn c++, give me some code example.\nStack overflow users, I need help. How to learn C++? Give me some",
+  " I need to learn how to code in Python, but I don't know where to start. Also, I want to get some help from the community.\n\nOkay",
+  " architecture, and explain how to use it in a practical scenario?\n\nFirst, I need to know the basic knowledge of llm. Then, after that, I",
+  ", and explain the difference between CNNs and RNNs?\n\nI need to know how to learn cnn, what is resnet, and explain the difference between"
+ ]
+}

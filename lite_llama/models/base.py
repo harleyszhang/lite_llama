@@ -58,10 +58,10 @@ class DecoderLayer(nn.Module):
         super().__init__()
         self.rms_norm_eps = config.rms_norm_eps
         self.input_layernorm_weight = nn.Parameter(
-            torch.ones(config.hidden_size, dtype=torch.float16)
+            torch.ones(config.hidden_size, dtype=config.dtype)
         )
         self.post_attention_layernorm_weight = nn.Parameter(
-            torch.ones(config.hidden_size, dtype=torch.float16)
+            torch.ones(config.hidden_size, dtype=config.dtype)
         )
         self.self_attn = Attention(config, qkv_bias=qkv_bias, use_qk_norm=use_qk_norm, quant=quant)
         # MoE 变体由 CausalLM._build_mlp 注入 SparseMoeBlock;默认 dense SwiGLU
@@ -122,10 +122,10 @@ class CausalLM(nn.Module):
         super().__init__()
         self.config = config
         # Weight format of the checkpoint being loaded, and therefore of every
-        # projection built below. ``None`` is fp16; an fp8 checkpoint declares its
+        # projection built below. ``None`` is unquantised; an fp8 checkpoint declares its
         # own block layout, which the layers keep as-is instead of widening.
         self.quant = config.quant
-        dtype = torch.float16
+        dtype = config.dtype
 
         # The vocabulary tensors are split along the vocabulary itself (see
         # :mod:`lite_llama.modules.vocab_parallel`): they are the largest pair of

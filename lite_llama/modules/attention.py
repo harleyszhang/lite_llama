@@ -40,11 +40,12 @@ class PagedAttention(nn.Module):
         num_kv_heads: Number of key/value heads (may be smaller than the query
             head count for grouped-query attention).
         head_dim: Size of a single attention head.
-        kv_cache_dtype: Element type of the cache — ``torch.float16`` stores
+        kv_cache_dtype: Element type of the cache — the activation dtype stores
             K/V verbatim; ``torch.uint8`` stores e4m3 bytes (vLLM's fp8 KV
             cache), quantised here on write and widened by the decode kernel.
-        k_scale: Per-tensor dequantisation scale of the fp8 key cache.
-        v_scale: Same for the value cache.
+            The dequantisation scales come with the strategy object that
+            :func:`~lite_llama.modules.quantization.kv_cache.get_kv_cache_method`
+            returns, so write and read cannot disagree about them.
     """
 
     def __init__(
@@ -52,17 +53,21 @@ class PagedAttention(nn.Module):
         num_kv_heads: int,
         head_dim: int,
         kv_cache_dtype: torch.dtype = torch.float16,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
     ) -> None:
         super().__init__()
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.scale = 1.0 / math.sqrt(head_dim)
         self.kv_cache_dtype = kv_cache_dtype
-        self.k_scale = k_scale
-        self.v_scale = v_scale
         self.kv_cache_method = get_kv_cache_method(kv_cache_dtype)
+        # Read the scales off the strategy that applied them. They used to be two
+        # more constructor arguments, which no caller ever passed: the fp8 cache
+        # was numerically correct only because that default and the method's own
+        # default were both 1.0, and a per-tensor scale would have gone missing
+        # silently the moment either side started computing one.
+        method = self.kv_cache_method
+        self.k_scale = method.k_scale if method is not None else 1.0
+        self.v_scale = method.v_scale if method is not None else 1.0
 
     def _write_cache(
         self,
@@ -195,8 +200,8 @@ class Attention(nn.Module):
 
         if use_qk_norm:
             # Normalises over head_dim, so it is replicated rather than sharded.
-            self.q_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=torch.float16))
-            self.k_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=torch.float16))
+            self.q_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=config.dtype))
+            self.k_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=config.dtype))
 
         self.attn = PagedAttention(
             self.num_kv_heads, self.head_dim, kv_cache_dtype=config.kv_cache_torch_dtype
