@@ -330,3 +330,69 @@ def test_invalid_bodies_are_rejected(client, body):
 def test_chat_requires_at_least_one_message(client):
     response = client.post("/v1/chat/completions", json={"model": _MODEL, "messages": []})
     assert response.status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+# Which engine the lifespan builds
+# --------------------------------------------------------------------------- #
+def test_two_replicas_build_the_data_parallel_engine(monkeypatch):
+    """``data_parallel_size > 1`` must build the DP front end, with every knob.
+
+    The failure mode of a dropped field is a silently wrong engine — decode
+    graphs off, a shorter context window — so the whole construction is captured
+    rather than a couple of spot checks. And ``device`` must be absent: a
+    replica's device is its position in the grid.
+    """
+    from lite_llama.entrypoints import api_server
+
+    captured: dict = {}
+
+    class FakeDP(FakeEngine):
+        def __init__(self, **kwargs):
+            super().__init__()
+            captured.update(kwargs)
+
+    monkeypatch.setattr(api_server, "AsyncDataParallelEngine", FakeDP)
+
+    config = ServerConfig(
+        model_dir="/nonexistent",
+        served_model_name=_MODEL,
+        data_parallel_size=2,
+        load_balancer="total_tokens",
+        max_num_seqs=7,
+        max_seq_len=1024,
+    )
+    with TestClient(build_app(config)) as client:
+        body = client.post("/v1/completions", json={"model": _MODEL, "prompt": "Hello"}).json()
+
+    assert body["choices"][0]["text"] == _REPLY, "the injected engine really served"
+    assert captured["data_parallel_size"] == 2
+    assert captured["load_balancer"] == "total_tokens"
+    assert captured["tensor_parallel_size"] == 1
+    assert captured["max_num_seqs"] == 7
+    assert captured["max_seq_len"] == 1024
+    assert captured["max_num_batched_tokens"] == 8192
+    assert captured["use_cuda_graph"] is True
+    assert "device" not in captured, "a replica's device is its grid position"
+
+
+def test_one_replica_still_builds_the_single_process_engine(monkeypatch):
+    """``data_parallel_size == 1`` must keep the original path.
+
+    A data-parallel coordinator of one replica is a whole extra process hop for
+    nothing; the default has to stay byte-for-byte the engine it was.
+    """
+    from lite_llama.entrypoints import api_server
+
+    def fake_from_pretrained(model, **kwargs):
+        assert "data_parallel_size" not in kwargs
+        return FakeEngine()
+
+    monkeypatch.setattr(api_server.AsyncLLMEngine, "from_pretrained", fake_from_pretrained)
+
+    config = ServerConfig(model_dir="/nonexistent", served_model_name=_MODEL)
+    with TestClient(build_app(config)) as client:
+        assert client.get("/health").json() == {"status": "ok"}
+        body = client.post("/v1/completions", json={"model": _MODEL, "prompt": "Hello"}).json()
+
+    assert body["choices"][0]["text"] == _REPLY

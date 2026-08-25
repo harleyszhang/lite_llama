@@ -22,6 +22,8 @@
 
 把"选副本"单独拎成一个策略对象、而不是塞进协调器里，是这次相较早期单体实现的关键改动：路由是**每请求一次**的决策，换一个策略（轮询 → 按 token 数）不动协调器一行代码。
 
+**一条线协议，两个前端。** `_ReplicaLoop` 收到的消息以打头标签区分来源：`"batch"` 是同步 `generate()` 的调度单位（整批一条应答），`"add"` / `"abort"` 是流式前端 `AsyncDataParallelEngine` 的逐请求通道（每 step 一条 `delta`、结束一条 `finished`，拒绝或失败只报那一个 id）。副本不关心自己被哪种前端持有——两条路径共享同一套记账，只是分组不同，这也是流式前端能在不动副本代码的情况下加进来的原因。
+
 - **worker**（`_dp_worker`）是网格里的**一个 cell**，不是一个副本：spawn 出的子进程里 `import torch`、按 `global_rank` 绑卡，然后按自己在副本里的位置分化成两种角色。
   - **leader**（`tp_rank == 0`）建一个**常驻**的 `ContinuousBatchingEngine`，跑 `_ReplicaLoop`：从自己的队列取请求、并进正在跑的 batch、逐 step 推进、把答案发回。引擎跨 dispatch 存活是这一层唯一的性能要点——请求随到随入，停了的序列**下一步**就把 slot 让给下一条，而不是整批陪最长的那条答案跑到底。空闲时循环阻塞在队列上，不空转 CPU。
   - **follower**（`tp_rank > 0`）建一个 `LLM` 并跑 `serve_plans`，**不读请求队列**：它每一次前向都由 leader 的 executor 通过控制面广播过来（见[张量并行](./tensor_parallel.md)）。
@@ -105,13 +107,14 @@ python benchmarks/bench_data_parallel.py --model my_weight/Qwen2.5-1.5B-Instruct
 | --- | ---: | --- |
 | `tests/distributed/test_parallel_state.py` | 20 | CPU（网格纯函数） |
 | `tests/distributed/test_dp_load_balancer.py` | 20 | CPU（策略纯函数） |
-| `tests/distributed/test_data_parallel.py` | 18 + 8 | CPU（路由/网格/构造/副本循环）+ GPU（需 2 卡端到端） |
+| `tests/distributed/test_data_parallel.py` | 23 + 8 | CPU（路由/网格/构造/副本循环）+ GPU（需 2 卡端到端） |
+| `tests/distributed/test_async_data_parallel.py` | 8 | CPU（假进程网格驱动泵线程） |
 
-那 18 个 CPU 测试里有 7 个只测 `_ReplicaLoop`：拿假队列喂它、拿假引擎数它调了几次 `step()`，于是"空闲时阻塞、忙时不阻塞""停止信号不打断在飞的 batch""一次 step 失败只失败那一批、不拖垮副本"这些**时序**性质不需要显卡就能钉住。
+那 23 个 CPU 测试里有 12 个只测 `_ReplicaLoop`：拿假队列喂它、拿假引擎数它调了几次 `step()`，于是"空闲时阻塞、忙时不阻塞""停止信号不打断在飞的 batch""一次 step 失败只失败那一批、不拖垮副本"这些**时序**性质不需要显卡就能钉住。后 5 个喂的是流式消息（`add` / `abort`），把"逐 delta 上报、abort 无应答、拒绝只报自己"这些与批路径不同的契约也钉在了 CPU 上。`test_async_data_parallel.py` 则把 `mp.get_context` 换成假的进程网格，直接驱动泵线程：消息变成正确协程的 chunk、失败变成正确调用者的异常、死掉的副本变成所有打开流的报错而不是挂死。
 
 ## 当前边界
 
-- **`generate()` 同步，副本内部不同步。** 每个副本跑一个常驻引擎，所以一个 dispatch 里的请求随到随入、停了就腾 slot；但 `generate()` 这个 API 仍然阻塞到最慢的副本交完自己那批答案—— 1 条 prompt 配 4 个副本，3 个空转。DP 在这里买的是"多请求的吞吐"，不是"少请求的延迟"。逐请求流式回传是自然的下一步：`_ReplicaLoop` 已经按请求记账，只差换一个分组把答案发回。
+- **同步 `generate()` 是批 API，流式走 `AsyncDataParallelEngine`。** 两个前端共享同一批副本和同一条线协议：批 API 阻塞到最慢的副本交完那批答案（1 条 prompt 配 4 个副本，3 个空转），流式前端逐请求上报 delta、支持逐请求 abort。`lite-llama serve --data-parallel-size 2` 落在它上面：结果队列由一条**泵线程**排空（`mp.Queue` 的阻塞 `get` 没法被事件循环 await），再按 request_id 投回各协程的事件循环——角色与单引擎前端里工作线程的 publish 半边完全相同。这也是 load-aware balancer 真正有意义的场景：批 API 里所有 prompt 同时到达，"最少在飞"无从谈起。
 - **并发上限在建副本时定，不随批大小走。** `max_num_seqs`（默认 32）是常驻引擎的 slot 数，一次发进来 256 条就分批入场。这是服务该有的行为（显存有上限），但离线批处理要吃满卡就得把它开到批的宽度——`DataParallelEngine(..., max_num_seqs=256)`。上面那张表就是这么测的。
 - **文本模型离线批处理。** 多模态的逐请求 processor 输出不走这条路径。
 - **每卡一份完整权重。** 这是 DP 的定义，不是限制——放不下单卡就要叠加 TP （`tensor_parallel_size > 1`），两者按网格组合。

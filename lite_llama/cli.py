@@ -32,6 +32,7 @@ from typing import Any, ClassVar
 from PIL import Image
 
 from .engine import ContinuousBatchingEngine, SamplingParams, VisionGenerator
+from .engine.dp_load_balancer import LOAD_BALANCERS
 from .models.config import read_model_type
 from .modules.quantization import RUNTIME_SCHEMES
 from .utils.prompt_templates import ChatPrompter, get_prompter
@@ -482,6 +483,23 @@ class ServeCommand(CliCommand):
                 {"action": "store_true", "help": "Run decode eager instead of replaying graphs"},
             ),
             CliOption(
+                "--data-parallel-size",
+                {
+                    "type": int,
+                    "default": 1,
+                    "help": "Whole-model replicas for throughput (one GPU each; "
+                    "combines with --tensor-parallel-size into a dp x tp grid)",
+                },
+            ),
+            CliOption(
+                "--load-balancer",
+                {
+                    "choices": list(LOAD_BALANCERS),
+                    "default": "round_robin",
+                    "help": "How requests are routed between data-parallel replicas",
+                },
+            ),
+            CliOption(
                 "--no-chat-template",
                 {
                     "action": "store_true",
@@ -508,6 +526,8 @@ class ServeCommand(CliCommand):
             quantization=opts.quantization,
             tensor_parallel_size=opts.tensor_parallel_size,
             kv_cache_dtype=opts.kv_cache_dtype,
+            data_parallel_size=args.data_parallel_size,
+            load_balancer=args.load_balancer,
             chat_template=not args.no_chat_template,
         )
         print(f"Serving {config.model_name} on http://{args.host}:{args.port}")
