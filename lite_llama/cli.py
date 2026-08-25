@@ -2,13 +2,19 @@
 
 Built bottom-up in four decoupled layers: a declarative option table
 (:class:`CliOption` + ``COMMON_OPTIONS``) shared by every subcommand; a frozen
-:class:`EngineOptions` that validates the parsed args and builds the right
-``TextGenerator`` / ``VisionGenerator``; a :class:`PrompterResolver` that picks
-base-vs-instruct prompting; and :class:`CliCommand` subclasses that wire it up.
-Adding a subcommand = one ``CliCommand`` subclass listed in ``COMMANDS``.
+:class:`EngineOptions` that validates the parsed args and builds the engine a
+command needs; a :class:`PrompterResolver` that picks base-vs-instruct
+prompting; and :class:`CliCommand` subclasses that wire it up. Adding a
+subcommand = one ``CliCommand`` subclass listed in ``COMMANDS``.
+
+Every text command runs on the continuous-batching engine, which is what makes
+``--tensor-parallel-size N`` uniform across them: the engine spawns the extra
+ranks and broadcasts each step's plan to them, so nothing in this file knows
+that more than one GPU is involved.
 
 Usage:
     lite-llama chat --model-dir my_weight/Qwen2.5-0.5B
+    lite-llama chat --model-dir my_weight/Qwen3-8B --tensor-parallel-size 2
     lite-llama vl-chat --model-dir my_weight/llava-1.5-7b-hf
 """
 
@@ -25,127 +31,10 @@ from typing import Any, ClassVar
 
 from PIL import Image
 
-from .engine import SamplingParams, TextGenerator, VisionGenerator
+from .engine import ContinuousBatchingEngine, SamplingParams, VisionGenerator
 from .models.config import read_model_type
 from .modules.quantization import RUNTIME_SCHEMES
 from .utils.prompt_templates import ChatPrompter, get_prompter
-
-
-# --------------------------------------------------------------------------- #
-# TP worker (module-level so mp can pickle it)
-# --------------------------------------------------------------------------- #
-def _pack_sampling_params(params: SamplingParams):
-    """Serialize :class:`SamplingParams` into one tensor for the TP broadcast.
-
-    ``max_gen_len`` is ``None``-aware: ``-1`` encodes ``None`` on the wire.
-    ``stop_on_repeat`` rides along as 0/1 so workers mirror rank 0's stop
-    behaviour exactly — mismatched stop conditions are how TP chat deadlocks
-    (one rank keeps forwarding while the other has already left the loop).
-    """
-    import torch
-
-    return torch.tensor(
-        [
-            params.temperature,
-            params.top_p,
-            params.repetition_penalty,
-            -1.0 if params.max_gen_len is None else float(params.max_gen_len),
-            1.0 if params.stop_on_repeat else 0.0,
-        ],
-        dtype=torch.float64,
-    )
-
-
-def _unpack_sampling_params(values) -> SamplingParams:
-    """Rebuild the :class:`SamplingParams` packed by :func:`_pack_sampling_params`."""
-    return SamplingParams(
-        temperature=float(values[0]),
-        top_p=float(values[1]),
-        repetition_penalty=float(values[2]),
-        max_gen_len=None if values[3] < 0 else int(values[3]),
-        stop_on_repeat=bool(values[4]),
-    )
-
-
-def _tp_mirror_worker(
-    rank: int,
-    world_size: int,
-    model_dir: str,
-    max_seq_len: int,
-    max_gpu_num_blocks: int | None,
-    quantization: str | None,
-    kv_cache_dtype: str = "auto",
-    image_paths: list[str] | None = None,
-    prompt_text: str | None = None,
-) -> None:
-    """Non-rank-0 TP worker: builds model, then mirrors rank 0's forwards via NCCL.
-
-    The worker sits in a loop: it receives a flag (1=forward, 0=exit) and the
-    prompt tokens from rank 0 via dist.broadcast, then calls generator.stream()
-    which participates in the same all-reduces as rank 0. Output is discarded.
-
-    For multimodal models, ``image_paths`` and ``prompt_text`` let the worker
-    run the same vision-tower + language-model forward calls as rank 0.
-    """
-    import torch
-    import torch.distributed as dist
-
-    from .distributed.parallel_state import init_tensor_parallel
-
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ.setdefault("MASTER_PORT", "29500")
-    torch.cuda.set_device(rank)
-    init_tensor_parallel(rank=rank, world_size=world_size)
-
-    if image_paths:
-        from .engine import VisionGenerator
-        generator = VisionGenerator(
-            checkpoints_dir=model_dir,
-            max_seq_len=max_seq_len,
-            max_gpu_num_blocks=max_gpu_num_blocks,
-            device=f"cuda:{rank}",
-            quantization=quantization,
-            tensor_parallel_size=world_size,
-            kv_cache_dtype=kv_cache_dtype,
-        )
-    else:
-        generator = TextGenerator(
-            checkpoints_dir=model_dir,
-            max_seq_len=max_seq_len,
-            max_gpu_num_blocks=max_gpu_num_blocks,
-            device=f"cuda:{rank}",
-            use_cuda_graph=False,
-            quantization=quantization,
-            tensor_parallel_size=world_size,
-            kv_cache_dtype=kv_cache_dtype,
-        )
-    # Mirror loop: wait for rank 0's broadcast, generate, discard output.
-    while True:
-        flag = torch.zeros(1, dtype=torch.int64, device=f"cuda:{rank}")
-        dist.broadcast(flag, src=0)
-        if flag.item() == 0:
-            break
-        length = torch.zeros(1, dtype=torch.int64, device=f"cuda:{rank}")
-        dist.broadcast(length, src=0)
-        tok_tensor = torch.zeros(length.item(), dtype=torch.int64, device=f"cuda:{rank}")
-        dist.broadcast(tok_tensor, src=0)
-        # Rank 0's real sampling params, never a local guess: both sides must
-        # stop at the same step, or one rank waits on an all-reduce that never
-        # comes (NCCL deadlock).
-        values = torch.zeros(5, dtype=torch.float64, device=f"cuda:{rank}")
-        dist.broadcast(values, src=0)
-        params = _unpack_sampling_params(values.cpu())
-
-        prompt = generator.engine.tokenizer.decode(tok_tensor.tolist())
-        if image_paths:
-            images = [Image.open(p).convert("RGB") for p in image_paths]
-            for _ in generator.stream(prompt_text or prompt, images, params):
-                pass
-        else:
-            for _ in generator.stream([prompt], params):
-                pass  # participate in all-reduces, discard output
-
-    dist.destroy_process_group()
 
 # ---------------------------------------------------------------------------
 # 第一层:声明式 CLI 参数表
@@ -221,9 +110,9 @@ COMMON_OPTIONS: tuple[CliOption, ...] = (
 class EngineOptions:
     """引擎构造参数;统一从 ``argparse.Namespace`` 显式提取、校验并持有。
 
-    充当 TextGenerator / VisionGenerator 的工厂:两条生成路径的构造签名
-    差异(如 CUDA Graph 只接入文本 decode 路径)在此消化,命令类只见
-    统一的 ``build_*`` 接口。
+    充当引擎工厂:文本路径(连续批处理引擎)与多模态路径
+    (``VisionGenerator``)的构造差异在此消化,命令类只见统一的
+    ``build_*`` 接口。
     """
 
     model_dir: str
@@ -236,13 +125,12 @@ class EngineOptions:
     tensor_parallel_size: int = 1
 
     @classmethod
-    def from_args(cls, args: argparse.Namespace) -> "EngineOptions":
+    def from_args(cls, args: argparse.Namespace) -> EngineOptions:
         # --model-dir 优先,其次环境变量 LITE_LLAMA_MODEL_DIR
         model_dir = args.model_dir or os.environ.get("LITE_LLAMA_MODEL_DIR")
         if not model_dir:
             raise SystemExit(
-                "Model directory not provided. "
-                "Pass --model-dir <path> or set LITE_LLAMA_MODEL_DIR."
+                "Model directory not provided. Pass --model-dir <path> or set LITE_LLAMA_MODEL_DIR."
             )
         if not Path(model_dir).is_dir():
             raise SystemExit(f"model directory {model_dir!r} does not exist")
@@ -251,16 +139,31 @@ class EngineOptions:
             max_seq_len=args.max_seq_len,
             max_gpu_num_blocks=args.max_gpu_num_blocks,
             device=args.device,
-            use_cuda_graph=getattr(args, "use_cuda_graph", False),
+            # Two flag spellings, because the right default differs by command:
+            # an interactive REPL captures graphs only when asked, a throughput
+            # command has them on unless refused.
+            use_cuda_graph=getattr(args, "use_cuda_graph", False)
+            or not getattr(args, "no_cuda_graph", True),
             quantization=getattr(args, "quantization", None),
             kv_cache_dtype=getattr(args, "kv_cache_dtype", "auto"),
             tensor_parallel_size=getattr(args, "tensor_parallel_size", 1),
         )
 
-    def build_text_generator(self) -> TextGenerator:
-        return TextGenerator(
-            checkpoints_dir=self.model_dir,
+    def build_engine(
+        self, *, max_num_seqs: int = 32, max_num_batched_tokens: int = 8192
+    ) -> ContinuousBatchingEngine:
+        """The text engine, for every command that is not multimodal.
+
+        One factory serves ``chat`` and ``batch`` because what separates them is
+        scheduling, not construction — and tensor parallelism arrives with it:
+        ``from_pretrained`` spawns the follower ranks and hands back an engine
+        whose executor drives them, so a command only picks its concurrency.
+        """
+        return ContinuousBatchingEngine.from_pretrained(
+            self.model_dir,
             max_seq_len=self.max_seq_len,
+            max_num_seqs=max_num_seqs,
+            max_num_batched_tokens=max_num_batched_tokens,
             max_gpu_num_blocks=self.max_gpu_num_blocks,
             device=self.device,
             use_cuda_graph=self.use_cuda_graph,
@@ -385,7 +288,7 @@ class CliCommand(ABC):
         sub.set_defaults(handler=self)
         return sub
 
-    def add_arguments(self, sub: argparse.ArgumentParser) -> None:
+    def add_arguments(self, sub: argparse.ArgumentParser) -> None:  # noqa: B027 -- opt-in hook
         """注册命令特有参数;默认无。"""
 
     @staticmethod
@@ -403,15 +306,18 @@ class CliCommand(ABC):
 
 
 class ChatCommand(CliCommand):
-    """``chat``:交互式文本对话(REPL 循环,逐 token 流式输出)。"""
+    """``chat``:交互式文本对话(REPL 循环,逐 token 流式输出)。
+
+    单卡多卡走同一条路径:引擎自己决定 rank,本类只管一次对话一个请求。
+    """
 
     name = "chat"
     help = "Interactive text chat"
 
     def add_arguments(self, sub: argparse.ArgumentParser) -> None:
-        CliOption(
-            "--prompt-style", {"help": "Prompter name (auto-detected by default)"}
-        ).register(sub)
+        CliOption("--prompt-style", {"help": "Prompter name (auto-detected by default)"}).register(
+            sub
+        )
         CliOption(
             "--use-cuda-graph",
             {
@@ -422,117 +328,30 @@ class ChatCommand(CliCommand):
 
     def run(self, args: argparse.Namespace) -> int:
         opts = EngineOptions.from_args(args)
-
-        # Tensor parallelism: spawn N processes, each running the same engine.
-        # All ranks call forward with the same inputs; the NCCL all-reduce
-        # inside RowParallelLinear keeps them in lockstep.
-        if opts.tensor_parallel_size > 1:
-            return self._run_tp(args, opts)
-
-        generator = opts.build_text_generator()
+        # A REPL has one turn in flight at a time, so a single slot is the whole
+        # of the concurrency and the KV cache is not split eight ways for nobody.
+        engine = opts.build_engine(max_num_seqs=1)
         style = PrompterResolver.resolve(opts.model_dir, args.prompt_style)
-        prompter = PrompterResolver.build(style, generator.tokenizer)
+        prompter = PrompterResolver.build(style, engine.tokenizer)
         params = self.build_sampling_params(args)
 
         self._print_banner(opts.model_dir, style, params)
-        while True:
-            try:
-                user_input = input(">>> ").strip()
-            except (EOFError, KeyboardInterrupt):  # Ctrl-D / Ctrl-C 退出
-                print()
-                return 0
-            if not user_input:
-                continue
-            if user_input.lower() == "exit":
-                return 0
-            self._stream_reply(generator, prompter, params, user_input)
-
-    def _run_tp(self, args: argparse.Namespace, opts: EngineOptions) -> int:
-        """Run TP chat: main process is rank 0 (has stdin), workers mirror forwards."""
-        import torch
-        import torch.distributed as dist
-        import torch.multiprocessing as mp
-
-        from .distributed.parallel_state import init_tensor_parallel
-
-        world_size = opts.tensor_parallel_size
-
-        # Spawn mirror workers for ranks 1..N-1.
         try:
-            mp.set_start_method("spawn", force=True)
-        except RuntimeError:
-            pass
-        workers = []
-        for rank in range(1, world_size):
-            p = mp.Process(
-                target=_tp_mirror_worker,
-                args=(rank, world_size, opts.model_dir, opts.max_seq_len,
-                      opts.max_gpu_num_blocks, opts.quantization, opts.kv_cache_dtype),
-                daemon=True,
-            )
-            p.start()
-            workers.append(p)
-
-        # Main process = rank 0.
-        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-        os.environ.setdefault("MASTER_PORT", "29500")
-        torch.cuda.set_device(0)
-        init_tensor_parallel(rank=0, world_size=world_size)
-
-        generator = TextGenerator(
-            checkpoints_dir=opts.model_dir,
-            max_seq_len=opts.max_seq_len,
-            max_gpu_num_blocks=opts.max_gpu_num_blocks,
-            device="cuda:0",
-            use_cuda_graph=False,
-            quantization=opts.quantization,
-            tensor_parallel_size=world_size,
-            kv_cache_dtype=opts.kv_cache_dtype,
-        )
-        style = PrompterResolver.resolve(opts.model_dir, getattr(args, "prompt_style", None))
-        prompter = PrompterResolver.build(style, generator.tokenizer)
-        params = self.build_sampling_params(args)
-        self._print_banner(opts.model_dir, style, params)
-
-        while True:
-            try:
-                user_input = input(">>> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                user_input = "exit"
-
-            # An empty line stays local — same as the single-GPU chat path — so a
-            # stray Enter cannot end the session; only "exit"/EOF broadcasts out.
-            if not user_input:
-                continue
-            exiting = user_input.lower() == "exit"
-
-            # Broadcast flag: 1=generate, 0=exit.
-            flag = torch.tensor([0 if exiting else 1], dtype=torch.int64, device="cuda:0")
-            dist.broadcast(flag, src=0)
-            if exiting:
-                break
-
-            # Tokenize and broadcast prompt tokens + sampling params to workers.
-            formatted = prompter.insert_prompt(user_input) if prompter else user_input
-            tokens = generator.tokenizer.encode(formatted)
-            tok_tensor = torch.tensor(tokens, dtype=torch.int64, device="cuda:0")
-            length = torch.tensor([len(tokens)], dtype=torch.int64, device="cuda:0")
-            dist.broadcast(length, src=0)
-            dist.broadcast(tok_tensor, src=0)
-            params_tensor = _pack_sampling_params(params).to("cuda:0")
-            dist.broadcast(params_tensor, src=0)
-
-            # All ranks generate together (all-reduces synchronize).
-            prompt_text = generator.tokenizer.decode(tokens)
-            for step_tokens in generator.stream([prompt_text], params):
-                print(step_tokens[0], end="", flush=True)
-            print()
-
-        # Shutdown workers.
-        for p in workers:
-            p.join(timeout=5)
-        dist.destroy_process_group()
-        return 0
+            while True:
+                try:
+                    user_input = input(">>> ").strip()
+                except (EOFError, KeyboardInterrupt):  # Ctrl-D / Ctrl-C 退出
+                    print()
+                    return 0
+                if not user_input:
+                    continue
+                if user_input.lower() == "exit":
+                    return 0
+                self._stream_reply(engine, prompter, params, user_input)
+        finally:
+            # Under tensor parallelism the follower ranks are waiting for the
+            # next plan; without this they would outlive the session.
+            engine.shutdown()
 
     @staticmethod
     def _print_banner(model_dir: str, style: str, params: SamplingParams) -> None:
@@ -550,7 +369,7 @@ class ChatCommand(CliCommand):
 
     @staticmethod
     def _stream_reply(
-        generator: TextGenerator,
+        engine: ContinuousBatchingEngine,
         prompter: ChatPrompter | None,
         params: SamplingParams,
         user_input: str,
@@ -561,10 +380,19 @@ class ChatCommand(CliCommand):
             prompter.insert_prompt(user_input)
             prompt_style_input = prompter.model_input
 
-        for step in generator.stream([prompt_style_input], params):
-            print(step[0], end="", flush=True)
-        reasons = generator.engine.last_stop_reasons
-        if reasons and reasons[0] == "repeat":
+        try:
+            request = engine.add_request(prompt_style_input, params)
+        except ValueError as exc:  # empty, or longer than the context window
+            print(f"[{exc}]\n", file=sys.stderr)
+            return
+
+        # One request is in flight, so whoever a step advanced is this one; the
+        # loop reads it rather than assuming, since a step that scheduled nothing
+        # would otherwise reprint the previous delta.
+        while engine.has_unfinished_requests():
+            for advanced in engine.step():
+                print(advanced.delta, end="", flush=True)
+        if request.finish_reason == "repeat":
             print(
                 "\n[stopped early: degenerate repetition detected; try a higher "
                 "--repetition-penalty or --temperature]",
@@ -593,7 +421,14 @@ class VlChatCommand(CliCommand):
         opts = EngineOptions.from_args(args)
 
         if opts.tensor_parallel_size > 1:
-            return self._run_tp(args, opts)
+            # Text commands shard through the engine's executor; the vision path
+            # still runs one replica, and the scheme that used to fake it here --
+            # a mirror process re-deriving the batch from a broadcast prompt --
+            # is exactly what this release removed.
+            raise SystemExit(
+                "vl-chat is single-GPU: --tensor-parallel-size > 1 needs the "
+                "continuous-batching engine, which does not host vision models yet"
+            )
 
         generator = opts.build_vision_generator()
         params = self.build_sampling_params(args)
@@ -609,88 +444,6 @@ class VlChatCommand(CliCommand):
         for delta in generator.stream(args.prompt or default_prompt, images, params):
             print(delta, end="", flush=True)
         print()
-        return 0
-
-    @staticmethod
-    def _run_tp(args: argparse.Namespace, opts: EngineOptions) -> int:
-        """TP vision chat: all ranks process the image independently (vision tower
-        is replicated); the language model's all-reduces keep them in lockstep."""
-        import torch
-        import torch.distributed as dist
-        import torch.multiprocessing as mp
-
-        from .distributed.parallel_state import init_tensor_parallel
-        from .engine import VisionGenerator
-
-        world_size = opts.tensor_parallel_size
-
-        # Determine the prompt before spawning workers so they get it too.
-        from .models.config import read_model_type
-        is_qwen3_vl = read_model_type(opts.model_dir) == "qwen3_vl"
-        default_prompt = (
-            "Describe this image."
-            if is_qwen3_vl
-            else "USER: <image>\nDescribe this image. ASSISTANT:"
-        )
-        prompt = args.prompt or default_prompt
-
-        # Spawn mirror workers for ranks 1..N-1.
-        try:
-            mp.set_start_method("spawn", force=True)
-        except RuntimeError:
-            pass
-        workers = []
-        for rank in range(1, world_size):
-            p = mp.Process(
-                target=_tp_mirror_worker,
-                args=(rank, world_size, opts.model_dir, opts.max_seq_len,
-                      opts.max_gpu_num_blocks, opts.quantization, opts.kv_cache_dtype,
-                      args.image, prompt),
-                daemon=True,
-            )
-            p.start()
-            workers.append(p)
-
-        # Main process = rank 0.
-        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-        os.environ.setdefault("MASTER_PORT", "29500")
-        torch.cuda.set_device(0)
-        init_tensor_parallel(rank=0, world_size=world_size)
-
-        generator = VisionGenerator(
-            checkpoints_dir=opts.model_dir,
-            max_seq_len=opts.max_seq_len,
-            max_gpu_num_blocks=opts.max_gpu_num_blocks,
-            device="cuda:0",
-            quantization=opts.quantization,
-            tensor_parallel_size=world_size,
-            kv_cache_dtype=opts.kv_cache_dtype,
-        )
-        params = CliCommand.build_sampling_params(args)
-
-        images = [Image.open(p).convert("RGB") for p in args.image]
-
-        # Broadcast the go-signal and prompt tokens so workers enter the same
-        # forward calls as rank 0 (vision tower + language model).
-        formatted = prompt
-        tokens = generator.engine.tokenizer.encode(formatted)
-        tok_tensor = torch.tensor(tokens, dtype=torch.int64, device="cuda:0")
-        length = torch.tensor([len(tokens)], dtype=torch.int64, device="cuda:0")
-        flag = torch.tensor([1], dtype=torch.int64, device="cuda:0")
-        dist.broadcast(flag, src=0)
-        dist.broadcast(length, src=0)
-        dist.broadcast(tok_tensor, src=0)
-
-        for delta in generator.stream(prompt, images, params):
-            print(delta, end="", flush=True)
-        print()
-
-        # Shutdown workers.
-        flag.zero_()
-        dist.broadcast(flag, src=0)
-        for p in workers:
-            p.join(timeout=5)
-        dist.destroy_process_group()
         return 0
 
 
@@ -742,11 +495,6 @@ class ServeCommand(CliCommand):
         from .entrypoints.api_server import ServerConfig, run_server
 
         opts = EngineOptions.from_args(args)
-        if opts.tensor_parallel_size > 1:
-            raise SystemExit(
-                "serve does not support --tensor-parallel-size > 1 yet; "
-                "the continuous-batching engine is single-process"
-            )
         # Sampling flags do not apply here: every HTTP request carries its own.
         config = ServerConfig(
             model_dir=opts.model_dir,
@@ -756,8 +504,9 @@ class ServeCommand(CliCommand):
             max_num_batched_tokens=args.max_num_batched_tokens,
             max_gpu_num_blocks=opts.max_gpu_num_blocks,
             device=opts.device,
-            use_cuda_graph=not args.no_cuda_graph,
+            use_cuda_graph=opts.use_cuda_graph,
             quantization=opts.quantization,
+            tensor_parallel_size=opts.tensor_parallel_size,
             kv_cache_dtype=opts.kv_cache_dtype,
             chat_template=not args.no_chat_template,
         )
@@ -784,6 +533,10 @@ class BatchCommand(CliCommand):
             ),
             CliOption("--max-num-seqs", {"type": int, "default": 32}),
             CliOption(
+                "--no-cuda-graph",
+                {"action": "store_true", "help": "Run decode eager instead of replaying graphs"},
+            ),
+            CliOption(
                 "--no-chat-template",
                 {"action": "store_true", "help": "Send prompts verbatim (base models)"},
             ),
@@ -797,31 +550,14 @@ class BatchCommand(CliCommand):
     def run(self, args: argparse.Namespace) -> int:
         import time
 
-        from .engine import ContinuousBatchingEngine
-
         opts = EngineOptions.from_args(args)
-        if opts.tensor_parallel_size > 1:
-            raise SystemExit(
-                "batch does not support --tensor-parallel-size > 1 yet; "
-                "the continuous-batching engine is single-process"
-            )
         prompts = self._load_prompts(args.prompts_file)
 
-        engine = ContinuousBatchingEngine.from_pretrained(
-            opts.model_dir,
-            max_seq_len=opts.max_seq_len,
-            max_num_seqs=args.max_num_seqs,
-            max_gpu_num_blocks=opts.max_gpu_num_blocks,
-            device=opts.device,
-            quantization=opts.quantization,
-            kv_cache_dtype=opts.kv_cache_dtype,
-        )
+        engine = opts.build_engine(max_num_seqs=args.max_num_seqs)
         prompter = (
             None
             if args.no_chat_template
-            else PrompterResolver.build(
-                PrompterResolver.resolve(opts.model_dir), engine.tokenizer
-            )
+            else PrompterResolver.build(PrompterResolver.resolve(opts.model_dir), engine.tokenizer)
         )
         if prompter is not None:
             prompts = [prompter.insert_prompt(p) for p in prompts]
@@ -829,9 +565,12 @@ class BatchCommand(CliCommand):
         params = self.build_sampling_params(args)
         started = time.perf_counter()
         requests = [engine.add_request(prompt, params) for prompt in prompts]
-        while engine.has_unfinished_requests():
-            engine.step()
-        elapsed = time.perf_counter() - started
+        try:
+            while engine.has_unfinished_requests():
+                engine.step()
+        finally:
+            elapsed = time.perf_counter() - started
+            engine.shutdown()  # releases the tensor-parallel followers, if any
 
         for index, request in enumerate(requests):
             print(f"--- [{index}] {request.finish_reason} ---")

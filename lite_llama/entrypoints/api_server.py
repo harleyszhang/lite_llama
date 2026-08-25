@@ -24,7 +24,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
-from ..engine.async_engine import AsyncLLMEngine
+from ..engine.async_engine import AsyncLLMEngine, StreamedOutput
 from ..engine.sampler import SamplingParams
 from ..utils.logger import get_logger
 from ..utils.prompt_templates import get_prompter
@@ -84,6 +84,9 @@ class ServerConfig:
         device: Torch device string.
         use_cuda_graph: Capture decode CUDA graphs.
         quantization: Runtime weight quantisation for fp16 checkpoints.
+        tensor_parallel_size: GPUs this replica's weights are split over. Above 1
+            the engine spawns the follower ranks itself and the server is still
+            one process with one scheduler.
         kv_cache_dtype: KV-cache element type (``"auto"`` or an fp8 spelling).
         chat_template: ``True`` applies the tokenizer's chat template to
             ``/v1/chat/completions`` messages. Turn it off for base models, which
@@ -99,6 +102,7 @@ class ServerConfig:
     device: str = "cuda"
     use_cuda_graph: bool = True
     quantization: str | None = None
+    tensor_parallel_size: int = 1
     kv_cache_dtype: str = "auto"
     chat_template: bool = True
 
@@ -246,6 +250,7 @@ def build_app(config: ServerConfig, engine: AsyncLLMEngine | None = None):
                 device=config.device,
                 use_cuda_graph=config.use_cuda_graph,
                 quantization=config.quantization,
+                tensor_parallel_size=config.tensor_parallel_size,
                 kv_cache_dtype=config.kv_cache_dtype,
             )
         active: AsyncLLMEngine = state["engine"]
