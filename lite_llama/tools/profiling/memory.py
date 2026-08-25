@@ -1,28 +1,75 @@
-"""viz.memory: static memory budget table (L1).
+"""Static GPU memory budget from config numbers alone — no GPU, no model load.
 
-Computes and renders a breakdown of GPU memory usage: model weights, KV cache,
-activations, and CUDA graph workspace. Pure computation from config parameters,
-no GPU required.
+Deciding a KV capacity or a max batch means knowing where the memory goes, and
+finding that out by launching the server and reading the OOM is a slow way to learn.
+Everything here is arithmetic over shape numbers, so it answers before the weights
+are downloaded.
+
+The shape numbers live in one dataclass and are validated there, which is what keeps
+the compute and render entry points from restating a twelve-field signature apiece.
+Two of the four rows are exact (weights, KV cache) and two are deliberate
+over-estimates (activations, graph workspace) — labelled as such, because a budget
+that under-promises is the only useful kind.
 
 Usage:
-    table = export_memory_budget(config, num_kv_blocks=100000, kv_dtype="fp16")
-    print_memory_budget(config, num_kv_blocks=100000)
+    print(export_memory_budget(num_layers=28, hidden_size=1024, ..., num_kv_blocks=147875))
+    budget = compute_memory_budget(ModelShape(num_layers=28, ...))
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+#: Bytes per element, keyed by the dtype names the config files use.
+DTYPE_BYTES = {"fp16": 2, "bf16": 2, "fp32": 4, "int8": 1, "uint8": 1, "fp8": 1, "int4": 1}
 
-@dataclass
+#: Workspace a captured CUDA graph set costs, over the tensors it replays. A fixed
+#: over-estimate: it depends on how many shapes get captured, which is a runtime fact.
+CUDA_GRAPH_BYTES = 256 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class ModelShape:
+    """Every number a budget needs. Named as the model config names them.
+
+    Attributes:
+        num_kv_blocks: KV cache capacity in *tokens*, i.e. blocks x block size.
+        tie_word_embeddings: When set, `lm_head` shares the embedding matrix and is
+            not counted twice — worth getting right, it is a third of a small model.
+    """
+
+    num_layers: int
+    hidden_size: int
+    intermediate_size: int
+    num_heads: int
+    num_kv_heads: int
+    head_dim: int
+    vocab_size: int
+    num_kv_blocks: int
+    weight_dtype: str = "fp16"
+    kv_dtype: str = "fp16"
+    max_batch_size: int = 16
+    max_seq_len: int = 2048
+    tie_word_embeddings: bool = False
+
+
+@dataclass(frozen=True)
 class MemoryBudget:
-    """Static memory breakdown in bytes."""
+    """Static memory breakdown in bytes, plus GB views for printing."""
 
     model_weights_bytes: int
     kv_cache_bytes: int
     activation_bytes: int
     cuda_graph_bytes: int
-    total_bytes: int
+
+    @property
+    def total_bytes(self) -> int:
+        return (
+            self.model_weights_bytes
+            + self.kv_cache_bytes
+            + self.activation_bytes
+            + self.cuda_graph_bytes
+        )
 
     @property
     def model_weights_gb(self) -> float:
@@ -37,119 +84,71 @@ class MemoryBudget:
         return self.total_bytes / (1024**3)
 
 
-def _dtype_bytes(dtype_str: str) -> int:
-    """Bytes per element for a dtype string."""
-    return {"fp16": 2, "bf16": 2, "fp32": 4, "int8": 1, "uint8": 1, "fp8": 1, "int4": 1}.get(
-        dtype_str, 2
-    )
-
-
-def compute_memory_budget(
-    num_layers: int,
-    hidden_size: int,
-    intermediate_size: int,
-    num_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-    vocab_size: int,
-    num_kv_blocks: int,
-    weight_dtype: str = "fp16",
-    kv_dtype: str = "fp16",
-    max_batch_size: int = 16,
-    max_seq_len: int = 2048,
-) -> MemoryBudget:
-    """Compute static memory budget from model config.
+def compute_memory_budget(shape: ModelShape) -> MemoryBudget:
+    """Break the resident footprint into weights, KV cache, activations, graphs.
 
     Args:
-        num_layers: Number of transformer layers.
-        hidden_size: Model hidden dimension.
-        intermediate_size: FFN intermediate dimension.
-        num_heads: Number of attention heads.
-        num_kv_heads: Number of KV heads (GQA).
-        head_dim: Dimension per head.
-        vocab_size: Vocabulary size.
-        num_kv_blocks: KV cache capacity in tokens.
-        weight_dtype: Model weight dtype string.
-        kv_dtype: KV cache dtype string.
-        max_batch_size: Maximum batch size for activation estimate.
-        max_seq_len: Maximum sequence length.
+        shape: The config numbers to budget for.
+
+    Returns:
+        The four components, in bytes.
     """
-    w_bytes = _dtype_bytes(weight_dtype)
-    kv_bytes = _dtype_bytes(kv_dtype)
+    w_bytes = DTYPE_BYTES.get(shape.weight_dtype, 2)
+    kv_bytes = DTYPE_BYTES.get(shape.kv_dtype, 2)
 
-    # Model weights: embedding + layers + lm_head
-    embed_params = vocab_size * hidden_size
-    # Per layer: fused qkv_proj + o_proj + fused gate_up_proj + down_proj + norms
-    qkv_params = hidden_size * (num_heads + 2 * num_kv_heads) * head_dim
-    o_params = num_heads * head_dim * hidden_size
-    ffn_params = hidden_size * intermediate_size * 3  # fused gate + up + down
-    norm_params = hidden_size * 2  # input_norm + post_norm
+    # Weights: embedding + layers + lm_head, where the head is free when tied.
+    embed_params = shape.vocab_size * shape.hidden_size
+    qkv_params = shape.hidden_size * (shape.num_heads + 2 * shape.num_kv_heads) * shape.head_dim
+    o_params = shape.num_heads * shape.head_dim * shape.hidden_size
+    ffn_params = shape.hidden_size * shape.intermediate_size * 3  # gate + up + down
+    norm_params = shape.hidden_size * 2  # input_norm + post_norm
     per_layer_params = qkv_params + o_params + ffn_params + norm_params
-    total_params = embed_params + num_layers * per_layer_params + vocab_size * hidden_size
-    model_bytes = total_params * w_bytes
+    head_params = 0 if shape.tie_word_embeddings else embed_params
+    total_params = embed_params + shape.num_layers * per_layer_params + head_params
 
-    # KV cache: 2 (K+V) * num_layers * num_kv_heads * head_dim * num_blocks
-    kv_cache_bytes = 2 * num_layers * num_kv_heads * head_dim * num_kv_blocks * kv_bytes
+    # KV cache: K and V, every layer, one entry per token of capacity.
+    kv_cache_bytes = (
+        2 * shape.num_layers * shape.num_kv_heads * shape.head_dim * shape.num_kv_blocks * kv_bytes
+    )
 
-    # Activation estimate: one forward pass peak (rough upper bound)
-    act_bytes = max_batch_size * max_seq_len * hidden_size * 2 * 4  # fp32 intermediates
-
-    # CUDA graph workspace (conservative estimate)
-    graph_bytes = 256 * 1024 * 1024  # 256 MB
-
-    total = model_bytes + kv_cache_bytes + act_bytes + graph_bytes
+    # Activations: a peak upper bound, assuming fp32 intermediates for the widest
+    # batch x sequence the server admits. Deliberately loose.
+    activation_bytes = shape.max_batch_size * shape.max_seq_len * shape.hidden_size * 2 * 4
 
     return MemoryBudget(
-        model_weights_bytes=model_bytes,
+        model_weights_bytes=total_params * w_bytes,
         kv_cache_bytes=kv_cache_bytes,
-        activation_bytes=act_bytes,
-        cuda_graph_bytes=graph_bytes,
-        total_bytes=total,
+        activation_bytes=activation_bytes,
+        cuda_graph_bytes=CUDA_GRAPH_BYTES,
     )
 
 
-def export_memory_budget(
-    num_layers: int,
-    hidden_size: int,
-    intermediate_size: int,
-    num_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-    vocab_size: int,
-    num_kv_blocks: int,
-    weight_dtype: str = "fp16",
-    kv_dtype: str = "fp16",
-    max_batch_size: int = 16,
-    max_seq_len: int = 2048,
-) -> str:
-    """Export memory budget as a markdown table string."""
-    budget = compute_memory_budget(
-        num_layers,
-        hidden_size,
-        intermediate_size,
-        num_heads,
-        num_kv_heads,
-        head_dim,
-        vocab_size,
-        num_kv_blocks,
-        weight_dtype,
-        kv_dtype,
-        max_batch_size,
-        max_seq_len,
-    )
+def export_memory_budget(**shape_fields) -> str:
+    """Render the budget for a :class:`ModelShape` as a markdown table.
 
-    lines = [
-        "| Component | Size | Percentage |",
-        "|-----------|------|------------|",
-        f"| Model Weights | {budget.model_weights_gb:.2f} GB | {budget.model_weights_bytes / budget.total_bytes * 100:.1f}% |",
-        f"| KV Cache ({kv_dtype}) | {budget.kv_cache_gb:.2f} GB | {budget.kv_cache_bytes / budget.total_bytes * 100:.1f}% |",
-        f"| Activations | {budget.activation_bytes / (1024**3):.2f} GB | {budget.activation_bytes / budget.total_bytes * 100:.1f}% |",
-        f"| CUDA Graph | {budget.cuda_graph_bytes / (1024**3):.2f} GB | {budget.cuda_graph_bytes / budget.total_bytes * 100:.1f}% |",
-        f"| **Total** | **{budget.total_gb:.2f} GB** | 100% |",
+    Args:
+        **shape_fields: Any :class:`ModelShape` field, by keyword.
+
+    Returns:
+        A five-row markdown table: four components and their total.
+    """
+    shape = ModelShape(**shape_fields)
+    budget = compute_memory_budget(shape)
+    rows = [
+        ("Model Weights", budget.model_weights_bytes),
+        (f"KV Cache ({shape.kv_dtype})", budget.kv_cache_bytes),
+        ("Activations", budget.activation_bytes),
+        ("CUDA Graph", budget.cuda_graph_bytes),
     ]
+    lines = ["| Component | Size | Percentage |", "|-----------|------|------------|"]
+    lines += [
+        f"| {label} | {nbytes / (1024**3):.2f} GB | {nbytes / budget.total_bytes * 100:.1f}% |"
+        for label, nbytes in rows
+    ]
+    lines.append(f"| **Total** | **{budget.total_gb:.2f} GB** | 100% |")
     return "\n".join(lines)
 
 
-def print_memory_budget(**kwargs) -> None:
-    """Print memory budget table to stdout."""
-    print(export_memory_budget(**kwargs))
+def print_memory_budget(**shape_fields) -> None:
+    """Print :func:`export_memory_budget` to stdout."""
+    print(export_memory_budget(**shape_fields))
