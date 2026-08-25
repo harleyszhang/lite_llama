@@ -261,7 +261,9 @@ class ContinuousBatchingEngine:
             device: Torch device string.
             use_cuda_graph: Capture decode graphs. Worth keeping on: continuous
                 batching pads odd batch sizes onto the captured grid, so most
-                steps stay on the graph path.
+                steps stay on the graph path. Ignored above
+                ``tensor_parallel_size`` 1, where a sharded layer's collectives
+                would be captured inside the graph.
             quantization: Runtime weight quantisation, forwarded to the engine.
                 Orthogonal to batching -- it changes the linear layers, not the
                 KV cache or the schedule.
@@ -292,7 +294,10 @@ class ContinuousBatchingEngine:
             "tokenizer_path": tokenizer,
             "max_seq_len": max_seq_len,
             "max_gpu_num_blocks": max_gpu_num_blocks,
-            "use_cuda_graph": use_cuda_graph,
+            # A captured graph would replay the collectives a sharded layer
+            # issues, which is not safe, so tensor parallelism decodes eager --
+            # the same trade-off :class:`~lite_llama.engine.llm.LLM` makes.
+            "use_cuda_graph": use_cuda_graph and tensor_parallel_size == 1,
             "quantization": quantization,
             "kv_cache_dtype": kv_cache_dtype,
         }
