@@ -187,8 +187,7 @@ class _PrefillPass(_StepPass):
         width = max(c for _, c in chunks)
 
         rows = [
-            request.prompt_token_ids[start:end]
-            + [self._pad_id] * (width - (end - start))
+            request.prompt_token_ids[start:end] + [self._pad_id] * (width - (end - start))
             for (request, _), start, end in zip(chunks, starts, ends, strict=True)
         ]
         input_ids = torch.tensor(rows, dtype=torch.long, device=self._device)
@@ -204,8 +203,18 @@ class _PrefillPass(_StepPass):
         last = torch.tensor(ends, dtype=torch.long, device=self._device) - 1
         logits = self._runner.forward(input_ids, positions, None, logits_positions=last)
 
-        completed = [r for r, _ in chunks if r.num_computed_tokens == r.prompt_len]
-        return self._sample_first(completed, logits)
+        # Only a chunk that completed its prompt has a next token to sample, and
+        # a grid can mix the two: the admission budget happily takes a short
+        # prompt (done in one chunk) alongside a long one (chunk-capped). So the
+        # completed requests must be paired with *their own* grid rows rather
+        # than with the leading rows of the batch.
+        done = [
+            (row, r) for row, (r, _) in enumerate(chunks) if r.num_computed_tokens == r.prompt_len
+        ]
+        if not done:
+            return []
+        rows = torch.tensor([row for row, _ in done], dtype=torch.long, device=self._device)
+        return self._sample_first([request for _, request in done], logits[rows])
 
     def _run_extend(self, chunks: list[tuple[Request, int]]) -> list[tuple[Request, int]]:
         """Resumed chunks as one decode-style row per token."""
@@ -244,7 +253,9 @@ class _PrefillPass(_StepPass):
         rows = torch.tensor(last_row, dtype=torch.long, device=self._device)
         return self._sample_first(completed, logits[:, -1, :][rows])
 
-    def _sample_first(self, requests: list[Request], logits: torch.Tensor) -> list[tuple[Request, int]]:
+    def _sample_first(
+        self, requests: list[Request], logits: torch.Tensor
+    ) -> list[tuple[Request, int]]:
         """Sample first tokens for ``requests`` and land them in the generated grid.
 
         A first sample has no repetition window yet, so the penalty is a no-op
