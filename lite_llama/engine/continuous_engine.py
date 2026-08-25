@@ -385,7 +385,11 @@ class ContinuousBatchingEngine:
         Returns:
             The requests that produced a token this step, in pass order. Each
             carries this step's text in ``delta``; those that stopped also carry
-            a ``finish_reason``.
+            a ``finish_reason``. A request that stopped on a stop token is
+            included with an empty ``delta`` — the async front end learns a
+            request ended only from what this list hands back, so leaving it
+            out would strand its stream waiting on a final chunk that never
+            comes.
         """
         scheduled = self.scheduler.schedule()
         if scheduled.is_empty:
@@ -457,8 +461,12 @@ class ContinuousBatchingEngine:
 
             if token_id in self.stop_token_ids:
                 # The stop token itself is model punctuation, not output; the
-                # one-shot path drops it too.
+                # one-shot path drops it too. The request still belongs in
+                # this step's return (see step()): its stream has to hear the
+                # finish reason, or an async consumer waits on a final chunk
+                # that never comes.
                 self._finish(request, "eos")
+                advanced.append(request)
                 continue
 
             request.output_token_ids.append(token_id)
