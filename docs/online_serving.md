@@ -58,11 +58,14 @@ for chunk in client.chat.completions.create(
 | `--host` / `--port` | `0.0.0.0` / `8000` | 监听地址 |
 | `--served-model-name` | 目录名 | `/v1/models` 里报的名字 |
 | `--max-seq-len` | `2048` | 上下文窗口，同时也是每个槽位的 KV 容量 |
-| `--max-num-seqs` | `32` | 同时 decode 的请求数上限 |
+| `--max-num-seqs` | `32` | 同时 decode 的请求数上限（DP 下是**每副本**的上限） |
 | `--max-num-batched-tokens` | `8192` | 一次 prefill 分组的 padded token 预算 |
 | `--max-gpu-num-blocks` | 自动 profile | 手动指定 KV cache 行数 |
 | `--no-cuda-graph` | 关 | 用 eager decode 而不是 replay graph |
 | `--no-chat-template` | 关 | base 模型用：消息原样拼接，不套模板 |
+| `--tensor-parallel-size` | `1` | 一份权重的 TP 切分数（切权重，装得下大模型） |
+| `--data-parallel-size` | `1` | 整模型副本数（每副本一卡起，买吞吐；与 TP 组成 dp×tp 网格） |
+| `--load-balancer` | `round_robin` | 请求怎么路由到副本：`round_robin` / `total_requests` / `total_tokens` |
 
 `--max-num-seqs` 既是显存旋钮也是延迟旋钮：超过某个宽度之后，每 token 的成本不再下降，而单请求延迟还在涨。
 
@@ -84,6 +87,18 @@ for chunk in client.chat.completions.create(
 每个请求流记住的是**创建它的那个协程所在的事件循环**，不是引擎启动时选定的某一个。这点是被一个真实的死锁逼出来的：早先版本在 `start()` 时绑定一个循环，于是 ASGI 测试客户端（自己在另一个线程里跑一个循环）永远收不到任何数据——不是报错，是挂住。回归测试：`tests/engine/test_async_engine.py::test_the_engine_serves_a_second_event_loop`。
 
 客户端断开时，`generate()` 的 `finally` 会投一条 abort，被放弃的请求**下一步就让出槽位**，而不是继续跑到长度上限。
+
+### 多卡：`--data-parallel-size` / `--tensor-parallel-size`
+
+`--tensor-parallel-size > 1` 时仍是上面这个形状（TP 的 follower 由引擎内部拉起，对服务层透明）。`--data-parallel-size > 1` 时换成 [`AsyncDataParallelEngine`](../lite_llama/engine/async_data_parallel.py)：每个副本一个进程一条常驻引擎，负载均衡器逐请求选副本，一条**泵线程**把共享结果队列里的消息按 request_id 投回各协程的事件循环——协程仍然只看到同样的 `generate` / `generate_text` 接口，OpenAI 层和所有端点行为不变。
+
+```bash
+# 两份整模型副本，按在飞 token 数路由
+lite-llama serve --model-dir my_weight/Qwen2.5-1.5B-Instruct \
+    --data-parallel-size 2 --load-balancer total_tokens
+```
+
+设计与实测（weak scaling 2.00x 线性）见[数据并行](./data_parallel.md)。
 
 ## 不经 HTTP 直接用
 
@@ -133,6 +148,5 @@ lite-llama batch --model-dir my_weight/Qwen2.5-1.5B-Instruct \
 
 ## 当前边界
 
-- **仅文本模型**：多模态 checkpoint 请用 `LLM.generate()`（视觉路径）。
-- **单副本单卡**：TP / DP 尚未接入，`serve` 起一个引擎。
+- **仅文本模型**：多模态 checkpoint 请用 `LLM.generate()`（视觉路径），`serve` 的 DP/TP 都不覆盖它。
 - **无鉴权、无限流**：面向内网与本地开发，不要直接暴露到公网。

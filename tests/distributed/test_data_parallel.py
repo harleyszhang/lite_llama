@@ -315,11 +315,13 @@ class _LoopEngine:
         self.aborted: list[str] = []
         self.admitted_at: list[int] = []
 
-    def add_request(self, prompt: str, params: SamplingParams | None = None) -> Request:
+    def add_request(
+        self, prompt: str, params: SamplingParams | None = None, request_id: str | None = None
+    ) -> Request:
         if prompt in self._reject:
             raise ValueError("prompt of 9000 tokens exceeds the context window")
         request = Request(
-            request_id=f"req-{next(self._ids)}",
+            request_id=request_id or f"req-{next(self._ids)}",
             prompt=prompt,
             prompt_token_ids=[1],
             params=params or SamplingParams(),
@@ -338,6 +340,7 @@ class _LoopEngine:
         advanced = []
         for request in list(self.running):
             request.output_token_ids.append(7)
+            request.delta = "x"
             request.text += "x"
             if len(request.output_token_ids) >= self._tokens.get(request.prompt, 2):
                 request.status = RequestStatus.FINISHED
@@ -368,7 +371,7 @@ def test_a_finished_batch_is_reported_once_with_every_index():
     losing one silently leaves that prompt unanswered forever.
     """
     engine = _LoopEngine()
-    loop, _requests, results = _loop(engine, (0, [3, 1], ["a", "b"], _GREEDY))
+    loop, _requests, results = _loop(engine, ("batch", 0, [3, 1], ["a", "b"], _GREEDY))
 
     loop.run()
 
@@ -389,7 +392,7 @@ def test_a_batch_waits_for_its_slowest_request():
     is done, because that is the unit the coordinator dispatched.
     """
     engine = _LoopEngine(tokens={"long": 5})
-    requests = _LoopQueue([(0, [0, 1], ["short", "long"], _GREEDY)])
+    requests = _LoopQueue([("batch", 0, [0, 1], ["short", "long"], _GREEDY)])
     results = _LoopQueue()
     loop = _ReplicaLoop(engine, requests, results)
 
@@ -416,7 +419,7 @@ def test_the_loop_blocks_when_idle_and_polls_when_busy():
     ``block`` flag, which is why it is asserted rather than assumed.
     """
     engine = _LoopEngine(tokens={"a": 3})
-    loop, requests, _results = _loop(engine, (0, [0], ["a"], _GREEDY))
+    loop, requests, _results = _loop(engine, ("batch", 0, [0], ["a"], _GREEDY))
 
     loop.run()
 
@@ -431,7 +434,7 @@ def test_a_stop_signal_mid_batch_still_answers_it():
     their prefill; dropping them would turn a clean shutdown into a hang.
     """
     engine = _LoopEngine(tokens={"a": 4})
-    loop, _requests, results = _loop(engine, (0, [0], ["a"], _GREEDY))
+    loop, _requests, results = _loop(engine, ("batch", 0, [0], ["a"], _GREEDY))
 
     loop.run()
 
@@ -447,12 +450,12 @@ def test_a_request_may_join_a_running_batch():
     one — which is exactly what the one-shot ``generate()`` per dispatch could not do.
     """
     engine = _LoopEngine(tokens={"a": 4})
-    requests = _LoopQueue([(0, [0], ["a"], _GREEDY)])
+    requests = _LoopQueue([("batch", 0, [0], ["a"], _GREEDY)])
     results = _LoopQueue()
     loop = _ReplicaLoop(engine, requests, results)
     # The second batch is dispatched while the first is still decoding, and the stop
     # signal only after that — the order a coordinator would produce.
-    arrivals = {1: (1, [2], ["b"], _GREEDY), 2: _SHUTDOWN}
+    arrivals = {1: ("batch", 1, [2], ["b"], _GREEDY), 2: _SHUTDOWN}
     engine._after_step = lambda step: (
         requests.items.append(arrivals[step]) if step in arrivals else None
     )
@@ -471,7 +474,7 @@ def test_a_step_failure_fails_the_batch_and_frees_its_slots():
     hold its cache slot for the process's lifetime.
     """
     engine = _LoopEngine(fail_on_step=1)
-    loop, _requests, results = _loop(engine, (0, [0, 1], ["a", "b"], _GREEDY))
+    loop, _requests, results = _loop(engine, ("batch", 0, [0, 1], ["a", "b"], _GREEDY))
 
     loop.run()
 
@@ -490,7 +493,7 @@ def test_an_unservable_prompt_fails_its_batch_and_not_the_replica():
     admitted is aborted so the batch leaves nothing behind.
     """
     engine = _LoopEngine(reject=["too long"])
-    loop, _requests, results = _loop(engine, (0, [0, 1], ["a", "too long"], _GREEDY))
+    loop, _requests, results = _loop(engine, ("batch", 0, [0, 1], ["a", "too long"], _GREEDY))
 
     loop.run()
 
@@ -499,6 +502,111 @@ def test_an_unservable_prompt_fails_its_batch_and_not_the_replica():
     assert "exceeds the context window" in detail
     assert engine.aborted == ["req-0"]
     assert engine.steps == 0
+
+
+# --------------------------------------------------------------------------- #
+# The replica's engine loop, streaming front end (no GPU work)
+# --------------------------------------------------------------------------- #
+def test_a_streamed_request_reports_each_delta_and_then_finishes():
+    """The streaming contract: progress every step, one final frame with the reason.
+
+    A batch is answered once as a whole; a streamed request is answered *per
+    step*, because its consumer is one HTTP connection and waiting for a batch
+    boundary would be waiting for a grouping that does not exist.
+    """
+    engine = _LoopEngine(tokens={"a": 3})
+    loop, _requests, results = _loop(engine, ("add", "r1", "a", _GREEDY))
+
+    loop.run()
+
+    assert [message[0] for message in results.items] == ["delta", "delta", "finished"]
+    assert {message[1] for message in results.items} == {"r1"}
+    # Delta frames carry the running text and counts the consumer reports as usage.
+    assert [message[2] for message in results.items[:2]] == ["x", "x"]
+    assert [message[3] for message in results.items[:2]] == ["x", "xx"]
+    assert [message[5] for message in results.items[:2]] == [1, 2]
+    # The finish frame carries the reason and the totals, with no delta of its own.
+    assert results.items[-1][2:] == ("eos", "xxx", 1, 3)
+
+
+def test_aborting_a_streamed_request_is_silent():
+    """No acknowledgement comes back for an abort.
+
+    The consumer that asked to cancel has stopped reading, so a reply would be
+    dropped by id on the coordinator side anyway. What must hold instead: the
+    request is aborted before any further step, and nothing is reported for it.
+    """
+    engine = _LoopEngine(tokens={"a": 4})
+    loop, _requests, results = _loop(engine, ("add", "r1", "a", _GREEDY), ("abort", "r1"))
+
+    loop.run()
+
+    assert engine.aborted == ["r1"]
+    assert engine.steps == 0, "aborted before the first step, not after burning one"
+    assert results.items == []
+
+
+def test_an_unservable_prompt_fails_only_its_own_request():
+    """The failure unit of the streaming path is the request, not a batch.
+
+    One caller waiting on one id must not take down the sibling that arrived
+    next to it — that is the whole difference from ``_admit_batch``'s grouping.
+    """
+    engine = _LoopEngine(reject=["too long"])
+    loop, _requests, results = _loop(
+        engine, ("add", "bad", "too long", _GREEDY), ("add", "ok", "fine", _GREEDY)
+    )
+
+    loop.run()
+
+    failed = [message for message in results.items if message[0] == "failed"]
+    assert len(failed) == 1
+    assert failed[0][1] == "bad"
+    assert "exceeds the context window" in failed[0][2]
+    assert [(m[1], m[2]) for m in results.items if m[0] == "finished"] == [("ok", "eos")]
+
+
+def test_a_step_failure_fails_the_streamed_request_and_frees_its_slot():
+    """A broken step must abort the streamed request too, or its slot leaks.
+
+    Same requirement as the batch path, different failure unit: the message is
+    ``("failed", request_id, ...)`` — and the deltas already sent stay sent,
+    because the consumer saw them and the error supersedes only the future.
+    """
+    engine = _LoopEngine(tokens={"a": 4}, fail_on_step=2)
+    loop, _requests, results = _loop(engine, ("add", "r1", "a", _GREEDY))
+
+    loop.run()
+
+    assert [message[0] for message in results.items] == ["delta", "failed"]
+    assert results.items[-1][1] == "r1"
+    assert "illegal memory access" in results.items[-1][2]
+    assert engine.aborted == ["r1"]
+    assert engine.running == []
+
+
+def test_batched_and_streamed_work_share_one_loop_without_confusion():
+    """Both front ends drive one replica at once; ids keep the answers apart.
+
+    The batch must still be answered as one ``done`` holding only its own
+    members, and the streamed request must still get its per-step deltas —
+    neither bookkeeping may leak into the other's messages.
+    """
+    engine = _LoopEngine(tokens={"a": 2, "b": 2})
+    loop, _requests, results = _loop(
+        engine, ("batch", 0, [0], ["a"], _GREEDY), ("add", "solo", "b", _GREEDY)
+    )
+
+    loop.run()
+
+    dones = [message for message in results.items if message[0] == "done"]
+    assert len(dones) == 1
+    assert dones[0][1] == 0
+    assert dones[0][2] == [(0, "xx", "eos")], "the streamed prompt is not a batch member"
+    assert [message[0] for message in results.items if message[1] == "solo"] == [
+        "delta",
+        "finished",
+    ]
 
 
 # --------------------------------------------------------------------------- #

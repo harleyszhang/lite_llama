@@ -24,11 +24,13 @@ use the continuous-batching engine instead::
 
 One GPU too few for the request rate? :class:`DataParallelEngine` takes the same
 arguments plus ``data_parallel_size`` and routes the prompts across that many whole-
-model replicas, one process per GPU.
+model replicas, one process per GPU. For serving, ``AsyncDataParallelEngine`` adds
+streaming on top — ``lite-llama serve --data-parallel-size N`` is it.
 """
 
 from .engine import (
     LLM,
+    AsyncDataParallelEngine,
     AsyncLLMEngine,
     CompletionOutput,
     ContinuousBatchingEngine,
@@ -49,19 +51,20 @@ __version__ = "0.3.0"
 
 __all__ = [
     "LLM",
-    "LLMEngine",
+    "AsyncDataParallelEngine",
     "AsyncLLMEngine",
+    "CompletionOutput",
     "ContinuousBatchingEngine",
     "DataParallelEngine",
+    "LLMEngine",
     "Request",
-    "SchedulerConfig",
-    "StreamedOutput",
+    "RequestOutput",
     "Sampler",
     "SamplingParams",
+    "SchedulerConfig",
+    "StreamedOutput",
     "TextGenerator",
     "VisionGenerator",
-    "CompletionOutput",
-    "RequestOutput",
-    "sample_top_p",
     "__version__",
+    "sample_top_p",
 ]

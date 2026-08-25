@@ -71,7 +71,7 @@ _SHUTDOWN = None
 
 
 class _ReplicaLoop:
-    """A replica's resident engine loop: queue in, finished batches out.
+    """A replica's resident engine loop: commands in, progress out.
 
     This is what separates a replica from a call to ``generate()``. The engine
     lives across dispatches, so a batch is no longer a barrier: the loop admits
@@ -79,17 +79,26 @@ class _ReplicaLoop:
     the next request on the following step instead of padding the batch out to the
     longest answer in it. Idle, it blocks on the queue rather than spinning.
 
-    A batch is answered as a whole because that is the unit the coordinator
-    dispatched and counts; the per-request answers are held until its last request
-    finishes. Reporting them individually is the same bookkeeping with a different
-    grouping, which is where streaming will land.
+    One loop serves two front ends, told apart by the inbound message's leading
+    tag rather than a constructor flag — a replica must not care which kind of
+    coordinator owns it:
+
+    * **batch** (``("batch", batch_id, indices, prompts, params)``) is
+      :meth:`DataParallelEngine.generate`'s unit of work, and is answered as a
+      whole — exactly one ``("done" | "error", batch_id, payload)`` message —
+      because that is what the dispatching side counts.
+    * **streaming** (``("add", request_id, prompt, params)``, cancelled by
+      ``("abort", request_id)``) forwards one online request at a time and is
+      answered per request: a ``("delta", request_id, ...)`` per step and a final
+      ``("finished" | "failed", request_id, ...)``. Same bookkeeping as the batch
+      path with a different grouping, which is why they share this loop.
 
     Args:
         engine: This replica's :class:`ContinuousBatchingEngine`. Under TP it is the
             leader's, and its executor broadcasts every plan to the follower ranks.
-        requests: Inbound ``(batch_id, indices, prompts, params)`` tuples, or
-            :data:`_SHUTDOWN`.
-        results: Outbound ``("done" | "error", batch_id, payload)`` messages.
+        requests: Inbound command tuples (see above), or :data:`_SHUTDOWN`.
+        results: Outbound ``("done" | "error", batch_id, payload)`` and
+            ``("delta" | "finished" | "failed", request_id, ...)`` messages.
     """
 
     def __init__(
@@ -102,6 +111,7 @@ class _ReplicaLoop:
         self._requests = requests
         self._results = results
         self._batch_of: dict[str, tuple[int, int]] = {}
+        self._solo: set[str] = set()
         self._live: dict[str, Any] = {}
         self._left: dict[int, int] = {}
         self._answers: dict[int, list[tuple[int, str, str | None]]] = {}
@@ -137,12 +147,23 @@ class _ReplicaLoop:
                 return False
             if message is _SHUTDOWN:
                 return True
-            self._admit(message)
+            self._handle(message)
             block = False
 
-    def _admit(self, message: tuple) -> None:
+    def _handle(self, message: tuple) -> None:
+        """Dispatch one inbound command by its leading tag."""
+        kind = message[0]
+        if kind == "batch":
+            self._admit_batch(message[1], message[2], message[3], message[4])
+        elif kind == "add":
+            self._admit_one(message[1], message[2], message[3])
+        elif kind == "abort":
+            self._abort_one(message[1])
+
+    def _admit_batch(
+        self, batch_id: int, indices: list[int], prompts: list[str], params: SamplingParams
+    ) -> None:
         """Turn one dispatched batch into engine requests, remembering who is who."""
-        batch_id, indices, prompts, params = message
         self._left[batch_id] = len(prompts)
         self._answers[batch_id] = []
         for index, prompt in zip(indices, prompts, strict=True):
@@ -157,23 +178,79 @@ class _ReplicaLoop:
             self._batch_of[request.request_id] = (batch_id, index)
             self._live[request.request_id] = request
 
+    def _admit_one(self, request_id: str, prompt: str, params: SamplingParams) -> None:
+        """Admit one streamed request under the caller's own id.
+
+        A refused prompt fails that request alone — the streaming front end has a
+        caller waiting on exactly this id, so the failure unit is the request, not
+        some batch it happens to travel with.
+        """
+        try:
+            request = self._engine.add_request(prompt, params, request_id=request_id)
+        except ValueError:
+            self._results.put(("failed", request_id, traceback.format_exc()))
+            return
+        self._solo.add(request_id)
+        self._live[request_id] = request
+
+    def _abort_one(self, request_id: str) -> None:
+        """Cancel one streamed request; its slot is free for the next step.
+
+        No acknowledgement is sent: the consumer that asked for the abort has
+        already stopped reading, and any ``finished`` message racing this command
+        lands on a stream nobody holds — the coordinator drops it by id.
+        """
+        self._engine.abort(request_id)
+        self._forget(request_id)
+
     def _step(self) -> None:
         """Run one engine step, then report whoever finished on it.
 
         ``step`` returns the requests it *advanced*, which excludes the ones that
         just stopped — a sequence's stop token is not output. So completion is read
         off the handles this loop holds, which the engine updates in place.
+        Streamed requests additionally report every delta the step produced: their
+        consumer is per-request, so waiting for a batch boundary would be waiting
+        for a grouping that does not exist.
         """
         try:
-            self._engine.step()
+            advanced = self._engine.step()
         except Exception:
             detail = traceback.format_exc()
             for batch_id in list(self._left):
                 self._fail(batch_id, detail)
+            for request_id in list(self._solo):
+                self._fail_one(request_id, detail)
             return
+
+        for request in advanced:
+            if request.request_id in self._solo:
+                self._results.put(
+                    (
+                        "delta",
+                        request.request_id,
+                        request.delta,
+                        request.text,
+                        request.prompt_len,
+                        len(request.output_token_ids),
+                    )
+                )
 
         for request_id, request in list(self._live.items()):
             if not request.is_finished:
+                continue
+            if request_id in self._solo:
+                self._results.put(
+                    (
+                        "finished",
+                        request_id,
+                        request.finish_reason,
+                        request.text,
+                        request.prompt_len,
+                        len(request.output_token_ids),
+                    )
+                )
+                self._forget(request_id)
                 continue
             batch_id, index = self._batch_of[request_id]
             self._answers[batch_id].append((index, request.text, request.finish_reason))
@@ -198,8 +275,15 @@ class _ReplicaLoop:
         self._answers.pop(batch_id, None)
         self._results.put(("error", batch_id, detail))
 
+    def _fail_one(self, request_id: str, detail: str) -> None:
+        """Abandon one streamed request: abort it, forget it, report it once."""
+        self._engine.abort(request_id)
+        self._forget(request_id)
+        self._results.put(("failed", request_id, detail))
+
     def _forget(self, request_id: str) -> None:
         self._batch_of.pop(request_id, None)
+        self._solo.discard(request_id)
         self._live.pop(request_id, None)
 
 
@@ -249,7 +333,8 @@ def _dp_worker(
         max_num_seqs: Requests this replica may keep in flight.
         max_num_batched_tokens: Padded token budget for one prefill group.
         request_queue: Leader-only inbound queue; followers are handed a dummy.
-        result_queue: Where ``("ready" | "done" | "error", ...)`` messages go back.
+        result_queue: Where ``("ready" | "done" | "error" | "delta" | ...
+            | "failed", ...)`` messages go back.
     """
     import torch
 
@@ -546,7 +631,7 @@ class DataParallelEngine:
                 continue
             batch_id = self._next_batch_id
             self._next_batch_id += 1
-            message = (batch_id, indices, [prompts[i] for i in indices], params)
+            message = ("batch", batch_id, indices, [prompts[i] for i in indices], params)
             self._request_queues[replica].put(message)
             dispatched += 1
 
