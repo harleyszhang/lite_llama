@@ -109,6 +109,14 @@ class CausalLM(nn.Module):
     use_qk_norm: ClassVar[bool] = False
     rotary_class: ClassVar[type[RotaryEmbedding]] = RotaryEmbedding
     hf_prefix: ClassVar[str] = "model."
+    #: ``{fused module path: (checkpoint module paths, in block order)}`` — the
+    #: projections this model fuses, consumed by
+    #: :func:`~lite_llama.models.weights.translate_text_key`. The sources' index
+    #: becomes the ``shard_id`` handed to the fused parameter's loader.
+    packed_modules_mapping: ClassVar[dict[str, tuple[str, ...]]] = {
+        "self_attn.qkv_proj": ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),
+        "mlp.gate_up_proj": ("mlp.gate_proj", "mlp.up_proj"),
+    }
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
@@ -163,9 +171,12 @@ class CausalLM(nn.Module):
         """Map a checkpoint key onto this model's parameters.
 
         Strips :attr:`hf_prefix` (``lm_head.weight`` sits outside it) and defers
-        the rest to :func:`lite_llama.models.weights.translate_text_key`.
+        the rest to :func:`lite_llama.models.weights.translate_text_key`, with
+        :attr:`packed_modules_mapping` supplying the fused-projection rules.
         """
-        return weights.translate_text_key(key.removeprefix(self.hf_prefix))
+        return weights.translate_text_key(
+            key.removeprefix(self.hf_prefix), self.packed_modules_mapping
+        )
 
     def load_weights(self, checkpoint: Iterable[tuple[str, torch.Tensor]]) -> None:
         """Fill every parameter from a HuggingFace checkpoint stream.
@@ -185,7 +196,6 @@ class CausalLM(nn.Module):
             tied={"lm_head.weight": "embed_tokens.weight"}
             if self.config.tie_word_embeddings
             else None,
-            shard=weights.tp_shard,
         )
 
     @torch.no_grad()
