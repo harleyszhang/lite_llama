@@ -128,9 +128,7 @@ class SlotBatch:
         # the earliest start and the latest end — rows start at their own
         # positions, so the grid must be exactly as wide as the widest chunk
         # for cur_select_index to line up with the flattened token grid.
-        max_prompt_len = max(
-            end - start for start, end in zip(seq_starts, seq_lens, strict=True)
-        )
+        max_prompt_len = max(end - start for start, end in zip(seq_starts, seq_lens, strict=True))
         if max_prompt_len > self.max_seq_len:
             raise ValueError(
                 f"prompt length {max_prompt_len} exceeds max_seq_len {self.max_seq_len}"
@@ -147,9 +145,7 @@ class SlotBatch:
         self._atten.is_prefill = True
         # Grid column j of row i maps to cache row starts[i] + j — an outer
         # sum rather than the flat identity used when every chunk started at 0.
-        cols = starts.unsqueeze(1) + torch.arange(
-            max_prompt_len, device=self.device
-        ).unsqueeze(0)
+        cols = starts.unsqueeze(1) + torch.arange(max_prompt_len, device=self.device).unsqueeze(0)
         self._atten.cur_select_index = table[b_req_idx.unsqueeze(1), cols].reshape(-1)
         self._atten.b_start_loc = self._row_offsets[:n] * max_prompt_len
 
@@ -186,9 +182,7 @@ class SlotBatch:
         starts, ends = list(seq_starts), list(seq_lens)
         chunk_lens = [end - start for start, end in zip(starts, ends, strict=True)]
         if max(ends) > self.max_seq_len:
-            raise ValueError(
-                f"sequence length {max(ends)} exceeds max_seq_len {self.max_seq_len}"
-            )
+            raise ValueError(f"sequence length {max(ends)} exceeds max_seq_len {self.max_seq_len}")
 
         rows_slot, rows_len = self._flatten_rows(slots, starts, chunk_lens)
 
@@ -202,7 +196,9 @@ class SlotBatch:
                 rows_slot = torch.cat(
                     [
                         rows_slot,
-                        torch.full((pad,), self._filler_slot, dtype=rows_slot.dtype, device=self.device),
+                        torch.full(
+                            (pad,), self._filler_slot, dtype=rows_slot.dtype, device=self.device
+                        ),
                     ]
                 )
                 rows_len = torch.cat(
@@ -304,9 +300,7 @@ class SlotBatch:
         total = sum(chunk_lens)
         # Which request each flattened row belongs to, then the row's offset
         # from where that request's stretch begins in the flat index space.
-        row_req = torch.repeat_interleave(
-            torch.arange(len(slots), device=self.device), lens
-        )
+        row_req = torch.repeat_interleave(torch.arange(len(slots), device=self.device), lens)
         stretch_starts = torch.cumsum(lens, 0) - lens
         within = torch.arange(total, device=self.device) - stretch_starts[row_req]
         row_lens = self._to_device(starts)[row_req] + within + 1
