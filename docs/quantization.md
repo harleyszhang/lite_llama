@@ -1,7 +1,6 @@
 # Quantization Support
 
-lite_llama supports multiple weight quantization schemes, with an architecture
-aligned to [sglang](https://github.com/sgl-project/sglang) for extensibility.
+lite_llama supports multiple weight quantization schemes, with an architecture aligned to [sglang](https://github.com/sgl-project/sglang) for extensibility.
 
 ## Supported Schemes
 
@@ -100,8 +99,7 @@ method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 
 ## Performance Benchmark
 
-Benchmarks on A10 (24 GB), decode batch size 4, max_gen_len=64, greedy.
-Baseline: HuggingFace transformers fp16 (eager, same prompts).
+Benchmarks on A10 (24 GB), decode batch size 4, max_gen_len=64, greedy. Baseline: HuggingFace transformers fp16 (eager, same prompts).
 
 ### Qwen3-0.6B (dense, 28 layers, hidden=1024)
 
@@ -157,9 +155,7 @@ python benchmarks/bench_quant.py --model-dir ... --json results.json
 
 ## Vision-Language Model Support
 
-Both TP and quantization extend to multimodal (VLM) checkpoints. The vision tower
-stays replicated in its native dtype; only the language-model projections are
-sharded or quantised.
+Both TP and quantization extend to multimodal (VLM) checkpoints. The vision tower stays replicated in its native dtype; only the language-model projections are sharded or quantised.
 
 | Model | Weights | TP | INT8 | vl-chat |
 |-------|---------|----|----|--------|

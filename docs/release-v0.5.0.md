@@ -1,15 +1,10 @@
 # Release v0.5.0 — 自动调优 + w4a16 重写
 
-**Date:** 2026-08-23
-**Branch:** `main`
-**Theme:** Kernel autotune 基础设施 (collect + search + persist) + w4a16 tl.dot 重写
+**Date:** 2026-08-23 **Branch:** `main` **Theme:** Kernel autotune 基础设施 (collect + search + persist) + w4a16 tl.dot 重写
 
 ## Summary
 
-v0.5.0 建立 kernel 自动调优系统：定义 `TuneKey(gpu, op, shape_bucket, dtype)` 稳定
-契约（v0.6 perf_key 直接引用）、JSON 持久化存储、命中查找逻辑；搜索引擎完成对
-fused_moe 和 flash_attn_nopad 的 shape 配置落盘。w4a16 量化 GEMM 重写为 per-group
-`tl.dot` 版本走 tensor core，精度测试 6/6 PASS。
+v0.5.0 建立 kernel 自动调优系统：定义 `TuneKey(gpu, op, shape_bucket, dtype)` 稳定契约（v0.6 perf_key 直接引用）、JSON 持久化存储、命中查找逻辑；搜索引擎完成对 fused_moe 和 flash_attn_nopad 的 shape 配置落盘。w4a16 量化 GEMM 重写为 per-group `tl.dot` 版本走 tensor core，精度测试 6/6 PASS。
 
 ## 1. Feature: Autotune 基础设施 (`lite_llama/kernels/autotune/`)
 
@@ -52,8 +47,7 @@ if config is None:
 
 ## 2. Feature: Autotune 搜索落盘
 
-离线搜索脚本 `scripts/autotune_collect.py` 从模型 config 推算真实 shape，
-对 fused_moe (432 configs) 和 flash_attn_nopad (72 configs) 执行 CUDA event 计时搜索。
+离线搜索脚本 `scripts/autotune_collect.py` 从模型 config 推算真实 shape，对 fused_moe (432 configs) 和 flash_attn_nopad (72 configs) 执行 CUDA event 计时搜索。
 
 **Qwen3-0.6B 搜索结果 (A10):**
 

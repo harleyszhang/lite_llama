@@ -6,10 +6,7 @@
 
 ## Summary
 
-v0.4.0 建立 lite_llama 的可信基线：量化子系统从 `models/quantization` 迁移到
-`modules/quantization`，对齐 sglang 架构、新增 AWQ/GPTQ/W8A8 的 MoE Method 支持
-（含 INT4 packed weights）；golden 回归门禁升级为显式 UNVERIFIED 状态（不再静默
-skip）；TP 模式下的非 greedy 采样 RNG 同步通过 rank0 broadcast 解决。
+v0.4.0 建立 lite_llama 的可信基线：量化子系统从 `models/quantization` 迁移到 `modules/quantization`，对齐 sglang 架构、新增 AWQ/GPTQ/W8A8 的 MoE Method 支持（含 INT4 packed weights）；golden 回归门禁升级为显式 UNVERIFIED 状态（不再静默 skip）；TP 模式下的非 greedy 采样 RNG 同步通过 rank0 broadcast 解决。
 
 ## 1. Feature: 量化模块架构重构 (sglang aligned)
 
@@ -69,18 +66,14 @@ out = fused_moe(
 
 ## 3. Fix: Golden 门禁去静默 skip
 
-**修复前：** 无 GPU 或无权重时 golden tests 被 `pytest.mark.skip` 静默标记 → CI
-dashboard 显示全绿（误导性）。
+**修复前：** 无 GPU 或无权重时 golden tests 被 `pytest.mark.skip` 静默标记 → CI dashboard 显示全绿（误导性）。
 
 **修复后：**
 
-- Golden 测试使用 `xfail(reason="UNVERIFIED: no CUDA device", run=False)` → CI
-  显示为 xfail（黄色/橙色），**不会**被误认为已验证。
+- Golden 测试使用 `xfail(reason="UNVERIFIED: no CUDA device", run=False)` → CI 显示为 xfail（黄色/橙色），**不会**被误认为已验证。
 - 设置 `LITE_LLAMA_GOLDEN_STRICT=1` 时升级为 `strict=True` → hard FAIL。
-- `cases.py` 新增 `CB_CASES`（连续批处理路径）和 `QUANT_CASES` +
-  `QUANT_SCHEMES`（量化路径覆盖）。
-- `scripts/golden_tokens.py` 支持 `--batch-save --models` 多模型批量重录和
-  `--all-schemes` 全量化方案录制。
+- `cases.py` 新增 `CB_CASES`（连续批处理路径）和 `QUANT_CASES` + `QUANT_SCHEMES`（量化路径覆盖）。
+- `scripts/golden_tokens.py` 支持 `--batch-save --models` 多模型批量重录和 `--all-schemes` 全量化方案录制。
 
 **验证方式：**
 
@@ -96,8 +89,7 @@ python scripts/golden_tokens.py --batch-save \
 
 ## 4. Fix: TP 采样 RNG 不同步
 
-**修复前：** TP 模式下每个 rank 独立运行 `torch.multinomial`，各自使用本地 RNG 状态
-→ 非 greedy 采样时 rank 间 diverge → 下一步 input_ids 不一致 → 模型输出错误。
+**修复前：** TP 模式下每个 rank 独立运行 `torch.multinomial`，各自使用本地 RNG 状态 → 非 greedy 采样时 rank 间 diverge → 下一步 input_ids 不一致 → 模型输出错误。
 
 **修复后：** Rank 0 采样后通过 `broadcast_tp(next_token)` 广播给所有 TP rank：
 
@@ -113,8 +105,7 @@ if get_tp_world_size() > 1:
     next_token = broadcast_tp(next_token)
 ```
 
-**影响范围：** `llm_engine.py`（offline batch）和 `continuous_engine.py`（online batch）
-的两个采样点均已修复。
+**影响范围：** `llm_engine.py`（offline batch）和 `continuous_engine.py`（online batch）的两个采样点均已修复。
 
 **修复前后对比 (TP=2, Qwen3-0.6B, temperature=0.7, seed 每 rank 不同)：**
 

@@ -1,7 +1,6 @@
 # Triton 内核 benchmark 测试
 
-各算子的 benchmark 结果图按算子分类存放于 [`../images/kernels_benchamrk/`](../images/kernels_benchamrk/)，
-目录结构如下（每个算子一个子目录，含 `.png` 图与对应 `.csv` 原始数据）：
+各算子的 benchmark 结果图按算子分类存放于 [`../images/kernels_benchamrk/`](../images/kernels_benchamrk/)，目录结构如下（每个算子一个子目录，含 `.png` 图与对应 `.csv` 原始数据）：
 
 ```text
 kernels_benchamrk/
@@ -61,15 +60,13 @@ MLP_Silu test result：
 
 flashattention benchmark test result：
 
-![flashattention benchmark test](../images/kernels_benchamrk/attention/fused-attention-batch8-head64-d64-fwd-causal=False.png)
-![flashattention benchmark test](../images/kernels_benchamrk/attention/fused-attention-batch4-head32-d64-fwd-causal=False.png)
+![flashattention benchmark test](../images/kernels_benchamrk/attention/fused-attention-batch8-head64-d64-fwd-causal=False.png) ![flashattention benchmark test](../images/kernels_benchamrk/attention/fused-attention-batch4-head32-d64-fwd-causal=False.png)
 
 ## flashattention_v2_no_pad
 
 flashattention_v2_no_pad benchmark test result：
 
-![flashattention_v2_no_pad](../images/kernels_benchamrk/attention/flashattention_nopad_benchamrk.png)
-![flashattention_v2_no_pad](../images/kernels_benchamrk/attention/flashattentionv2_nopad_benchamrk.png)
+![flashattention_v2_no_pad](../images/kernels_benchamrk/attention/flashattention_nopad_benchamrk.png) ![flashattention_v2_no_pad](../images/kernels_benchamrk/attention/flashattentionv2_nopad_benchamrk.png)
 
 ## flashdecoding
 

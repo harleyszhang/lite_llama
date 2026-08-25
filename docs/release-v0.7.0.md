@@ -1,8 +1,6 @@
 # Release v0.7.0 — 调度能力 (Chunked Prefill + Prefix Caching + Preemption)
 
-**Date:** 2026-08-24
-**Branch:** `prefix_caching`
-**Theme:** Chunked prefill 封顶单步 prefill 工作量 + Prefix caching 复用共享前缀 KV + 抢占 (recompute)
+**Date:** 2026-08-24 **Branch:** `prefix_caching` **Theme:** Chunked prefill 封顶单步 prefill 工作量 + Prefix caching 复用共享前缀 KV + 抢占 (recompute)
 
 ## Summary
 
@@ -73,9 +71,7 @@ sched = Scheduler(config, num_slots=64)
 | req-2 (shared) | 768 | **32** | 64.0% |
 | req-3 (shared) | 768 | **32** | 72.0% |
 
-**关键结论：** 第一个请求 cold，prefill 全部 800 token 并填充缓存；之后每个共享前缀的
-请求跳过 768 token，实际 prefill 工作量从 800 → 32 token，**降低 25x**。命中率随共享
-请求增多持续爬升到 72%。
+**关键结论：** 第一个请求 cold，prefill 全部 800 token 并填充缓存；之后每个共享前缀的请求跳过 768 token，实际 prefill 工作量从 800 → 32 token，**降低 25x**。命中率随共享请求增多持续爬升到 72%。
 
 > 复现：`python scripts/gen_prefix_cache_gif.py`
 > benchmark 日志：[`docs/benchmark_logs/bench_prefix_cache_v07.json`](benchmark_logs/bench_prefix_cache_v07.json)
@@ -99,13 +95,9 @@ print(f"prefix cache hit rate: {sched.prefix_cache_hit_rate:.1%}")
 
 ## 3. Feature: Preemption (Recompute Strategy)
 
-**能力：** 开启 `enable_preemption` 后，`max_num_seqs` 可超过 slot 数——请求组
-**超订**（oversubscribe）slot 池，通过 recompute 时分复用。当一个等待中的请求拿不到
-slot 时，调度器 evict 最年轻的、已产出 ≥1 token 的 decoding 请求（丢弃其 KV，
-重新排队等待 recompute），把 slot 让给它。
+**能力：** 开启 `enable_preemption` 后，`max_num_seqs` 可超过 slot 数——请求组 **超订**（oversubscribe）slot 池，通过 recompute 时分复用。当一个等待中的请求拿不到 slot 时，调度器 evict 最年轻的、已产出 ≥1 token 的 decoding 请求（丢弃其 KV，重新排队等待 recompute），把 slot 让给它。
 
-**防活锁的进度配额：** 刚被 recompute 的请求在它 decode 出下一个 token 之前不会
-再次被选为受害者，因此不会出现两个请求互相抢占、谁都不前进的情况。
+**防活锁的进度配额：** 刚被 recompute 的请求在它 decode 出下一个 token 之前不会再次被选为受害者，因此不会出现两个请求互相抢占、谁都不前进的情况。
 
 ### 可视化：3 个请求时分复用 2 个 slot
 
@@ -125,8 +117,7 @@ slot 时，调度器 evict 最年轻的、已产出 ≥1 token 的 decoding 请�
 | 4 | req-1 | req-2 | req-0 | 2 |
 | 5 | req-0 | req-1 | req-2 | 3 |
 
-**关键结论：** 三个请求在两个 slot 上轮转，每一步都有请求在 decode，没有饿死——
-`req-0 → req-1 → req-2` 公平轮询。
+**关键结论：** 三个请求在两个 slot 上轮转，每一步都有请求在 decode，没有饿死—— `req-0 → req-1 → req-2` 公平轮询。
 
 ```python
 config = SchedulerConfig(max_num_seqs=3, enable_preemption=True)
@@ -162,9 +153,7 @@ print(f"total preemptions: {sched.num_preemptions}")
 | 4 | [long-c] | [88] | [short-a, short-b] | [] | **是** |
 | 5 | [short-d] | [20] | [short-a, long-c] | [short-b] | **是** |
 
-**关键结论：** v0.6 里 prefill 与 decode 互斥（一个 step 只能二选一）；v0.7 的
-`SchedulerOutput` 让它们在同一 step 并存（step 2-5），并用 `prefill_chunk_lens` 和
-`preempted` 携带分片与抢占元数据。
+**关键结论：** v0.6 里 prefill 与 decode 互斥（一个 step 只能二选一）；v0.7 的 `SchedulerOutput` 让它们在同一 step 并存（step 2-5），并用 `prefill_chunk_lens` 和 `preempted` 携带分片与抢占元数据。
 
 ## 5. SchedulerConfig 新增参数
 
