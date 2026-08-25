@@ -9,10 +9,19 @@ Usage:
     print_memory_budget(num_layers=28, hidden_size=1024, ...)
 """
 
-from .structure import print_structure_tree, export_structure_tree
-from .memory import print_memory_budget, export_memory_budget
+from .memory import (
+    MemoryBudget,
+    ModelShape,
+    compute_memory_budget,
+    export_memory_budget,
+    print_memory_budget,
+)
+from .structure import export_structure_tree, print_structure_tree
 
 __all__ = [
+    "MemoryBudget",
+    "ModelShape",
+    "compute_memory_budget",
     "export_memory_budget",
     "export_structure_tree",
     "print_memory_budget",

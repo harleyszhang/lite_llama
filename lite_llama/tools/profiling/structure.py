@@ -1,20 +1,30 @@
-"""viz.structure: export model architecture as a text tree (L1).
+"""Render a model as an indented text tree: layer types, parameter counts, dtypes.
 
-Walks a torch.nn.Module tree and renders it as an indented text tree showing
-layer types, parameter shapes, and quantisation status.
+A checkpoint's shape is the first thing you need when a load fails or a shard looks
+wrong, and `print(model)` buries it under repr noise. This walks `named_children()`
+once and renders box-drawing branches, so sibling boundaries stay readable at depth.
+Every node carries only the parameters it owns directly (`recurse=False`), which is
+what makes the numbers add up instead of counting a subtree once per ancestor.
+
+Depth is budgeted rather than unlimited: past `max_depth` a node reports how many
+children it hid, so a 48-layer model stays one screen instead of ten thousand lines.
 
 Usage:
-    tree_str = export_structure_tree(model)
-    print_structure_tree(model)
+    print_structure_tree(model, max_depth=3)
+    tree = export_structure_tree(model)      # same text, as a string
 """
 
 from __future__ import annotations
 
 import torch.nn as nn
 
+#: Box-drawing pieces: a branch, the last branch, and the bar that continues under
+#: a node whose siblings are still to come.
+TEE, ELBOW, BAR, GAP = "├── ", "└── ", "│   ", "    "
+
 
 def _format_params(module: nn.Module) -> str:
-    """Summarise parameters of a leaf module."""
+    """Summarise the parameters this module owns directly, ignoring its children."""
     params = list(module.parameters(recurse=False))
     if not params:
         return ""
@@ -23,71 +33,48 @@ def _format_params(module: nn.Module) -> str:
     return f" [{total:,} params, {'/'.join(sorted(dtypes))}]"
 
 
-def _tree_lines(module: nn.Module, prefix: str = "", name: str = "model") -> list[str]:
-    """Recursively build tree lines."""
-    lines: list[str] = []
-    type_name = type(module).__name__
-    param_info = _format_params(module)
-    lines.append(f"{prefix}{name}: {type_name}{param_info}")
+def _lines(
+    module: nn.Module, name: str, prefix: str, connector: str, depth: int, max_depth: int
+) -> list[str]:
+    """Render one node, then its subtree while the depth budget lasts.
 
+    Args:
+        module: Node to render.
+        name: Attribute name this node is bound to in its parent.
+        prefix: Bars and gaps inherited from every ancestor, already assembled.
+        connector: This node's own branch glyph; empty for the root.
+        depth: Distance from the root, in nodes.
+        max_depth: Last depth whose children are expanded.
+    """
+    lines = [f"{prefix}{connector}{name}: {type(module).__name__}{_format_params(module)}"]
     children = list(module.named_children())
-    for i, (child_name, child) in enumerate(children):
-        is_last = i == len(children) - 1
-        connector = "└── " if is_last else "├── "
-        extension = "    " if is_last else "│   "
-        child_lines = _tree_lines(child, prefix=prefix + extension, name=child_name)
-        # Replace first line's prefix with the connector
-        first = f"{prefix}{connector}{child_name}: {type(child).__name__}{_format_params(child)}"
-        lines.append(first)
-        lines.extend(child_lines[1:])  # skip the redundant first line from recursion
+    if not children:
+        return lines
 
+    # Children hang under this node, so they inherit its prefix plus either a bar
+    # (siblings still to come below it) or a gap (this node closed its branch).
+    below = prefix if not connector else prefix + (GAP if connector == ELBOW else BAR)
+    if depth >= max_depth:
+        return [*lines, f"{below}... ({len(children)} children)"]
+    for index, (child_name, child) in enumerate(children):
+        last = index == len(children) - 1
+        lines += _lines(child, child_name, below, ELBOW if last else TEE, depth + 1, max_depth)
     return lines
 
 
 def export_structure_tree(model: nn.Module, max_depth: int = 4) -> str:
-    """Export the model structure as an indented text tree.
+    """Return the model structure as an indented text tree.
 
     Args:
-        model: The PyTorch model.
-        max_depth: Maximum nesting depth to display.
+        model: Module to walk.
+        max_depth: Last depth whose children are expanded; deeper nodes report a count.
 
     Returns:
-        Multi-line string of the tree.
+        Multi-line string, one node per line, root first.
     """
-    lines: list[str] = []
-    _build_tree(model, lines, prefix="", depth=0, max_depth=max_depth, name="model")
-    return "\n".join(lines)
-
-
-def _build_tree(module: nn.Module, lines: list[str], prefix: str,
-                depth: int, max_depth: int, name: str) -> None:
-    """Recursively build the tree into lines list."""
-    type_name = type(module).__name__
-    param_info = _format_params(module)
-    lines.append(f"{prefix}{name}: {type_name}{param_info}")
-
-    if depth >= max_depth:
-        children = list(module.named_children())
-        if children:
-            lines.append(f"{prefix}    ... ({len(children)} children)")
-        return
-
-    children = list(module.named_children())
-    for i, (child_name, child) in enumerate(children):
-        is_last = i == len(children) - 1
-        connector = "└── " if is_last else "├── "
-        extension = "    " if is_last else "│   "
-        lines.append(f"{prefix}{connector}{child_name}: {type(child).__name__}{_format_params(child)}")
-        # Recurse into grandchildren
-        grandchildren = list(child.named_children())
-        for j, (gc_name, gc) in enumerate(grandchildren):
-            gc_is_last = j == len(grandchildren) - 1
-            gc_connector = "└── " if gc_is_last else "├── "
-            gc_extension = "    " if gc_is_last else "│   "
-            _build_tree(gc, lines, prefix + extension + gc_extension,
-                       depth + 2, max_depth, gc_name)
+    return "\n".join(_lines(model, "model", "", "", 0, max_depth))
 
 
 def print_structure_tree(model: nn.Module, max_depth: int = 4) -> None:
-    """Print the model structure tree to stdout."""
+    """Print :func:`export_structure_tree` to stdout."""
     print(export_structure_tree(model, max_depth=max_depth))
