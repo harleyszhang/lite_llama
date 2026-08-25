@@ -15,6 +15,11 @@ without the plumbing being threaded through its constructor, exactly as vLLM's
 ``parallel_state`` does. The default state is a world of one, where every collective is
 a no-op and every layer is full width — so single-GPU code paths never branch.
 
+Each replica gets *two* groups over the same ranks: an NCCL one for the data plane
+(activations, logits) and a gloo one for the control plane
+(:func:`broadcast_object_tp`), because the thing a driver rank has to tell its workers
+is a Python object, not a device tensor.
+
 Usage:
     init_parallel(global_rank=3, tp_size=2, dp_size=2)   # replica 1, tp rank 1
     y = all_reduce_tp(partial_y)
@@ -23,6 +28,7 @@ Usage:
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -37,6 +43,7 @@ _log = get_logger(__name__)
 _TP_RANK: int = 0
 _TP_WORLD_SIZE: int = 1
 _TP_GROUP: dist.ProcessGroup | None = None
+_TP_CPU_GROUP: dist.ProcessGroup | None = None
 _DP_RANK: int = 0
 _DP_WORLD_SIZE: int = 1
 
@@ -101,7 +108,7 @@ def init_parallel(
         ValueError: If the sizes are not positive, or ``global_rank`` falls outside
             the grid.
     """
-    global _TP_RANK, _TP_WORLD_SIZE, _TP_GROUP, _DP_RANK, _DP_WORLD_SIZE
+    global _TP_RANK, _TP_WORLD_SIZE, _TP_GROUP, _TP_CPU_GROUP, _DP_RANK, _DP_WORLD_SIZE
 
     _DP_RANK, _TP_RANK = grid_coordinates(global_rank, tp_size, dp_size)
     _DP_WORLD_SIZE = dp_size
@@ -120,8 +127,14 @@ def init_parallel(
     for replica in range(dp_size):
         members = list(range(replica * tp_size, (replica + 1) * tp_size))
         group = dist.new_group(members, backend=backend)
+        # A second, CPU-backed group over the same ranks carries the *control*
+        # plane: :func:`broadcast_object_tp` ships pickled plans, and nccl can
+        # only move device memory, so it would have to stage every plan through
+        # the GPU. gloo sends the bytes straight from host memory.
+        cpu_group = group if backend == "gloo" else dist.new_group(members, backend="gloo")
         if replica == _DP_RANK:
             _TP_GROUP = group
+            _TP_CPU_GROUP = cpu_group
     _log.info(
         "parallel state: global rank %d/%d (dp %d/%d, tp %d/%d)",
         global_rank,
@@ -161,12 +174,13 @@ def init_tensor_parallel(
 
 def destroy_parallel() -> None:
     """Tear down the process group and reset the grid to a world of one."""
-    global _TP_RANK, _TP_WORLD_SIZE, _TP_GROUP, _DP_RANK, _DP_WORLD_SIZE
+    global _TP_RANK, _TP_WORLD_SIZE, _TP_GROUP, _TP_CPU_GROUP, _DP_RANK, _DP_WORLD_SIZE
     if _TP_GROUP is not None:
         dist.destroy_process_group()
     _TP_RANK = 0
     _TP_WORLD_SIZE = 1
     _TP_GROUP = None
+    _TP_CPU_GROUP = None
     _DP_RANK = 0
     _DP_WORLD_SIZE = 1
 
@@ -274,6 +288,30 @@ def broadcast_tp(tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
     global_src = _DP_RANK * _TP_WORLD_SIZE + src
     dist.broadcast(tensor, src=global_src, group=_TP_GROUP)
     return tensor
+
+
+def broadcast_object_tp(obj: Any = None, src: int = 0) -> Any:
+    """Broadcast any picklable object from TP-local ``src`` to every TP rank.
+
+    This is the *control* plane. A tensor-parallel step is decided once — on the
+    rank that owns the scheduler — and then run everywhere, so the decision has
+    to travel: which slots, which token ids, which sampling parameters. Sending
+    it as an object rather than as a pile of padded tensors means the receiving
+    ranks reconstruct exactly what the sender planned, with no encoding to keep
+    in sync on both sides; and it goes over the gloo group, so a few hundred
+    bytes of control never touch device memory or serialise behind the NCCL
+    stream that the data plane is using.
+
+    Non-root ranks ignore ``obj`` and return what the root sent. Returns ``obj``
+    unchanged when ``tp_world_size == 1``, which is what lets the single-process
+    path call this without a branch.
+    """
+    if _TP_WORLD_SIZE <= 1:
+        return obj
+    payload = [obj]
+    global_src = _DP_RANK * _TP_WORLD_SIZE + src
+    dist.broadcast_object_list(payload, src=global_src, group=_TP_CPU_GROUP)
+    return payload[0]
 
 
 def all_reduce_min(value: int) -> int:
