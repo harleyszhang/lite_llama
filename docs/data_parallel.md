@@ -23,7 +23,7 @@ TP 用延迟换"装得下"，DP 用显存（每卡一份权重）换吞吐。
 
 | 角色 | 本仓库 | vLLM | SGLang |
 | --- | --- | --- | --- |
-| 副本 worker（rank-aware 进程，独占一张卡） | `_dp_worker` | `DPEngineCoreProc` | scheduler 进程 |
+| 副本进程（rank-aware，独占一张卡） | `_dp_worker` → `_ReplicaLoop` | `DPEngineCoreProc` | scheduler 进程 |
 | 负载均衡策略（选哪个副本） | `dp_load_balancer.LoadBalancer` | `DPLBAsyncMPClient` | `LoadBalanceMethod` |
 | 协调器（拉起 worker、路由、回收结果） | `DataParallelEngine` | engine core client | `DataParallelController` |
 
@@ -31,8 +31,15 @@ TP 用延迟换"装得下"，DP 用显存（每卡一份权重）换吞吐。
 路由是**每请求一次**的决策，换一个策略（轮询 → 按 token 数）不动协调器一行代码。
 
 - **worker**（`_dp_worker`）是网格里的**一个 cell**，不是一个副本：spawn 出的子进程里
-  `import torch`、按 `global_rank` 绑卡、建一个 `LLM`，然后从自己的队列取请求、生成、把结果
-  发回。建模失败也走结果队列（一条 `"error"` 消息），协调器因此会**报错而不是死等**一个永远
+  `import torch`、按 `global_rank` 绑卡，然后按自己在副本里的位置分化成两种角色。
+  - **leader**（`tp_rank == 0`）建一个**常驻**的 `ContinuousBatchingEngine`，跑 `_ReplicaLoop`：
+    从自己的队列取请求、并进正在跑的 batch、逐 step 推进、把答案发回。引擎跨 dispatch
+    存活是这一层唯一的性能要点——请求随到随入，停了的序列**下一步**就把 slot 让给下一条，
+    而不是整批陪最长的那条答案跑到底。空闲时循环阻塞在队列上，不空转 CPU。
+  - **follower**（`tp_rank > 0`）建一个 `LLM` 并跑 `serve_plans`，**不读请求队列**：它每一次
+    前向都由 leader 的 executor 通过控制面广播过来（见[张量并行](./tensor_parallel.md)）。
+
+  建模失败也走结果队列（一条 `"error"` 消息），协调器因此会**报错而不是死等**一个永远
   不会应答的 worker。
 - **协调器**（`DataParallelEngine`）本进程里**什么模型都不加载**——它只有 worker 进程和
   一个 balancer，所以它刻意**不是** `LLM` 的子类：没有权重、没有 KV cache、没有 sampler。
@@ -70,22 +77,33 @@ TP 用延迟换"装得下"，DP 用显存（每卡一份权重）换吞吐。
 不共享任何张量，没什么好同步的，NCCL 完全不碰。这也是为什么纯 DP 用普通的 `multiprocessing`
 队列而不是 NCCL：worker 从不读另一个 worker 的张量。
 
-**进程数按 cell 算，不按副本算。** `tp_size > 1` 时 `init_parallel` rendezvous 的是
+**进程数按 cell 算，队列数按副本算。** `tp_size > 1` 时 `init_parallel` rendezvous 的是
 `dp_size × tp_size` 个 rank 的世界，所以只 spawn `dp_size` 个进程会**永久挂死**在等待从未
-启动的 rank 上——一个协调器的任何超时都解释不了的失败。协调器因此为每个 cell 起一个进程、
-配一个独立的请求队列：一个副本内的 tp ranks 是**镜像**，收到同一条请求消息、跑同一次前向，
-靠 TP 集合通信保持同步（采样出的 token 从 tp rank 0 广播）；只有副本的 leader（`tp_rank == 0`）
-回结果，因为协调器每个副本只等一条应答。
+启动的 rank 上——一个协调器的任何超时都解释不了的失败。所以协调器为每个 cell 起一个进程，
+但**请求队列只有 `dp_size` 个**：一条请求发给一个**副本**，而不是发给副本的每个 rank。
+副本内的 follower 不参与路由，它们跑什么由 leader 的控制面决定（每 step 一次
+`SchedulerOutput` 广播，采样出的 token 再从 tp rank 0 广播回去）；只有 leader 回结果，因为
+协调器每个副本只等一条应答。
 
-这条网格约束在 CPU 上就能断言（`test_dp_times_tp_spawns_one_process_per_grid_cell`），不需要
-四张卡：把 `mp.get_context` 换成假的进程/队列，直接检查 4 个 cell 的 `(global_rank, dp_rank,
-tp_rank)` 与队列不共享。
+这么分层的收益是**路由与同步互不知情**：换 balancer 不碰 TP 的一行代码，改 TP 的广播格式也
+不碰路由。早期实现里 tp ranks 是**镜像**——每个 rank 一个队列、各自收同一条请求消息——那样
+"一条请求"就同时是路由单位和同步单位，两边任何一处不一致都会让某个 rank 少跑一次前向而
+卡死在集合通信里。
+
+这条网格约束在 CPU 上就能断言，不需要四张卡：把 `mp.get_context` 换成假的进程/队列，直接检查
+4 个 cell 的 `(global_rank, dp_rank, tp_rank)`（`test_dp_times_tp_spawns_one_process_per_grid_cell`）
+以及一个副本的两个 rank 拿到的是**同一个**队列对象
+（`test_a_replica_shares_one_queue_across_its_ranks`）。
 
 ## 实测数据
 
 Qwen2.5-1.5B-Instruct，2× A10（23 GB），greedy，`max_gen_len=128`，round-robin。
 基线是 `data_parallel_size=1` 的协调器（隔离掉副本数以外的变量），另附一行进程内 `LLM`
 用来显示协调器的 IPC 开销。
+
+> 这组数字采于副本改成常驻引擎循环**之前**（每次 dispatch 建一次批）。weak scaling 的口径
+> 不受影响（每副本一批，本来就没有可回收的 slot），strong scaling 那一栏是常驻循环会改善的
+> 那一栏，待两卡空闲后重测。
 
 **weak scaling**（每副本固定 16 条，总量随副本数增长——即"服务吞吐"问题）：
 
@@ -138,15 +156,20 @@ GEMM 的 M 维，同一条 prompt 在 batch 32 里和在 batch 16 里 fp16 累�
 
 | 文件 | 数量 | 需要 |
 | --- | ---: | --- |
-| `tests/distributed/test_parallel_state.py` | 15 | CPU（网格纯函数） |
-| `tests/distributed/test_dp_load_balancer.py` | 21 | CPU（策略纯函数） |
-| `tests/distributed/test_data_parallel.py` | 12 + 8 | CPU（路由/网格/构造）+ GPU（需 2 卡端到端） |
+| `tests/distributed/test_parallel_state.py` | 20 | CPU（网格纯函数） |
+| `tests/distributed/test_dp_load_balancer.py` | 20 | CPU（策略纯函数） |
+| `tests/distributed/test_data_parallel.py` | 18 + 8 | CPU（路由/网格/构造/副本循环）+ GPU（需 2 卡端到端） |
+
+那 18 个 CPU 测试里有 7 个只测 `_ReplicaLoop`：拿假队列喂它、拿假引擎数它调了几次 `step()`，
+于是"空闲时阻塞、忙时不阻塞""停止信号不打断在飞的 batch""一次 step 失败只失败那一批、
+不拖垮副本"这些**时序**性质不需要显卡就能钉住。
 
 ## 当前边界
 
-- **同步批处理。** `generate()` 阻塞到最慢的副本结束——1 条 prompt 配 4 个副本，3 个空转。
-  DP 在这里买的是"多请求的吞吐"，不是"少请求的延迟"。真正的在线连续批处理路由（每个副本一个
-  `ContinuousBatchingEngine`、请求随到随走）是自然的下一步，但需要跨进程的调度。
+- **`generate()` 同步，副本内部不同步。** 每个副本跑一个常驻引擎，所以一个 dispatch 里的请求
+  随到随入、停了就腾 slot；但 `generate()` 这个 API 仍然阻塞到最慢的副本交完自己那批答案——
+  1 条 prompt 配 4 个副本，3 个空转。DP 在这里买的是"多请求的吞吐"，不是"少请求的延迟"。
+  逐请求流式回传是自然的下一步：`_ReplicaLoop` 已经按请求记账，只差换一个分组把答案发回。
 - **文本模型离线批处理。** 多模态的逐请求 processor 输出不走这条路径。
 - **每卡一份完整权重。** 这是 DP 的定义，不是限制——放不下单卡就要叠加 TP
   （`tensor_parallel_size > 1`），两者按网格组合。
@@ -158,5 +181,6 @@ GEMM 的 M 维，同一条 prompt 在 batch 32 里和在 batch 16 里 fp16 累�
 
 ## 相关文档
 
+- [张量并行](./tensor_parallel.md)：切权重的那一半，可与 DP 组合成网格。
 - [连续批处理](./continuous_batching.md)：单副本内请求随到随走的 per-step 调度。
-- [量化与张量并行](./quantization.md)：TP 切权重的那一半，可与 DP 组合成网格。
+- [量化](./quantization.md)：每卡一份权重太大时的另一个旋钮。
