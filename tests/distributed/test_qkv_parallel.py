@@ -26,6 +26,7 @@ import torch.nn.functional as F
 
 from lite_llama.distributed import parallel_state as ps
 from lite_llama.models import weights
+from lite_llama.models.base import CausalLM
 from lite_llama.modules import QKVParallelLinear
 
 HIDDEN = 32
@@ -91,8 +92,7 @@ def _load_this_rank() -> QKVParallelLinear:
     weights.load_weights(
         model,
         _checkpoint().items(),
-        weights.translate_text_key,
-        shard=weights.tp_shard,
+        lambda key: weights.translate_text_key(key, CausalLM.packed_modules_mapping),
     )
     return model.layers[0].self_attn.qkv_proj
 

@@ -80,6 +80,29 @@ class VocabParallelEmbedding(nn.Module):
         self.weight = nn.Parameter(
             torch.empty(len(self.shard), hidden_size, dtype=dtype), requires_grad=False
         )
+        self.weight.weight_loader = self._weight_loader
+
+    def _weight_loader(
+        self, param: torch.Tensor, loaded: torch.Tensor, shard_id=None
+    ) -> torch.Tensor:
+        """Fill this rank's vocabulary rows from the full table; return the view written.
+
+        The same rule serves the embedding and the LM head: both are
+        ``[vocab, hidden]`` split along the vocabulary, so the incoming tensor is
+        narrowed to this rank's rows — the same :attr:`shard` the gather masks
+        with. Never packed, so ``shard_id`` is unused.
+        """
+        world_size = get_tp_world_size()
+        if world_size > 1:
+            size = loaded.shape[0] // world_size
+            loaded = loaded.narrow(0, get_tp_rank() * size, size)
+        if param.shape != loaded.shape:
+            raise ValueError(
+                f"checkpoint tensor of shape {tuple(loaded.shape)} does not fit "
+                f"parameter view of shape {tuple(param.shape)}"
+            )
+        param.data.copy_(loaded)
+        return param.data
 
     @property
     def local_vocab_size(self) -> int:

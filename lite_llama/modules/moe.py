@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..distributed.parallel_state import all_reduce_tp, divide, get_tp_world_size
+from ..distributed.parallel_state import all_reduce_tp, divide, get_tp_rank, get_tp_world_size
 from ..models.config import ModelConfig
 from .quantization import QuantizationConfig, UnquantizedFusedMoEMethod
 
@@ -67,6 +67,59 @@ class SparseMoeBlock(nn.Module):
             quant.get_quant_method(self) if quant is not None else UnquantizedFusedMoEMethod()
         )
         self.experts = nn.ParameterDict(self.quant_method.create_weights(self))
+        # ParameterDict entries are not direct attributes, so the linear layers'
+        # recurse=False binding does not reach them; bind explicitly. The router
+        # (``gate_weight``) is replicated and keeps the default whole-copy loader.
+        for param in self.experts.values():
+            param.weight_loader = self._expert_loader
+
+    def _expert_loader(self, param, loaded, shard_id) -> torch.Tensor:
+        """Fill one expert's slice of a stacked parameter; return the view written.
+
+        ``shard_id`` is ``(expert_index, projection)`` with projection numbering
+        gate=0, up=1, down=2. gate/up share one stacked tensor fused along dim 1,
+        so each fills its half of the expert's slice and is TP-sharded along the
+        incoming rows; down fills a whole slice, sharded along the columns. The
+        scale grids of a quantised checkpoint follow the same rule — their axes
+        count scale blocks, so the same proportional narrow applies.
+
+        A checkpoint that ships the experts already stacked (transformers >= 5
+        writes the ``[E, ...]`` layout itself) carries no shard id and is copied
+        whole — supported only without tensor parallelism, the same boundary the
+        table-driven loader had.
+        """
+        if shard_id is None:
+            if get_tp_world_size() > 1:
+                raise ValueError(
+                    "a checkpoint with pre-stacked experts cannot be TP-sharded on "
+                    "load; use the per-expert layout"
+                )
+            if param.shape != loaded.shape:
+                raise ValueError(
+                    f"checkpoint tensor of shape {tuple(loaded.shape)} does not fit "
+                    f"parameter of shape {tuple(param.shape)}"
+                )
+            param.data.copy_(loaded)
+            return param.data
+        expert_index, proj = shard_id
+        view = param.data[expert_index]
+        if proj < 2:
+            half = view.shape[0] // 2
+            view = view.narrow(0, proj * half, half)
+            dim = 0
+        else:
+            dim = 1
+        world_size = get_tp_world_size()
+        if world_size > 1:
+            size = loaded.shape[dim] // world_size
+            loaded = loaded.narrow(dim, get_tp_rank() * size, size)
+        if view.shape != loaded.shape:
+            raise ValueError(
+                f"checkpoint tensor of shape {tuple(loaded.shape)} does not fit "
+                f"parameter view of shape {tuple(view.shape)}"
+            )
+        view.copy_(loaded)
+        return view
 
     def _route(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute per-token expert ids and weights (HF-compatible ordering).
