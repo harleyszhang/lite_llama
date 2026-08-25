@@ -122,6 +122,10 @@ class Request:
         return self.num_computed_tokens >= self.prompt_len
 
 
+DEFAULT_MAX_NUM_SEQS = 32
+DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
+
+
 @dataclass(frozen=True)
 class SchedulerConfig:
     """Limits the admission policy enforces.
@@ -144,8 +148,8 @@ class SchedulerConfig:
     """
 
     max_seq_len: int = 2048
-    max_num_seqs: int = 32
-    max_num_batched_tokens: int = 8192
+    max_num_seqs: int = DEFAULT_MAX_NUM_SEQS
+    max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS
     max_chunk_size: int = 512
     enable_prefix_cache: bool = False
     enable_preemption: bool = False

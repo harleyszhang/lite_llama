@@ -41,6 +41,7 @@ from ..utils.logger import get_logger
 from .async_engine import StreamedOutput, _RequestStream
 from .data_parallel import DataParallelEngine
 from .sampler import SamplingParams
+from .scheduler import DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_NUM_SEQS
 
 logger = get_logger(__name__)
 
@@ -88,8 +89,8 @@ class AsyncDataParallelEngine(DataParallelEngine):
         data_parallel_size: int = 1,
         tensor_parallel_size: int = 1,
         load_balancer: str = "round_robin",
-        max_num_seqs: int = 32,
-        max_num_batched_tokens: int = 8192,
+        max_num_seqs: int = DEFAULT_MAX_NUM_SEQS,
+        max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS,
         **engine_kwargs: Any,
     ) -> None:
         super().__init__(
