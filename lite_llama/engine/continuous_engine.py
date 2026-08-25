@@ -8,21 +8,26 @@ computing 480 steps of padding. It also cannot accept a request that arrives one
 millisecond after the call started.
 
 :class:`ContinuousBatchingEngine` replaces the fixed batch with a per-step
-decision built from two collaborating strategies, mirroring vLLM v1's split of
-the engine loop into "schedule → execute passes → harvest":
+decision, mirroring vLLM v1's split of the engine loop into "schedule → execute →
+harvest". The middle stage is deliberately thin: a step turns the scheduler's
+plan into :class:`~lite_llama.executor.worker.ModelInput` values — pure data, no
+tensors — and hands each to an :class:`~lite_llama.executor.executor.Executor`,
+which returns the tokens it sampled. A step produces up to three of them:
 
-* :class:`_PrefillPass` runs prompt chunks — a padded grid through the prefill
-  kernel for a request's first chunk, one decode-style row per token for a
-  resumed chunk whose prefix is already cached — and samples the first token of
-  whichever prefills completed;
-* :class:`_DecodePass` runs one decode token for every fully-prefilled request,
-  owning the device-side batch state that makes consecutive steps sync-free.
+* a **prefill** grid for chunks whose prompt is not in the cache yet;
+* an **extend** pass for chunks resuming on top of a cached prefix;
+* a **decode** pass for every fully prefilled request.
 
-Both passes can run in the same step — chunked prefill interleaves with decode
-instead of stalling it — and :meth:`step` is the template method that sequences
-them and harvests the emitted tokens. One host-device synchronisation per step is
-deliberate: sampled tokens are read back to detokenise and to decide who stops,
-which is what retires a finished request on the very next step.
+All three can occur in the same step — chunked prefill interleaves with decode
+instead of stalling it. Planning rather than executing is what keeps this file
+free of device state: nothing here has to be invalidated when a request joins or
+leaves, because a plan names the slots it means. It is also what lets tensor
+parallelism drop in behind the same call, a plan being small enough to broadcast
+and complete enough for every rank to derive the identical layout from it.
+
+One host-device synchronisation per step is deliberate: sampled tokens are read
+back to detokenise and to decide who stops, which is what retires a finished
+request on the very next step.
 
 Usage:
     engine = ContinuousBatchingEngine.from_pretrained("my_weight/Qwen2.5-0.5B")
@@ -37,319 +42,128 @@ from __future__ import annotations
 import itertools
 import time
 from collections.abc import Sequence
+from typing import NamedTuple
 
 import torch
 
-from ..distributed.parallel_state import broadcast_tp, get_tp_world_size
+from ..executor.executor import Executor, UniProcExecutor
+from ..executor.worker import ModelInput, PassKind
 from ..models.config import read_model_type
 from ..models.registry import ModelRegistry
 from .detokenizer import IncrementalDetokenizer
 from .llm_engine import LLMEngine
 from .outputs import CompletionOutput, RequestOutput
-from .sampler import BatchedSamplingParams, GeneratedSpan, SamplingParams
+from .sampler import SamplingParams
 from .scheduler import Request, Scheduler, SchedulerConfig
 from .stop_criteria import POLL_INTERVAL, detect_repetition
 
 
-def _sync_tp(tokens: torch.Tensor) -> torch.Tensor:
-    """Broadcast rank 0's sampled ids so every TP rank decodes identically.
+class _Work(NamedTuple):
+    """A plan, and the requests whose tokens it will produce, in that order.
 
-    Non-greedy sampling draws from a per-rank RNG, so without this the ranks
-    would diverge one token in and corrupt every later step.
-    """
-    if get_tp_world_size() > 1:
-        return broadcast_tp(tokens)
-    return tokens
-
-
-class _BatchTensors:
-    """Device-side per-row state for whichever requests are decoding.
-
-    Everything here is indexed by position in the current decode batch, so it
-    is only valid while the running set is unchanged; :meth:`matches` reports
-    that, and :meth:`advance` moves a still-valid batch one token forward
-    without touching the host. The generated-token grid is the reason this
-    exists at all: the repetition penalty needs every token a sequence has
-    produced, and rebuilding that as a padded host tensor each step would cost
-    more Python than the decode step costs GPU.
-
-    Args:
-        slots: Cache slot per running request.
-        gen_counts: Tokens already generated per running request.
-        params: Sampling configuration per running request.
-        gen_grid: Shared ``[num_slots, max_seq_len]`` grid of generated tokens.
-        device: Torch device string.
+    The plan is anonymous by design — it names slots, not requests — so the step
+    keeps the request objects alongside it to attribute the sampled tokens.
     """
 
-    def __init__(
-        self,
-        slots: Sequence[int],
-        gen_counts: Sequence[int],
-        params: Sequence[SamplingParams],
-        gen_grid: torch.Tensor,
-        device: str,
-    ) -> None:
-        self.host_slots = list(slots)
-        self._gen_grid = gen_grid
-        self.slots = torch.tensor(self.host_slots, dtype=torch.long, device=device)
-        # Column each row's *next* token goes to; also the count of tokens it has
-        # already produced, which is what bounds the repetition-penalty window.
-        self.gen_pos = torch.tensor(list(gen_counts), dtype=torch.long, device=device)
-        self.sampling = BatchedSamplingParams.build(params, device)
-
-    def matches(self, slots: Sequence[int]) -> bool:
-        """Whether this state still describes ``slots``, in the same order."""
-        return self.host_slots == list(slots)
-
-    def advance(self) -> None:
-        """Move every row one generated token forward, on-device."""
-        self.gen_pos += 1
-
-    def last_tokens(self) -> torch.Tensor:
-        """``[batch]`` most recently generated token per row — the next decode input."""
-        return self._gen_grid[self.slots, self.gen_pos - 1]
-
-    def record(self, next_token: torch.Tensor) -> None:
-        """Write this step's sampled tokens into the generated grid."""
-        self._gen_grid[self.slots, self.gen_pos] = next_token
-
-    def generated_span(self, columns: torch.Tensor, width: int) -> GeneratedSpan:
-        """Padded view of every generated token, for the repetition penalty.
-
-        Args:
-            columns: Cached ``arange(max_seq_len)`` used to slice the grid.
-            width: Longest generated sequence in the batch; the grid is far
-                wider, and gathering all of it would copy megabytes per step.
-        """
-        cols = columns[:width]
-        token_ids = self._gen_grid[self.slots.unsqueeze(1), cols.unsqueeze(0)]
-        return GeneratedSpan(token_ids, cols.unsqueeze(0) < self.gen_pos.unsqueeze(1))
+    plan: ModelInput
+    requests: list[Request]
 
 
-class _StepPass:
-    """Strategy: one model pass over the work the scheduler handed a step.
+def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
+    """Plan one prompt-chunk pass; the two routes differ only in ``kind``.
 
-    A pass converts ``(requests, chunk lens)`` into ``(request, token)`` pairs —
-    its only contract with :meth:`ContinuousBatchingEngine.step`, which owns
-    harvesting. Subclasses hold whatever per-pass device state they need; the
-    engine keeps no batch state of its own.
-
-    Args:
-        engine: Owning engine, for the executor, sampler and shared tensors.
+    Chunk ``i`` writes cache rows ``[num_computed_tokens - chunk,
+    num_computed_tokens)`` of its slot — the scheduler has already advanced the
+    counter, so this reads the chunk's span off the request rather than tracking
+    it separately.
     """
+    slots, starts, lens, tokens = [], [], [], []
+    sampled, requests = [], []
+    for row, (request, chunk) in enumerate(chunks):
+        start = request.num_computed_tokens - chunk
+        slots.append(request.slot)
+        starts.append(start)
+        lens.append(request.num_computed_tokens)
+        tokens.extend(request.prompt_token_ids[start : request.num_computed_tokens])
+        if request.num_computed_tokens == request.prompt_len:
+            # Only a chunk that finished its prompt has a next token to sample,
+            # and a pass mixes the two: the admission budget happily takes a
+            # short prompt (done in one chunk) beside a long one (chunk-capped).
+            # So the sampled rows are a subset, named by row index.
+            sampled.append(row)
+            requests.append(request)
 
-    def __init__(self, engine: ContinuousBatchingEngine) -> None:
-        self._engine = engine
-        # Collaborators resolved once; the engine's tokenizer and runner are
-        # immutable after construction.
-        self._runner = engine.engine.model_runner
-        self._sampler = engine.engine.sampler
-        self._device = engine.device
-        self._pad_id = engine.engine.pad_id
+    return _Work(
+        ModelInput(
+            kind=kind,
+            slots=tuple(slots),
+            seq_starts=tuple(starts),
+            seq_lens=tuple(lens),
+            tokens=tuple(tokens),
+            sampling=tuple(request.params for request in requests),
+            sampled=tuple(sampled),
+            # A first token has no generated history yet, so the repetition
+            # penalty is a no-op here whatever the request configured.
+            gen_counts=(0,) * len(requests),
+        ),
+        requests,
+    )
 
 
-class _PrefillPass(_StepPass):
-    """Runs prompt chunks and samples the first token of whichever complete.
+def _prefill_work(group: list[Request], chunk_lens: list[int]) -> list[_Work]:
+    """Split the step's prompt chunks by the kernel each may legally use.
 
-    A chunk routes by whether its request's slot already holds K/V from an
-    earlier chunk:
+    A chunk routes by whether its slot already holds K/V from an earlier chunk:
 
     * a *first* chunk (``num_computed_tokens == chunk``) runs as a padded grid
       through the prefill kernel — pure self-attention over the grid, the cheap
       path, correct because nothing of the prompt is cached yet;
-    * a *resumed* chunk cannot take it: the prefill kernel never reads the
-      cache, so its tokens would attend only within the chunk and silently drop
-      the prefix. Those tokens instead expand into one decode-style row each
-      (:meth:`SlotBatch.begin_extend`), each query attending over its slot's
-      whole cached history — exact causal extend semantics at one row per token.
-
-    Both routes write K/V at each token's own cache row; only requests whose
-    chunk completes the prompt get a sampled token this step.
+    * a *resumed* chunk cannot take it: the prefill kernel never reads the cache,
+      so its tokens would attend only within the chunk and silently drop the
+      prefix. Those tokens extend instead, one row per token, each attending over
+      its slot's whole cached history.
     """
-
-    def run(self, group: list[Request], chunk_lens: list[int]) -> list[tuple[Request, int]]:
-        pairs = list(zip(group, chunk_lens, strict=True))
-        first = [(r, c) for r, c in pairs if r.num_computed_tokens == c]
-        resumed = [(r, c) for r, c in pairs if r.num_computed_tokens > c]
-        emitted: list[tuple[Request, int]] = []
-        if first:
-            emitted += self._run_grid(first)
-        if resumed:
-            emitted += self._run_extend(resumed)
-        return emitted
-
-    def _run_grid(self, chunks: list[tuple[Request, int]]) -> list[tuple[Request, int]]:
-        """First chunks as one padded grid through the prefill kernel."""
-        engine = self._engine
-        slots = [r.slot for r, _ in chunks]
-        starts = [r.num_computed_tokens - c for r, c in chunks]
-        ends = [r.num_computed_tokens for r, _ in chunks]
-        width = max(c for _, c in chunks)
-
-        rows = [
-            request.prompt_token_ids[start:end] + [self._pad_id] * (width - (end - start))
-            for (request, _), start, end in zip(chunks, starts, ends, strict=True)
-        ]
-        input_ids = torch.tensor(rows, dtype=torch.long, device=self._device)
-        # Padded columns run past a row's real position, but attention never
-        # reads past that row's b_seq_len, so the junk positions are inert.
-        positions = torch.tensor(starts, dtype=torch.long, device=self._device).unsqueeze(1)
-        positions = positions + torch.arange(width, device=self._device).unsqueeze(0)
-
-        engine.slot_batch.begin_prefill(slots, starts, ends)
-        # Each sequence's next-token logits sit at its own last real position
-        # rather than at the end of the padded row; the model gathers exactly
-        # those rows before the lm_head GEMM.
-        last = torch.tensor(ends, dtype=torch.long, device=self._device) - 1
-        logits = self._runner.forward(input_ids, positions, None, logits_positions=last)
-
-        # Only a chunk that completed its prompt has a next token to sample, and
-        # a grid can mix the two: the admission budget happily takes a short
-        # prompt (done in one chunk) alongside a long one (chunk-capped). So the
-        # completed requests must be paired with *their own* grid rows rather
-        # than with the leading rows of the batch.
-        done = [
-            (row, r) for row, (r, _) in enumerate(chunks) if r.num_computed_tokens == r.prompt_len
-        ]
-        if not done:
-            return []
-        rows = torch.tensor([row for row, _ in done], dtype=torch.long, device=self._device)
-        return self._sample_first([request for _, request in done], logits[rows])
-
-    def _run_extend(self, chunks: list[tuple[Request, int]]) -> list[tuple[Request, int]]:
-        """Resumed chunks as one decode-style row per token."""
-        engine = self._engine
-        slots = [r.slot for r, _ in chunks]
-        starts = [r.num_computed_tokens - c for r, c in chunks]
-        ends = [r.num_computed_tokens for r, _ in chunks]
-
-        padded = engine.slot_batch.begin_extend(slots, starts, ends)
-
-        # Flatten chunk tokens in batch order; remember the row each completed
-        # chunk's last token lands on — its logits are that request's first
-        # sample. Filler rows pad the input to the metadata's row count; their
-        # tokens and logits are discarded.
-        tokens: list[int] = []
-        last_row: list[int] = []
-        completed: list[Request] = []
-        for request, chunk in chunks:
-            start = request.num_computed_tokens - chunk
-            tokens.extend(request.prompt_token_ids[start : start + chunk])
-            if request.num_computed_tokens == request.prompt_len:
-                completed.append(request)
-                last_row.append(len(tokens) - 1)
-        tokens.extend([self._pad_id] * (padded - len(tokens)))
-
-        input_ids = torch.tensor(tokens, dtype=torch.long, device=self._device).view(padded, 1)
-        # begin_extend set b_seq_len to each row's absolute position plus one,
-        # so the token's position is exactly that minus one.
-        positions = (engine.slot_batch.seq_lens - 1).view(-1, 1)
-
-        logits = self._runner.forward(input_ids, positions, None)
-        if not completed:
-            return []
-        # Decode-style logits run [rows, 1, vocab]; a completed chunk's first
-        # token comes from the last row of its stretch.
-        rows = torch.tensor(last_row, dtype=torch.long, device=self._device)
-        return self._sample_first(completed, logits[:, -1, :][rows])
-
-    def _sample_first(
-        self, requests: list[Request], logits: torch.Tensor
-    ) -> list[tuple[Request, int]]:
-        """Sample first tokens for ``requests`` and land them in the generated grid.
-
-        A first sample has no repetition window yet, so the penalty is a no-op
-        regardless of configuration; no generated span is gathered. Tokens land
-        in column 0 of the generated grid, where the decode pass's rebuilt state
-        expects to find them.
-        """
-        if not requests:
-            return []
-        sampling = BatchedSamplingParams.build([r.params for r in requests], self._device)
-        tokens = _sync_tp(self._sampler.sample_batched(logits, sampling).reshape(-1))
-        slots = torch.tensor([r.slot for r in requests], dtype=torch.long, device=self._device)
-        self._engine.gen_grid[slots, 0] = tokens
-        return list(zip(requests, tokens.tolist(), strict=True))
+    pairs = list(zip(group, chunk_lens, strict=True))
+    routes = (
+        (PassKind.PREFILL, [pair for pair in pairs if pair[0].num_computed_tokens == pair[1]]),
+        (PassKind.EXTEND, [pair for pair in pairs if pair[0].num_computed_tokens > pair[1]]),
+    )
+    return [_chunk_work(kind, chunks) for kind, chunks in routes if chunks]
 
 
-class _DecodePass(_StepPass):
-    """Runs one decode token for every fully-prefilled request.
+def _decode_work(running: list[Request]) -> _Work:
+    """Plan one decode token for every fully prefilled request.
 
-    Owns the :class:`_BatchTensors` that makes consecutive steps sync-free:
-    while the running set holds steady the pass just advances positions
-    on-device, and any membership change (finish, abort, admission) invalidates
-    it through :meth:`invalidate` so the next run rebuilds from the host.
+    The input token is the last one each request generated, taken from the host:
+    every step ends by synchronising to detokenise that token, so it is already
+    sitting in ``output_token_ids``, and shipping it costs one upload of a few
+    hundred bytes instead of a gather out of the generated-token grid.
     """
-
-    def __init__(self, engine: ContinuousBatchingEngine) -> None:
-        super().__init__(engine)
-        self._batch: _BatchTensors | None = None
-
-    def invalidate(self) -> None:
-        """Forget the cached batch; the next step rebuilds its metadata.
-
-        Called whenever the running set changes out from under a step —
-        finishes, aborts, admissions all do — because row indices are only
-        meaningful while membership and order are stable.
-        """
-        self._batch = None
-
-    def run(self, running: list[Request]) -> list[tuple[Request, int]]:
-        engine = self._engine
-        slots = [request.slot for request in running]
-        # Cache length once this step's token is written: the request already
-        # counts the token it is about to feed in ``output_token_ids``.
-        seq_lens = [request.seq_len for request in running]
-
-        batch = self._batch
-        if batch is not None and batch.matches(slots):
-            batch.advance()
-        else:
-            batch = _BatchTensors(
-                slots,
-                [len(r.output_token_ids) for r in running],
-                [r.params for r in running],
-                engine.gen_grid,
-                self._device,
-            )
-            self._batch = batch
-
-        padded = engine.slot_batch.begin_decode(slots, seq_lens)
-        input_ids = self._decode_inputs(batch.last_tokens(), len(running), padded)
-        # Position of the token being fed is its cache row, i.e. length minus one.
-        positions = engine.slot_batch.seq_lens.view(-1, 1) - 1
-
-        logits = self._runner.forward(input_ids, positions, None)
-        logits = logits[: len(running), -1, :]
-
-        generated = None
-        if batch.sampling.any_penalty:
-            width = max(len(r.output_token_ids) for r in running)
-            generated = batch.generated_span(engine.columns, width)
-
-        tokens = _sync_tp(
-            self._sampler.sample_batched(logits, batch.sampling, generated).reshape(-1)
-        )
-        batch.record(tokens)
-        return list(zip(running, tokens.tolist(), strict=True))
-
-    def _decode_inputs(self, last_tokens: torch.Tensor, size: int, padded: int) -> torch.Tensor:
-        """Shape this step's input tokens to the size the model will be called with."""
-        if padded == size:
-            return last_tokens.view(size, 1)
-        # Filler rows exist only to reach a captured graph batch size; whatever
-        # token id they carry is thrown away with their logits.
-        staging = self._engine._decode_input
-        staging[:size, 0] = last_tokens
-        return staging[:padded]
+    # Cache length once this step's token is written: the request already counts
+    # the token it is about to feed in ``output_token_ids``.
+    seq_lens = tuple(request.seq_len for request in running)
+    return _Work(
+        ModelInput(
+            kind=PassKind.DECODE,
+            slots=tuple(request.slot for request in running),
+            # One token per row, landing at the row its cache length points at.
+            seq_starts=tuple(length - 1 for length in seq_lens),
+            seq_lens=seq_lens,
+            tokens=tuple(request.output_token_ids[-1] for request in running),
+            sampling=tuple(request.params for request in running),
+            sampled=tuple(range(len(running))),
+            gen_counts=tuple(len(request.output_token_ids) for request in running),
+        ),
+        running,
+    )
 
 
 class ContinuousBatchingEngine:
     """Serves independently arriving requests as one continuously reshaped batch.
 
     Drive it by calling :meth:`step` in a loop. Each call runs the scheduler's
-    plan for the step — a prefill pass over newly admitted or resumed chunks,
-    then a decode pass over everything running — and returns the requests that
+    plan for the step — prompt chunks for newly admitted or resumed requests, then
+    a decode token for everything running — and returns the requests that
     produced a token, so a caller can stream text without knowing anything about
     batching.
 
@@ -390,33 +204,14 @@ class ContinuousBatchingEngine:
             )
         self.config = config
 
-        self._slot_batch = engine.model_runner.enable_slot_kv_cache()
-        # Slot ids stay below max_num_seqs, which keeps the generated-token grid
-        # proportional to the concurrency the caller actually asked for rather
-        # than to however many slots happen to fit in the cache.
-        num_slots = min(self._slot_batch.num_slots, config.max_num_seqs)
-        self.scheduler = Scheduler(config, num_slots)
+        self._executor: Executor = UniProcExecutor(engine, config.max_num_seqs, config.max_seq_len)
+        # The executor owns the cache, so it decides how many requests can be in
+        # flight; the scheduler hands out exactly those slots.
+        self.scheduler = Scheduler(config, self._executor.num_slots)
 
-        self.gen_grid = torch.zeros(
-            (num_slots, config.max_seq_len), dtype=torch.long, device=self.device
-        )
-        self.columns = torch.arange(config.max_seq_len, device=self.device)
-        # Decode inputs for a graph-padded batch: written on-device every step,
-        # so filler rows keep whatever token id was there last. They are discarded.
-        self._decode_input = torch.zeros(
-            (self._slot_batch.num_slots + 1, 1), dtype=torch.long, device=self.device
-        )
-
-        self._prefill_pass = _PrefillPass(self)
-        self._decode_pass = _DecodePass(self)
         self._detokenizers: dict[str, IncrementalDetokenizer] = {}
         self._request_ids = itertools.count()
         self._step_count = 0
-
-    @property
-    def slot_batch(self):
-        """The fixed-slot KV view both passes drive."""
-        return self._slot_batch
 
     # ------------------------------------------------------------------ build #
     @classmethod
@@ -545,9 +340,8 @@ class ContinuousBatchingEngine:
     def step(self) -> list[Request]:
         """Run one engine step and return the requests it advanced.
 
-        The template is fixed — schedule, execute the prefill pass, execute the
-        decode pass, harvest — and each stage is a method, so behaviour varies
-        only through the passes themselves.
+        The shape is fixed — schedule, plan, execute, harvest — and the middle two
+        stages are the only ones that know about batching at all.
 
         Returns:
             The requests that produced a token this step, in pass order. Each
@@ -559,11 +353,16 @@ class ContinuousBatchingEngine:
             return []
 
         self._step_count += 1
-        emitted: list[tuple[Request, int]] = []
+        work: list[_Work] = []
         if scheduled.prefill:
-            emitted += self._prefill_pass.run(scheduled.prefill, scheduled.prefill_chunk_lens)
+            work += _prefill_work(scheduled.prefill, scheduled.prefill_chunk_lens)
         if scheduled.decode:
-            emitted += self._decode_pass.run(scheduled.decode)
+            work.append(_decode_work(scheduled.decode))
+
+        emitted: list[tuple[Request, int]] = []
+        for plan, requests in work:
+            tokens = self._executor.execute(plan)
+            emitted += zip(requests, tokens.tolist(), strict=True)
         return self._harvest(emitted)
 
     def generate(
@@ -593,6 +392,10 @@ class ContinuousBatchingEngine:
             )
             for request in requests
         ]
+
+    def shutdown(self) -> None:
+        """Release the executor. The engine cannot serve any more steps after this."""
+        self._executor.shutdown()
 
     # ---------------------------------------------------------------- harvest #
     def _harvest(self, emitted: list[tuple[Request, int]]) -> list[Request]:
@@ -638,7 +441,3 @@ class ContinuousBatchingEngine:
     def _retire(self, request: Request) -> None:
         """Drop the per-request state the engine owns; the caller keeps the handle."""
         self._detokenizers.pop(request.request_id, None)
-        # The running set just changed, so the next step must rebuild its
-        # device-side metadata instead of incrementing the cached batch's.
-        self._decode_pass.invalidate()
-        self._slot_batch.reset()
