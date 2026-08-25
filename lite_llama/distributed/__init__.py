@@ -3,6 +3,7 @@
 from .parallel_state import (
     all_reduce_min,
     all_reduce_tp,
+    broadcast_object_tp,
     destroy_parallel,
     destroy_tensor_parallel,
     divide,
@@ -19,6 +20,7 @@ from .parallel_state import (
 __all__ = [
     "all_reduce_min",
     "all_reduce_tp",
+    "broadcast_object_tp",
     "destroy_parallel",
     "destroy_tensor_parallel",
     "divide",

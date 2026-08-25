@@ -42,11 +42,18 @@ from __future__ import annotations
 import itertools
 import time
 from collections.abc import Sequence
+from multiprocessing.process import BaseProcess
 from typing import NamedTuple
 
 import torch
 
-from ..executor.executor import Executor, UniProcExecutor
+from ..distributed.parallel_state import get_tp_rank, get_tp_world_size
+from ..executor.executor import (
+    Executor,
+    MultiprocExecutor,
+    UniProcExecutor,
+    launch_tensor_parallel,
+)
 from ..executor.worker import ModelInput, PassKind
 from ..models.config import read_model_type
 from ..models.registry import ModelRegistry
@@ -177,6 +184,11 @@ class ContinuousBatchingEngine:
         engine: A built :class:`~lite_llama.engine.llm_engine.LLMEngine`; this
             object takes over its KV cache and must be the only user of it.
         config: Admission limits. Defaults derive ``max_seq_len`` from the engine.
+        executor: Where passes run. Defaults to a
+            :class:`~lite_llama.executor.executor.UniProcExecutor` over ``engine``,
+            which is the single-GPU case; :meth:`from_pretrained` substitutes a
+            tensor-parallel one. Injecting it is also how a test drives the step
+            loop without a model.
 
     Raises:
         NotImplementedError: The checkpoint is multimodal. Vision prefill needs
@@ -184,7 +196,12 @@ class ContinuousBatchingEngine:
             has no place for.
     """
 
-    def __init__(self, engine: LLMEngine, config: SchedulerConfig | None = None) -> None:
+    def __init__(
+        self,
+        engine: LLMEngine,
+        config: SchedulerConfig | None = None,
+        executor: Executor | None = None,
+    ) -> None:
         if engine.model_runner.spec.is_multimodal:
             raise NotImplementedError(
                 "continuous batching supports text-only checkpoints; "
@@ -204,7 +221,9 @@ class ContinuousBatchingEngine:
             )
         self.config = config
 
-        self._executor: Executor = UniProcExecutor(engine, config.max_num_seqs, config.max_seq_len)
+        self._executor: Executor = executor or UniProcExecutor(
+            engine, config.max_num_seqs, config.max_seq_len
+        )
         # The executor owns the cache, so it decides how many requests can be in
         # flight; the scheduler hands out exactly those slots.
         self.scheduler = Scheduler(config, self._executor.num_slots)
@@ -246,25 +265,21 @@ class ContinuousBatchingEngine:
             quantization: Runtime weight quantisation, forwarded to the engine.
                 Orthogonal to batching -- it changes the linear layers, not the
                 KV cache or the schedule.
-            tensor_parallel_size: Must be 1; see below.
+            tensor_parallel_size: GPUs this replica's weights are split over.
+                Above 1, ranks 1.. are spawned as follower processes and every
+                step's plan is broadcast to them; this process stays rank 0 and
+                keeps the scheduler. When the caller has *already* placed this
+                process in a TP group (the CLI, a DP controller), no process is
+                spawned and the existing group is used -- the value then only has
+                to agree with it.
             kv_cache_dtype: KV-cache element type, forwarded to the engine
                 (``"auto"`` for fp16, or an fp8 spelling to halve the cache).
 
         Raises:
-            NotImplementedError: The checkpoint is multimodal, or tensor
-                parallelism was requested.
+            NotImplementedError: The checkpoint is multimodal.
+            ValueError: ``tensor_parallel_size`` contradicts a group this process
+                is already a member of.
         """
-        if tensor_parallel_size != 1:
-            # TP is driven by the multi-process worker path in lite_llama.cli,
-            # which owns one engine per rank. Combining that with this engine's
-            # single worker thread and per-request slot pool is a real design
-            # question, not a parameter to forward -- so it is refused rather
-            # than accepted and silently ignored.
-            raise NotImplementedError(
-                "continuous batching does not support tensor_parallel_size > 1 yet; "
-                "use `lite-llama chat` for tensor-parallel inference"
-            )
-
         spec = ModelRegistry.resolve(read_model_type(model))
         if spec.is_multimodal:
             raise NotImplementedError(
@@ -272,24 +287,43 @@ class ContinuousBatchingEngine:
                 "use LLM.generate() for vision-language models"
             )
 
+        engine_kwargs = {
+            "checkpoints_dir": model,
+            "tokenizer_path": tokenizer,
+            "max_seq_len": max_seq_len,
+            "max_gpu_num_blocks": max_gpu_num_blocks,
+            "use_cuda_graph": use_cuda_graph,
+            "quantization": quantization,
+            "kv_cache_dtype": kv_cache_dtype,
+        }
+
+        # Followers must exist *before* this rank builds its engine: sharded
+        # layers read their width from the process group, and sizing the KV cache
+        # is itself a collective over it.
+        followers: tuple[BaseProcess, ...] = ()
+        joined = get_tp_world_size()
+        if joined > 1 and joined != tensor_parallel_size:
+            raise ValueError(
+                f"this process is already rank {get_tp_rank()} of a {joined}-way "
+                f"tensor-parallel group, but tensor_parallel_size={tensor_parallel_size}"
+            )
+        if joined == 1 and tensor_parallel_size > 1:
+            followers = launch_tensor_parallel(tensor_parallel_size, engine_kwargs, max_num_seqs)
+
         engine = LLMEngine(
-            checkpoints_dir=model,
-            tokenizer_path=tokenizer,
-            max_seq_len=max_seq_len,
-            max_gpu_num_blocks=max_gpu_num_blocks,
             device=device,
-            use_cuda_graph=use_cuda_graph,
-            quantization=quantization,
-            kv_cache_dtype=kv_cache_dtype,
+            tensor_parallel_size=tensor_parallel_size,
+            **engine_kwargs,
         )
-        return cls(
-            engine,
-            SchedulerConfig(
-                max_seq_len=engine.max_seq_len,
-                max_num_seqs=max_num_seqs,
-                max_num_batched_tokens=max_num_batched_tokens,
-            ),
+        config = SchedulerConfig(
+            max_seq_len=engine.max_seq_len,
+            max_num_seqs=max_num_seqs,
+            max_num_batched_tokens=max_num_batched_tokens,
         )
+        executor: Executor | None = None
+        if get_tp_world_size() > 1:
+            executor = MultiprocExecutor(engine, config.max_num_seqs, config.max_seq_len, followers)
+        return cls(engine, config, executor)
 
     # ------------------------------------------------------------- public API #
     def add_request(

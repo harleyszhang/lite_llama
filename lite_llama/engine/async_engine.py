@@ -223,21 +223,31 @@ class AsyncLLMEngine:
 
     # ----------------------------------------------------------- worker loop #
     def _run(self) -> None:
-        """Drive the engine until shutdown. The only thread that touches it."""
-        while not self._stopping.is_set():
-            try:
-                self._drain_commands()
-                if not self._engine.has_unfinished_requests():
-                    # Idle: block on the command queue rather than spinning, so a
-                    # server with no traffic costs no CPU.
-                    self._apply(self._commands.get())
-                    continue
-                for request in self._engine.step():
-                    self._publish(request)
-            except Exception as exc:  # the worker thread must not die silently
-                logger.exception("engine worker step failed")
-                self._fail_all(exc)
-                self._drop_everything()
+        """Drive the engine until shutdown. The only thread that touches it.
+
+        Releasing the engine belongs here rather than in :meth:`shutdown`: the
+        worker owns it, so the thread that ran every model pass is also the one
+        that tells the tensor-parallel followers to stop. Doing it from the event
+        loop would issue a collective off the owning thread, and skipping it would
+        leave those follower processes waiting for a plan that never comes.
+        """
+        try:
+            while not self._stopping.is_set():
+                try:
+                    self._drain_commands()
+                    if not self._engine.has_unfinished_requests():
+                        # Idle: block on the command queue rather than spinning, so a
+                        # server with no traffic costs no CPU.
+                        self._apply(self._commands.get())
+                        continue
+                    for request in self._engine.step():
+                        self._publish(request)
+                except Exception as exc:  # the worker thread must not die silently
+                    logger.exception("engine worker step failed")
+                    self._fail_all(exc)
+                    self._drop_everything()
+        finally:
+            self._engine.shutdown()
 
     def _drain_commands(self) -> None:
         while True:

@@ -2,21 +2,25 @@
 
 Core design
 -----------
-An engine should not know whether the model it drives lives in this process, in
-eight of them, or behind a network. It hands an :class:`~lite_llama.executor.worker.ModelInput`
-to an :class:`Executor` and gets sampled tokens back — three methods, no tensors in
-the signature except the result.
+An engine should not know whether the model it drives lives in this process or in
+eight of them. It hands a :class:`~lite_llama.executor.worker.ModelInput` to an
+:class:`Executor` and gets sampled tokens back — three methods, and no tensor in
+any signature except the result.
 
-Two implementations, differing only in *where the plan comes from*:
+Two implementations, differing only in *who else runs the plan*:
 
 * :class:`UniProcExecutor` calls the local :class:`~lite_llama.executor.worker.ModelWorker`
-  directly. Single process, so a breakpoint in the engine loop is a breakpoint in
-  the kernel; this is the default for one GPU and the reason the plan-building
-  code stays debuggable.
-* ``MultiprocExecutor`` (tensor parallelism) broadcasts the plan over a CPU
-  collective and then runs *the same* worker method. Because the plan is pure
-  data and every rank derives layout from it identically, the driver and the
-  workers execute one code path, not two.
+  and stops there. One process, so a breakpoint in the engine loop is a breakpoint
+  in the kernel; this is the default for one GPU.
+* :class:`MultiprocExecutor` first broadcasts the plan to its follower ranks, then
+  runs *the same* worker method. Because the plan is pure data and every rank
+  derives its layout from it identically, driver and followers execute one code
+  path, not two — there is no separate "worker forward" to keep in sync. This
+  replaces the mirror-process scheme, where each rank re-derived the batch from a
+  broadcast prompt string and any disagreement became an NCCL hang.
+
+The schedule is computed once, on the driver. Followers never see a request, a
+queue or a stop condition; they receive plans until they receive ``None``.
 
 Usage:
     executor = UniProcExecutor(llm_engine, max_num_seqs=32, max_seq_len=2048)
@@ -26,15 +30,26 @@ Usage:
 
 from __future__ import annotations
 
+import multiprocessing as mp
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 import torch
 
+from ..distributed.parallel_state import broadcast_object_tp
+from ..utils.logger import get_logger
 from .worker import ModelInput, ModelWorker
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
     from ..engine.llm_engine import LLMEngine
+
+_log = get_logger(__name__)
+
+#: How long :meth:`MultiprocExecutor.shutdown` waits for a follower to notice the
+#: stop signal before it is killed. A follower's remaining work is one forward
+#: pass, so this is generous.
+SHUTDOWN_TIMEOUT_S = 30.0
 
 
 class Executor(ABC):
@@ -82,3 +97,156 @@ class UniProcExecutor(Executor):
 
     def shutdown(self) -> None:
         """Nothing to tear down: the caller still owns the engine it passed in."""
+
+
+class MultiprocExecutor(Executor):
+    """Tensor parallelism: this rank plans, every rank runs.
+
+    The driver is rank 0 of its replica *and* a worker, so a TP size of two costs
+    two processes rather than three. Each :meth:`execute` publishes the plan on
+    the CPU group and then does its own share of the forward; the collectives
+    inside the model and the sampler line the ranks up from there.
+
+    Args:
+        engine: This rank's :class:`~lite_llama.engine.llm_engine.LLMEngine`,
+            holding its shard of the weights.
+        max_num_seqs: Concurrency ceiling.
+        max_seq_len: Context bound.
+        followers: Processes running ranks 1.. of this replica, as returned by
+            :func:`launch_tensor_parallel`. Empty when someone else owns them
+            (the CLI, a DP controller), in which case shutdown only sends the
+            stop signal.
+    """
+
+    def __init__(
+        self,
+        engine: LLMEngine,
+        max_num_seqs: int,
+        max_seq_len: int,
+        followers: Sequence[mp.process.BaseProcess] = (),
+    ) -> None:
+        self._worker = ModelWorker(engine, max_num_seqs, max_seq_len)
+        self._followers = tuple(followers)
+        self._live = True
+
+    @property
+    def num_slots(self) -> int:
+        return self._worker.num_slots
+
+    def execute(self, model_input: ModelInput) -> torch.Tensor:
+        ensure_followers_alive(self._followers)
+        broadcast_object_tp(model_input)
+        return self._worker.execute(model_input)
+
+    def shutdown(self) -> None:
+        """Tell the followers to leave their loop, then reap them.
+
+        Idempotent, and conditional on the group still being whole: broadcasting
+        the stop signal to a rank that has already died would block forever, so a
+        crashed follower is joined without being asked. An empty follower tuple
+        means somebody else owns the processes, and the signal is still theirs to
+        receive.
+        """
+        if not self._live:
+            return
+        self._live = False
+        if all(process.is_alive() for process in self._followers):
+            broadcast_object_tp(None)
+        for process in self._followers:
+            process.join(timeout=SHUTDOWN_TIMEOUT_S)
+            if process.is_alive():
+                _log.warning("tp follower pid %s did not exit; terminating", process.pid)
+                process.terminate()
+
+
+def ensure_followers_alive(followers: Sequence[mp.process.BaseProcess]) -> None:
+    """Raise if any follower has exited, before a collective can hang on it.
+
+    Every collective assumes all ranks arrive. When one has died the rest simply
+    wait, and a silent hang is the worst failure mode multi-process execution
+    has — so the driver checks the cheap local fact (is the process alive) before
+    committing to the expensive global one. Rank numbering starts at 1: rank 0 is
+    the process doing the checking.
+    """
+    for rank, process in enumerate(followers, start=1):
+        if not process.is_alive():
+            raise RuntimeError(
+                f"tensor-parallel rank {rank} (pid {process.pid}) exited with code "
+                f"{process.exitcode}; see its traceback above"
+            )
+
+
+def launch_tensor_parallel(
+    tp_size: int,
+    engine_kwargs: dict[str, Any],
+    max_num_seqs: int,
+    master_port: int = 29500,
+) -> tuple[mp.process.BaseProcess, ...]:
+    """Start ranks 1..``tp_size``-1 and join this process as rank 0.
+
+    Blocks until the whole group has rendezvoused, so on return the caller may
+    build its own :class:`~lite_llama.engine.llm_engine.LLMEngine` and the shard
+    widths will already be right — layers read the TP size from
+    :mod:`lite_llama.distributed.parallel_state`, not from an argument.
+
+    Args:
+        tp_size: Ranks in the group, including this one.
+        engine_kwargs: Constructor arguments every rank builds its engine from,
+            minus ``device``, which is the rank's own GPU. Must be picklable.
+        max_num_seqs: Concurrency ceiling, so followers size their scratch to
+            match.
+        master_port: Rendezvous port; rank 0 listens.
+
+    Returns:
+        The follower processes, in rank order.
+    """
+    from ..distributed.parallel_state import init_tensor_parallel
+
+    context = mp.get_context("spawn")
+    followers = [
+        context.Process(
+            target=run_follower,
+            args=(rank, tp_size, engine_kwargs, max_num_seqs, master_port),
+            name=f"lite-llama-tp{rank}",
+            daemon=True,
+        )
+        for rank in range(1, tp_size)
+    ]
+    for process in followers:
+        process.start()
+    init_tensor_parallel(rank=0, world_size=tp_size, master_port=master_port)
+    return tuple(followers)
+
+
+def run_follower(
+    rank: int,
+    tp_size: int,
+    engine_kwargs: dict[str, Any],
+    max_num_seqs: int,
+    master_port: int,
+) -> None:
+    """Body of a non-driver tensor-parallel rank: build, then run plans forever.
+
+    The loop is the whole of a follower. It holds no scheduler, no queue and no
+    stop criteria, and it discards the tokens it samples — rank 0 sampled the
+    same ones and is the one who has to detokenise them. What keeps the ranks in
+    step is that they run identical code over an identical plan.
+
+    Module-level so that ``spawn`` can pickle it by name.
+    """
+    from ..distributed.parallel_state import destroy_parallel, init_tensor_parallel
+    from ..engine.llm_engine import LLMEngine
+
+    torch.cuda.set_device(rank)
+    init_tensor_parallel(rank=rank, world_size=tp_size, master_port=master_port)
+    try:
+        engine = LLMEngine(device=f"cuda:{rank}", tensor_parallel_size=tp_size, **engine_kwargs)
+        # ``max_seq_len`` only sizes this rank's local scratch, so taking it from
+        # the engine (rather than shipping the driver's scheduler config) cannot
+        # desynchronise anything.
+        worker = ModelWorker(engine, max_num_seqs, engine.max_seq_len)
+        _log.info("tp rank %d ready on cuda:%d", rank, rank)
+        while (plan := broadcast_object_tp()) is not None:
+            worker.execute(plan)
+    finally:
+        destroy_parallel()
