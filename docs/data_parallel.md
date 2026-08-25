@@ -4,19 +4,15 @@
 
 张量并行（TP）把**一个权重矩阵**切到多张卡上，让放不下单卡的大模型跑起来，代价是每个 block 一次 all-reduce。数据并行（DP）解决的是另一个问题：模型单卡放得下，但**请求太多**，一张卡喂不饱吞吐。DP 不切权重，而是把**请求流**分给若干份完整模型副本，每个副本各占一张卡、各跑各的 batch，前向过程里**没有任何集合通信**。
 
-因此两者是正交的、可组合的：`dp_size` 份副本，每份 `tp_size` 张卡，构成一个
-`dp_size × tp_size` 的 rank 网格（见 `lite_llama/distributed/parallel_state.py`）。
-TP 用延迟换"装得下"，DP 用显存（每卡一份权重）换吞吐。
+因此两者是正交的、可组合的：`dp_size` 份副本，每份 `tp_size` 张卡，构成一个 `dp_size × tp_size` 的 rank 网格（见 `lite_llama/distributed/parallel_state.py`）。 TP 用延迟换"装得下"，DP 用显存（每卡一份权重）换吞吐。
 
 ![data parallel](./images/data_parallel.gif)
 
-上图是 8 个请求经 round-robin 派发到 2 个副本：`GPU0` 拿到偶数号请求、`GPU1` 拿到奇数号，
-两个副本**同时**解码各自的 batch。要看的就是两条泳道并排推进——这份并发就是全部的加速来源。
+上图是 8 个请求经 round-robin 派发到 2 个副本：`GPU0` 拿到偶数号请求、`GPU1` 拿到奇数号，两个副本**同时**解码各自的 batch。要看的就是两条泳道并排推进——这份并发就是全部的加速来源。
 
 ## 分层结构
 
-实现照搬 vLLM 与 SGLang 的分工，只是缩到 lite_llama 的同步批处理 API 上。三者各司其职，
-互不知道对方的内部：
+实现照搬 vLLM 与 SGLang 的分工，只是缩到 lite_llama 的同步批处理 API 上。三者各司其职，互不知道对方的内部：
 
 | 角色 | 本仓库 | vLLM | SGLang |
 | --- | --- | --- | --- |
@@ -24,79 +20,43 @@ TP 用延迟换"装得下"，DP 用显存（每卡一份权重）换吞吐。
 | 负载均衡策略（选哪个副本） | `dp_load_balancer.LoadBalancer` | `DPLBAsyncMPClient` | `LoadBalanceMethod` |
 | 协调器（拉起 worker、路由、回收结果） | `DataParallelEngine` | engine core client | `DataParallelController` |
 
-把"选副本"单独拎成一个策略对象、而不是塞进协调器里，是这次相较早期单体实现的关键改动：
-路由是**每请求一次**的决策，换一个策略（轮询 → 按 token 数）不动协调器一行代码。
+把"选副本"单独拎成一个策略对象、而不是塞进协调器里，是这次相较早期单体实现的关键改动：路由是**每请求一次**的决策，换一个策略（轮询 → 按 token 数）不动协调器一行代码。
 
-- **worker**（`_dp_worker`）是网格里的**一个 cell**，不是一个副本：spawn 出的子进程里
-  `import torch`、按 `global_rank` 绑卡，然后按自己在副本里的位置分化成两种角色。
-  - **leader**（`tp_rank == 0`）建一个**常驻**的 `ContinuousBatchingEngine`，跑 `_ReplicaLoop`：
-    从自己的队列取请求、并进正在跑的 batch、逐 step 推进、把答案发回。引擎跨 dispatch
-    存活是这一层唯一的性能要点——请求随到随入，停了的序列**下一步**就把 slot 让给下一条，
-    而不是整批陪最长的那条答案跑到底。空闲时循环阻塞在队列上，不空转 CPU。
-  - **follower**（`tp_rank > 0`）建一个 `LLM` 并跑 `serve_plans`，**不读请求队列**：它每一次
-    前向都由 leader 的 executor 通过控制面广播过来（见[张量并行](./tensor_parallel.md)）。
+- **worker**（`_dp_worker`）是网格里的**一个 cell**，不是一个副本：spawn 出的子进程里 `import torch`、按 `global_rank` 绑卡，然后按自己在副本里的位置分化成两种角色。
+  - **leader**（`tp_rank == 0`）建一个**常驻**的 `ContinuousBatchingEngine`，跑 `_ReplicaLoop`：从自己的队列取请求、并进正在跑的 batch、逐 step 推进、把答案发回。引擎跨 dispatch 存活是这一层唯一的性能要点——请求随到随入，停了的序列**下一步**就把 slot 让给下一条，而不是整批陪最长的那条答案跑到底。空闲时循环阻塞在队列上，不空转 CPU。
+  - **follower**（`tp_rank > 0`）建一个 `LLM` 并跑 `serve_plans`，**不读请求队列**：它每一次前向都由 leader 的 executor 通过控制面广播过来（见[张量并行](./tensor_parallel.md)）。
 
   建模失败也走结果队列（一条 `"error"` 消息），协调器因此会**报错而不是死等**一个永远
   不会应答的 worker。
-- **协调器**（`DataParallelEngine`）本进程里**什么模型都不加载**——它只有 worker 进程和
-  一个 balancer，所以它刻意**不是** `LLM` 的子类：没有权重、没有 KV cache、没有 sampler。
+- **协调器**（`DataParallelEngine`）本进程里**什么模型都不加载**——它只有 worker 进程和一个 balancer，所以它刻意**不是** `LLM` 的子类：没有权重、没有 KV cache、没有 sampler。
 
 ## 请求怎么路由
 
-`dp_load_balancer.py` 里是三个纯策略对象，不碰队列、进程和张量，因此在 CPU 上毫秒级可测。
-名字直接沿用 SGLang 的 `LoadBalanceMethod` 拼写，认识一边就认识另一边：
+`dp_load_balancer.py` 里是三个纯策略对象，不碰队列、进程和张量，因此在 CPU 上毫秒级可测。名字直接沿用 SGLang 的 `LoadBalanceMethod` 拼写，认识一边就认识另一边：
 
-- **`round_robin`**（默认）：0,1,0,1… 轮流发，不管每个请求跑多久。离线批处理的正确默认——
-  所有 prompt 一起到，没有哪条特别长。用条带式（0,2,4,… 给副本 0）而不是切连续区间，是为了
-  把长短请求均匀打散，避免一个已排好序的列表把所有长 prompt 都堆给同一个副本。
-- **`total_requests`**：发给当前在飞**请求数**最少的副本。所有副本空闲时它退化成轮询
-  （低下标优先），所以能安全地做默认的替身。
-- **`total_tokens`**：发给当前在飞**token 数**最少的副本。prefill 的开销与 prompt 长度成正比，
-  长度悬殊时"请求数"是错的计量单位——两条 4k prompt 不等于两条 40 token 的负载。
+- **`round_robin`**（默认）：0,1,0,1… 轮流发，不管每个请求跑多久。离线批处理的正确默认—— 所有 prompt 一起到，没有哪条特别长。用条带式（0,2,4,… 给副本 0）而不是切连续区间，是为了把长短请求均匀打散，避免一个已排好序的列表把所有长 prompt 都堆给同一个副本。
+- **`total_requests`**：发给当前在飞**请求数**最少的副本。所有副本空闲时它退化成轮询（低下标优先），所以能安全地做默认的替身。
+- **`total_tokens`**：发给当前在飞**token 数**最少的副本。prefill 的开销与 prompt 长度成正比，长度悬殊时"请求数"是错的计量单位——两条 4k prompt 不等于两条 40 token 的负载。
 
 三个策略共享同一个 tie-break（低下标优先），因此冷启动时输出完全一致的 0,1,2… 序列。
 
-**关于 token 估计的诚实契约。** 只有 `total_tokens` 真的读 `estimated_tokens`，它通过类属性
-`needs_token_estimate = True` 声明这件事；协调器据此决定要不要花一次 tokenizer 开销。早期实现
-在这里有两个互相掩盖的问题：`select(estimated_tokens=...)` 的形参**根本没被用过**，而调用方传
-进去的又是 `len(prompt)`——**字符数当 token 数**。中英混排 1:1、缩进密集的代码 1:6，这个比例
-本身就不是常数，任何非英文 batch 都会被算错。现在路由层用 tokenizer 一次性数完整批，而不需要
-估计的策略连 tokenizer 都不加载。
+**关于 token 估计的诚实契约。** 只有 `total_tokens` 真的读 `estimated_tokens`，它通过类属性 `needs_token_estimate = True` 声明这件事；协调器据此决定要不要花一次 tokenizer 开销。早期实现在这里有两个互相掩盖的问题：`select(estimated_tokens=...)` 的形参**根本没被用过**，而调用方传进去的又是 `len(prompt)`——**字符数当 token 数**。中英混排 1:1、缩进密集的代码 1:6，这个比例本身就不是常数，任何非英文 batch 都会被算错。现在路由层用 tokenizer 一次性数完整批，而不需要估计的策略连 tokenizer 都不加载。
 
-协调器把每请求的选择**按副本聚回一个子 batch**，这样每个副本仍然只做一次高效的成批前向，
-而**选择**本身保持逐请求的策略——换 balancer 就换了切分，路由代码一行不动。
+协调器把每请求的选择**按副本聚回一个子 batch**，这样每个副本仍然只做一次高效的成批前向，而**选择**本身保持逐请求的策略——换 balancer 就换了切分，路由代码一行不动。
 
 ## 与张量并行的关系
 
-网格坐标是纯函数 `grid_coordinates(global_rank, tp_size, dp_size) → (dp_rank, tp_rank)`，
-按 `global_rank = dp_rank * tp_size + tp_rank` 布局，让一个副本的 TP ranks 连续。
-`init_parallel` 只有在 `tp_size > 1` 时才真正 rendezvous 建 NCCL 进程组——纯 DP 的副本之间
-不共享任何张量，没什么好同步的，NCCL 完全不碰。这也是为什么纯 DP 用普通的 `multiprocessing`
-队列而不是 NCCL：worker 从不读另一个 worker 的张量。
+网格坐标是纯函数 `grid_coordinates(global_rank, tp_size, dp_size) → (dp_rank, tp_rank)`，按 `global_rank = dp_rank * tp_size + tp_rank` 布局，让一个副本的 TP ranks 连续。 `init_parallel` 只有在 `tp_size > 1` 时才真正 rendezvous 建 NCCL 进程组——纯 DP 的副本之间不共享任何张量，没什么好同步的，NCCL 完全不碰。这也是为什么纯 DP 用普通的 `multiprocessing` 队列而不是 NCCL：worker 从不读另一个 worker 的张量。
 
-**进程数按 cell 算，队列数按副本算。** `tp_size > 1` 时 `init_parallel` rendezvous 的是
-`dp_size × tp_size` 个 rank 的世界，所以只 spawn `dp_size` 个进程会**永久挂死**在等待从未
-启动的 rank 上——一个协调器的任何超时都解释不了的失败。所以协调器为每个 cell 起一个进程，
-但**请求队列只有 `dp_size` 个**：一条请求发给一个**副本**，而不是发给副本的每个 rank。
-副本内的 follower 不参与路由，它们跑什么由 leader 的控制面决定（每 step 一次
-`SchedulerOutput` 广播，采样出的 token 再从 tp rank 0 广播回去）；只有 leader 回结果，因为
-协调器每个副本只等一条应答。
+**进程数按 cell 算，队列数按副本算。** `tp_size > 1` 时 `init_parallel` rendezvous 的是 `dp_size × tp_size` 个 rank 的世界，所以只 spawn `dp_size` 个进程会**永久挂死**在等待从未启动的 rank 上——一个协调器的任何超时都解释不了的失败。所以协调器为每个 cell 起一个进程，但**请求队列只有 `dp_size` 个**：一条请求发给一个**副本**，而不是发给副本的每个 rank。副本内的 follower 不参与路由，它们跑什么由 leader 的控制面决定（每 step 一次 `SchedulerOutput` 广播，采样出的 token 再从 tp rank 0 广播回去）；只有 leader 回结果，因为协调器每个副本只等一条应答。
 
-这么分层的收益是**路由与同步互不知情**：换 balancer 不碰 TP 的一行代码，改 TP 的广播格式也
-不碰路由。早期实现里 tp ranks 是**镜像**——每个 rank 一个队列、各自收同一条请求消息——那样
-"一条请求"就同时是路由单位和同步单位，两边任何一处不一致都会让某个 rank 少跑一次前向而
-卡死在集合通信里。
+这么分层的收益是**路由与同步互不知情**：换 balancer 不碰 TP 的一行代码，改 TP 的广播格式也不碰路由。早期实现里 tp ranks 是**镜像**——每个 rank 一个队列、各自收同一条请求消息——那样 "一条请求"就同时是路由单位和同步单位，两边任何一处不一致都会让某个 rank 少跑一次前向而卡死在集合通信里。
 
-这条网格约束在 CPU 上就能断言，不需要四张卡：把 `mp.get_context` 换成假的进程/队列，直接检查
-4 个 cell 的 `(global_rank, dp_rank, tp_rank)`（`test_dp_times_tp_spawns_one_process_per_grid_cell`）
-以及一个副本的两个 rank 拿到的是**同一个**队列对象
-（`test_a_replica_shares_one_queue_across_its_ranks`）。
+这条网格约束在 CPU 上就能断言，不需要四张卡：把 `mp.get_context` 换成假的进程/队列，直接检查 4 个 cell 的 `(global_rank, dp_rank, tp_rank)`（`test_dp_times_tp_spawns_one_process_per_grid_cell`）以及一个副本的两个 rank 拿到的是**同一个**队列对象（`test_a_replica_shares_one_queue_across_its_ranks`）。
 
 ## 实测数据
 
-Qwen2.5-1.5B-Instruct，2× A10（23 GB），greedy，`max_gen_len=128`，round-robin。
-基线是 `data_parallel_size=1` 的协调器（隔离掉副本数以外的变量），另附一行进程内 `LLM`
-用来显示协调器的 IPC 开销。
+Qwen2.5-1.5B-Instruct，2× A10（23 GB），greedy，`max_gen_len=128`，round-robin。基线是 `data_parallel_size=1` 的协调器（隔离掉副本数以外的变量），另附一行进程内 `LLM` 用来显示协调器的 IPC 开销。
 
 > 每个副本的 `max_num_seqs`（并发上限）都设成它实际收到的条数。这一条必须显式说明：副本里
 > 是一个**常驻**引擎，不像一次性的 `LLM` 那样能按手上这批的大小自适应，用服务默认值（32）去
@@ -121,13 +81,8 @@ Qwen2.5-1.5B-Instruct，2× A10（23 GB），greedy，`max_gen_len=128`，round-
 
 两条结论，按实测说：
 
-1. **weak scaling 拿到满格的 ×2.00（100% 线性）。** 每个副本干一份独立的活、无跨卡通信，
-   这正是 DP 该有的形状：加一张卡，吞吐加一份。IPC 开销可忽略（进程内 `LLM` 与 dp=1 协调器
-   差 2~3%）。
-2. **strong scaling ×1.64（82% 线性）。** 把一个批切成两半，每半仍要各自跑一遍 prefill，且
-   墙钟由**较慢**的那个副本决定；256 条切成 128+128 后单副本已不在最省的工作点，所以拿不到
-   满格的 2×。这不是缺陷，是"切分同一批"这件事的固有上限——想要满格加速就用 weak scaling
-   的口径（更多并发请求），而不是把小批越切越碎。
+1. **weak scaling 拿到满格的 ×2.00（100% 线性）。** 每个副本干一份独立的活、无跨卡通信，这正是 DP 该有的形状：加一张卡，吞吐加一份。IPC 开销可忽略（进程内 `LLM` 与 dp=1 协调器差 2~3%）。
+2. **strong scaling ×1.64（82% 线性）。** 把一个批切成两半，每半仍要各自跑一遍 prefill，且墙钟由**较慢**的那个副本决定；256 条切成 128+128 后单副本已不在最省的工作点，所以拿不到满格的 2×。这不是缺陷，是"切分同一批"这件事的固有上限——想要满格加速就用 weak scaling 的口径（更多并发请求），而不是把小批越切越碎。
 
 复现：
 
@@ -140,15 +95,9 @@ python benchmarks/bench_data_parallel.py --model my_weight/Qwen2.5-1.5B-Instruct
 
 ## 精度如何保证
 
-上面两次运行里，dp=2 的输出与单卡**逐字节一致**（256/256、32/32 完全相同）。但这需要小心
-表述，和连续批处理是同一件事：**只有算术完全一致时"文本相同"才是合理预期**。batch 宽度是
-GEMM 的 M 维，同一条 prompt 在 batch 32 里和在 batch 16 里 fp16 累加顺序不同，top-2 相差
-~1e-2 的 token 就可能翻转。
+上面两次运行里，dp=2 的输出与单卡**逐字节一致**（256/256、32/32 完全相同）。但这需要小心表述，和连续批处理是同一件事：**只有算术完全一致时"文本相同"才是合理预期**。batch 宽度是 GEMM 的 M 维，同一条 prompt 在 batch 32 里和在 batch 16 里 fp16 累加顺序不同，top-2 相差 ~1e-2 的 token 就可能翻转。
 
-所以 DP 的一致性测试比对的是**同构 batch**：不是"dp=2 的 6 条"对"单卡的 6 条"（副本各只跑
-3 条，batch 形状就不同），而是让参考 `LLM` 重放**同样的子 batch**——副本 0 的 3 条对单卡的
-这 3 条。这样 batch 组成完全一致，任何差异都是真正的路由 bug，而不是浮点噪声。见
-`tests/distributed/test_data_parallel.py::TestTwoReplicas::test_matches_a_single_gpu_per_replica_batch`。
+所以 DP 的一致性测试比对的是**同构 batch**：不是"dp=2 的 6 条"对"单卡的 6 条"（副本各只跑 3 条，batch 形状就不同），而是让参考 `LLM` 重放**同样的子 batch**——副本 0 的 3 条对单卡的这 3 条。这样 batch 组成完全一致，任何差异都是真正的路由 bug，而不是浮点噪声。见 `tests/distributed/test_data_parallel.py::TestTwoReplicas::test_matches_a_single_gpu_per_replica_batch`。
 
 测试规模：
 
@@ -158,27 +107,15 @@ GEMM 的 M 维，同一条 prompt 在 batch 32 里和在 batch 16 里 fp16 累�
 | `tests/distributed/test_dp_load_balancer.py` | 20 | CPU（策略纯函数） |
 | `tests/distributed/test_data_parallel.py` | 18 + 8 | CPU（路由/网格/构造/副本循环）+ GPU（需 2 卡端到端） |
 
-那 18 个 CPU 测试里有 7 个只测 `_ReplicaLoop`：拿假队列喂它、拿假引擎数它调了几次 `step()`，
-于是"空闲时阻塞、忙时不阻塞""停止信号不打断在飞的 batch""一次 step 失败只失败那一批、
-不拖垮副本"这些**时序**性质不需要显卡就能钉住。
+那 18 个 CPU 测试里有 7 个只测 `_ReplicaLoop`：拿假队列喂它、拿假引擎数它调了几次 `step()`，于是"空闲时阻塞、忙时不阻塞""停止信号不打断在飞的 batch""一次 step 失败只失败那一批、不拖垮副本"这些**时序**性质不需要显卡就能钉住。
 
 ## 当前边界
 
-- **`generate()` 同步，副本内部不同步。** 每个副本跑一个常驻引擎，所以一个 dispatch 里的请求
-  随到随入、停了就腾 slot；但 `generate()` 这个 API 仍然阻塞到最慢的副本交完自己那批答案——
-  1 条 prompt 配 4 个副本，3 个空转。DP 在这里买的是"多请求的吞吐"，不是"少请求的延迟"。
-  逐请求流式回传是自然的下一步：`_ReplicaLoop` 已经按请求记账，只差换一个分组把答案发回。
-- **并发上限在建副本时定，不随批大小走。** `max_num_seqs`（默认 32）是常驻引擎的 slot 数，
-  一次发进来 256 条就分批入场。这是服务该有的行为（显存有上限），但离线批处理要吃满卡就得
-  把它开到批的宽度——`DataParallelEngine(..., max_num_seqs=256)`。上面那张表就是这么测的。
+- **`generate()` 同步，副本内部不同步。** 每个副本跑一个常驻引擎，所以一个 dispatch 里的请求随到随入、停了就腾 slot；但 `generate()` 这个 API 仍然阻塞到最慢的副本交完自己那批答案—— 1 条 prompt 配 4 个副本，3 个空转。DP 在这里买的是"多请求的吞吐"，不是"少请求的延迟"。逐请求流式回传是自然的下一步：`_ReplicaLoop` 已经按请求记账，只差换一个分组把答案发回。
+- **并发上限在建副本时定，不随批大小走。** `max_num_seqs`（默认 32）是常驻引擎的 slot 数，一次发进来 256 条就分批入场。这是服务该有的行为（显存有上限），但离线批处理要吃满卡就得把它开到批的宽度——`DataParallelEngine(..., max_num_seqs=256)`。上面那张表就是这么测的。
 - **文本模型离线批处理。** 多模态的逐请求 processor 输出不走这条路径。
-- **每卡一份完整权重。** 这是 DP 的定义，不是限制——放不下单卡就要叠加 TP
-  （`tensor_parallel_size > 1`），两者按网格组合。
-- **副本独立 profile 各自的 KV cache。** `all_reduce_min` 只在副本内的 TP 组里取最小值，
-  DP 副本之间不参与，所以忙卡上的副本可以自持一份更小的 cache。规约张量落在
-  `torch.cuda.current_device()` 上而不是 `cuda:{tp_rank}`：DP×TP 下进程占的是
-  `dp_rank * tp_size + tp_rank` 号卡，`CUDA_VISIBLE_DEVICES` 还会再重映射一次，用 tp rank
-  当设备号会让副本 1 从副本 0 的卡上发起规约。
+- **每卡一份完整权重。** 这是 DP 的定义，不是限制——放不下单卡就要叠加 TP （`tensor_parallel_size > 1`），两者按网格组合。
+- **副本独立 profile 各自的 KV cache。** `all_reduce_min` 只在副本内的 TP 组里取最小值， DP 副本之间不参与，所以忙卡上的副本可以自持一份更小的 cache。规约张量落在 `torch.cuda.current_device()` 上而不是 `cuda:{tp_rank}`：DP×TP 下进程占的是 `dp_rank * tp_size + tp_rank` 号卡，`CUDA_VISIBLE_DEVICES` 还会再重映射一次，用 tp rank 当设备号会让副本 1 从副本 0 的卡上发起规约。
 
 ## 相关文档
 
