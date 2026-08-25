@@ -8,6 +8,10 @@ the completions back where the caller expects them — so that is what is assert
 * **reassembly** returns completions in the caller's order, the failure that would be
   hardest to notice: every answer is individually plausible, just attached to the
   wrong prompt;
+* **the replica's engine loop** (:class:`_ReplicaLoop`) is asserted against a fake
+  engine and plain queues: admission while decoding, one message per batch, and what
+  a failure leaves behind. That tier is where the resident-engine behaviour lives and
+  it needs no GPU at all;
 * **parity with a single GPU** holds *per replica-batch*. It deliberately does not
   compare against one run over the full prompt list: a replica batches a subset where
   one GPU batched everything, and a different batch shape changes GEMM reduction order,
@@ -19,7 +23,9 @@ The end-to-end tier needs two GPUs; it skips rather than fails on one.
 
 from __future__ import annotations
 
+import itertools
 import queue
+from collections.abc import Iterable
 from pathlib import Path
 from typing import ClassVar
 
@@ -27,6 +33,8 @@ import pytest
 import torch
 
 from lite_llama import LLM, DataParallelEngine, RequestOutput, SamplingParams
+from lite_llama.engine.data_parallel import _SHUTDOWN, _ReplicaLoop
+from lite_llama.engine.scheduler import Request, RequestStatus
 
 # Enough KV for the short generations here, small enough that two replicas plus the
 # single-GPU reference engine coexist on one card.
@@ -144,21 +152,32 @@ def test_token_estimates_are_skipped_when_no_policy_reads_them():
     assert estimates == [0, 0, 0]
 
 
-def test_replica_queues_hand_the_request_to_every_rank_of_the_replica():
-    """A TP replica is several processes, and all of them must run the same forward.
+def test_a_replica_shares_one_queue_across_its_ranks():
+    """A request goes to the replica, not to each of its ranks.
 
-    Sending only to the leader is the shape of the DP x TP hang: the followers sit on an
-    empty queue while the leader blocks in a collective waiting for them.
+    The followers of a TP replica do not read requests at all: their leader owns the
+    scheduler and broadcasts each step's plan to them. One queue per replica is that
+    contract in the constructor — and the reason the old per-cell queues could not
+    stay, since a follower reading a request would consume it from its leader.
     """
+    from lite_llama.engine import data_parallel as dp_module
 
-    class _Grid:
-        tensor_parallel_size = 2
-        _request_queues: ClassVar[list[str]] = ["r0t0", "r0t1", "r1t0", "r1t1"]
-        _replica_queues = DataParallelEngine._replica_queues
+    _FakeProcess.spawned = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(torch.cuda, "device_count", lambda: 4)
+        patch.setattr(
+            dp_module.mp,
+            "get_context",
+            lambda method: type("_Ctx", (), {"Queue": _FakeQueue, "Process": _FakeProcess})(),
+        )
+        engine = DataParallelEngine(model="unused", data_parallel_size=2, tensor_parallel_size=2)
 
-    grid = _Grid()
-    assert grid._replica_queues(0) == ["r0t0", "r0t1"]
-    assert grid._replica_queues(1) == ["r1t0", "r1t1"]
+    queues = [args[_REQUEST_QUEUE_ARG] for args in _FakeProcess.spawned]
+    assert queues[0] is queues[1]  # replica 0's leader and follower
+    assert queues[2] is queues[3]  # replica 1's
+    assert queues[0] is not queues[2]
+
+    engine.shutdown()
 
 
 class _FakeQueue:
@@ -174,6 +193,10 @@ class _FakeQueue:
         if not self.items:
             raise queue.Empty
         return self.items.pop(0)
+
+
+#: Position of the request queue in the arguments ``_dp_worker`` is spawned with.
+_REQUEST_QUEUE_ARG = 8
 
 
 class _FakeProcess:
@@ -228,10 +251,254 @@ def test_dp_times_tp_spawns_one_process_per_grid_cell(monkeypatch: pytest.Monkey
         (2, 1, 0),
         (3, 1, 1),
     ]
-    # Each cell owns its own request queue; sharing one would race the mirrors.
-    assert len({id(args[6]) for args in _FakeProcess.spawned}) == 4
 
     engine.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# The replica's engine loop (no GPU work)
+# --------------------------------------------------------------------------- #
+class _LoopQueue:
+    """``mp.Queue``'s ``get(block=...)`` over a list, recording how it was called.
+
+    Honouring ``block`` is the point: the loop must wait when it has nothing to run
+    and must *not* wait when it is mid-decode, and a stub that returned immediately
+    either way would let a busy-spinning replica pass its tests. Blocking on an
+    empty queue is therefore an outright failure — in the real process it is a hang.
+    """
+
+    def __init__(self, items: Iterable = ()) -> None:
+        self.items = list(items)
+        self.gets: list[bool] = []
+
+    def put(self, item) -> None:
+        self.items.append(item)
+
+    def get(self, block: bool = True):
+        self.gets.append(block)
+        if not self.items:
+            if block:
+                raise AssertionError("the loop blocked on an empty queue with no stop signal")
+            raise queue.Empty
+        return self.items.pop(0)
+
+
+class _LoopEngine:
+    """A :class:`ContinuousBatchingEngine` stand-in whose requests finish on schedule.
+
+    Hands out *real* ``Request`` objects, because the loop reads completion off the
+    handles the engine updates in place; a renamed field has to fail here rather
+    than in a two-GPU run.
+
+    Args:
+        tokens: Steps each request runs for, by prompt, defaulting to two.
+        fail_on_step: Step number that raises, standing in for a kernel failure.
+        reject: Prompts ``add_request`` refuses, as an over-long one would be.
+        after_step: Called with the step number — how a test makes a request arrive
+            *while* the replica is decoding.
+    """
+
+    def __init__(
+        self,
+        tokens: dict[str, int] | None = None,
+        fail_on_step: int | None = None,
+        reject: Iterable[str] = (),
+        after_step=None,
+    ) -> None:
+        self._tokens = tokens or {}
+        self._fail_on_step = fail_on_step
+        self._reject = set(reject)
+        self._after_step = after_step
+        self._ids = itertools.count()
+        self.running: list[Request] = []
+        self.steps = 0
+        self.aborted: list[str] = []
+        self.admitted_at: list[int] = []
+
+    def add_request(self, prompt: str, params: SamplingParams | None = None) -> Request:
+        if prompt in self._reject:
+            raise ValueError("prompt of 9000 tokens exceeds the context window")
+        request = Request(
+            request_id=f"req-{next(self._ids)}",
+            prompt=prompt,
+            prompt_token_ids=[1],
+            params=params or SamplingParams(),
+        )
+        self.running.append(request)
+        self.admitted_at.append(self.steps)
+        return request
+
+    def has_unfinished_requests(self) -> bool:
+        return bool(self.running)
+
+    def step(self) -> list[Request]:
+        self.steps += 1
+        if self.steps == self._fail_on_step:
+            raise RuntimeError("illegal memory access")
+        advanced = []
+        for request in list(self.running):
+            request.output_token_ids.append(7)
+            request.text += "x"
+            if len(request.output_token_ids) >= self._tokens.get(request.prompt, 2):
+                request.status = RequestStatus.FINISHED
+                request.finish_reason = "eos"
+                self.running.remove(request)
+            else:
+                advanced.append(request)
+        if self._after_step is not None:
+            self._after_step(self.steps)
+        return advanced
+
+    def abort(self, request_id: str) -> None:
+        self.aborted.append(request_id)
+        self.running = [r for r in self.running if r.request_id != request_id]
+
+
+def _loop(engine: _LoopEngine, *messages) -> tuple[_ReplicaLoop, _LoopQueue, _LoopQueue]:
+    """A loop wired to pre-queued messages plus the stop signal, and its two queues."""
+    requests = _LoopQueue([*messages, _SHUTDOWN])
+    results = _LoopQueue()
+    return _ReplicaLoop(engine, requests, results), requests, results
+
+
+def test_a_finished_batch_is_reported_once_with_every_index():
+    """The coordinator counts batches, so a batch must produce exactly one message.
+
+    The indices matter as much as the text: they are the caller's positions, and
+    losing one silently leaves that prompt unanswered forever.
+    """
+    engine = _LoopEngine()
+    loop, _requests, results = _loop(engine, (0, [3, 1], ["a", "b"], _GREEDY))
+
+    loop.run()
+
+    assert len(results.items) == 1
+    kind, batch_id, payload = results.items[0]
+    assert (kind, batch_id) == ("done", 0)
+    assert {index: (text, reason) for index, text, reason in payload} == {
+        3: ("xx", "eos"),
+        1: ("xx", "eos"),
+    }
+
+
+def test_a_batch_waits_for_its_slowest_request():
+    """A batch is answered as a whole, but its members finish independently.
+
+    The short request must leave the engine as soon as it stops — that freed slot is
+    what continuous batching buys — while the answer stays held until the long one
+    is done, because that is the unit the coordinator dispatched.
+    """
+    engine = _LoopEngine(tokens={"long": 5})
+    requests = _LoopQueue([(0, [0, 1], ["short", "long"], _GREEDY)])
+    results = _LoopQueue()
+    loop = _ReplicaLoop(engine, requests, results)
+
+    loop._take_arrivals(block=False)
+    loop._step()
+    loop._step()
+
+    # "short" stopped at its second token and is out of the engine; its answer is
+    # held, not sent, because its batch is not done.
+    assert [request.prompt for request in engine.running] == ["long"]
+    assert results.items == []
+
+    requests.put(_SHUTDOWN)
+    loop.run()
+    assert len(results.items) == 1
+    assert len(results.items[0][2]) == 2
+
+
+def test_the_loop_blocks_when_idle_and_polls_when_busy():
+    """Waiting is conditional on having nothing to run.
+
+    A replica between dispatches must cost no CPU, and a replica mid-decode must not
+    stall its steps on a queue that may stay empty for minutes. Both are the same
+    ``block`` flag, which is why it is asserted rather than assumed.
+    """
+    engine = _LoopEngine(tokens={"a": 3})
+    loop, requests, _results = _loop(engine, (0, [0], ["a"], _GREEDY))
+
+    loop.run()
+
+    assert requests.gets[0] is True  # idle: waited for the dispatch
+    assert not any(requests.gets[1:])  # busy: never waited again
+
+
+def test_a_stop_signal_mid_batch_still_answers_it():
+    """Shutdown stops admission, not the work already paid for.
+
+    The coordinator is waiting on those answers, and the requests have already spent
+    their prefill; dropping them would turn a clean shutdown into a hang.
+    """
+    engine = _LoopEngine(tokens={"a": 4})
+    loop, _requests, results = _loop(engine, (0, [0], ["a"], _GREEDY))
+
+    loop.run()
+
+    assert engine.steps == 4
+    assert results.items[0][0] == "done"
+
+
+def test_a_request_may_join_a_running_batch():
+    """The whole point of a resident engine: work arriving mid-decode is admitted.
+
+    ``admitted_at`` records the step count each request was added on, so the second
+    batch being admitted at step 1 is the proof that it did not wait behind the first
+    one — which is exactly what the one-shot ``generate()`` per dispatch could not do.
+    """
+    engine = _LoopEngine(tokens={"a": 4})
+    requests = _LoopQueue([(0, [0], ["a"], _GREEDY)])
+    results = _LoopQueue()
+    loop = _ReplicaLoop(engine, requests, results)
+    # The second batch is dispatched while the first is still decoding, and the stop
+    # signal only after that — the order a coordinator would produce.
+    arrivals = {1: (1, [2], ["b"], _GREEDY), 2: _SHUTDOWN}
+    engine._after_step = lambda step: (
+        requests.items.append(arrivals[step]) if step in arrivals else None
+    )
+
+    loop.run()
+
+    assert engine.admitted_at == [0, 1]
+    assert sorted(batch_id for _kind, batch_id, _payload in results.items) == [0, 1]
+    assert {kind for kind, _batch, _payload in results.items} == {"done"}
+
+
+def test_a_step_failure_fails_the_batch_and_frees_its_slots():
+    """A failed step must abort what it was running, or the slots leak.
+
+    The replica keeps serving afterwards, so a request left in the scheduler would
+    hold its cache slot for the process's lifetime.
+    """
+    engine = _LoopEngine(fail_on_step=1)
+    loop, _requests, results = _loop(engine, (0, [0, 1], ["a", "b"], _GREEDY))
+
+    loop.run()
+
+    kind, batch_id, detail = results.items[0]
+    assert (kind, batch_id) == ("error", 0)
+    assert "illegal memory access" in detail
+    assert len(engine.aborted) == 2
+    assert engine.running == []
+
+
+def test_an_unservable_prompt_fails_its_batch_and_not_the_replica():
+    """A prompt the engine refuses is the batch's failure, not silence.
+
+    Answering it with an empty completion would be worse than an error: the caller
+    asked for text and would get a plausible-looking blank. The sibling already
+    admitted is aborted so the batch leaves nothing behind.
+    """
+    engine = _LoopEngine(reject=["too long"])
+    loop, _requests, results = _loop(engine, (0, [0, 1], ["a", "too long"], _GREEDY))
+
+    loop.run()
+
+    kind, batch_id, detail = results.items[0]
+    assert (kind, batch_id) == ("error", 0)
+    assert "exceeds the context window" in detail
+    assert engine.aborted == ["req-0"]
+    assert engine.steps == 0
 
 
 # --------------------------------------------------------------------------- #
