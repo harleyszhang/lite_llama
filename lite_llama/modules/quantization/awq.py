@@ -2,7 +2,7 @@
 
 AWQ checkpoints store group-wise int4 weights with an interleaved bit layout.
 The load stream converts to the canonical w4a16 layout (see
-:mod:`lite_llama.models.quantization._layout.awq`), then the shared int4
+:func:`lite_llama.modules.quantization.utils.adapt_int4_checkpoint`), then the shared int4
 kernel runs.
 """
 
@@ -13,8 +13,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from ...kernels.quantization import w4a16_matmul
 from ...kernels import fused_moe
+from ...kernels.quantization import w4a16_matmul
 from .base_config import (
     FusedMoEMethodBase,
     LinearMethodBase,
@@ -24,10 +24,10 @@ from .base_config import (
 from .parameter import RawParameter
 from .utils import quantize_int4_groupwise
 
-
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #
+
 
 class AWQConfig(QuantizationConfig):
     """AutoAWQ checkpoint config: group-wise int4 with configurable group size."""
@@ -50,7 +50,7 @@ class AWQConfig(QuantizationConfig):
         return 75
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "AWQConfig":
+    def from_config(cls, config: dict[str, Any]) -> AWQConfig:
         bits = int(config.get("bits", 4))
         if bits != 4:
             raise ValueError(f"only 4-bit AWQ is supported, got {bits}")
@@ -60,19 +60,8 @@ class AWQConfig(QuantizationConfig):
         ignored = tuple(config.get("modules_to_not_convert") or ())
         return cls(group_size, ignored)
 
-    def get_quant_method(
-        self, layer: nn.Module, prefix: str = ""
-    ) -> QuantizeMethodBase | None:
-        if not self.quantizes(prefix):
-            from .unquant import UnquantizedLinearMethod, UnquantizedFusedMoEMethod
-            from ...modules.moe import SparseMoeBlock
-            if isinstance(layer, SparseMoeBlock):
-                return UnquantizedFusedMoEMethod()
-            return UnquantizedLinearMethod()
-        from ...modules.moe import SparseMoeBlock
-        if isinstance(layer, SparseMoeBlock):
-            return AWQMoEMethod()
-        return AWQLinearMethod()
+    def get_quant_method(self, layer: nn.Module, prefix: str = "") -> QuantizeMethodBase | None:
+        return self._dispatch(layer, prefix, AWQLinearMethod, AWQMoEMethod)
 
     @property
     def storage_dtype(self) -> torch.dtype:
@@ -81,12 +70,6 @@ class AWQConfig(QuantizationConfig):
     @property
     def is_int4(self) -> bool:
         return True
-
-    def scale_shape(self, out_features: int, in_features: int) -> tuple[int, ...]:
-        return (out_features, (in_features + self.group_k - 1) // self.group_k)
-
-    def shard_is_aligned(self, size: int) -> bool:
-        return size % self.group_k == 0
 
 
 class AWQLinearMethod(LinearMethodBase):
@@ -103,7 +86,9 @@ class AWQLinearMethod(LinearMethodBase):
             torch.empty(*config.scale_shape(output_size, input_size), dtype=torch.float32)
         )
 
-    def apply(self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+    def apply(
+        self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
         return w4a16_matmul(
             x,
             layer.weight,
@@ -113,7 +98,7 @@ class AWQLinearMethod(LinearMethodBase):
             bias=bias,
         )
 
-    def quantize_from_fp16(self, layer: nn.Module, config: "QuantizationConfig") -> None:
+    def quantize_from_fp16(self, layer: nn.Module, config: QuantizationConfig) -> None:
         cfg: AWQConfig = config  # type: ignore[assignment]
         qweight, scales, zeros = quantize_int4_groupwise(layer.weight.data, cfg.group_k)
         layer.weight = RawParameter(qweight)
@@ -139,7 +124,9 @@ class AWQMoEMethod(FusedMoEMethodBase):
         num_groups_d = (down_k + config.group_k - 1) // config.group_k
         return {
             "gate_up_proj": RawParameter(
-                torch.empty(block.num_experts, gate_up_n, gate_up_k // pack_factor, dtype=torch.int32)
+                torch.empty(
+                    block.num_experts, gate_up_n, gate_up_k // pack_factor, dtype=torch.int32
+                )
             ),
             "gate_up_proj_scale": RawParameter(
                 torch.empty(block.num_experts, gate_up_n, num_groups_gu, dtype=torch.float32)

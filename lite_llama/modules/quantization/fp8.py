@@ -30,6 +30,7 @@ FP8_BLOCK = 128
 # Config
 # --------------------------------------------------------------------------- #
 
+
 class Fp8Config(QuantizationConfig):
     """fp8-e4m3 weight-only (W8A16) with block-wise or per-channel scales.
 
@@ -61,7 +62,7 @@ class Fp8Config(QuantizationConfig):
         return 89  # Ada / Hopper for native fp8; Ampere via software
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "Fp8Config":
+    def from_config(cls, config: dict[str, Any]) -> Fp8Config:
         fmt = str(config.get("fmt", "e4m3")).lower()
         if fmt != "e4m3":
             raise ValueError(f"unsupported fp8 format {fmt!r}; only e4m3 is implemented")
@@ -75,20 +76,8 @@ class Fp8Config(QuantizationConfig):
         ignored = tuple(config.get("modules_to_not_convert") or ())
         return cls(gn, gk, ignored)
 
-    def get_quant_method(
-        self, layer: nn.Module, prefix: str = ""
-    ) -> QuantizeMethodBase | None:
-        if not self.quantizes(prefix):
-            from ...modules.moe import SparseMoeBlock
-            from .unquant import UnquantizedFusedMoEMethod, UnquantizedLinearMethod
-            if isinstance(layer, SparseMoeBlock):
-                return UnquantizedFusedMoEMethod()
-            return UnquantizedLinearMethod()
-
-        from ...modules.moe import SparseMoeBlock
-        if isinstance(layer, SparseMoeBlock):
-            return Fp8MoEMethod()
-        return Fp8LinearMethod()
+    def get_quant_method(self, layer: nn.Module, prefix: str = "") -> QuantizeMethodBase | None:
+        return self._dispatch(layer, prefix, Fp8LinearMethod, Fp8MoEMethod)
 
     @property
     def storage_dtype(self) -> torch.dtype:
@@ -98,15 +87,6 @@ class Fp8Config(QuantizationConfig):
     def is_fp8(self) -> bool:
         return True
 
-    def scale_shape(self, out_features: int, in_features: int) -> tuple[int, ...]:
-        return (
-            (out_features + self.group_n - 1) // self.group_n,
-            (in_features + self.group_k - 1) // self.group_k,
-        )
-
-    def shard_is_aligned(self, size: int) -> bool:
-        return size % max(self.group_n, self.group_k) == 0
-    
 
 class Fp8LinearMethod(LinearMethodBase):
     """fp8-e4m3 weight + fp16 activation; per-channel or block-wise scale grid."""
@@ -120,7 +100,9 @@ class Fp8LinearMethod(LinearMethodBase):
             torch.empty(*config.scale_shape(output_size, input_size), dtype=torch.float32)
         )
 
-    def apply(self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+    def apply(
+        self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
         config: Fp8Config = layer.quant  # type: ignore[assignment]
         return w8a16_matmul(
             x,
@@ -131,7 +113,7 @@ class Fp8LinearMethod(LinearMethodBase):
             bias=bias,
         )
 
-    def quantize_from_fp16(self, layer: nn.Module, config: "QuantizationConfig") -> None:
+    def quantize_from_fp16(self, layer: nn.Module, config: QuantizationConfig) -> None:
         qweight, scale = quantize_fp8_per_channel(layer.weight.data)
         layer.weight = RawParameter(qweight)
         layer.weight_scale_inv = RawParameter(scale)
@@ -150,7 +132,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             ),
             "gate_up_proj_scale_inv": RawParameter(
                 torch.empty(
-                    block.num_experts, *config.scale_shape(gate_up_n, gate_up_k), dtype=torch.float32
+                    block.num_experts,
+                    *config.scale_shape(gate_up_n, gate_up_k),
+                    dtype=torch.float32,
                 )
             ),
             "down_proj": RawParameter(
@@ -177,7 +161,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             group_k=min(config.group_k, block.hidden_size),
         )
 
-    def quantize_from_fp16(self, block: nn.Module, config: "QuantizationConfig") -> None:
+    def quantize_from_fp16(self, block: nn.Module, config: QuantizationConfig) -> None:
         for name in ("gate_up_proj", "down_proj"):
             qweight, scale = quantize_fp8_per_channel(block.experts[name].data)
             block.experts[name] = RawParameter(qweight)

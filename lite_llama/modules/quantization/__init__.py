@@ -27,7 +27,7 @@ Public API:
 
 from __future__ import annotations
 
-from typing import Any, Type
+from typing import Any
 
 from .awq import AWQConfig
 from .base_config import (
@@ -37,7 +37,7 @@ from .base_config import (
     QuantizeMethodBase,
 )
 from .blockwise_int8 import BlockInt8Config
-from .fp8 import Fp8Config
+from .fp8 import FP8_BLOCK, Fp8Config
 from .gptq import GPTQConfig
 from .kv_cache import BaseKVCacheMethod, Fp8KVCacheMethod, get_kv_cache_method
 from .parameter import RawParameter
@@ -50,16 +50,13 @@ from .w8a8_int8 import W8A8Int8Config
 # Constants
 # --------------------------------------------------------------------------- #
 
-#: Block size of the fine-grained FP8 format (Qwen/DeepSeek checkpoints).
-FP8_BLOCK = 128
-
 #: Checkpoint suffix of the per-block dequantisation scale.
 SCALE_SUFFIX = "weight_scale_inv"
 
 # --------------------------------------------------------------------------- #
 # Registry (mirrors sglang BASE_QUANTIZATION_METHODS)
 # --------------------------------------------------------------------------- #
-BASE_QUANTIZATION_METHODS: dict[str, Type[QuantizationConfig]] = {
+BASE_QUANTIZATION_METHODS: dict[str, type[QuantizationConfig]] = {
     "fp8": Fp8Config,
     "w8a8_fp8": W8A8Fp8Config,
     "w8a8_int8": W8A8Int8Config,
@@ -72,7 +69,7 @@ BASE_QUANTIZATION_METHODS: dict[str, Type[QuantizationConfig]] = {
 }
 
 #: Runtime quantisation schemes accepted by ``--quantization``.
-RUNTIME_SCHEMES: dict[str, Type[QuantizationConfig]] = {
+RUNTIME_SCHEMES: dict[str, type[QuantizationConfig]] = {
     "int8": BlockInt8Config,
     "int8-blockwise": BlockInt8Config,
     "fp8": W8A8Fp8Config,
@@ -81,13 +78,12 @@ RUNTIME_SCHEMES: dict[str, Type[QuantizationConfig]] = {
 }
 
 
-def get_quantization_config(name: str) -> Type[QuantizationConfig]:
+def get_quantization_config(name: str) -> type[QuantizationConfig]:
     """Look up a QuantizationConfig class by name."""
     cls = BASE_QUANTIZATION_METHODS.get(name.lower())
     if cls is None:
         raise ValueError(
-            f"unknown quantisation method {name!r}; "
-            f"supported: {sorted(BASE_QUANTIZATION_METHODS)}"
+            f"unknown quantisation method {name!r}; supported: {sorted(BASE_QUANTIZATION_METHODS)}"
         )
     return cls
 
@@ -138,7 +134,9 @@ def for_runtime_scheme(name: str) -> QuantizationConfig:
     return cls.from_config({})
 
 
-__all__ = [
+# Grouped by role rather than sorted: the groups say what each name is for,
+# which a flat alphabetical list cannot.
+__all__ = [  # noqa: RUF022
     # ABC
     "QuantizationConfig",
     "QuantizeMethodBase",
