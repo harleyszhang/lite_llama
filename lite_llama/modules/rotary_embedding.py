@@ -125,6 +125,19 @@ class RotaryEmbedding(nn.Module):
         if self.max_seq_len > 0:
             self._build_caches(device)
 
+    @staticmethod
+    def _autocast_device(x: torch.Tensor) -> str:
+        """Autocast device key for *x*; mps has no autocast implementation,
+        so the disable-autocast block routes through the cpu key instead."""
+        return "cpu" if x.device.type == "mps" else x.device.type
+
+    @staticmethod
+    def _scaled_pair(
+        cos: torch.Tensor, sin: torch.Tensor, scaling: float, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply the (YaRN) attention scaling and cast to the activation dtype."""
+        return (cos * scaling).to(dtype=dtype), (sin * scaling).to(dtype=dtype)
+
     def _build_caches(self, device: torch.device | None) -> None:
         """Precompute ``[max_seq_len, rotary_dim]`` cos/sin rows, scaling applied."""
         positions = torch.arange(self.max_seq_len, device=device, dtype=torch.float32)
@@ -164,15 +177,12 @@ class RotaryEmbedding(nn.Module):
         positions = position_ids[:, None, :].to(dtype=torch.float32)
 
         # Autocast off: the outer product must stay in fp32 for positional accuracy.
-        device_type = x.device.type if x.device.type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):
+        with torch.autocast(device_type=self._autocast_device(x), enabled=False):
             freqs = (inv_freq_expanded @ positions).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
             cos, sin = emb.cos(), emb.sin()
 
-        cos = cos * self.attention_scaling
-        sin = sin * self.attention_scaling
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+        return self._scaled_pair(cos, sin, self.attention_scaling, x.dtype)
 
 
 class MRotaryEmbedding(RotaryEmbedding):
@@ -243,13 +253,10 @@ class MRotaryEmbedding(RotaryEmbedding):
         inv_freq_expanded = inv_freq[None, None, :, None].expand(3, batch, -1, 1)
         positions = position_ids[:, :, None, :].to(device=x.device, dtype=torch.float32)
 
-        device_type = x.device.type if x.device.type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):
+        with torch.autocast(device_type=self._autocast_device(x), enabled=False):
             freqs = (inv_freq_expanded @ positions).transpose(2, 3)
             freqs = self._interleave_sections(freqs, self.mrope_section)
             emb = torch.cat((freqs, freqs), dim=-1)
             cos, sin = emb.cos(), emb.sin()
 
-        cos = cos * self.attention_scaling
-        sin = sin * self.attention_scaling
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+        return self._scaled_pair(cos, sin, self.attention_scaling, x.dtype)
