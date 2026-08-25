@@ -45,6 +45,7 @@ class StubEngine:
         self._fail_on_step = fail_on_step
         self.steps = 0
         self.max_concurrent = 0
+        self.released = False
 
     def add_request(self, prompt, params=None, request_id=None):
         if prompt == "reject me":
@@ -79,6 +80,9 @@ class StubEngine:
             if len(request.output_token_ids) >= self._tokens:
                 self.scheduler.finish(request, "length")
         return batch
+
+    def shutdown(self):
+        self.released = True
 
 
 async def collect(engine, prompt, **kwargs):
@@ -191,6 +195,21 @@ async def test_shutdown_is_idempotent_and_stops_the_worker():
 
     await engine.shutdown()
     await engine.shutdown()
+
+
+async def test_shutdown_releases_the_engine():
+    """The worker must hand the engine back, or tensor-parallel ranks never exit.
+
+    Under tensor parallelism the follower processes sit in a broadcast waiting
+    for the next plan, and the stop signal only reaches them through the
+    engine's own ``shutdown``. A server that closed without it would leave a
+    process per extra GPU behind, still holding its weights.
+    """
+    stub = StubEngine(tokens=2)
+    async with AsyncLLMEngine(stub) as engine:
+        await asyncio.wait_for(collect(engine, "hi"), _TIMEOUT)
+
+    assert stub.released
 
 
 async def test_the_engine_serves_a_second_event_loop():

@@ -27,6 +27,9 @@ Usage:
     @needs_gpus(2)
     def test_something():
         shards = run_on_tp_ranks(my_module_level_payload, tp_size=2)
+
+    def test_the_control_plane():           # no device needed
+        seen = run_on_tp_ranks(my_payload, tp_size=2, backend="gloo")
 """
 
 from __future__ import annotations
@@ -67,22 +70,25 @@ def _worker(
     tp_size: int,
     dp_size: int,
     port: int,
+    backend: str,
     results: mp.Queue,
 ) -> None:
     """One rank: take a device, join the grid, run the payload, report answer or traceback.
 
     The device is claimed *before* ``init_parallel`` because nccl binds the calling
     thread's current device at rendezvous; leaving every rank on device 0 is the classic
-    way to get a hang instead of a result. The traceback travels as text rather than
-    being raised: an exception in a child process is invisible to pytest, and a rank that
-    dies silently leaves its peers blocked in a collective with nothing to explain why.
+    way to get a hang instead of a result. On gloo there is no device to claim. The
+    traceback travels as text rather than being raised: an exception in a child process
+    is invisible to pytest, and a rank that dies silently leaves its peers blocked in a
+    collective with nothing to explain why.
     """
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = str(port)  # not setdefault: an inherited value is stale
     try:
-        torch.cuda.set_device(rank)
+        if backend == "nccl":
+            torch.cuda.set_device(rank)
         ps.init_parallel(
-            global_rank=rank, tp_size=tp_size, dp_size=dp_size, master_port=port, backend="nccl"
+            global_rank=rank, tp_size=tp_size, dp_size=dp_size, master_port=port, backend=backend
         )
         results.put((rank, payload(rank), None))
     except BaseException:  # reported to the parent, which re-raises it verbatim
@@ -97,8 +103,9 @@ def run_on_tp_ranks(
     *,
     dp_size: int = 1,
     timeout: float = 300.0,
+    backend: str = "nccl",
 ) -> list[Any]:
-    """Run ``payload(rank)`` on every rank of a ``dp_size x tp_size`` nccl grid.
+    """Run ``payload(rank)`` on every rank of a ``dp_size x tp_size`` grid.
 
     Args:
         payload: Module-level function (spawn has to pickle it) called once per rank with
@@ -108,6 +115,11 @@ def run_on_tp_ranks(
         timeout: Seconds to wait for all ranks. Exceeding it means a collective
             mismatch — a rank calling a collective its peers do not is a deadlock, not a
             wrong answer, so it has to fail as a bounded test rather than hang the suite.
+        backend: ``"nccl"`` for the data plane (one device per rank, see
+            :func:`needs_gpus`) or ``"gloo"`` for a device-free grid — enough to
+            exercise the control plane, which is what
+            :func:`~lite_llama.distributed.parallel_state.broadcast_object_tp` and the
+            executor's plan hand-off live on.
 
     Returns:
         One result per global rank, in rank order.
@@ -117,7 +129,7 @@ def run_on_tp_ranks(
         TimeoutError: If some rank never reported.
     """
     world_size = tp_size * dp_size
-    if torch.cuda.device_count() < world_size:
+    if backend == "nccl" and torch.cuda.device_count() < world_size:
         raise RuntimeError(f"{world_size} ranks need {world_size} devices, one each")
 
     context = mp.get_context("spawn")
@@ -125,7 +137,9 @@ def run_on_tp_ranks(
     port = free_port()
     workers = [
         context.Process(
-            target=_worker, args=(payload, rank, tp_size, dp_size, port, results), daemon=True
+            target=_worker,
+            args=(payload, rank, tp_size, dp_size, port, backend, results),
+            daemon=True,
         )
         for rank in range(world_size)
     ]
