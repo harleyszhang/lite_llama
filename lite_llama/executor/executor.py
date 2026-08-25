@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import multiprocessing as mp
+import socket
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
@@ -176,11 +177,23 @@ def ensure_followers_alive(followers: Sequence[mp.process.BaseProcess]) -> None:
             )
 
 
+def free_port() -> int:
+    """A port the OS says is free, so a rendezvous never inherits a stale one.
+
+    A fixed default (29500) makes two engines on one machine collide, and makes a
+    crashed run's lingering socket break the next one — both of which surface as a
+    hang at rendezvous rather than as an error.
+    """
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 def launch_tensor_parallel(
     tp_size: int,
     engine_kwargs: dict[str, Any],
     max_num_seqs: int,
-    master_port: int = 29500,
+    master_port: int | None = None,
 ) -> tuple[mp.process.BaseProcess, ...]:
     """Start ranks 1..``tp_size``-1 and join this process as rank 0.
 
@@ -195,13 +208,14 @@ def launch_tensor_parallel(
             minus ``device``, which is the rank's own GPU. Must be picklable.
         max_num_seqs: Concurrency ceiling, so followers size their scratch to
             match.
-        master_port: Rendezvous port; rank 0 listens.
+        master_port: Rendezvous port; rank 0 listens. Defaults to a free one.
 
     Returns:
         The follower processes, in rank order.
     """
     from ..distributed.parallel_state import init_tensor_parallel
 
+    master_port = free_port() if master_port is None else master_port
     context = mp.get_context("spawn")
     followers = [
         context.Process(
