@@ -17,8 +17,8 @@ import triton
 import triton.language as tl
 
 from .activations import silu
-from .utils import torch_to_triton_dtype
 from .quantization.w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
+from .utils import torch_to_triton_dtype
 
 #: ``QUANT_MODE`` values shared by the kernel and its launcher.
 _QUANT_NONE = 0
