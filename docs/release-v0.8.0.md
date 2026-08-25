@@ -171,8 +171,6 @@ Backend 'linear' selection:
 
 **Overlap 调度器抽象（L1 骨架）：** 注册表新增 `overlap` op 类型，为后续跨 stream 计算/通信重叠提供探测基础。当前 A10 环境下 `cuda_stream` 后端已就绪 (priority=100)，L1 timeline 实现留待后续版本。
 
----
-
 ## 测试结果
 
 ```text
@@ -222,8 +220,18 @@ git checkout refactor-multi-process-engine && uv pip install -e .
 # 张量并行（driver 兼任 rank 0，tp=2 只花两个进程）
 python -m lite_llama.cli chat --model-dir my_weight/Qwen3-8B --tensor-parallel-size 2
 
-# 数据并行 + 张量并行网格
-python -m lite_llama.cli chat --model-dir my_weight/Qwen3-8B --dp 2 --tensor-parallel-size 2
+# 数据并行 + 张量并行网格（DP 没有 CLI 入口，走 DataParallelEngine API）
+python - <<'PY'
+from lite_llama import DataParallelEngine, SamplingParams
+
+with DataParallelEngine(
+    model="my_weight/Qwen3-8B",
+    data_parallel_size=2,
+    tensor_parallel_size=2,
+) as engine:
+    outputs = engine.generate(["用一句话介绍你自己。"], SamplingParams(max_gen_len=64))
+    print(outputs[0].text)
+PY
 
 # 查看一步到底往线路上放了多少字节
 python scripts/gen_collective_gif.py
