@@ -11,8 +11,12 @@ The structure mirrors how vLLM and SGLang lay this out, scaled down to lite_llam
 synchronous batch API:
 
 * a **worker** (:func:`_dp_worker`) is a rank-aware process that builds one
-  :class:`~lite_llama.engine.llm.LLM` on its own GPU and serves requests off a queue
-  the role of vLLM's ``DPEngineCoreProc`` and SGLang's scheduler process;
+  :class:`~lite_llama.engine.continuous_engine.ContinuousBatchingEngine` on its own
+  GPU and serves requests off a queue for as long as it lives — the role of vLLM's
+  ``DPEngineCoreProc`` and SGLang's scheduler process. The engine being *resident*
+  is what makes a dispatch cheap and a batch non-blocking: requests join the
+  replica's running batch and a finished sequence frees its slot immediately,
+  instead of every batch running at full width until its longest member stops;
 * a **load balancer** (:mod:`lite_llama.engine.dp_load_balancer`) decides which replica
   each request goes to  SGLang's ``LoadBalanceMethod``, vLLM's ``DPLBAsyncMPClient``;
 * the **coordinator** (:class:`DataParallelEngine`) owns the worker processes, routes
@@ -37,7 +41,7 @@ import contextlib
 import queue
 import time
 import traceback
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch.multiprocessing as mp
 
@@ -45,6 +49,9 @@ from ..utils.logger import get_logger
 from .dp_load_balancer import LOAD_BALANCERS, make_load_balancer
 from .outputs import CompletionOutput, RequestOutput
 from .sampler import SamplingParams
+
+if TYPE_CHECKING:  # pragma: no cover - the worker imports these in its own process
+    from .continuous_engine import ContinuousBatchingEngine
 
 _log = get_logger(__name__)
 
@@ -59,8 +66,141 @@ STARTUP_TIMEOUT_S = 900.0
 #: so liveness, not the clock, is what distinguishes "still working" from "died".
 _LIVENESS_POLL_S = 5.0
 
-#: Sentinel that tells a worker to leave its request loop and exit.
+#: Sentinel that tells a replica to leave its engine loop and exit.
 _SHUTDOWN = None
+
+
+class _ReplicaLoop:
+    """A replica's resident engine loop: queue in, finished batches out.
+
+    This is what separates a replica from a call to ``generate()``. The engine
+    lives across dispatches, so a batch is no longer a barrier: the loop admits
+    whatever has arrived between steps, and a sequence that stops frees its slot to
+    the next request on the following step instead of padding the batch out to the
+    longest answer in it. Idle, it blocks on the queue rather than spinning.
+
+    A batch is answered as a whole because that is the unit the coordinator
+    dispatched and counts; the per-request answers are held until its last request
+    finishes. Reporting them individually is the same bookkeeping with a different
+    grouping, which is where streaming will land.
+
+    Args:
+        engine: This replica's :class:`ContinuousBatchingEngine`. Under TP it is the
+            leader's, and its executor broadcasts every plan to the follower ranks.
+        requests: Inbound ``(batch_id, indices, prompts, params)`` tuples, or
+            :data:`_SHUTDOWN`.
+        results: Outbound ``("done" | "error", batch_id, payload)`` messages.
+    """
+
+    def __init__(
+        self,
+        engine: ContinuousBatchingEngine,
+        requests: mp.Queue,
+        results: mp.Queue,
+    ) -> None:
+        self._engine = engine
+        self._requests = requests
+        self._results = results
+        self._batch_of: dict[str, tuple[int, int]] = {}
+        self._live: dict[str, Any] = {}
+        self._left: dict[int, int] = {}
+        self._answers: dict[int, list[tuple[int, str, str | None]]] = {}
+
+    def run(self) -> None:
+        """Serve until the coordinator sends :data:`_SHUTDOWN` and the work drains.
+
+        A stop signal that arrives mid-batch stops *admission*, not the batch: the
+        requests already in flight are worth the steps they have already cost, and
+        the coordinator is waiting for their answers.
+        """
+        stopping = False
+        while True:
+            idle = not self._engine.has_unfinished_requests()
+            if stopping and idle:
+                return
+            if not stopping:
+                stopping = self._take_arrivals(block=idle)
+            if self._engine.has_unfinished_requests():
+                self._step()
+
+    def _take_arrivals(self, block: bool) -> bool:
+        """Admit everything waiting on the queue; ``True`` if asked to stop.
+
+        Blocking is conditional on having nothing to run: an idle replica must not
+        spin a core, and a busy one must not stall its decode waiting for work that
+        may never come. The first message may block, the rest never do.
+        """
+        while True:
+            try:
+                message = self._requests.get(block=block)
+            except queue.Empty:
+                return False
+            if message is _SHUTDOWN:
+                return True
+            self._admit(message)
+            block = False
+
+    def _admit(self, message: tuple) -> None:
+        """Turn one dispatched batch into engine requests, remembering who is who."""
+        batch_id, indices, prompts, params = message
+        self._left[batch_id] = len(prompts)
+        self._answers[batch_id] = []
+        for index, prompt in zip(indices, prompts, strict=True):
+            try:
+                request = self._engine.add_request(prompt, params)
+            except ValueError:
+                # An unservable prompt (empty, or longer than the context window)
+                # fails its batch rather than being silently answered with "":
+                # the caller asked for a completion and there is none.
+                self._fail(batch_id, traceback.format_exc())
+                return
+            self._batch_of[request.request_id] = (batch_id, index)
+            self._live[request.request_id] = request
+
+    def _step(self) -> None:
+        """Run one engine step, then report whoever finished on it.
+
+        ``step`` returns the requests it *advanced*, which excludes the ones that
+        just stopped — a sequence's stop token is not output. So completion is read
+        off the handles this loop holds, which the engine updates in place.
+        """
+        try:
+            self._engine.step()
+        except Exception:
+            detail = traceback.format_exc()
+            for batch_id in list(self._left):
+                self._fail(batch_id, detail)
+            return
+
+        for request_id, request in list(self._live.items()):
+            if not request.is_finished:
+                continue
+            batch_id, index = self._batch_of[request_id]
+            self._answers[batch_id].append((index, request.text, request.finish_reason))
+            self._forget(request_id)
+            self._left[batch_id] -= 1
+            if self._left[batch_id] == 0:
+                del self._left[batch_id]
+                self._results.put(("done", batch_id, self._answers.pop(batch_id)))
+
+    def _fail(self, batch_id: int, detail: str) -> None:
+        """Abandon a batch: abort what is still running and report it once.
+
+        Aborting matters as much as reporting — a request left in the scheduler
+        would hold its cache slot forever, and this replica has to keep serving the
+        batches that did not fail.
+        """
+        for request_id, (batch, _index) in list(self._batch_of.items()):
+            if batch == batch_id:
+                self._engine.abort(request_id)
+                self._forget(request_id)
+        self._left.pop(batch_id, None)
+        self._answers.pop(batch_id, None)
+        self._results.put(("error", batch_id, detail))
+
+    def _forget(self, request_id: str) -> None:
+        self._batch_of.pop(request_id, None)
+        self._live.pop(request_id, None)
 
 
 def _dp_worker(
@@ -70,83 +210,87 @@ def _dp_worker(
     dp_size: int,
     tp_size: int,
     engine_kwargs: dict[str, Any],
+    max_num_seqs: int,
+    max_num_batched_tokens: int,
     request_queue: mp.Queue,
     result_queue: mp.Queue,
 ) -> None:
-    """One rank of the grid: build an engine on its own GPU, then serve until told to stop.
+    """One cell of the ``dp_size x tp_size`` grid, in its own process on its own GPU.
 
-    There is one process per *cell* of the ``dp_size x tp_size`` grid, not one per
-    replica. That is forced by ``init_parallel``: with ``tp_size > 1`` it rendezvouses a
-    world of ``dp_size * tp_size`` ranks, so spawning only ``dp_size`` processes hangs
-    forever waiting for ranks nobody started. Each cell occupies device ``global_rank``.
+    There is one process per cell, not per replica: with ``tp_size > 1``
+    ``init_parallel`` rendezvouses a world of ``dp_size * tp_size`` ranks, so
+    spawning only ``dp_size`` of them hangs forever waiting for ranks nobody
+    started. Each cell occupies device ``global_rank``.
 
-    Within a replica the ranks are *mirrors*: they receive the same request message and
-    run the same forward, staying in step through the TP collectives (the sampled token
-    is broadcast from TP rank 0). Only the replica's leader (``tp_rank == 0``) reports a
-    result, because the coordinator expects exactly one answer per replica.
+    The two roles are no longer mirrors of each other, which is the point of this
+    layout:
 
-    Runs in a spawned process, so it takes only picklable arguments and imports torch
-    itself. Every startup outcome is reported through ``result_queue`` — including a
-    failed build, which arrives as an ``"error"`` message so the coordinator raises
-    instead of blocking on a worker that will never answer.
+    * the **leader** (``tp_rank == 0``) owns the replica's scheduler and runs
+      :class:`_ReplicaLoop`. It is the only rank that reads the request queue, and
+      the only one that answers.
+    * a **follower** never sees a request at all. It receives each step's plan from
+      its leader over the control plane and runs it, so the ranks agree by
+      construction instead of by both deriving the same batch from a broadcast
+      prompt.
+
+    Runs in a spawned process, so it takes only picklable arguments and imports
+    torch itself. Every startup outcome is reported through ``result_queue`` —
+    including a failed build, which arrives as an ``"error"`` message so the
+    coordinator raises instead of blocking on a rank that will never answer.
 
     Args:
         global_rank: This process's rank in ``[0, dp_size * tp_size)``, and its device.
         dp_rank: Which replica this process belongs to.
-        tp_rank: Which rank inside that replica; ``0`` is the reporting leader.
+        tp_rank: Which rank inside that replica; ``0`` is the leader.
         dp_size: Total replicas (for the parallel-state grid).
         tp_size: TP ranks per replica (1 for pure DP).
-        engine_kwargs: Forwarded verbatim to :class:`LLM`, minus ``device``.
-        request_queue: ``(batch_id, indices, prompts, params)`` tuples, or
-            :data:`_SHUTDOWN`.
+        engine_kwargs: Checkpoint and model options, as :class:`LLM` takes them,
+            minus ``device``.
+        max_num_seqs: Requests this replica may keep in flight.
+        max_num_batched_tokens: Padded token budget for one prefill group.
+        request_queue: Leader-only inbound queue; followers are handed a dummy.
         result_queue: Where ``("ready" | "done" | "error", ...)`` messages go back.
     """
     import torch
 
     from ..distributed.parallel_state import init_parallel
+    from ..executor.executor import serve_plans
+    from .continuous_engine import ContinuousBatchingEngine
     from .llm import LLM
 
-    is_leader = tp_rank == 0
+    engine: ContinuousBatchingEngine | None = None
     try:
         torch.cuda.set_device(global_rank)
         init_parallel(global_rank=global_rank, tp_size=tp_size, dp_size=dp_size)
-        llm = LLM(device=f"cuda:{global_rank}", **engine_kwargs)
+        device = f"cuda:{global_rank}"
+        if tp_rank == 0:
+            # ``from_pretrained`` finds this process already in a TP group and
+            # therefore spawns nothing: the grid is the coordinator's to own.
+            engine = ContinuousBatchingEngine.from_pretrained(
+                device=device,
+                max_num_seqs=max_num_seqs,
+                max_num_batched_tokens=max_num_batched_tokens,
+                **engine_kwargs,
+            )
+        else:
+            follower = LLM(device=device, **engine_kwargs)
         result_queue.put(("ready", global_rank, None))
     except Exception:
         result_queue.put(("error", global_rank, traceback.format_exc()))
         return
 
-    while True:
-        message = request_queue.get()
-        if message is _SHUTDOWN:
-            break
-        batch_id, indices, prompts, params = message
-        try:
-            outputs = llm.generate(prompts, params)
-        except Exception:
-            detail = traceback.format_exc()
-            if is_leader:
-                result_queue.put(("error", batch_id, detail))
-                continue
-            # A follower must not put a second message on the queue for one dispatch:
-            # the coordinator counts messages, and the extra one would be misread as a
-            # result by the next generate(). Exiting is the signal instead — the
-            # coordinator's liveness poll turns the leader's stalled collective into a
-            # RuntimeError naming this dead process.
-            _log.error("tp rank %d of replica %d failed:\n%s", tp_rank, dp_rank, detail)
-            return
-        if not is_leader:
-            continue
-        result_queue.put(
-            (
-                "done",
-                batch_id,
-                [
-                    (i, out.text, out.outputs[0].finish_reason)
-                    for i, out in zip(indices, outputs, strict=True)
-                ],
-            )
-        )
+    if engine is None:
+        # Exits when the leader broadcasts its stop signal, which is what makes
+        # shutting a replica down a single message to its leader.
+        serve_plans(follower, max_num_seqs)
+        return
+
+    try:
+        _ReplicaLoop(engine, request_queue, result_queue).run()
+    except Exception:
+        _log.exception("replica %d engine loop failed", dp_rank)
+    finally:
+        engine.shutdown()
 
 
 class DataParallelEngine:
@@ -161,7 +305,7 @@ class DataParallelEngine:
     Replica ``i`` spans devices ``[i * tp, (i+1) * tp)`` and is served by that many
     processes — one per cell of the rank grid in
     :mod:`lite_llama.distributed.parallel_state`. The replica's leader is the process on
-    its first device; it is the one that answers.
+    its first device; it holds the scheduler, reads the queue and answers.
 
     Args:
         model: HuggingFace checkpoint directory, as for :class:`LLM`.
@@ -169,6 +313,9 @@ class DataParallelEngine:
         tensor_parallel_size: TP ranks *within* each replica (1 = pure DP).
         load_balancer: Routing policy name, one of
             :data:`~lite_llama.engine.dp_load_balancer.LOAD_BALANCERS`.
+        max_num_seqs: Requests each replica keeps in flight. Per replica, not in
+            total: DP multiplies concurrency along with throughput.
+        max_num_batched_tokens: Padded token budget for one prefill group.
         **engine_kwargs: Forwarded verbatim to each replica's :class:`LLM`
             (``max_seq_len``, ``quantization``, ``use_cuda_graph``, ...). ``device``
             is not accepted: it is derived from the replica's position in the grid.
@@ -185,6 +332,8 @@ class DataParallelEngine:
         data_parallel_size: int = 1,
         tensor_parallel_size: int = 1,
         load_balancer: str = "round_robin",
+        max_num_seqs: int = 32,
+        max_num_batched_tokens: int = 8192,
         **engine_kwargs: Any,
     ) -> None:
         import torch
@@ -219,6 +368,12 @@ class DataParallelEngine:
             "tensor_parallel_size": tensor_parallel_size,
             **engine_kwargs,
         }
+        if self._engine_kwargs.get("use_cuda_graph") is None:
+            # ``LLM`` reads None as "decide from the architecture"; a replica's
+            # engine takes a bool, and the text-only default is to capture. Each
+            # replica captures its own graphs -- DP replicas share no collectives,
+            # so unlike TP there is nothing unsafe to record.
+            self._engine_kwargs.pop("use_cuda_graph", None)
         self._tokenizer = None
         self._next_batch_id = 0
         self._closed = False
@@ -226,9 +381,9 @@ class DataParallelEngine:
         # "spawn" is required: a forked child inherits a CUDA context that cannot be
         # re-initialised on another device.
         ctx = mp.get_context("spawn")
-        # One queue per *grid cell*, not per replica: the followers of a TP replica must
-        # each receive the request message to run the same forward as their leader.
-        self._request_queues = [ctx.Queue() for _ in range(needed)]
+        # One queue per *replica*, not per cell: a request goes to the leader, which
+        # broadcasts the resulting plans to its followers over the control plane.
+        self._request_queues = [ctx.Queue() for _ in range(data_parallel_size)]
         self._result_queue: mp.Queue = ctx.Queue()
         self._workers = [
             ctx.Process(
@@ -240,7 +395,9 @@ class DataParallelEngine:
                     data_parallel_size,
                     tensor_parallel_size,
                     self._engine_kwargs,
-                    self._request_queues[global_rank],
+                    max_num_seqs,
+                    max_num_batched_tokens,
+                    self._request_queues[global_rank // tensor_parallel_size],
                     self._result_queue,
                 ),
                 daemon=True,
@@ -351,11 +508,6 @@ class DataParallelEngine:
             buckets[replica].append(index)
         return buckets
 
-    def _replica_queues(self, replica: int) -> list[mp.Queue]:
-        """Every rank of ``replica``, leader first — all of them must get the request."""
-        base = replica * self.tensor_parallel_size
-        return self._request_queues[base : base + self.tensor_parallel_size]
-
     def generate(
         self,
         prompts: str | list[str],
@@ -395,8 +547,7 @@ class DataParallelEngine:
             batch_id = self._next_batch_id
             self._next_batch_id += 1
             message = (batch_id, indices, [prompts[i] for i in indices], params)
-            for request_queue in self._replica_queues(replica):
-                request_queue.put(message)
+            self._request_queues[replica].put(message)
             dispatched += 1
 
         texts: list[str | None] = [None] * len(prompts)
@@ -436,9 +587,11 @@ class DataParallelEngine:
     def shutdown(self) -> None:
         """Stop every replica and release its GPU memory. Idempotent.
 
-        Workers are asked to leave their loop first and only killed if they do not: a
-        replica in the middle of a forward would otherwise leave its CUDA context for
-        the driver to clean up.
+        One message per replica is enough: its leader leaves the engine loop, and
+        releasing the engine on the way out broadcasts the stop signal that ends its
+        followers. Nothing is killed that has not been asked first — a rank in the
+        middle of a forward would otherwise leave its CUDA context for the driver to
+        clean up.
         """
         if self._closed:
             return

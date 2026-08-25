@@ -218,6 +218,29 @@ def launch_tensor_parallel(
     return tuple(followers)
 
 
+def serve_plans(engine: LLMEngine, max_num_seqs: int) -> None:
+    """Run broadcast plans until the driver sends ``None``. The whole of a follower.
+
+    A follower rank holds no scheduler, no queue and no stop criteria, and it
+    discards the tokens it samples — rank 0 sampled the same ones and is the one
+    who has to detokenise them. What keeps the ranks in step is that they run
+    identical code over an identical plan.
+
+    Separate from :func:`run_follower` because who *starts* a follower varies —
+    this module spawns it for a lone replica, the data-parallel controller spawns
+    it as one cell of its grid — while what a follower *does* must not.
+
+    Args:
+        engine: This rank's engine, holding its shard of the weights.
+        max_num_seqs: Concurrency ceiling, so the scratch matches the driver's.
+            ``max_seq_len`` is taken from the engine instead: it only sizes local
+            scratch, so reading it here cannot desynchronise anything.
+    """
+    worker = ModelWorker(engine, max_num_seqs, engine.max_seq_len)
+    while (plan := broadcast_object_tp()) is not None:
+        worker.execute(plan)
+
+
 def run_follower(
     rank: int,
     tp_size: int,
@@ -225,12 +248,7 @@ def run_follower(
     max_num_seqs: int,
     master_port: int,
 ) -> None:
-    """Body of a non-driver tensor-parallel rank: build, then run plans forever.
-
-    The loop is the whole of a follower. It holds no scheduler, no queue and no
-    stop criteria, and it discards the tokens it samples — rank 0 sampled the
-    same ones and is the one who has to detokenise them. What keeps the ranks in
-    step is that they run identical code over an identical plan.
+    """Body of a non-driver tensor-parallel rank: rendezvous, build, serve plans.
 
     Module-level so that ``spawn`` can pickle it by name.
     """
@@ -241,12 +259,7 @@ def run_follower(
     init_tensor_parallel(rank=rank, world_size=tp_size, master_port=master_port)
     try:
         engine = LLMEngine(device=f"cuda:{rank}", tensor_parallel_size=tp_size, **engine_kwargs)
-        # ``max_seq_len`` only sizes this rank's local scratch, so taking it from
-        # the engine (rather than shipping the driver's scheduler config) cannot
-        # desynchronise anything.
-        worker = ModelWorker(engine, max_num_seqs, engine.max_seq_len)
         _log.info("tp rank %d ready on cuda:%d", rank, rank)
-        while (plan := broadcast_object_tp()) is not None:
-            worker.execute(plan)
+        serve_plans(engine, max_num_seqs)
     finally:
         destroy_parallel()
