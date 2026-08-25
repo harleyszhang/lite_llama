@@ -1,5 +1,6 @@
-"""Parallelism state: the DP x TP rank grid and the collectives TP needs."""
+"""Parallelism state: the DP x TP rank grid, the collectives TP needs, and their bill."""
 
+from .collective_log import CollectiveLedger, Tally, human_bytes, record_collectives
 from .parallel_state import (
     all_reduce_min,
     all_reduce_tp,
@@ -18,6 +19,8 @@ from .parallel_state import (
 )
 
 __all__ = [
+    "CollectiveLedger",
+    "Tally",
     "all_reduce_min",
     "all_reduce_tp",
     "broadcast_object_tp",
@@ -30,6 +33,8 @@ __all__ = [
     "get_tp_world_size",
     "get_world_size",
     "grid_coordinates",
+    "human_bytes",
     "init_parallel",
     "init_tensor_parallel",
+    "record_collectives",
 ]
