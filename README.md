@@ -256,6 +256,20 @@ engine = ContinuousBatchingEngine.from_pretrained("my_weight/Qwen3-8B", tensor_p
 
 The engine never learns how many processes run its model: it hands a plan to an `Executor` (`UniProcExecutor` for one GPU, `MultiprocExecutor` for many) and gets sampled tokens back. Because the plan is pure data, driver and follower ranks run one code path rather than two — no mirror process re-deriving the batch from a broadcast prompt, which is what used to turn any disagreement into an NCCL hang. Plans travel on a CPU (gloo) group so the control plane never stages through GPU memory, while the vocabulary-parallel sampler exchanges **two scalars per row** instead of gathering logits, keeping per-step traffic independent of vocabulary size.
 
+That last claim is not an argument — it is measured. Every collective reports its payload to a **collective ledger**, so you can ask a step what it cost:
+
+![tensor parallel](./docs/images/tensor_parallel.gif)
+
+```python
+from lite_llama.distributed import record_collectives
+
+with record_collectives() as ledger:
+    engine.step()
+print(ledger.report())          # per-op calls and bytes, split data / control plane
+```
+
+Recording is windowed, so the default path costs one `if`; windows nest, so a per-step ledger inside a whole-run ledger comes out of a single pass. Regenerate the GIF above with `python scripts/gen_collective_gif.py` — it drives a real `tp=2` engine and every byte in it is a measurement.
+
 See [docs/tensor_parallel.md](docs/tensor_parallel.md) for the design, the sharding rules (including why QKV is split per segment under GQA), and what byte-exact parity between `tp=1` and `tp=2` can and cannot assert under fp16.
 
 ### Quantization

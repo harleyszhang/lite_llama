@@ -2,10 +2,7 @@
 
 ## 为什么需要它
 
-数据并行（DP）复制整个模型、切请求流，解决的是"喂不饱一张卡"。张量并行（TP）反过来：切
-**权重本身**，解决的是"一张卡装不下"。一个 30B 的 fp8 checkpoint 在 23 GB 的 A10 上没有第二
-条路——权重必须分头存放，每层的输出再靠一次集合通信合回来。代价是延迟：TP 把每个 block 的
-矩阵乘换成"更小的矩阵乘 + 一次 all-reduce"。
+数据并行（DP）复制整个模型、切请求流，解决的是"喂不饱一张卡"。张量并行（TP）反过来：切 **权重本身**，解决的是"一张卡装不下"。一个 30B 的 fp8 checkpoint 在 23 GB 的 A10 上没有第二条路——权重必须分头存放，每层的输出再靠一次集合通信合回来。代价是延迟：TP 把每个 block 的矩阵乘换成"更小的矩阵乘 + 一次 all-reduce"。
 
 两者正交，构成 `dp_size × tp_size` 的 rank 网格，见[数据并行](./data_parallel.md)。
 
@@ -25,9 +22,7 @@ engine = ContinuousBatchingEngine.from_pretrained(
 
 ## 一条接缝：Executor
 
-这一版最重要的结构改动不是切权重（那是线性代数），而是**把"谁来跑一次前向"收敛成一个接口**。
-引擎不知道模型在本进程还是在八个进程里，它只做一件事：把一个 plan 交给 `Executor`，拿回采样
-出的 token。
+这一版最重要的结构改动不是切权重（那是线性代数），而是**把"谁来跑一次前向"收敛成一个接口**。引擎不知道模型在本进程还是在八个进程里，它只做一件事：把一个 plan 交给 `Executor`，拿回采样出的 token。
 
 | 角色 | 本仓库 | vLLM |
 | --- | --- | --- |
@@ -36,45 +31,28 @@ engine = ContinuousBatchingEngine.from_pretrained(
 | 执行一次 plan（多进程） | `MultiprocExecutor` | `MultiprocExecutor` |
 | 非 driver rank 的全部行为 | `serve_plans` | `WorkerProc.worker_busy_loop` |
 
-接口只有三个成员：`num_slots`、`execute(model_input)`、`shutdown()`。除了返回值，**任何签名
-里都没有张量**——这是"引擎不感知拓扑"能成立的原因。
+接口只有三个成员：`num_slots`、`execute(model_input)`、`shutdown()`。除了返回值，**任何签名里都没有张量**——这是"引擎不感知拓扑"能成立的原因。
 
-- **`UniProcExecutor`**：调本进程的 `ModelWorker`，到此为止。一张卡的默认路径，所以引擎循环
-  里下一个断点就是 kernel 里的断点，`mp.active_children()` 是 0
-  （`test_tp_engine.py::test_one_gpu_stays_in_one_process`）。单卡不该为多卡的能力付调试成本。
-- **`MultiprocExecutor`**：先把 plan 广播给 follower ranks，然后调**同一个** worker 方法。
-  driver 兼任 rank 0，所以 `tp=2` 只花**两个**进程而不是三个
-  （`test_two_gpus_cost_exactly_one_extra_process`）。
+- **`UniProcExecutor`**：调本进程的 `ModelWorker`，到此为止。一张卡的默认路径，所以引擎循环里下一个断点就是 kernel 里的断点，`mp.active_children()` 是 0 （`test_tp_engine.py::test_one_gpu_stays_in_one_process`）。单卡不该为多卡的能力付调试成本。
+- **`MultiprocExecutor`**：先把 plan 广播给 follower ranks，然后调**同一个** worker 方法。 driver 兼任 rank 0，所以 `tp=2` 只花**两个**进程而不是三个（`test_two_gpus_cost_exactly_one_extra_process`）。
 
 ### plan 是数据，所以只有一条代码路径
 
 follower 不持有 scheduler、不持有队列、不持有停止条件；它收 plan，直到收到 `None`。
 
-这是相较**已退场的镜像进程方案**的关键修正。旧方案广播的是 prompt 字符串，每个 rank 各自
-**重新推导**该跑哪一批——于是"两边推导一致"变成了一个不变量，而它一旦被破坏（多一次 prefill、
-少一个 slot），表现不是报错，而是**卡死在 NCCL 里**。现在 plan 本身是唯一真相：布局从同一份
-数据派生，driver 和 follower 执行的是同一段代码，没有第二份"worker 的前向"要维护同步。
+这是相较**已退场的镜像进程方案**的关键修正。旧方案广播的是 prompt 字符串，每个 rank 各自 **重新推导**该跑哪一批——于是"两边推导一致"变成了一个不变量，而它一旦被破坏（多一次 prefill、少一个 slot），表现不是报错，而是**卡死在 NCCL 里**。现在 plan 本身是唯一真相：布局从同一份数据派生，driver 和 follower 执行的是同一段代码，没有第二份"worker 的前向"要维护同步。
 
 ### 死掉的 rank 必须先于集合通信被发现
 
-每个集合通信都假设所有 rank 会到场；一个 rank 死了，其余的**只是等**。静默挂死是多进程执行
-最坏的失败模式，所以 `execute()` 在提交昂贵的全局事实（broadcast）之前，先查一个廉价的本地
-事实：进程还活着吗（`ensure_followers_alive`）。同理，`shutdown()` 只在整个组还完整时才广播
-停止信号——向一个已经死掉的 rank 广播会永久阻塞。
+每个集合通信都假设所有 rank 会到场；一个 rank 死了，其余的**只是等**。静默挂死是多进程执行最坏的失败模式，所以 `execute()` 在提交昂贵的全局事实（broadcast）之前，先查一个廉价的本地事实：进程还活着吗（`ensure_followers_alive`）。同理，`shutdown()` 只在整个组还完整时才广播停止信号——向一个已经死掉的 rank 广播会永久阻塞。
 
 ## 控制面走 gloo，不走 NCCL
 
-plan 是 Python 对象，而 NCCL 只能搬**显存**：用它传 plan 就得把每个 plan 在 GPU 上中转一次。
-所以 `init_parallel` 在建 NCCL 组的同时，为同一批 rank 再建一个 **CPU（gloo）组**专门承载控制
-面，`broadcast_object_tp` 把 pickle 后的字节从主存直接发出去。
+plan 是 Python 对象，而 NCCL 只能搬**显存**：用它传 plan 就得把每个 plan 在 GPU 上中转一次。所以 `init_parallel` 在建 NCCL 组的同时，为同一批 rank 再建一个 **CPU（gloo）组**专门承载控制面，`broadcast_object_tp` 把 pickle 后的字节从主存直接发出去。
 
-分层的结果是：**数据面（NCCL，张量）与控制面（gloo，plan）互不知情**，而控制面因为不需要显卡，
-在 CPU 上就能整套测出来（`test_tp_control_plane.py`：广播语义 + follower 存活检测，7 个测试）。
+分层的结果是：**数据面（NCCL，张量）与控制面（gloo，plan）互不知情**，而控制面因为不需要显卡，在 CPU 上就能整套测出来（`test_tp_control_plane.py`：广播语义 + follower 存活检测，7 个测试）。
 
-**rendezvous 端口自选。** 固定 29500 有两个都表现为"挂在 rendezvous"的坑：同机跑两个引擎会
-撞端口；崩溃残留的 socket 会毁掉下一次运行。所以 `free_port()` 向内核要一个空闲端口，
-`launch_tensor_parallel(master_port=None)` 默认走它。这个函数放在**生产代码**里、测试 harness
-反过来 import 它，是为了让"怎么选端口"只有一处定义。
+**rendezvous 端口自选。** 固定 29500 有两个都表现为"挂在 rendezvous"的坑：同机跑两个引擎会撞端口；崩溃残留的 socket 会毁掉下一次运行。所以 `free_port()` 向内核要一个空闲端口， `launch_tensor_parallel(master_port=None)` 默认走它。这个函数放在**生产代码**里、测试 harness 反过来 import 它，是为了让"怎么选端口"只有一处定义。
 
 ## 权重怎么切
 
@@ -86,50 +64,30 @@ plan 是 Python 对象，而 NCCL 只能搬**显存**：用它传 plan 就得把
 | `VocabParallelEmbedding` | vocab 维 | 一次 `all_reduce` |
 | `ParallelLMHead` | vocab 维 | 无（logits 留在本地） |
 
-**`QKVParallelLinear` 为什么不是一个 `ColumnParallelLinear`。** q/k/v 三个 GEMM 融成一个
-`[q | k | v]`，算术不变但激活只读一次、一次 kernel launch 顶三次——TP 下 decode 走 eager，
-launch 开销没有 graph replay 帮你藏。但**不能**写成 `ColumnParallelLinear(hidden, q + 2*kv)`：
-GQA 让 query 头数远多于 kv 头数（Qwen3-8B 是 32 vs 8），两个边界各自独立。对 `q + 2*kv` 做一刀
-均分是"看不见 q 在哪结束"的：低 rank 会拿到清一色 query 头、高 rank 拿到清一色 kv 头。局部宽度
-两种切法算出来一样，所以下游**不会报错**——这正是它危险的地方。
+**`QKVParallelLinear` 为什么不是一个 `ColumnParallelLinear`。** q/k/v 三个 GEMM 融成一个 `[q | k | v]`，算术不变但激活只读一次、一次 kernel launch 顶三次——TP 下 decode 走 eager， launch 开销没有 graph replay 帮你藏。但**不能**写成 `ColumnParallelLinear(hidden, q + 2*kv)`： GQA 让 query 头数远多于 kv 头数（Qwen3-8B 是 32 vs 8），两个边界各自独立。对 `q + 2*kv` 做一刀均分是"看不见 q 在哪结束"的：低 rank 会拿到清一色 query 头、高 rank 拿到清一色 kv 头。局部宽度两种切法算出来一样，所以下游**不会报错**——这正是它危险的地方。
 
-**vocab 两端为什么值得单独切。** `[vocab, hidden]` 这两个张量在 151K vocab × 8192 hidden 的
-fp16 下各约 4.9 GB，而 decode 步的 `lm_head` GEMM 是 `batch × vocab × hidden`，大词表模型里
-最大的那次矩阵乘。切 vocab 把两者同时除以 `tp`（实测：`tp=2` 的 embedding 字节数正好是 `tp=1`
-的一半，`test_two_ranks_hold_half_the_vocabulary_each`）。对 tied 模型这还是**唯一正确**的选择
-——不切的 head 配上切了的 embedding，就是两个张量都声称自己是同一个
-（`test_tying_survives_sharding` 断言 tie 关系在分片后仍然成立）。
+**vocab 两端为什么值得单独切。** `[vocab, hidden]` 这两个张量在 151K vocab × 8192 hidden 的 fp16 下各约 4.9 GB，而 decode 步的 `lm_head` GEMM 是 `batch × vocab × hidden`，大词表模型里最大的那次矩阵乘。切 vocab 把两者同时除以 `tp`（实测：`tp=2` 的 embedding 字节数正好是 `tp=1` 的一半，`test_two_ranks_hold_half_the_vocabulary_each`）。对 tied 模型这还是**唯一正确**的选择 ——不切的 head 配上切了的 embedding，就是两个张量都声称自己是同一个（`test_tying_survives_sharding` 断言 tie 关系在分片后仍然成立）。
 
-`ParallelLMHead` 刻意**不 all-gather logits**：sampler 直接吃本地那一段，于是每步的传输量与
-词表大小**无关**，也从不实体化一个完整的 logits 张量。
+`ParallelLMHead` 刻意**不 all-gather logits**：sampler 直接吃本地那一段，于是每步的传输量与词表大小**无关**，也从不实体化一个完整的 logits 张量。
 
 ## 采样怎么做到不 diverge
 
-每个 rank 只有词表的一段，而 top-p / temperature 都需要全局归一化。朴素做法是 all-gather
-logits——每步搬 `batch × vocab`，正好把上一节省下的东西还回去。
+每个 rank 只有词表的一段，而 top-p / temperature 都需要全局归一化。朴素做法是 all-gather logits——每步搬 `batch × vocab`，正好把上一节省下的东西还回去。
 
-这里用的是**去中心化 log_softmax**：`log_softmax(x)_i = x_i - logsumexp(x)`，而 `logsumexp`
-每行只是**一个数**。于是每步只需交换**每行两个标量**：
+这里用的是**去中心化 log_softmax**：`log_softmax(x)_i = x_i - logsumexp(x)`，而 `logsumexp` 每行只是**一个数**。于是每步只需交换**每行两个标量**：
 
 1. `all_reduce_max` 求全局行最大值（数值稳定用），
 2. `all_reduce_sum` 求 `exp(x - max)` 的全局行和。
 
-通信量从 `O(batch × vocab)` 降到 `O(batch)`，且与词表大小无关（`vocab_logsumexp`）。argmax 同理
-只交换"局部最优值 + 它的全局 id"。
+通信量从 `O(batch × vocab)` 降到 `O(batch)`，且与词表大小无关（`vocab_logsumexp`）。argmax 同理只交换"局部最优值 + 它的全局 id"。
 
-非贪心采样从各 rank 自己的 RNG 抽签，所以最后还要把 rank 0 采出的 id 广播回去
-（`worker.py::_sync_tp`）——否则各 rank 对"刚生成的 token 是什么"意见不一，后面每一步都在放大
-这个分歧。这一层的数学在 CPU 上就能整套验证（`test_parallel_sampling.py`，9 个测试，同进程模拟
-分片）。
+非贪心采样从各 rank 自己的 RNG 抽签，所以最后还要把 rank 0 采出的 id 广播回去（`worker.py::_sync_tp`）——否则各 rank 对"刚生成的 token 是什么"意见不一，后面每一步都在放大这个分歧。这一层的数学在 CPU 上就能整套验证（`test_parallel_sampling.py`，9 个测试，同进程模拟分片）。
 
 ## 精度：byte parity 到底能断言什么
 
-分片在**精确算术**下是恒等变换，所以"tp=2 与 tp=1 逐字节相同"看起来是理所当然的断言。它不是。
-fp16 归约不满足结合律：row-parallel GEMM 加一次 all-reduce，是把同一批乘积**按另一个顺序**加
-起来。
+分片在**精确算术**下是恒等变换，所以"tp=2 与 tp=1 逐字节相同"看起来是理所当然的断言。它不是。 fp16 归约不满足结合律：row-parallel GEMM 加一次 all-reduce，是把同一批乘积**按另一个顺序**加起来。
 
-这件事上我们没有靠猜。取证脚本在**单卡、tp=1**下，只改变 batch 的组成（因而改变 GEMM 的归约
-形状）重跑同一条 prompt：
+这件事上我们没有靠猜。取证脚本在**单卡、tp=1**下，只改变 batch 的组成（因而改变 GEMM 的归约形状）重跑同一条 prompt：
 
 ```text
 prompt: "The history of the Roman Empire spans many centuries, and"
@@ -138,12 +96,9 @@ prompt: "The history of the Roman Empire spans many centuries, and"
                      ^ 两者在第 56 个字符分叉，全程没有张量并行参与
 ```
 
-这条 prompt 在第 14 个 token 处正好压在一个贪心平局上。**无条件**要求逐字节相等，断言的是
-fp16 的性质，而不是分片的正确性。
+这条 prompt 在第 14 个 token 处正好压在一个贪心平局上。**无条件**要求逐字节相等，断言的是 fp16 的性质，而不是分片的正确性。
 
-所以 `test_tp_engine.py` 让测试**自己测出噪声下限**：每条 prompt 答两次——在它的 batch 里，和
-单独一条。**单卡引擎与自己不一致**的条目就是踩在平局上的条目，其余条目才是恒等式该成立的地方。
-三层断言：
+所以 `test_tp_engine.py` 让测试**自己测出噪声下限**：每条 prompt 答两次——在它的 batch 里，和单独一条。**单卡引擎与自己不一致**的条目就是踩在平局上的条目，其余条目才是恒等式该成立的地方。三层断言：
 
 | 断言 | 范围 |
 | --- | --- |
@@ -151,16 +106,55 @@ fp16 的性质，而不是分片的正确性。
 | 共享前缀 ≥ 16 字符 | 踩在平局上的条目——错的 shard offset 会毁掉**第一个** token，不是第十四个 |
 | 稳定条目占比 ≥ 2/3 | 防止上面那条强断言被静默架空 |
 
-第三条是关键：没有它，一旦某天大部分 prompt 都变成"不稳定"，最强的那条断言就悄悄退化成空断言
-而测试依然全绿。实测输出（`pytest -s` 可见）：
+第三条是关键：没有它，一旦某天大部分 prompt 都变成"不稳定"，最强的那条断言就悄悄退化成空断言而测试依然全绿。实测输出（`pytest -s` 可见）：
 
 ```text
 batch-shape stable: 7/9; on a tie: [('batch6', 4), ('mixed', 1)]
 ```
 
-逐字节相等因此覆盖 9 个条目里的 7 个，且这个覆盖率本身被断言着。这是能同时抓住"off-by-one 的
-shard offset""mask 漏进了别的 rank 的行"这类**产出看起来合理的数字**的失败的唯一检查——任何
-"差值 < eps"的松散比较都不会察觉。
+逐字节相等因此覆盖 9 个条目里的 7 个，且这个覆盖率本身被断言着。这是能同时抓住"off-by-one 的 shard offset""mask 漏进了别的 rank 的行"这类**产出看起来合理的数字**的失败的唯一检查——任何 "差值 < eps"的松散比较都不会察觉。
+
+## 观测：collective 记账
+
+上一节那条"每行两个标量"的主张，到这里之前一直只是 docstring 里的一段论证。问题在于它**没法从 profile 里看出来**：一个 all-gather logits 的采样器会通过 `tests/distributed/` 下**每一个**正确性测试——同样的 token、同样的 logprob——只是每步多搬几个数量级的字节。kernel 名字的火焰图也不会告诉你差别，因为两者都只是"一次 NCCL 调用"。
+
+![tensor parallel](./images/tensor_parallel.gif)
+
+所以每个集合通信都会把自己的 op 与 payload 报给一本账（`lite_llama/distributed/collective_log.py`）：
+
+```python
+from lite_llama.distributed import record_collectives
+
+with record_collectives() as ledger:
+    engine.step()
+print(ledger.report())
+assert ledger.tally("all_gather").nbytes < 1024   # 关于流量的一句主张
+```
+
+四个设计点：
+
+- **窗口式，不是全局的。** 没人开窗时模块级的 `_OPEN` 是空 tuple，埋点的代价就是这一个 `if`。测量因此天然是**有作用域的**——问的是"这一步花了多少"，而不是"进程启动以来累计多少"。
+- **窗口可嵌套，事件计入所有打开的窗口。** per-step 窗口套在 whole-run 窗口里，一趟就同时拿到两份数据，调用方不需要做减法。
+- **plane 是 op 的属性，不是调用点的属性。** `broadcast_object` 是控制面（pickle 对象走 gloo），其余是数据面（张量走 NCCL）。二者是设计上互相交换的关系——花两个标量的控制流量换掉一次词表规模的 gather——所以按调用点打标签迟早会漂。
+- **记账点在 world-of-one 早退之后。** 单卡下的 no-op collective 不搬字节，记它就是在量调用点而不是量线路。`broadcast_object_tp` 的字节数需要第二次 pickle，所以只在有窗口打开时才算，并且**在广播之后**算——这样 follower 报的数就是 driver 发出去的数。
+
+实测一次真实的 tp=2 运行（Qwen2.5-1.5B-Instruct，4 条 prompt，24 步，rank 0 视角）：
+
+```text
+op                plane      calls       bytes    per call
+all_reduce        data        1368     29.2 MB     21.9 KB
+broadcast_object  control       24     10.0 KB       428 B
+all_gather        data          24       344 B        14 B
+broadcast         data          24       344 B        14 B
+all_reduce_max    data          24       164 B         7 B
+total                         1464     29.2 MB   (data 29.2 MB, control 10.0 KB)
+```
+
+两个读法。**层拿走了全部流量**：28 层各两次 row-parallel all-reduce，一步 decode 171 KB，一步 prefill 22.7 MB。**采样没有**：一行一步 12 B（`all_reduce_max` + `all_gather`），而同一行如果 gather logits 是 148.4 KB——**12,661 倍**。控制面全程 10 KB，也就是说"plan 走 gloo"这个选择的代价在总账里是 0.03%。
+
+这本账也让一类新的断言成为可能（`tests/distributed/test_collective_log.py`）：把词表从 4096 放大到 32768，采样流量必须**一个字节都不变**。这是区分"分片采样"和"gather 后采样"的唯一检查。
+
+GIF 由 `scripts/gen_collective_gif.py` 生成，驱动的是真实 tp=2 引擎，每个字节都是量出来的（唯一一条算术而非测量的是"if gathered"那一行，它描述的是另一种实现）。
 
 ## 测试规模
 
@@ -168,29 +162,20 @@ shard offset""mask 漏进了别的 rank 的行"这类**产出看起来合理的�
 | --- | ---: | --- |
 | `tests/distributed/test_tp_control_plane.py` | 7 | CPU（gloo 控制面 + 存活检测） |
 | `tests/distributed/test_parallel_sampling.py` | 9 | CPU（分布式采样数学） |
+| `tests/distributed/test_collective_log.py` | 19 | CPU（记账窗口 + gloo 双 rank + 词表无关性） |
 | `tests/distributed/test_vocab_parallel.py` | 13 | CPU + GPU（vocab 分片；2 个需 4 卡） |
 | `tests/distributed/test_qkv_parallel.py` | 17 | CPU（段级切分与权重映射） |
 | `tests/distributed/test_tp_engine.py` | 9 | GPU（需 2 卡，端到端） |
 
-端到端那 9 个测试由**两个 spawn 出的 probe 进程**测量，每个宽度一个：父进程从不 `import` CUDA
-也不碰 parallel_state，所以一个崩掉的 rank 不会把一个半初始化的 TP 组泄漏给同一 session 里其余
-测试。加载 checkpoint 和 rendezvous 是唯一昂贵的部分，所以一个 probe 一次采集全部事实（两种分
-组的答案、executor 类型、子进程数、embedding 字节数、tie 关系），断言只从 report 里读。
+端到端那 9 个测试由**两个 spawn 出的 probe 进程**测量，每个宽度一个：父进程从不 `import` CUDA 也不碰 parallel_state，所以一个崩掉的 rank 不会把一个半初始化的 TP 组泄漏给同一 session 里其余测试。加载 checkpoint 和 rendezvous 是唯一昂贵的部分，所以一个 probe 一次采集全部事实（两种分组的答案、executor 类型、子进程数、embedding 字节数、tie 关系），断言只从 report 里读。
 
-其中一个测试专门跑**在线服务**路径：`AsyncLLMEngine(tensor_parallel_size=2)` 并发处理两条请求。
-它是唯一从**后台线程**发起集合通信的路径（`step()` 由 worker 线程驱动），实测不失步，且答案与
-离线 tp=2 逐字节一致。
+其中一个测试专门跑**在线服务**路径：`AsyncLLMEngine(tensor_parallel_size=2)` 并发处理两条请求。它是唯一从**后台线程**发起集合通信的路径（`step()` 由 worker 线程驱动），实测不失步，且答案与离线 tp=2 逐字节一致。
 
 ## 当前边界
 
-- **TP 下 decode 走 eager。** 被捕获的 CUDA graph 会连带 replay 分片层发出的 NCCL all-reduce，
-  而那只在"每个 rank 捕获完全相同的序列并锁步 replay"时才成立；不一致的后果是**卡死在集合通信
-  里**而不是抛异常。所以 `tensor_parallel_size > 1` 时 `use_cuda_graph` 被主动关掉
-  （`continuous_engine.py`），而不是留给用户去踩。
-- **`vl-chat` 是单卡的。** 视觉路径还跑在一次性批处理的引擎上，`--tensor-parallel-size > 1`
-  会直接报错退出——旧的"镜像进程假装 TP"正是这一版删掉的东西，不会为了让参数看起来能用而留着。
-- **vocab 与两个 head 数都必须能被 `tp` 整除**，否则 `divide()` 在构造时就报错（而不是在某个
-  kernel 里给出错的形状）。
+- **TP 下 decode 走 eager。** 被捕获的 CUDA graph 会连带 replay 分片层发出的 NCCL all-reduce，而那只在"每个 rank 捕获完全相同的序列并锁步 replay"时才成立；不一致的后果是**卡死在集合通信里**而不是抛异常。所以 `tensor_parallel_size > 1` 时 `use_cuda_graph` 被主动关掉（`continuous_engine.py`），而不是留给用户去踩。
+- **`vl-chat` 是单卡的。** 视觉路径还跑在一次性批处理的引擎上，`--tensor-parallel-size > 1` 会直接报错退出——旧的"镜像进程假装 TP"正是这一版删掉的东西，不会为了让参数看起来能用而留着。
+- **vocab 与两个 head 数都必须能被 `tp` 整除**，否则 `divide()` 在构造时就报错（而不是在某个 kernel 里给出错的形状）。
 - **单机。** rendezvous 走 `127.0.0.1`；跨节点需要真正的 `MASTER_ADDR` 与 rank 分配。
 
 ## 相关文档
