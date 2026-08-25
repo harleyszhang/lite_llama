@@ -118,11 +118,22 @@ def bench_single_process(model, prompts, gen_len, iters, **kw) -> tuple[DPResult
 
 
 def bench_data_parallel(
-    model, replicas, prompts, gen_len, iters, load_balancer, **kw
+    model, replicas, prompts, gen_len, iters, load_balancer, max_num_seqs, **kw
 ) -> tuple[DPResult, list[str]]:
-    """One row per replica count, through the DP coordinator."""
+    """One row per replica count, through the DP coordinator.
+
+    ``max_num_seqs`` is the replica's concurrency ceiling, and it has to be stated:
+    a replica hosts a *resident* engine, so unlike the one-shot ``LLM`` row it cannot
+    size itself to the batch it is handed. Leaving it at the serving default while the
+    reference row decodes the whole batch at once would attribute a difference in
+    concurrency to a difference in parallelism.
+    """
     with DataParallelEngine(
-        model=model, data_parallel_size=replicas, load_balancer=load_balancer, **kw
+        model=model,
+        data_parallel_size=replicas,
+        load_balancer=load_balancer,
+        max_num_seqs=max_num_seqs,
+        **kw,
     ) as engine:
         latency, tokens, texts = _measure(
             engine.generate, prompts, gen_len, iters, engine.tokenizer
@@ -195,6 +206,12 @@ def main() -> None:
     # the moment it is registered.
     parser.add_argument("--load-balancer", default="round_robin", choices=list(LOAD_BALANCERS))
     parser.add_argument("--gen-len", type=int, default=128)
+    parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=0,
+        help="Replica concurrency ceiling; 0 sizes it to the prompts each replica gets",
+    )
     parser.add_argument("--iters", type=int, default=2, help="Timed repeats (median reported)")
     parser.add_argument("--max-seq-len", type=int, default=1024)
     parser.add_argument(
@@ -232,7 +249,8 @@ def main() -> None:
     print(
         f"{args.model}  |  {args.scaling} scaling  batch={args.batch_size}"
         f"{' per replica' if args.scaling == 'weak' else ' total'}  gen_len={args.gen_len}  "
-        f"iters={args.iters}  lb={args.load_balancer}"
+        f"iters={args.iters}  lb={args.load_balancer}  "
+        f"max_num_seqs={args.max_num_seqs or 'per-replica batch'}"
     )
     print(f"gpu={torch.cuda.get_device_name(0)} x {visible}  quant={args.quantization or 'fp16'}")
     print(f"{'=' * 91}")
@@ -243,13 +261,18 @@ def main() -> None:
     results = [reference]
     agreements: list[tuple[str, list[str]]] = []
     for replicas in range(1, args.dp + 1):
+        prompts = prompts_for(replicas)
+        # Sized to the share one replica receives, so every row decodes as wide a batch
+        # as the reference ``LLM`` row does and the comparison is of replica counts.
+        per_replica = -(-len(prompts) // replicas)
         result, texts = bench_data_parallel(
             args.model,
             replicas,
-            prompts_for(replicas),
+            prompts,
             args.gen_len,
             args.iters,
             args.load_balancer,
+            args.max_num_seqs or per_replica,
             **kw,
         )
         results.append(result)
