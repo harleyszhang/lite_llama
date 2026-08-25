@@ -15,25 +15,19 @@
 
 """Image loading and preprocessing for the vision-language models.
 
-Loads images from path / URL / base64, optionally pads to a square
-(``expand2square``), and runs the HF image processor to produce pixel tensors for
-the vision tower. Adapted from LLaVA.
+Loads images from path or URL, optionally pads to a square (``expand2square``), and
+runs the HF image processor to produce pixel tensors for the vision tower. Adapted
+from LLaVA.
 
 Usage:
     images = load_images(paths); pixels = process_images(images, processor, cfg)
 """
 
-import base64
-import os
 from io import BytesIO
 
 import requests
 import torch
 from PIL import Image
-
-
-def load_image_from_base64(image):
-    return Image.open(BytesIO(base64.b64decode(image)))
 
 
 def load_image(image_file):
@@ -51,33 +45,6 @@ def load_images(image_files):
         image = load_image(image_file)
         out.append(image)
     return out
-
-
-def vis_images(image_files):
-    if len(image_files) == 1:
-        image = image_files[0]
-        os.system(
-            f"termvisage --query-timeout 1 -H left --height 40 --oversize {image}"
-        )  # --height 50：设置图片高度为 500 行。
-
-    else:
-        # Concat images
-        system_inst = "convert "
-        inst_template1 = " \\( {image} -background none -resize x{height} \\) "
-        inst_template2 = " \\( {image} -background none -resize x{height} -splice 50x0 \\) "
-        for count, image in enumerate(image_files, start=1):
-            with Image.open(image) as img:
-                width, height = img.size  # 查看尺寸
-                print(f"{image} width and height is {width}, {height}")
-
-            if count == 1:
-                system_inst += inst_template1.format(image=image, height=height)
-            else:
-                system_inst += inst_template2.format(image=image, height=height)
-        system_inst += " +append .vis.jpg"
-        os.system(system_inst)
-
-        os.system("termvisage --query-timeout 1 .vis.jpg -H left")
 
 
 def expand2square(pil_img, background_color):
