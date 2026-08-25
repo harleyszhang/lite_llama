@@ -25,7 +25,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
             torch.empty(output_size, input_size, dtype=torch.float16), requires_grad=False
         )
 
-    def apply(self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+    def apply(
+        self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
         return F.linear(x, layer.weight, bias)
 
 
@@ -81,18 +83,14 @@ class UnquantizedConfig(QuantizationConfig):
         return 0
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "UnquantizedConfig":
+    def from_config(cls, config: dict[str, Any]) -> UnquantizedConfig:
         return cls()
 
-    def get_quant_method(
-        self, layer: nn.Module, prefix: str = ""
-    ) -> QuantizeMethodBase | None:
-        # Dispatch by layer type
-        from ...modules.moe import SparseMoeBlock
-
-        if isinstance(layer, SparseMoeBlock):
-            return UnquantizedFusedMoEMethod()
-        return UnquantizedLinearMethod()
+    def get_quant_method(self, layer: nn.Module, prefix: str = "") -> QuantizeMethodBase | None:
+        # quantizes() is always True here (ignored is empty), so this is a
+        # pure layer-type dispatch; going through _dispatch keeps the shape
+        # of every config's override identical.
+        return self._dispatch(layer, prefix, UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
 
     @property
     def storage_dtype(self) -> torch.dtype:

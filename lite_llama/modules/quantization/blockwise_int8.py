@@ -22,10 +22,10 @@ from .base_config import (
 from .parameter import RawParameter
 from .utils import quantize_int8_groupwise, quantize_int8_per_channel
 
-
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #
+
 
 class BlockInt8Config(QuantizationConfig):
     """int8 weight-only with per-channel or group-wise scales.
@@ -34,7 +34,9 @@ class BlockInt8Config(QuantizationConfig):
     ``--quantization int8-blockwise`` (group-wise with default group=128).
     """
 
-    def __init__(self, group_n: int = 1, group_k: int = 1 << 30, ignored: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self, group_n: int = 1, group_k: int = 1 << 30, ignored: tuple[str, ...] = ()
+    ) -> None:
         super().__init__()
         self.group_n = group_n
         self.group_k = group_k
@@ -51,35 +53,23 @@ class BlockInt8Config(QuantizationConfig):
         return 70  # Volta
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "BlockInt8Config":
+    def from_config(cls, config: dict[str, Any]) -> BlockInt8Config:
         ignored = tuple(config.get("modules_to_not_convert") or ())
         group_size = int(config.get("group_size", 1 << 30))
         return cls(group_k=group_size, ignored=ignored)
 
     @classmethod
-    def per_channel(cls) -> "BlockInt8Config":
+    def per_channel(cls) -> BlockInt8Config:
         """Symmetric int8, one scale per output channel, computed at load time."""
         return cls(group_n=1, group_k=1 << 30)
 
     @classmethod
-    def groupwise(cls, group_size: int = 128) -> "BlockInt8Config":
+    def groupwise(cls, group_size: int = 128) -> BlockInt8Config:
         """Symmetric int8 with one scale per ``group_size`` input channels."""
         return cls(group_n=1, group_k=group_size)
 
-    def get_quant_method(
-        self, layer: nn.Module, prefix: str = ""
-    ) -> QuantizeMethodBase | None:
-        if not self.quantizes(prefix):
-            from ...modules.moe import SparseMoeBlock
-            from .unquant import UnquantizedFusedMoEMethod, UnquantizedLinearMethod
-            if isinstance(layer, SparseMoeBlock):
-                return UnquantizedFusedMoEMethod()
-            return UnquantizedLinearMethod()
-
-        from ...modules.moe import SparseMoeBlock
-        if isinstance(layer, SparseMoeBlock):
-            return BlockInt8MoEMethod()
-        return BlockInt8LinearMethod()
+    def get_quant_method(self, layer: nn.Module, prefix: str = "") -> QuantizeMethodBase | None:
+        return self._dispatch(layer, prefix, BlockInt8LinearMethod, BlockInt8MoEMethod)
 
     @property
     def storage_dtype(self) -> torch.dtype:
@@ -98,7 +88,9 @@ class BlockInt8LinearMethod(LinearMethodBase):
             torch.empty(*config.scale_shape(output_size, input_size), dtype=torch.float32)
         )
 
-    def apply(self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+    def apply(
+        self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
         config: BlockInt8Config = layer.quant  # type: ignore[assignment]
         return w8a16_matmul(
             x,
@@ -109,7 +101,7 @@ class BlockInt8LinearMethod(LinearMethodBase):
             bias=bias,
         )
 
-    def quantize_from_fp16(self, layer: nn.Module, config: "QuantizationConfig") -> None:
+    def quantize_from_fp16(self, layer: nn.Module, config: QuantizationConfig) -> None:
         cfg: BlockInt8Config = config  # type: ignore[assignment]
         if cfg.group_k < layer.input_size:
             qweight, scale = quantize_int8_groupwise(layer.weight.data, cfg.group_k)
@@ -132,7 +124,9 @@ class BlockInt8MoEMethod(FusedMoEMethodBase):
             ),
             "gate_up_proj_scale_inv": RawParameter(
                 torch.empty(
-                    block.num_experts, *config.scale_shape(gate_up_n, gate_up_k), dtype=torch.float32
+                    block.num_experts,
+                    *config.scale_shape(gate_up_n, gate_up_k),
+                    dtype=torch.float32,
                 )
             ),
             "down_proj": RawParameter(
@@ -159,7 +153,7 @@ class BlockInt8MoEMethod(FusedMoEMethodBase):
             group_k=min(config.group_k, block.hidden_size),
         )
 
-    def quantize_from_fp16(self, block: nn.Module, config: "QuantizationConfig") -> None:
+    def quantize_from_fp16(self, block: nn.Module, config: QuantizationConfig) -> None:
         cfg: BlockInt8Config = config  # type: ignore[assignment]
         for name in ("gate_up_proj", "down_proj"):
             if cfg.group_k < block.hidden_size:
