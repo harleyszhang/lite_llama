@@ -131,7 +131,7 @@ def fp8_matmul(
     group_n: int,
     group_k: int,
     bias: torch.Tensor | None = None,
-    out_dtype: torch.dtype = torch.float16,
+    out_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
     """``dequant(qx) @ dequant(qweight).T (+ bias)`` with both operands fp8.
 
@@ -146,7 +146,8 @@ def fp8_matmul(
         group_n: Rows of one weight-scale block. ``1`` means per-output-channel.
         group_k: Columns of one weight-scale block. ``>= K`` means one per row.
         bias: Optional ``[N]`` bias, added in fp32 before the output cast.
-        out_dtype: Output dtype; the rest of the network runs fp16.
+        out_dtype: Output dtype; the rest of the network runs bf16 (or fp16
+            for a checkpoint that declares it).
 
     Returns:
         ``[..., N]`` in ``out_dtype``.

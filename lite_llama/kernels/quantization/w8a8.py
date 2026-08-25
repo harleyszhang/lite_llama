@@ -166,8 +166,8 @@ def smoothquant_matmul(
     Returns:
         ``[..., N]`` in ``x``'s dtype.
     """
-    if x.dtype != torch.float16:
-        raise ValueError(f"smoothquant activations must be fp16, got {x.dtype}")
+    if x.dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError(f"smoothquant activations must be fp16 or bf16, got {x.dtype}")
     if qweight.dtype != torch.int8:
         raise ValueError(f"qweight must be int8, got {qweight.dtype}")
 

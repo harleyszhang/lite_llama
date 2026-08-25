@@ -92,6 +92,10 @@ def _w8a16_matmul_kernel(
             b = dequant_fp8e4m3(b)
         else:
             b = b.to(tl.float16)
+        # tl.dot needs both operands in the activation's dtype. Widening the
+        # widened-from-fp16 weight to bf16 rounds at 2^-8 — an order below the
+        # 2^-4 the 8-bit weight itself carries, so nothing measurable is lost.
+        b = b.to(a.dtype)
         scale = tl.load(scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_sk)
         accumulator += tl.dot(a, b) * scale[None, :]
         a_ptrs += BLOCK_K * stride_ak
@@ -159,8 +163,8 @@ def w8a16_matmul(
     is_fp8 = qweight.dtype == torch.uint8
     if not is_fp8 and qweight.dtype != torch.int8:
         raise ValueError(f"qweight must be uint8 (fp8) or int8, got {qweight.dtype}")
-    if x.dtype != torch.float16:
-        raise ValueError(f"w8a16 activations must be fp16, got {x.dtype}")
+    if x.dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError(f"w8a16 activations must be fp16 or bf16, got {x.dtype}")
     if qweight.stride(-1) != 1:
         raise ValueError("qweight last dimension must be contiguous")
 

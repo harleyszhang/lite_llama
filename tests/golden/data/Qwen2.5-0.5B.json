@@ -10,35 +10,35 @@
   " I have a basic knowledge of c++ and I want to learn c++ programming. I have a basic knowledge of c++ and I want to learn c++"
  ],
  "batch_uniform_rp1.1": [
-  " I have no idea how to learn python. I am a beginner and I want to know the best way to learn it.\nI would like to know what is",
+  " I have no idea how to learn python. I am a beginner and i want to know the best way to learn it.\nI would like to know what is",
   " I have a basic knowledge of c++ and i want to learn more. What are the best books for learning c++? Which one is better than others?\n"
  ],
  "batch_mixed": [
   " I am trying to create a simple program that will take a string and return the number of vowels in the string. I have tried using the following code but it",
-  " its influence can be seen in various aspects of modern society. Which of the following options best represents the impact of the Roman Empire on modern society?\nA. The"
+  " its influence can be seen in various aspects of modern life. From the construction of the Colosseum to the spread of Christianity, the Roman Empire left an"
  ],
  "batch_mixed_rp1.1": [
   " I am trying to create a simple program that will take the user input and then print out the result. The problem is that when I run it, it prints",
-  " its influence can be seen in various aspects of modern society. Which of the following options best represents a direct manifestation of Roman culture?\nA. The use of the"
+  " its influence can be seen in various aspects of modern life. From the construction of roads and bridges to the development of agriculture, the Roman Empire left a lasting impact"
  ],
  "batch8": [
   " to be happy. I believe that happiness is to be able to enjoy the things that you have. I believe that happiness is to be able to enjoy the things",
-  " it is widely used in many applications. In this paper, we propose a new architecture, VGG-16, which is a variant of VGG.",
-  " Certainly! The American Civil War, also known as the War of the Rebellion or the Civil War, was a conflict that took place from 1861",
+  " it is a very popular backbone in the deep learning community. It is a very popular backbone in the deep learning community. It is a very popular backbone in the",
+  " The American Civil War, also known as the War of the Rebellion or the Civil War, was a conflict that took place from 1861 to ",
   "?\nGeorge Washington",
-  " I want to learn c++ and I want to learn how to use c++ to do some things. I want to learn how to use c++ to do",
+  " I want to learn c++ and I want to learn it from scratch. I want to learn it from scratch. I want to learn it from scratch. I",
   " I want to learn python, give me some code examples. I want to learn python, give me some code examples. I want to learn python, give me",
   ", transformer, transformer, transformer, transformer, transformer, transformer, transformer, transformer, transformer, transformer, transformer, transformer, transformer, transformer, transformer, transformer",
   ", and how to use it in python\nSure! Here's a brief introduction to ResNet and how to use it in Python:\n\nResNet is a deep"
  ],
  "batch8_rp1.1": [
-  " to be happy. I believe that happiness is a feeling of contentment and fulfillment, which comes from within rather than being imposed on us by others. Happiness can",
-  " it is widely used in many applications. In this paper, we propose a new architecture called VGG-16 to improve the performance of VGG by using",
-  " Certainly! The American Civil War, also known as the War of 1861-1865 or simply the Civil War, was a conflict",
+  " to be happy. I believe that happiness is a feeling of well-being, and it can come from many different sources. For example, if you have a good",
+  " it is a very popular backbone in the deep learning community. It has been used to train many state-of-the-art models, such as VGG16,",
+  " The American Civil War, also known as the War of 1861-1865 or simply the Civil War, was a conflict that took",
   "?\nGeorge Washington",
-  " I want to learn c++ and give me some code example. Please help me.\nSure, here are a few examples of C++ code:\n\n1. Hello",
+  " I want to learn c++ and i have no idea how to start. Can you give me some code example? Sure! Here are a few simple C++",
   " I want to learn python, give me some code examples. I want to learn python, give me some code examples.\nI want to learn python, give me",
-  ", transformer model, transformer architecture, transformer architecture in detail. Please introduce the transformer model and its architecture.\nThe Transformer is a type of recurrent neural network (R",
-  ", and how to use it in python\nSure! Here's a brief introduction of ResNet:\n\nResidual Networks (ResNets) are a type of"
+  ", transformer model, transformer architecture, transformer loss function, transformer loss, transformer loss function, transformer loss function, transformer loss function, transformer loss function, transformer loss",
+  ", and how to use it in python\nSure! Here's a brief introduction to ResNet:\n\nResidual Networks (ResNets) are a type of"
  ]
 }

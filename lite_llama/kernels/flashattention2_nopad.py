@@ -167,7 +167,7 @@ def flash_attention2_nopad_kernel(
 # Flashattention NoPad 实现（Triton 内核）
 # --------------------------------------
 @torch.no_grad()
-@custom_fwd(cast_inputs=torch.float16, device_type="cuda")
+@custom_fwd(device_type="cuda")
 def flash_attention2_no_pad(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -189,7 +189,8 @@ def flash_attention2_no_pad(
 
     # Autotune lookup: use persisted best config if available, else heuristic.
     from .autotune import get_best_config
-    tuned = get_best_config("flash_attn_nopad", m=max_seq_len, n=HEAD_DIM, k=HEAD_DIM, dtype="fp16")
+    dtype_key = "bf16" if q.dtype == torch.bfloat16 else "fp16"
+    tuned = get_best_config("flash_attn_nopad", m=max_seq_len, n=HEAD_DIM, k=HEAD_DIM, dtype=dtype_key)
     if tuned is not None:
         BLOCK_M = tuned.get("BLOCK_M_SIZE", 64)
         BLOCK_N = tuned.get("BLOCK_N_SIZE", 64)

@@ -116,8 +116,10 @@ def _w4a16_matmul_kernel(
         # Dequant: [BLOCK_N, GROUP_SIZE]
         b_dequant = (b_flat - zero[:, None]) * scale[:, None]
 
-        # Transpose to [GROUP_SIZE, BLOCK_N] for tl.dot
-        b_tile = tl.trans(b_dequant).to(tl.float16)  # [GROUP_SIZE, BLOCK_N]
+        # Transpose to [GROUP_SIZE, BLOCK_N] for tl.dot; cast into the
+        # activation's dtype (bf16 loses 3 mantissa bits the 4-bit weight never
+        # carried in the first place).
+        b_tile = tl.trans(b_dequant).to(a_tile.dtype)  # [GROUP_SIZE, BLOCK_N]
 
         # Accumulate: [BLOCK_M, GROUP_SIZE] @ [GROUP_SIZE, BLOCK_N]
         accumulator += tl.dot(a_tile, b_tile)
@@ -161,8 +163,8 @@ def w4a16_matmul(
     Returns:
         ``[..., N]`` in ``x``'s dtype.
     """
-    if x.dtype != torch.float16:
-        raise ValueError(f"w4a16 activations must be fp16, got {x.dtype}")
+    if x.dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError(f"w4a16 activations must be fp16 or bf16, got {x.dtype}")
     if qweight.dtype != torch.int32:
         raise ValueError(f"qweight must be int32 (packed int4), got {qweight.dtype}")
 
