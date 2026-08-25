@@ -15,8 +15,9 @@ Usage:
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import torch
 
@@ -134,11 +135,6 @@ class BackendRegistry:
         if op not in self._explanations:
             self.select(op)
         return self._explanations.get(op, f"No backends for '{op}'")
-
-    def list_all(self, op: str | None = None) -> list[Backend]:
-        if op:
-            return [b for b in self._backends if b.op == op]
-        return list(self._backends)
 
 
 # --------------------------------------------------------------------------- #
