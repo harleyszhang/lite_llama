@@ -115,20 +115,23 @@ class MultiModalCausalLM(nn.Module):
             if rest is None:
                 continue
             if lite_prefix != LANGUAGE_MODEL_PREFIX:
-                return lite_prefix + rest, weights.whole
+                # Vision tower and projector are replicated HF modules: no shard
+                # id, and their parameters carry no loader, so the default
+                # whole-copy loader fills them.
+                return lite_prefix + rest, None
             target = self.language_model.translate_weight_key(rest)
             if target is None:
                 return None
-            name, destination = target
-            return lite_prefix + name, destination
+            name, shard_id = target
+            return lite_prefix + name, shard_id
         return None
 
     def load_weights(self, checkpoint: Iterable[tuple[str, torch.Tensor]]) -> None:
         """Fill vision tower, projector and language model from one checkpoint stream.
 
-        The sharder is passed through so tensor parallelism works for the language
-        model; vision-tower parameters do not match any ``_SHARD_DIM`` entry and
-        are therefore returned unchanged (replicated across ranks).
+        The language model's parameters carry their own loaders, so tensor
+        parallelism needs no help here; vision-tower parameters carry none and
+        fall back to the default whole-copy loader (replicated across ranks).
         """
         tied = (
             {
@@ -148,7 +151,6 @@ class MultiModalCausalLM(nn.Module):
             checkpoint,
             self.translate_weight_key,
             tied=tied,
-            shard=weights.tp_shard,
         )
 
     @torch.no_grad()

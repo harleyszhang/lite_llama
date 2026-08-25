@@ -47,10 +47,14 @@ def init_empty_parameters():
         original(module, name, param)
         if module._parameters.get(name) is None:
             return
-        # Preserve the Parameter subclass and its attributes (e.g. `requires_grad`).
+        # Preserve the Parameter subclass and its attributes: ``requires_grad``,
+        # and the ``weight_loader`` the owning layer bound to the parameter.
         existing = module._parameters[name]
-        kwargs = existing.__dict__
-        module._parameters[name] = type(existing)(existing.to(torch.device("meta")), **kwargs)
+        new = type(existing)(
+            existing.to(torch.device("meta")), requires_grad=existing.requires_grad
+        )
+        new.__dict__.update(existing.__dict__)
+        module._parameters[name] = new
 
     try:
         nn.Module.register_parameter = register_meta_parameter
@@ -81,10 +85,14 @@ def materialise_parameters(
             if param is None:
                 continue
             keep_dtype = isinstance(param, RawParameter) or not param.is_floating_point()
-            module._parameters[name] = type(param)(
+            new = type(param)(
                 torch.empty(param.shape, dtype=param.dtype if keep_dtype else dtype, device=device),
                 requires_grad=False,
             )
+            # Attribute carrier as well as storage: the ``weight_loader`` bound at
+            # construction time must survive into the materialised parameter.
+            new.__dict__.update(param.__dict__)
+            module._parameters[name] = new
 
 
 @runtime_checkable

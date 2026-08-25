@@ -6,22 +6,19 @@ concatenated into ``qkv_proj.weight``, one GEMM per attention block), **fused ga
 (the dense MLP's ``gate_proj``+``up_proj`` concatenated into ``gate_up_proj.weight`` so
 the forward pass is one GEMM) and **stacked MoE experts** (``3*num_experts`` matrices
 packed into three tensors for grouped-GEMM experts).
-The rest is naming (bare ``nn.Parameter`` vs ``nn.Linear``). Rules are expressed as
-*destinations* (parameter + the view to fill); :func:`load_weights` then verifies
-every parameter is covered exactly once, so a missed key fails loudly, not silently.
+The rest is naming (bare ``nn.Parameter`` vs ``nn.Linear``).
 
-A destination is handed the arriving tensor as well as the parameter, which is what
-makes the unequal ``[q | k | v]`` blocks expressible: the parameter alone only fixes
-``q = total - 2 * kv``, and the arriving tensor supplies the missing width. No head
-geometry has to be threaded into the translator.
-
-A second table, :data:`_SHARD_DIM`, says how each weight is cut for tensor
-parallelism. It is written in terms of the *incoming* tensor rather than the
-parameter, which is what makes one entry cover the weight and its quantisation
-scales at once (a scale grid is the same matrix at a coarser resolution) and also
-the fused/stacked parameters, whose own axes are shifted by the fusing — q, k and v
-arrive separately, so ``qkv_proj``'s one entry splits each of them by its own head
-count and a rank's blocks land next to each other rather than next to other ranks'.
+The work splits in two, and the split is the design. *Renaming* stays here: one pure
+function maps a checkpoint key to ``(parameter name, shard id)``, where the shard id
+says which block of a packed parameter the tensor fills (``0/1/2`` for
+``[q | k | v]``, ``0/1`` for gate/up, ``(expert, projection)`` for stacked experts).
+*Placing* — which view of the parameter that block is, and which slice of the
+incoming tensor this tensor-parallel rank owns — belongs to the layer that owns the
+parameter, because that is where the head counts and the sharding rule already live.
+So every sharded parameter carries a ``weight_loader`` attribute (see
+:mod:`lite_llama.modules.linear`), and :func:`load_weights` is a small loop: rename,
+find the parameter, call its loader, then verify every parameter is covered exactly
+once so a missed key fails loudly instead of silently.
 
 Usage:
     load_weights(model, hf_weights_iterator(path), model.translate_weight_key)
@@ -31,81 +28,39 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable, Mapping
+from typing import Any
 
 import torch
 import torch.nn as nn
 
-from ..distributed.parallel_state import get_tp_rank, get_tp_world_size
+#: Which block of a packed parameter one checkpoint tensor fills: ``0/1/2`` for the
+#: fused ``[q | k | v]``, ``0/1`` for the fused gate/up pair, ``(expert, projection)``
+#: for the stacked MoE experts, ``None`` when the parameter is not packed.
+ShardId = Any
 
-#: Selects the region of a parameter that one checkpoint tensor fills, given both the
-#: parameter and that tensor.
-Destination = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
-
-#: ``(parameter name, destination)``, or ``None`` for a key the model ignores.
-Target = tuple[str, Destination] | None
+#: ``(parameter name, shard id)``, or ``None`` for a key the model ignores.
+Target = tuple[str, ShardId] | None
 
 #: Maps a checkpoint key to its :data:`Target`.
 Translator = Callable[[str], Target]
 
-#: Narrows an incoming tensor to the slice this rank owns.
-Sharder = Callable[[str, torch.Tensor], torch.Tensor]
 
+def default_weight_loader(
+    param: torch.Tensor, loaded: torch.Tensor, shard_id: ShardId = None
+) -> torch.Tensor:
+    """Fill a parameter that carries no loader of its own; return the view written.
 
-def whole(param: torch.Tensor, incoming: torch.Tensor) -> torch.Tensor:
-    """The whole parameter: the common case."""
-    return param
-
-
-def half(index: int) -> Destination:
-    """Half ``index`` of a parameter fused along dim 0 (the gate/up pair)."""
-
-    def select(param: torch.Tensor, incoming: torch.Tensor) -> torch.Tensor:
-        size = param.shape[0] // 2
-        return param.narrow(0, index * size, size)
-
-    return select
-
-
-def qkv_segment(index: int) -> Destination:
-    """Block ``index`` of the fused ``[q | k | v]`` parameter, ``0`` being q.
-
-    The three blocks are not the same width — grouped-query attention gives q more
-    heads — and the parameter alone does not say where the boundaries are: a total of
-    ``T`` only fixes ``q = T - 2 * kv``. The arriving tensor closes the gap, since its
-    own row count *is* the width of the block it fills. That keeps the head geometry in
-    :class:`~lite_llama.modules.linear.QKVParallelLinear`, where it belongs, instead of
-    duplicating it in this table.
-
-    It works unchanged for the quantisation scale grids, whose rows are the same blocks
-    counted in groups of ``group_n`` instead of channels.
+    The fallback for parameters no layer claimed: norms, the MoE router and the
+    whole vision tower are replicated on every rank and never packed, so the whole
+    rule is "the shapes must match, then copy".
     """
-
-    def select(param: torch.Tensor, incoming: torch.Tensor) -> torch.Tensor:
-        rows = incoming.shape[0]
-        total = param.shape[0]
-        offset = (0, total - 2 * rows, total - rows)[index]
-        return param.narrow(0, offset, rows)
-
-    return select
-
-
-def expert(index: int) -> Destination:
-    """The slice of a stacked ``[num_experts, ...]`` parameter owned by one expert."""
-
-    def select(param: torch.Tensor, incoming: torch.Tensor) -> torch.Tensor:
-        return param[index]
-
-    return select
-
-
-def expert_half(index: int, half_index: int) -> Destination:
-    """Half ``half_index`` of expert ``index``'s slice of a stacked gate/up parameter."""
-
-    def select(param: torch.Tensor, incoming: torch.Tensor) -> torch.Tensor:
-        rows = param.shape[1] // 2
-        return param[index].narrow(0, half_index * rows, rows)
-
-    return select
+    if param.shape != loaded.shape:
+        raise ValueError(
+            f"checkpoint tensor of shape {tuple(loaded.shape)} does not fit "
+            f"parameter of shape {tuple(param.shape)}"
+        )
+    param.data.copy_(loaded)
+    return param.data
 
 
 # --------------------------------------------------------------------------- #
@@ -128,18 +83,6 @@ _FLATTENED: tuple[str, ...] = (
     "mlp.gate",
 )
 
-#: HF module path suffix -> which block of the fused ``qkv_proj`` it fills.
-_FUSED_QKV: dict[str, int] = {
-    "self_attn.q_proj": 0,
-    "self_attn.k_proj": 1,
-    "self_attn.v_proj": 2,
-}
-
-#: HF module path suffix -> which half of the dense MLP's fused ``gate_up_proj``
-#: it fills. The MoE experts' gate/up are fused separately (see ``_EXPERT_KEY``)
-#: and never reach this table.
-_FUSED_GATE_UP: dict[str, int] = {"mlp.gate_proj": 0, "mlp.up_proj": 1}
-
 #: Keys outside the decoder stack, matched exactly rather than by suffix.
 #: ``lm_head.weight`` is absent because :class:`~lite_llama.modules.vocab_parallel.
 #: ParallelLMHead` is a real submodule whose parameter is already called that.
@@ -155,50 +98,30 @@ _EXPERT_KEY = re.compile(
     r"\.(?P<leaf>weight|weight_scale_inv)$"
 )
 
-#: Suffixes that separate a parameter from the module owning it. Ordered so the
-#: longest match wins: ``q_proj.weight_scale_inv`` belongs to ``q_proj``, not to
-#: ``q_proj.weight``. ``weight_scale``/``weight_zeros`` are the int4 grids.
-_PARAM_SUFFIXES: tuple[str, ...] = (
-    ".weight_scale_inv",
-    "_scale_inv",
-    ".weight_scale",
-    ".weight_zeros",
-    ".weight",
-    ".bias",
-)
-
-#: Module path suffix -> the dimension of the *incoming* checkpoint tensor that
-#: tensor parallelism splits. Column-parallel weights are cut along their output
-#: rows (dim 0), row-parallel ones along the contracted columns (dim 1); a stacked
-#: expert parameter is fed one expert at a time, so its own leading expert axis
-#: does not appear here. The two vocabulary tensors are ``[vocab, hidden]``, so
-#: splitting the vocabulary is also a dim-0 cut.
-_SHARD_DIM: tuple[tuple[str, int], ...] = (
-    ("embed_tokens", 0),
-    ("lm_head", 0),
-    ("self_attn.qkv_proj", 0),
-    ("self_attn.o_proj", 1),
-    ("mlp.experts.gate_up_proj", 0),
-    ("mlp.experts.down_proj", 1),
-    ("mlp.gate_up_proj", 0),
-    ("mlp.down_proj", 1),
-)
+#: gate/up/down as projection ids within one expert's slice: gate and up are the
+#: two halves of the fused ``gate_up_proj`` (0 and 1), down is its own tensor (2).
+_EXPERT_PROJ_ID = {"gate": 0, "up": 1, "down": 2}
 
 
-def translate_text_key(key: str) -> Target:
-    """Map one decoder-stack checkpoint key onto ``(parameter, destination)``.
+def translate_text_key(key: str, packed: Mapping[str, tuple[str, ...]]) -> Target:
+    """Map one decoder-stack checkpoint key onto ``(parameter, shard id)``.
 
     Args:
         key: Checkpoint key with the model's own prefix already stripped, e.g.
             ``layers.3.self_attn.v_proj.weight``.
+        packed: The model's ``packed_modules_mapping``: ``{fused module path:
+            (checkpoint module paths, in block order)}``. A key under one of the
+            source modules maps onto the fused parameter with the source's index
+            as its shard id.
 
     Returns:
-        The parameter the tensor belongs to and the view inside it to fill. Keys
-        that already match a lite_llama parameter name (``embed_tokens.weight``,
-        ``layers.N.mlp.up_proj.weight``) map to themselves.
+        The parameter the tensor belongs to and which block of it the tensor
+        fills. Keys that already match a lite_llama parameter name
+        (``embed_tokens.weight``, ``layers.N.mlp.down_proj.weight``) map to
+        themselves with no shard id.
     """
     if key in _TOP_LEVEL:
-        return _TOP_LEVEL[key], whole
+        return _TOP_LEVEL[key], None
 
     experts = _EXPERT_KEY.match(key)
     if experts is not None:
@@ -206,70 +129,19 @@ def translate_text_key(key: str) -> Target:
         # The scale grid is stacked alongside the weight under its own name,
         # because a ParameterDict entry cannot carry a second leaf.
         suffix = "_scale_inv" if experts["leaf"].endswith("_scale_inv") else ""
-        if experts["proj"] == "down":
-            return f"{prefix}.down_proj{suffix}", expert(index)
-        # gate and up are fused along dim 0 inside each expert's slice.
-        return (
-            f"{prefix}.gate_up_proj{suffix}",
-            expert_half(index, 0 if experts["proj"] == "gate" else 1),
-        )
+        proj = _EXPERT_PROJ_ID[experts["proj"]]
+        name = f"{prefix}.gate_up_proj{suffix}" if proj < 2 else f"{prefix}.down_proj{suffix}"
+        return name, (index, proj)
 
     module, _, leaf = key.rpartition(".")
-    for suffix, index in _FUSED_QKV.items():
-        if module.endswith(suffix):
-            return f"{module[: -len(suffix)]}self_attn.qkv_proj.{leaf}", qkv_segment(index)
-    for suffix, index in _FUSED_GATE_UP.items():
-        if module.endswith(suffix):
-            return f"{module[: -len(suffix)]}mlp.gate_up_proj.{leaf}", half(index)
+    for fused, sources in packed.items():
+        for shard_id, source in enumerate(sources):
+            if module.endswith(source):
+                return f"{module[: -len(source)]}{fused}.{leaf}", shard_id
     for suffix in _FLATTENED:
         if module.endswith(suffix):
-            return f"{module}_{leaf}", whole
-    return key, whole
-
-
-def shard_dim(param_name: str) -> int | None:
-    """Dimension of the incoming tensor that ``param_name`` is split along, if any.
-
-    Vision-tower parameters (``vision_tower.*``) are never sharded — the vision
-    encoder is replicated across TP ranks. The suffix-based match would otherwise
-    falsely trigger on vision keys that share names with text projections
-    (e.g. ``self_attn.o_proj``).
-    """
-    if param_name.startswith("vision_tower."):
-        return None
-    module = param_name
-    for suffix in _PARAM_SUFFIXES:
-        if module.endswith(suffix):
-            module = module[: -len(suffix)]
-            break
-    for prefix, dim in _SHARD_DIM:
-        if module.endswith(prefix):
-            return dim
-    return None
-
-
-def tp_shard(param_name: str, tensor: torch.Tensor) -> torch.Tensor:
-    """Narrow ``tensor`` to this rank's slice, or return it unchanged.
-
-    Splitting on the way in rather than loading the full tensor and slicing later
-    is what keeps a TP rank's peak memory at its own share of the checkpoint.
-
-    Raises:
-        ValueError: If the dimension does not divide evenly across ranks.
-    """
-    world_size = get_tp_world_size()
-    if world_size == 1:
-        return tensor
-    dim = shard_dim(param_name)
-    if dim is None:
-        return tensor
-    size = tensor.shape[dim]
-    if size % world_size != 0:
-        raise ValueError(
-            f"{param_name}: dimension {dim} of size {size} does not divide across "
-            f"{world_size} tensor-parallel ranks"
-        )
-    return tensor.narrow(dim, get_tp_rank() * (size // world_size), size // world_size)
+            return f"{module}_{leaf}", None
+    return key, None
 
 
 def strip_prefix(key: str, prefix: str) -> str | None:
@@ -287,7 +159,6 @@ def load_weights(
     weights: Iterable[tuple[str, torch.Tensor]],
     translate: Translator,
     tied: Mapping[str, str] | None = None,
-    shard: Sharder | None = None,
 ) -> None:
     """Copy a HuggingFace checkpoint into ``model``'s already-allocated parameters.
 
@@ -295,8 +166,12 @@ def load_weights(
         model: Model whose parameters have real storage (see
             :func:`lite_llama.executor.loader.materialise_parameters`).
         weights: ``(checkpoint key, tensor)`` pairs, in any order.
-        translate: Maps a checkpoint key to its destination, or ``None`` to skip
-            it (HF bookkeeping tensors, keys belonging to another submodule).
+        translate: Maps a checkpoint key to ``(parameter name, shard id)``, or
+            ``None`` to skip it (HF bookkeeping tensors, keys belonging to
+            another submodule). The shard id is handed to the parameter's
+            ``weight_loader``, which owns both the destination view and the
+            tensor-parallel narrow; parameters without one (norms, the MoE
+            router, vision towers) fall back to :func:`default_weight_loader`.
         tied: ``{target parameter: source parameter}`` pairs to satisfy by *aliasing*
             when the checkpoint omits the target. Checkpoints with
             ``tie_word_embeddings: true`` ship no ``lm_head.weight`` at all, and
@@ -305,9 +180,6 @@ def load_weights(
             memory and the only way ``lm_head.weight is embed_tokens.weight`` can hold
             once the two are sharded. A checkpoint that *does* ship the target wins:
             the tie is a fallback, not an override.
-        shard: Narrows each incoming tensor to the slice this tensor-parallel rank
-            owns; :func:`tp_shard` for the models that support TP, ``None`` for
-            those that do not (the vision towers are replicated).
 
     Raises:
         ValueError: If a parameter ends up unfilled, partially filled or written
@@ -320,20 +192,16 @@ def load_weights(
         target = translate(key)
         if target is None:
             continue
-        name, destination = target
+        name, shard_id = target
         param = params.get(name)
         if param is None:
             raise ValueError(f"checkpoint key {key!r} maps to unknown parameter {name!r}")
 
-        if shard is not None:
-            tensor = shard(name, tensor)
-        view = destination(param.data, tensor)
-        if view.shape != tensor.shape:
-            raise ValueError(
-                f"checkpoint key {key!r} has shape {tuple(tensor.shape)} but "
-                f"{name!r} expects {tuple(view.shape)}"
-            )
-        view.copy_(tensor)
+        loader = getattr(param, "weight_loader", None) or default_weight_loader
+        try:
+            view = loader(param, tensor, shard_id)
+        except ValueError as e:
+            raise ValueError(f"checkpoint key {key!r} -> {name!r}: {e}") from None
         filled[name] += view.numel()
 
     for target_name, source_name in (tied or {}).items():

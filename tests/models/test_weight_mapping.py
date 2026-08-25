@@ -1,10 +1,13 @@
-"""Unit tests for the HF-key -> lite_llama-parameter mapping.
+"""Weight-mapping unit tests: key translation, per-layer loaders, coverage accounting.
 
-Two tiers, both pure CPU and free of real checkpoints:
+Three tiers, all pure CPU and free of real checkpoints:
 
 1. **Key translation** (:func:`lite_llama.models.weights.translate_text_key`) as a
    pure function: one assertion per key shape, no tensors involved.
-2. **Coverage accounting** in :func:`lite_llama.models.weights.load_weights`. This
+2. **Layer loaders**: each sharded parameter carries a ``weight_loader`` that owns
+   its destination view — which block of a fused parameter an incoming tensor fills.
+   These build one real layer and call the loader directly.
+3. **Coverage accounting** in :func:`lite_llama.models.weights.load_weights`. This
    is the safety net that makes the rest of the suite trustworthy: a rename rule
    that stops matching leaves a parameter unwritten, and an unwritten parameter
    produces a model that runs and returns nonsense instead of failing.
@@ -15,12 +18,21 @@ Round-trip parity against real HuggingFace models lives in
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn as nn
 
 from lite_llama.executor.weight_utils import hf_weight_files
 from lite_llama.models import weights
+from lite_llama.models.base import CausalLM
+from lite_llama.modules import ColumnParallelLinear, QKVParallelLinear, SparseMoeBlock
+
+#: The packed-mapping the text models actually use; the translator is a pure
+#: function of the key and this table, so the tests exercise the production rules
+#: by passing the production table.
+_PACKED = CausalLM.packed_modules_mapping
 
 # --------------------------------------------------------------------------- #
 # Tier 1: key translation
@@ -31,105 +43,54 @@ from lite_llama.models import weights
     "key,expected",
     [
         # Untouched: these already carry lite_llama parameter names.
-        ("embed_tokens.weight", "embed_tokens.weight"),
-        ("lm_head.weight", "lm_head.weight"),
-        ("layers.3.mlp.gate_proj.weight", "layers.3.mlp.gate_up_proj.weight"),
-        ("layers.3.mlp.up_proj.weight", "layers.3.mlp.gate_up_proj.weight"),
-        ("layers.3.mlp.down_proj.weight", "layers.3.mlp.down_proj.weight"),
+        ("embed_tokens.weight", ("embed_tokens.weight", None)),
+        ("lm_head.weight", ("lm_head.weight", None)),
+        ("layers.3.mlp.gate_proj.weight", ("layers.3.mlp.gate_up_proj.weight", 0)),
+        ("layers.3.mlp.up_proj.weight", ("layers.3.mlp.gate_up_proj.weight", 1)),
+        ("layers.3.mlp.down_proj.weight", ("layers.3.mlp.down_proj.weight", None)),
         # Flattened: the module level is folded into the parameter name.
-        ("norm.weight", "norm_weight"),
-        ("layers.3.input_layernorm.weight", "layers.3.input_layernorm_weight"),
-        ("layers.3.post_attention_layernorm.weight", "layers.3.post_attention_layernorm_weight"),
+        ("norm.weight", ("norm_weight", None)),
+        ("layers.3.input_layernorm.weight", ("layers.3.input_layernorm_weight", None)),
+        ("layers.3.post_attention_layernorm.weight", ("layers.3.post_attention_layernorm_weight", None)),
         # Projections are submodules (LinearBase), so their parameters use dots.
-        ("layers.3.self_attn.o_proj.weight", "layers.3.self_attn.o_proj.weight"),
-        ("layers.3.self_attn.q_norm.weight", "layers.3.self_attn.q_norm_weight"),
-        ("layers.3.self_attn.k_norm.weight", "layers.3.self_attn.k_norm_weight"),
+        ("layers.3.self_attn.o_proj.weight", ("layers.3.self_attn.o_proj.weight", None)),
+        ("layers.3.self_attn.q_norm.weight", ("layers.3.self_attn.q_norm_weight", None)),
+        ("layers.3.self_attn.k_norm.weight", ("layers.3.self_attn.k_norm_weight", None)),
         # MoE router. Must not be confused with the dense ``mlp.gate_proj``.
-        ("layers.3.mlp.gate.weight", "layers.3.mlp.gate_weight"),
-        # Fused triple: all three attention projections land in one parameter.
-        ("layers.3.self_attn.q_proj.weight", "layers.3.self_attn.qkv_proj.weight"),
-        ("layers.3.self_attn.k_proj.weight", "layers.3.self_attn.qkv_proj.weight"),
-        ("layers.3.self_attn.v_proj.weight", "layers.3.self_attn.qkv_proj.weight"),
-        ("layers.3.self_attn.q_proj.bias", "layers.3.self_attn.qkv_proj.bias"),
-        ("layers.3.self_attn.k_proj.bias", "layers.3.self_attn.qkv_proj.bias"),
-        ("layers.3.self_attn.v_proj.bias", "layers.3.self_attn.qkv_proj.bias"),
-        # Stacked experts.
-        ("layers.3.mlp.experts.7.gate_proj.weight", "layers.3.mlp.experts.gate_up_proj"),
-        ("layers.3.mlp.experts.7.up_proj.weight", "layers.3.mlp.experts.gate_up_proj"),
-        ("layers.3.mlp.experts.7.down_proj.weight", "layers.3.mlp.experts.down_proj"),
+        ("layers.3.mlp.gate.weight", ("layers.3.mlp.gate_weight", None)),
+        # Fused triple: all three attention projections land in one parameter,
+        # and the shard id says which block of [q | k | v] each one fills.
+        ("layers.3.self_attn.q_proj.weight", ("layers.3.self_attn.qkv_proj.weight", 0)),
+        ("layers.3.self_attn.k_proj.weight", ("layers.3.self_attn.qkv_proj.weight", 1)),
+        ("layers.3.self_attn.v_proj.weight", ("layers.3.self_attn.qkv_proj.weight", 2)),
+        ("layers.3.self_attn.q_proj.bias", ("layers.3.self_attn.qkv_proj.bias", 0)),
+        ("layers.3.self_attn.k_proj.bias", ("layers.3.self_attn.qkv_proj.bias", 1)),
+        ("layers.3.self_attn.v_proj.bias", ("layers.3.self_attn.qkv_proj.bias", 2)),
+        # Stacked experts: (expert index, projection) with gate=0, up=1, down=2.
+        ("layers.3.mlp.experts.7.gate_proj.weight", ("layers.3.mlp.experts.gate_up_proj", (7, 0))),
+        ("layers.3.mlp.experts.7.up_proj.weight", ("layers.3.mlp.experts.gate_up_proj", (7, 1))),
+        ("layers.3.mlp.experts.7.down_proj.weight", ("layers.3.mlp.experts.down_proj", (7, 2))),
+        # The fp8 scale grid of an expert stacks under its own parameter name.
+        (
+            "layers.3.mlp.experts.7.gate_proj.weight_scale_inv",
+            ("layers.3.mlp.experts.gate_up_proj_scale_inv", (7, 0)),
+        ),
     ],
 )
-def test_translate_text_key_names_the_right_parameter(key: str, expected: str):
-    name, _ = weights.translate_text_key(key)
-    assert name == expected
-
-
-def test_q_k_and_v_fill_three_blocks_of_unequal_width():
-    """All three map to one parameter, and grouped-query attention makes q wider.
-
-    Nothing in an 8-row parameter says where q ends; each arriving tensor's own row
-    count is what places it. Four q rows and two each of k and v is the GQA case that a
-    single ``//`` over the fused width would get wrong.
-    """
-    param = torch.zeros(8, 3)
-    _, q_dest = weights.translate_text_key("layers.0.self_attn.q_proj.weight")
-    _, k_dest = weights.translate_text_key("layers.0.self_attn.k_proj.weight")
-    _, v_dest = weights.translate_text_key("layers.0.self_attn.v_proj.weight")
-
-    q_dest(param, torch.empty(4, 3)).fill_(1)
-    k_dest(param, torch.empty(2, 3)).fill_(2)
-    v_dest(param, torch.empty(2, 3)).fill_(3)
-    assert torch.equal(param[:4], torch.ones(4, 3))
-    assert torch.equal(param[4:6], torch.full((2, 3), 2.0))
-    assert torch.equal(param[6:], torch.full((2, 3), 3.0))
-
-
-def test_qkv_blocks_are_equal_width_without_gqa():
-    """Multi-head attention is the same rule with all three row counts equal."""
-    param = torch.zeros(6, 3)
-    dests = [
-        weights.translate_text_key(f"layers.0.self_attn.{leaf}_proj.weight")[1]
-        for leaf in ("q", "k", "v")
-    ]
-    for index, dest in enumerate(dests):
-        dest(param, torch.empty(2, 3)).fill_(index + 1)
-    assert torch.equal(param[:, 0], torch.tensor([1.0, 1.0, 2.0, 2.0, 3.0, 3.0]))
-
-
-def test_gate_and_up_fill_opposite_halves():
-    """The dense MLP's gate/up pair splits the parameter down the middle instead."""
-    param = torch.zeros(8, 3)
-    _, gate_dest = weights.translate_text_key("layers.0.mlp.gate_proj.weight")
-    _, up_dest = weights.translate_text_key("layers.0.mlp.up_proj.weight")
-
-    gate_dest(param, torch.empty(4, 3)).fill_(1)
-    up_dest(param, torch.empty(4, 3)).fill_(2)
-    assert torch.equal(param[:4], torch.ones(4, 3))
-    assert torch.equal(param[4:], torch.full((4, 3), 2.0))
+def test_translate_text_key_names_the_right_parameter(key: str, expected: weights.Target):
+    assert weights.translate_text_key(key, _PACKED) == expected
 
 
 def test_dense_gate_up_fusion_misses_the_moe_router_and_experts():
     """Only the dense ``mlp.gate_proj`` may fuse; the MoE siblings keep their names."""
-    assert weights.translate_text_key("layers.0.mlp.gate.weight")[0] == "layers.0.mlp.gate_weight"
-    assert (
-        weights.translate_text_key("layers.0.mlp.experts.7.gate_proj.weight")[0]
-        == "layers.0.mlp.experts.gate_up_proj"
+    assert weights.translate_text_key("layers.0.mlp.gate.weight", _PACKED) == (
+        "layers.0.mlp.gate_weight",
+        None,
     )
-
-
-def test_expert_gate_and_up_fill_opposite_halves_of_their_own_slice():
-    """gate/up are fused *within* each expert's slice, not across experts."""
-    param = torch.zeros(3, 4, 5)  # [experts, 2 * moe_inter, hidden]
-    _, gate = weights.translate_text_key("layers.0.mlp.experts.1.gate_proj.weight")
-    _, up = weights.translate_text_key("layers.0.mlp.experts.1.up_proj.weight")
-
-    gate(param, torch.empty(2, 5)).fill_(1)
-    up(param, torch.empty(2, 5)).fill_(2)
-    assert torch.equal(param[1, :2], torch.ones(2, 5))
-    assert torch.equal(param[1, 2:], torch.full((2, 5), 2.0))
-    # Other experts untouched.
-    assert param[0].abs().sum() == 0
-    assert param[2].abs().sum() == 0
+    assert weights.translate_text_key("layers.0.mlp.experts.7.gate_proj.weight", _PACKED) == (
+        "layers.0.mlp.experts.gate_up_proj",
+        (7, 0),
+    )
 
 
 def test_strip_prefix_reports_a_non_match():
@@ -141,8 +102,132 @@ def test_strip_prefix_reports_a_non_match():
 
 
 # --------------------------------------------------------------------------- #
-# Tier 2: coverage accounting
+# Tier 2: the loaders the layers bind onto their parameters
 # --------------------------------------------------------------------------- #
+
+
+def test_q_k_and_v_fill_three_blocks_of_unequal_width():
+    """All three land in one parameter, and grouped-query attention makes q wider.
+
+    The block boundaries are the layer's own head geometry: four one-dimensional
+    query heads and two key/value heads give an 8-row parameter whose q block is
+    twice the k and v blocks.
+    """
+    proj = QKVParallelLinear(3, num_heads=4, num_kv_heads=2, head_dim=1)
+    param = proj.weight
+    param.data.zero_()
+
+    loader = param.weight_loader
+    loader(param, torch.full((4, 3), 1.0), 0)
+    loader(param, torch.full((2, 3), 2.0), 1)
+    loader(param, torch.full((2, 3), 3.0), 2)
+    assert torch.equal(param.data[:4], torch.ones(4, 3))
+    assert torch.equal(param.data[4:6], torch.full((2, 3), 2.0))
+    assert torch.equal(param.data[6:], torch.full((2, 3), 3.0))
+
+
+def test_qkv_blocks_are_equal_width_without_gqa():
+    """Multi-head attention is the same rule with all three blocks equal."""
+    proj = QKVParallelLinear(3, num_heads=2, num_kv_heads=2, head_dim=1)
+    param = proj.weight
+    param.data.zero_()
+
+    for shard_id in range(3):
+        param.weight_loader(param, torch.full((2, 3), float(shard_id + 1)), shard_id)
+    assert torch.equal(param.data[:, 0], torch.tensor([1.0, 1.0, 2.0, 2.0, 3.0, 3.0]))
+
+
+def test_qkv_loader_scales_block_boundaries_to_a_scale_grid():
+    """An fp8 scale grid has one row per ``group_n`` channels; the same shard ids
+    must place its blocks, so the loader rescales the boundaries by the ratio of
+    the parameter's rows to the weight's rows."""
+    proj = QKVParallelLinear(3, num_heads=4, num_kv_heads=2, head_dim=1)
+    grid = torch.zeros(4, 3)  # one row per 2 weight rows: [q | k | v] -> 2+1+1
+    # The loader reads only the parameter's shape, so a plain tensor standing in
+    # for a scale-grid parameter exercises the rescaling.
+    proj._weight_loader(grid, torch.full((2, 3), 1.0), 0)
+    proj._weight_loader(grid, torch.full((1, 3), 2.0), 1)
+    proj._weight_loader(grid, torch.full((1, 3), 3.0), 2)
+    assert torch.equal(grid[:, 0], torch.tensor([1.0, 1.0, 2.0, 3.0]))
+
+
+def test_qkv_loader_rejects_a_tensor_without_a_shard_id():
+    proj = QKVParallelLinear(3, num_heads=4, num_kv_heads=2, head_dim=1)
+    with pytest.raises(ValueError, match="must name its block"):
+        proj.weight.weight_loader(proj.weight, torch.zeros(8, 3), None)
+
+
+def test_gate_and_up_fill_opposite_halves():
+    """The dense MLP's gate/up pair splits the parameter down the middle instead."""
+    proj = ColumnParallelLinear(3, 8)
+    param = proj.weight
+    param.data.zero_()
+
+    param.weight_loader(param, torch.full((4, 3), 1.0), 0)
+    param.weight_loader(param, torch.full((4, 3), 2.0), 1)
+    assert torch.equal(param.data[:4], torch.ones(4, 3))
+    assert torch.equal(param.data[4:], torch.full((4, 3), 2.0))
+
+
+def test_expert_gate_and_up_fill_opposite_halves_of_their_own_slice():
+    """gate/up are fused *within* each expert's slice, not across experts."""
+    block = SparseMoeBlock(
+        SimpleNamespace(
+            num_experts=3,
+            num_experts_per_tok=2,
+            moe_intermediate_size=2,
+            norm_topk_prob=True,
+            hidden_size=5,
+        )
+    )
+    param = block.experts["gate_up_proj"]  # [experts, 2 * moe_inter, hidden]
+    param.data.zero_()
+
+    param.weight_loader(param, torch.full((2, 5), 1.0), (1, 0))
+    param.weight_loader(param, torch.full((2, 5), 2.0), (1, 1))
+    assert torch.equal(param.data[1, :2], torch.ones(2, 5))
+    assert torch.equal(param.data[1, 2:], torch.full((2, 5), 2.0))
+    # Other experts untouched.
+    assert param.data[0].abs().sum() == 0
+    assert param.data[2].abs().sum() == 0
+
+
+def test_expert_down_proj_fills_a_whole_slice():
+    block = SparseMoeBlock(
+        SimpleNamespace(
+            num_experts=3,
+            num_experts_per_tok=2,
+            moe_intermediate_size=2,
+            norm_topk_prob=True,
+            hidden_size=5,
+        )
+    )
+    param = block.experts["down_proj"]  # [experts, hidden, moe_inter]
+    param.data.zero_()
+
+    param.weight_loader(param, torch.full((5, 2), 7.0), (2, 2))
+    assert torch.equal(param.data[2], torch.full((5, 2), 7.0))
+    assert param.data[:2].abs().sum() == 0
+
+
+# --------------------------------------------------------------------------- #
+# Tier 3: coverage accounting
+# --------------------------------------------------------------------------- #
+
+
+def _half_loader(param: torch.Tensor, loaded: torch.Tensor, shard_id=None) -> torch.Tensor:
+    """What a packed linear's loader does, minus the tensor-parallel narrow:
+    ``shard_id`` picks a dim-0 half of the parameter."""
+    view = param.data
+    if shard_id is not None:
+        half = view.shape[0] // 2
+        view = view.narrow(0, shard_id * half, half)
+    if view.shape != loaded.shape:
+        raise ValueError(
+            f"shape {tuple(loaded.shape)} does not fit view of shape {tuple(view.shape)}"
+        )
+    view.copy_(loaded)
+    return view
 
 
 class _TwoParams(nn.Module):
@@ -153,17 +238,20 @@ class _TwoParams(nn.Module):
         self.plain = nn.Parameter(torch.zeros(2, 3))
         self.fused = nn.Parameter(torch.zeros(4, 3))
         self.mirror = nn.Parameter(torch.zeros(2, 3))
+        # The plain and mirror parameters keep the default whole-copy loader;
+        # the fused one gets the half-selecting rule a packed linear would bind.
+        self.fused.weight_loader = _half_loader
 
 
 def _translate(key: str) -> weights.Target:
     table: dict[str, weights.Target] = {
-        "plain": ("plain", weights.whole),
-        "fused_low": ("fused", weights.half(0)),
-        "fused_high": ("fused", weights.half(1)),
-        "mirror": ("mirror", weights.whole),
+        "plain": ("plain", None),
+        "fused_low": ("fused", 0),
+        "fused_high": ("fused", 1),
+        "mirror": ("mirror", None),
         "ignore_me": None,
     }
-    return table.get(key, (key, weights.whole))
+    return table.get(key, (key, None))
 
 
 def _stream(*, drop: tuple[str, ...] = ()) -> list[tuple[str, torch.Tensor]]:
@@ -207,7 +295,13 @@ def test_a_parameter_written_twice_is_rejected():
 
 
 def test_shape_mismatch_names_both_shapes():
-    with pytest.raises(ValueError, match=r"shape \(3, 3\) but 'plain' expects \(2, 3\)"):
+    with pytest.raises(ValueError, match=r"shape \(3, 3\).*\(2, 3\)"):
+        weights.load_weights(_TwoParams(), [("plain", torch.zeros(3, 3))], _translate)
+
+
+def test_shape_mismatch_names_the_key_and_parameter():
+    """The loader reports the shapes; the loop adds which key and parameter met."""
+    with pytest.raises(ValueError, match=r"checkpoint key 'plain' -> 'plain'"):
         weights.load_weights(_TwoParams(), [("plain", torch.zeros(3, 3))], _translate)
 
 
