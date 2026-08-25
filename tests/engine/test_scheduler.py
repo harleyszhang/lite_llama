@@ -45,9 +45,7 @@ def make_request(request_id: str, prompt_len: int = 4, **params) -> Request:
     )
 
 
-def make_request_with_tokens(
-    request_id: str, token_ids: list[int], **params
-) -> Request:
+def make_request_with_tokens(request_id: str, token_ids: list[int], **params) -> Request:
     """A request with explicit token ids (for prefix-cache tests)."""
     return Request(
         request_id=request_id,
@@ -99,9 +97,7 @@ class TestRequestAdmission:
         ("prompt_len", "why"),
         [(0, "empty prompt"), (_MAX_SEQ_LEN, "no room left to generate")],
     )
-    def test_unservable_prompts_are_refused_at_submission(
-        self, scheduler, prompt_len, why
-    ):
+    def test_unservable_prompts_are_refused_at_submission(self, scheduler, prompt_len, why):
         """Refusing here is what lets the engine assume every admitted request fits."""
         with pytest.raises(ValueError):
             scheduler.add_request(make_request("a", prompt_len=prompt_len))
@@ -598,9 +594,9 @@ class TestPrefixCacheIntegration:
             sched.add_request(make_request_with_tokens(name, shared))
             sched.schedule()
             rates.append(sched.prefix_cache_hit_rate)
-        assert rates[0] == 0.0          # first request: cold
-        assert rates[1] > 0.0          # second: hit
-        assert rates[2] >= rates[1]    # third: monotonically non-decreasing
+        assert rates[0] == 0.0  # first request: cold
+        assert rates[1] > 0.0  # second: hit
+        assert rates[2] >= rates[1]  # third: monotonically non-decreasing
 
     def test_finish_releases_prefix_but_it_stays_cached(self):
         """After the first request finishes, its prefix survives (LRU persistence)."""
