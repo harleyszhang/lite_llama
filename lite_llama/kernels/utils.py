@@ -1,7 +1,7 @@
-"""Shared helpers for the Triton kernels (block sizing, contiguity, version gates).
+"""Shared helpers for the Triton kernels (block sizing, contiguity, HIP detection).
 
 Small utilities the kernels reuse: ``calculate_settings`` picks BLOCK_SIZE /
-num_warps, ``ensure_contiguous`` guards kernel inputs, plus HIP and version checks.
+num_warps, ``ensure_contiguous`` guards kernel inputs, plus a HIP check.
 
 Incorporates code from Unsloth (Apache-2.0, https://github.com/unslothai/unsloth)
 and Liger-Kernel; modifications by Yanning Chen, 2024.
@@ -11,13 +11,10 @@ Usage:
 """
 
 import functools
-import importlib
-from collections.abc import Callable
 
 import torch
 import triton
 import triton.language as tl
-from packaging.version import Version
 
 MAX_FUSED_SIZE = 65536
 
@@ -61,15 +58,6 @@ def calculate_settings(n):
     elif BLOCK_SIZE >= 2048:
         num_warps = 8
     return BLOCK_SIZE, num_warps
-
-
-def compare_version(package: str, operator: Callable, target: str):
-    try:
-        pkg = importlib.import_module(package)
-    except ImportError:
-        return False
-    pkg_version = Version(pkg.__version__)
-    return operator(pkg_version, Version(target))
 
 
 torch_to_triton_dtype = {
