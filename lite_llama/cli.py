@@ -1,11 +1,13 @@
 """``lite-llama`` command-line entry point.
 
 Built bottom-up in four decoupled layers: a declarative option table
-(:class:`CliOption` + ``COMMON_OPTIONS``) shared by every subcommand; a frozen
-:class:`EngineOptions` that validates the parsed args and builds the engine a
-command needs; a :class:`PrompterResolver` that picks base-vs-instruct
-prompting; and :class:`CliCommand` subclasses that wire it up. Adding a
-subcommand = one ``CliCommand`` subclass listed in ``COMMANDS``.
+(:class:`CliOption` + ``COMMON_OPTIONS``) shared by every subcommand; frozen
+option objects (:class:`BaseOptions` for what every engine build shares,
+:class:`TextEngineOptions` adding the text engine's own switches) that
+validate the parsed args; the
+:class:`~lite_llama.utils.prompt_templates.PrompterResolver` that picks
+base-vs-instruct prompting; and :class:`CliCommand` subclasses that wire it
+up. Adding a subcommand = one ``CliCommand`` subclass listed in ``COMMANDS``.
 
 Every text command runs on the continuous-batching engine, which is what makes
 ``--tensor-parallel-size N`` uniform across them: the engine spawns the extra
@@ -33,9 +35,9 @@ from PIL import Image
 
 from .engine import ContinuousBatchingEngine, SamplingParams, VisionGenerator
 from .engine.dp_load_balancer import LOAD_BALANCERS
-from .models.config import read_model_type
+from .engine.scheduler import DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_NUM_SEQS
 from .modules.quantization import RUNTIME_SCHEMES
-from .utils.prompt_templates import ChatPrompter, get_prompter
+from .utils.prompt_templates import ChatPrompter, PrompterResolver
 
 # ---------------------------------------------------------------------------
 # 第一层:声明式 CLI 参数表
@@ -102,31 +104,56 @@ COMMON_OPTIONS: tuple[CliOption, ...] = (
 )
 
 
+def _cuda_graph_option(*, default: bool) -> CliOption:
+    """The one CUDA-graph flag every *text* command takes.
+
+    ``argparse.BooleanOptionalAction`` registers both spellings — positive
+    ``--cuda-graph`` and negative ``--no-cuda-graph`` — against a single
+    boolean dest, so no command needs a second flag with the opposite sense
+    (the ``use or not no_`` double negative ``from_args`` used to carry). Only
+    the default differs by command, and it lives here in the declaration,
+    where a flag's semantics belong. Vision commands do not register it: that
+    path decodes eager by construction, and a flag it would silently ignore
+    is worse than no flag.
+    """
+    return CliOption(
+        "--cuda-graph",
+        {
+            "action": argparse.BooleanOptionalAction,
+            "default": default,
+            "help": "Capture decode CUDA graphs (default: %(default)s)",
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # 第二层:引擎构造参数(配置对象 + Builder)
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
-class EngineOptions:
-    """引擎构造参数;统一从 ``argparse.Namespace`` 显式提取、校验并持有。
+class BaseOptions:
+    """Construction options every engine build shares, text or vision.
 
-    充当引擎工厂:文本路径(连续批处理引擎)与多模态路径
-    (``VisionGenerator``)的构造差异在此消化,命令类只见统一的
-    ``build_*`` 接口。
+    Exactly the fields :class:`~lite_llama.engine.generator.VisionGenerator`
+    takes — which is why the vision command parses these and nothing more:
+    it no longer carries a CUDA-graph switch it would only have to refuse.
     """
 
     model_dir: str
     max_seq_len: int = 2048
     max_gpu_num_blocks: int | None = None
     device: str = "cuda"
-    use_cuda_graph: bool = False
     quantization: str | None = None
     kv_cache_dtype: str = "auto"
     tensor_parallel_size: int = 1
 
     @classmethod
-    def from_args(cls, args: argparse.Namespace) -> EngineOptions:
+    def from_args(cls, args: argparse.Namespace) -> BaseOptions:
+        return cls(**cls._collect(args))
+
+    @staticmethod
+    def _collect(args: argparse.Namespace) -> dict[str, Any]:
         # --model-dir 优先,其次环境变量 LITE_LLAMA_MODEL_DIR
         model_dir = args.model_dir or os.environ.get("LITE_LLAMA_MODEL_DIR")
         if not model_dir:
@@ -135,43 +162,15 @@ class EngineOptions:
             )
         if not Path(model_dir).is_dir():
             raise SystemExit(f"model directory {model_dir!r} does not exist")
-        return cls(
-            model_dir=model_dir,
-            max_seq_len=args.max_seq_len,
-            max_gpu_num_blocks=args.max_gpu_num_blocks,
-            device=args.device,
-            # Two flag spellings, because the right default differs by command:
-            # an interactive REPL captures graphs only when asked, a throughput
-            # command has them on unless refused.
-            use_cuda_graph=getattr(args, "use_cuda_graph", False)
-            or not getattr(args, "no_cuda_graph", True),
-            quantization=getattr(args, "quantization", None),
-            kv_cache_dtype=getattr(args, "kv_cache_dtype", "auto"),
-            tensor_parallel_size=getattr(args, "tensor_parallel_size", 1),
-        )
-
-    def build_engine(
-        self, *, max_num_seqs: int = 32, max_num_batched_tokens: int = 8192
-    ) -> ContinuousBatchingEngine:
-        """The text engine, for every command that is not multimodal.
-
-        One factory serves ``chat`` and ``batch`` because what separates them is
-        scheduling, not construction — and tensor parallelism arrives with it:
-        ``from_pretrained`` spawns the follower ranks and hands back an engine
-        whose executor drives them, so a command only picks its concurrency.
-        """
-        return ContinuousBatchingEngine.from_pretrained(
-            self.model_dir,
-            max_seq_len=self.max_seq_len,
-            max_num_seqs=max_num_seqs,
-            max_num_batched_tokens=max_num_batched_tokens,
-            max_gpu_num_blocks=self.max_gpu_num_blocks,
-            device=self.device,
-            use_cuda_graph=self.use_cuda_graph,
-            quantization=self.quantization,
-            tensor_parallel_size=self.tensor_parallel_size,
-            kv_cache_dtype=self.kv_cache_dtype,
-        )
+        return {
+            "model_dir": model_dir,
+            "max_seq_len": args.max_seq_len,
+            "max_gpu_num_blocks": args.max_gpu_num_blocks,
+            "device": args.device,
+            "quantization": getattr(args, "quantization", None),
+            "kv_cache_dtype": getattr(args, "kv_cache_dtype", "auto"),
+            "tensor_parallel_size": getattr(args, "tensor_parallel_size", 1),
+        }
 
     def build_vision_generator(self) -> VisionGenerator:
         # CUDA Graph capture 只接了文本 decode 路径,vl-chat 不传该参数
@@ -186,84 +185,53 @@ class EngineOptions:
         )
 
 
+@dataclass(frozen=True)
+class TextEngineOptions(BaseOptions):
+    """Base options plus the switches only the text engine has.
+
+    One factory serves ``chat``, ``batch`` and ``serve`` because what separates
+    them is scheduling, not construction — and tensor parallelism arrives with
+    the factory: ``from_pretrained`` spawns the follower ranks and hands back
+    an engine whose executor drives them, so a command only picks its
+    concurrency.
+    """
+
+    use_cuda_graph: bool = False
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> TextEngineOptions:
+        # ``cuda_graph`` is the dest every text command's --cuda-graph flag
+        # writes; the fallback only fires if a command forgot to register it.
+        return cls(**BaseOptions._collect(args), use_cuda_graph=getattr(args, "cuda_graph", False))
+
+    def build_engine(
+        self,
+        *,
+        max_num_seqs: int = DEFAULT_MAX_NUM_SEQS,
+        max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS,
+    ) -> ContinuousBatchingEngine:
+        return ContinuousBatchingEngine.from_pretrained(
+            self.model_dir,
+            max_seq_len=self.max_seq_len,
+            max_num_seqs=max_num_seqs,
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_gpu_num_blocks=self.max_gpu_num_blocks,
+            device=self.device,
+            use_cuda_graph=self.use_cuda_graph,
+            quantization=self.quantization,
+            tensor_parallel_size=self.tensor_parallel_size,
+            kv_cache_dtype=self.kv_cache_dtype,
+        )
+
+
 # ---------------------------------------------------------------------------
 # 第三层:Prompter 选择策略
 # ---------------------------------------------------------------------------
 
-
-class PrompterResolver:
-    """聊天模板选择策略:决定 checkpoint 该套哪个 prompter(或原样直传)。
-
-    背景:给 *base* 模型套 chat 模板是有害的——base Qwen2.5-0.5B 收到
-    ``<|im_start|>assistant`` 会回显 "Assistant" 然后退化成重复;反之给
-    *chat* 模型喂裸 prompt 同样糟糕。因此必须可靠区分两类 checkpoint。
-    """
-
-    # 名称中出现即判定为 instruct/chat 模型的标记
-    _INSTRUCT_NAME_HINTS: ClassVar[tuple[str, ...]] = ("instruct", "chat", "-it")
-    # 默认即 chat 模型的家族(config.json 的 model_type)
-    _CHAT_BY_DEFAULT_TYPES: ClassVar[tuple[str, ...]] = ("qwen3", "qwen3_vl")
-    # model_type -> prompter 注册名;Qwen2/Qwen3 同为 ChatML 模板,共用 "qwen2"
-    _PROMPTER_BY_TYPE: ClassVar[dict[str, str]] = {"qwen2": "qwen2", "qwen3": "qwen2"}
-    # config.json 无法表达 LLaMA 家族的细分模板(vicuna / llama3 / llava),
-    # 只能退回按路径名匹配
-    _NAME_CANDIDATES: ClassVar[tuple[str, ...]] = ("qwen2", "qwen3", "llama3", "llama")
-
-    @staticmethod
-    def read_model_type(model_dir: str) -> str:
-        """从 checkpoint 的 config.json 读 ``model_type``;读不到返回 ``""``。
-
-        读取本身委托 :func:`lite_llama.models.config.read_model_type`(config SSOT);
-        CLI 侧只对缺失/损坏的配置做容错,降级为按目录名推断模板。
-        """
-        try:
-            return read_model_type(model_dir)
-        except (OSError, ValueError):
-            return ""
-
-    @classmethod
-    def is_instruct(cls, model_dir: str) -> bool:
-        """该 checkpoint 是否经指令微调、适配 chat 模板。规则按序生效:
-
-        1. 名称显式带 ``base``(如 Qwen3-0.6B-Base)→ 不是 instruct;
-        2. 名称带 ``instruct`` / ``chat`` / ``-it`` → 是(LLaMA、Qwen2.5);
-        3. Qwen3 家族默认就是 chat 模型,只有 ``-Base`` 变体是裸补全模型——
-           规则 1 已拦截后者,这里只看 model_type。
-        """
-        name = Path(model_dir).name.lower()
-        if "base" in name:
-            return False
-        if any(hint in name for hint in cls._INSTRUCT_NAME_HINTS):
-            return True
-        return cls.read_model_type(model_dir) in cls._CHAT_BY_DEFAULT_TYPES
-
-    @classmethod
-    def resolve(cls, model_dir: str, explicit: str | None = None) -> str:
-        """推断 prompter 注册名;base 模型返回 ``"empty"``(原样直传)。"""
-        if explicit:
-            return explicit
-        if not cls.is_instruct(model_dir):
-            return "empty"
-        model_type = cls.read_model_type(model_dir)
-        if model_type in cls._PROMPTER_BY_TYPE:
-            return cls._PROMPTER_BY_TYPE[model_type]
-        name = Path(model_dir).name.lower()
-        for candidate in cls._NAME_CANDIDATES:
-            if candidate in name:
-                return candidate
-        return "empty"
-
-    @staticmethod
-    def build(style: str, tokenizer) -> ChatPrompter | None:
-        """构造 prompter;base 模型(``style == "empty"``)或无 chat_template 时返回 ``None``。
-
-        返回 ``None`` 表示"原样直传":base 模型没有聊天模板,套模板反而有害
-        (base Qwen2.5 收到 ``<|im_start|>assistant`` 会回显并退化重复)。instruct
-        模型则交给 :func:`get_prompter`,用 tokenizer 自带的官方模板(vLLM 式)。
-        """
-        if style == "empty":
-            return None
-        return get_prompter(tokenizer)
+# PrompterResolver 住在 utils/prompt_templates.py:base-vs-instruct 的判定必须
+# 全链路唯一(serve 的 /v1/chat/completions 与 chat/batch 共用同一套规则),
+# 放在 CLI 里会让 serve 长出第二套模板策略——一个带 chat_template 的 base
+# checkpoint 在 chat 里被原样直传、在 serve 里却被套上模板,正是曾经的真实分歧。
 
 
 # ---------------------------------------------------------------------------
@@ -316,27 +284,19 @@ class ChatCommand(CliCommand):
     help = "Interactive text chat"
 
     def add_arguments(self, sub: argparse.ArgumentParser) -> None:
-        CliOption("--prompt-style", {"help": "Prompter name (auto-detected by default)"}).register(
-            sub
-        )
-        CliOption(
-            "--use-cuda-graph",
-            {
-                "action": "store_true",
-                "help": "Capture decode CUDA graphs for faster generation (text models only)",
-            },
-        ).register(sub)
+        # A REPL pays capture latency up front for a single stream of turns, so
+        # graphs are opt-in here; throughput commands default the other way.
+        _cuda_graph_option(default=False).register(sub)
 
     def run(self, args: argparse.Namespace) -> int:
-        opts = EngineOptions.from_args(args)
+        opts = TextEngineOptions.from_args(args)
         # A REPL has one turn in flight at a time, so a single slot is the whole
         # of the concurrency and the KV cache is not split eight ways for nobody.
         engine = opts.build_engine(max_num_seqs=1)
-        style = PrompterResolver.resolve(opts.model_dir, args.prompt_style)
-        prompter = PrompterResolver.build(style, engine.tokenizer)
+        prompter = PrompterResolver.build(opts.model_dir, engine.tokenizer)
         params = self.build_sampling_params(args)
 
-        self._print_banner(opts.model_dir, style, params)
+        self._print_banner(opts.model_dir, prompter, params)
         try:
             while True:
                 try:
@@ -355,10 +315,12 @@ class ChatCommand(CliCommand):
             engine.shutdown()
 
     @staticmethod
-    def _print_banner(model_dir: str, style: str, params: SamplingParams) -> None:
+    def _print_banner(
+        model_dir: str, prompter: ChatPrompter | None, params: SamplingParams
+    ) -> None:
         print(f"Loaded {Path(model_dir).name}. Type 'exit' to quit.")
-        if style == "empty":
-            print("(base model detected: prompts are sent verbatim, no chat template)")
+        if prompter is None:
+            print("(no chat template: prompts are sent verbatim)")
         if params.is_greedy and params.repetition_penalty == 1.0:
             # greedy + base 模型是经典的重复循环组合:fp16 argmax 平局翻转
             # (~0.02 logit gap) 之后循环无法自我纠正,提前给用户提个醒
@@ -419,7 +381,7 @@ class VlChatCommand(CliCommand):
         ).register(sub)
 
     def run(self, args: argparse.Namespace) -> int:
-        opts = EngineOptions.from_args(args)
+        opts = BaseOptions.from_args(args)
 
         if opts.tensor_parallel_size > 1:
             # Text commands shard through the engine's executor; the vision path
@@ -466,7 +428,7 @@ class ServeCommand(CliCommand):
                 "--max-num-seqs",
                 {
                     "type": int,
-                    "default": 32,
+                    "default": DEFAULT_MAX_NUM_SEQS,
                     "help": "How many requests may decode concurrently",
                 },
             ),
@@ -474,14 +436,11 @@ class ServeCommand(CliCommand):
                 "--max-num-batched-tokens",
                 {
                     "type": int,
-                    "default": 8192,
+                    "default": DEFAULT_MAX_NUM_BATCHED_TOKENS,
                     "help": "Padded token budget for one prefill group",
                 },
             ),
-            CliOption(
-                "--no-cuda-graph",
-                {"action": "store_true", "help": "Run decode eager instead of replaying graphs"},
-            ),
+            _cuda_graph_option(default=True),
             CliOption(
                 "--data-parallel-size",
                 {
@@ -512,7 +471,7 @@ class ServeCommand(CliCommand):
     def run(self, args: argparse.Namespace) -> int:
         from .entrypoints.api_server import ServerConfig, run_server
 
-        opts = EngineOptions.from_args(args)
+        opts = TextEngineOptions.from_args(args)
         # Sampling flags do not apply here: every HTTP request carries its own.
         config = ServerConfig(
             model_dir=opts.model_dir,
@@ -528,7 +487,10 @@ class ServeCommand(CliCommand):
             kv_cache_dtype=opts.kv_cache_dtype,
             data_parallel_size=args.data_parallel_size,
             load_balancer=args.load_balancer,
-            chat_template=not args.no_chat_template,
+            # None = auto: the same base-vs-instruct detection chat/batch apply,
+            # so a Base checkpoint is served verbatim instead of templated just
+            # because its tokenizer happens to ship a template.
+            chat_template=False if args.no_chat_template else None,
         )
         print(f"Serving {config.model_name} on http://{args.host}:{args.port}")
         run_server(config, host=args.host, port=args.port)
@@ -551,11 +513,8 @@ class BatchCommand(CliCommand):
                 "--prompts-file",
                 {"help": "Text file with one prompt per line; omit to use a built-in demo set"},
             ),
-            CliOption("--max-num-seqs", {"type": int, "default": 32}),
-            CliOption(
-                "--no-cuda-graph",
-                {"action": "store_true", "help": "Run decode eager instead of replaying graphs"},
-            ),
+            CliOption("--max-num-seqs", {"type": int, "default": DEFAULT_MAX_NUM_SEQS}),
+            _cuda_graph_option(default=True),
             CliOption(
                 "--no-chat-template",
                 {"action": "store_true", "help": "Send prompts verbatim (base models)"},
@@ -570,14 +529,12 @@ class BatchCommand(CliCommand):
     def run(self, args: argparse.Namespace) -> int:
         import time
 
-        opts = EngineOptions.from_args(args)
+        opts = TextEngineOptions.from_args(args)
         prompts = self._load_prompts(args.prompts_file)
 
         engine = opts.build_engine(max_num_seqs=args.max_num_seqs)
-        prompter = (
-            None
-            if args.no_chat_template
-            else PrompterResolver.build(PrompterResolver.resolve(opts.model_dir), engine.tokenizer)
+        prompter = PrompterResolver.build(
+            opts.model_dir, engine.tokenizer, use_template=not args.no_chat_template
         )
         if prompter is not None:
             prompts = [prompter.insert_prompt(p) for p in prompts]
@@ -659,20 +616,6 @@ def main(argv: list[str] | None = None) -> int:
     warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
     args = build_parser().parse_args(argv)
     return args.handler.run(args)
-
-
-# ---------------------------------------------------------------------------
-# 向后兼容 facade:tests/test_repeat_detection.py 依赖的旧函数名,
-# 实现已迁入 PrompterResolver,此处仅保留委托。
-# ---------------------------------------------------------------------------
-
-
-def _is_instruct_checkpoint(model_dir: str) -> bool:
-    return PrompterResolver.is_instruct(model_dir)
-
-
-def _infer_prompter_type(model_dir: str) -> str:
-    return PrompterResolver.resolve(model_dir)
 
 
 if __name__ == "__main__":
