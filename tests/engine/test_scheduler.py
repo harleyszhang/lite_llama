@@ -428,6 +428,77 @@ class TestPreemption:
         # Every request got at least one decode turn.
         assert all(count > 0 for count in decode_counts.values())
 
+    def test_preemption_conserves_requests_and_slots(self):
+        """Regression: a preempted victim used to leak out of both queues.
+
+        ``_preempt`` re-queues the victim at the *head* of the waiting deque,
+        and the admission loop that follows used to pop that head — the victim —
+        instead of the candidate it had already peeked. The victim then sat in
+        neither queue (never scheduled again) while the candidate stayed queued
+        for a second admission holding two slots. After every step each request
+        must live in exactly one queue, and slots must be conserved.
+        """
+        sched = _oversubscribed(num_slots=2, max_num_seqs=3)
+        requests = [make_request(f"r{i}") for i in range(3)]
+        for request in requests:
+            sched.add_request(request)
+
+        for _ in range(10):
+            _decode_once(sched.schedule())
+
+            for request in requests:
+                in_waiting = any(r is request for r in sched.waiting)
+                in_running = any(r is request for r in sched.running)
+                assert in_waiting != in_running, f"{request.request_id} is in both or neither"
+
+            slots = [r.slot for r in sched.running]
+            assert all(slot is not None for slot in slots)
+            assert all(r.slot is None for r in sched.waiting)
+            assert len(set(slots)) == len(slots), "two requests sharing a slot"
+            assert len(slots) + sched.num_free_slots == 2, "slot conservation broken"
+
+        assert sched.num_preemptions >= 1, "scenario never reached the bug path"
+
+    def test_preemption_folds_generated_tokens_into_the_prompt(self):
+        """Recompute preemption replays the generated tokens, not just the prompt.
+
+        vLLM v1 semantics: the victim's output moves into its prompt, so
+        re-admission re-prefills through it and decoding continues the text the
+        caller already saw instead of restarting from the bare prompt and
+        diverging from it. The generation cap shrinks by the same count so the
+        request's *total* output stays bounded by what it asked for.
+        """
+        sched = _oversubscribed(num_slots=2, max_num_seqs=3)
+        for i in range(3):
+            sched.add_request(make_request(f"r{i}"))
+
+        victim = None
+        for _ in range(8):
+            out = sched.schedule()
+            _decode_once(out)
+            if out.preempted:
+                victim = out.preempted[0]
+                break
+        assert victim is not None, "scenario never reached a preemption"
+
+        moved = len(victim.prompt_token_ids) - 4
+        assert moved >= 1, "victim was preempted before generating anything"
+        assert victim.prompt_token_ids[:4] == [0, 1, 2, 3], "original prompt must survive"
+        assert victim.prompt_token_ids[4:] == [999] * moved, "output folded in verbatim"
+        assert victim.output_token_ids == []
+        assert victim.max_new_tokens == _MAX_SEQ_LEN - 4 - moved
+        assert victim.status is RequestStatus.WAITING
+
+        # Re-admission prefills through the extended prompt: one chunk covers
+        # prompt plus folded tokens, so decode resumes where the text broke off.
+        for _ in range(4):
+            out = sched.schedule()
+            if any(r is victim for r in out.prefill):
+                break
+            _decode_once(out)
+        assert victim.status is RequestStatus.RUNNING
+        assert victim.num_computed_tokens == victim.prompt_len
+
 
 # --------------------------------------------------------------------------- #
 # 7. SchedulerOutput field integrity
@@ -631,3 +702,33 @@ class TestPrefixCacheIntegration:
                     assert p.num_cached_tokens == 0
                 return
         pytest.fail("expected at least one preemption within 6 steps")
+
+    def test_preemption_releases_prefix_cache_references(self):
+        """Regression: preemption used to leak the victim's prefix references.
+
+        ``register`` takes one reference per block and only ``release`` returns
+        it, so a preempt cycle without the release inflated every shared
+        block's ref_cnt once per cycle — and referenced blocks are never
+        eviction candidates. All three requests share the same four blocks, so
+        the *sum* of reference counts must stay at one per running request:
+        folded output keeps each prompt under a fifth block, so no new blocks
+        can appear either.
+        """
+        sched = self._sched(
+            enable_preemption=True,
+            max_num_seqs=3,
+            num_slots=2,
+        )
+        shared = list(range(64))  # exactly four 16-token blocks
+        for i in range(3):
+            sched.add_request(make_request_with_tokens(f"r{i}", shared))
+
+        cache = sched._prefix_cache
+        for _ in range(10):
+            out = sched.schedule()
+            for r in out.decode:
+                r.output_token_ids.append(999)
+            total_refs = sum(block.ref_cnt for block in cache._blocks.values())
+            assert total_refs == 4 * sched.num_running
+            assert cache.num_cached_blocks == 4
+        assert sched.num_preemptions >= 1, "scenario never reached the bug path"
