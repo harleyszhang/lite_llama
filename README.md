@@ -376,7 +376,7 @@ with DataParallelEngine(model="my_weight/Qwen2.5-1.5B-Instruct", data_parallel_s
     outputs = engine.generate(prompts, SamplingParams(temperature=0.0))
 ```
 
-On 2× A10 (Qwen2.5-1.5B-Instruct): **weak scaling 2.00x** (100% linear, 1790 → 3580 tok/s) with byte-identical outputs. Compose it with TP — `data_parallel_size=2, tensor_parallel_size=2` — on a 4-GPU box.
+On 2× A10 (Qwen2.5-1.5B-Instruct): **weak scaling 2.00x** (100% linear, 1857 → 3716 tok/s) with byte-identical outputs, and **1.64x** on a fixed 256-prompt batch. Compose it with TP — `data_parallel_size=2, tensor_parallel_size=2` — on a 4-GPU box.
 
 ## Architecture
 
