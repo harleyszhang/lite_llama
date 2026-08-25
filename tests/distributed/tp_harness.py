@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import os
 import queue as queue_module
-import socket
 import time
 import traceback
 from collections.abc import Callable
@@ -47,13 +46,7 @@ import torch
 import torch.multiprocessing as mp
 
 from lite_llama.distributed import parallel_state as ps
-
-
-def free_port() -> int:
-    """A port the OS says is free, so parallel test runs never collide on 29500."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+from lite_llama.executor.executor import free_port
 
 
 def needs_gpus(count: int):
