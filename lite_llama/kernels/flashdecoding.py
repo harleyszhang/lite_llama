@@ -142,9 +142,6 @@ def _flash_decoding_stage1_kernel(
         # 更新归一化器
         m_i = m_ij
 
-    # 计算是否需要存储
-    need_store = num_blocks > 0  # 标量布尔值
-
     # 计算存储的偏移量
     off_mid_o = (
         batch_pid * mido_batch_stride
@@ -159,7 +156,9 @@ def _flash_decoding_stage1_kernel(
         + seq_block_pid * mido_les_partitions_stride
     )
 
-    # 计算最终的 attention 输出和 log-sum-exp
+    # 本分区完全落在该行序列长度之外时不写: mid_o 只按实际分区数分配,
+    # 越界分区没有属于它的存储。用 0 次迭代的循环表达, 因为 triton 里
+    # ``if`` 包住 ``tl.store`` 会把整个 store 变成谓词化写入。
     need_store = tl.where(num_blocks == 0, 0, 1)
     for _ in range(0, need_store, 1):
         tl.store(Mid_O + off_mid_o, acc / d_i)
@@ -196,11 +195,13 @@ def flash_decode_stage1(
         q.shape
     )  # decode 阶段 q 张量的 seq_len = 1, 这里的 batchs 实际就是 batch_size
 
-    # grid 配置的并行度比 flashattention1-2 多了 kv cache seq 维度
+    # grid 配置的并行度比 flashattention1-2 多了 kv cache seq 维度。z 维必须与
+    # ``flash_decoding`` 里 mid_o 的分区数完全一致: 多启动一个 block 会让它算出
+    # 一个 mid_o 里不存在的分区偏移, 目前只靠 num_blocks == 0 的不写才没有越界。
     grid = (
         batchs,
         num_heads,
-        triton.cdiv(max_actual_seq_len + PARTITION_SIZE - 1, PARTITION_SIZE),
+        triton.cdiv(max_actual_seq_len, PARTITION_SIZE),
     )
     num_kv_groups = q.shape[1] // k.shape[1]  # num_q_heads // num_k_heads
 
@@ -247,7 +248,7 @@ def _flash_decoding_stage2_kernel(
     o_bs_stride,
     o_heads_stride,
     o_dim_stride,
-    B_Seqlen,  # TODO 支持 PagedAttention 和连续批处理
+    B_Seqlen,  # [batch] 每行的历史长度, 决定该行要归约多少个分区
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_SEQ: tl.constexpr,  # type: ignore
 ):
@@ -274,7 +275,7 @@ def _flash_decoding_stage2_kernel(
 
     num_partitions = (cur_batch_seq_len + BLOCK_SEQ - 1) // BLOCK_SEQ
 
-    for block_seq_n in range(0, num_partitions, 1):  # TODO 有 bug 需要修复
+    for block_seq_n in range(0, num_partitions, 1):
         part_v = tl.load(part_v_ptrs + block_seq_n * mido_partitions_stride)
         part_max = tl.load(part_max_ptrs + block_seq_n)  # mido_les_partitions_stride = 1
 
@@ -295,7 +296,9 @@ def _flash_decoding_stage2_kernel(
 
     # -- 更新 attention 输出累加器 -- #
     offs_out = batch_pid * o_bs_stride + head_pid * o_heads_stride + offs_d * o_dim_stride
-    tl.store(Ouput + offs_out, acc / d_i)
+    # 长度为 0 的行没有分区可归约, acc 和 d_i 都还是初值; 除数兜底成 1.0 让它
+    # 写出零向量, 而不是把 NaN 播进 o_proj 和之后的每一层。
+    tl.store(Ouput + offs_out, acc / tl.where(d_i > 0.0, d_i, 1.0))
 
 
 @torch.no_grad()
@@ -316,7 +319,7 @@ def flash_decode_stage2(
         *mid_o.stride(),
         *mid_o_logexpsum.stride(),
         *atten_output.stride(),
-        b_seq_len,  # TODO 支持 PagedAttention 和连续批处理
+        b_seq_len,
         BLOCK_DMODEL=HEAD_DIM,
         BLOCK_SEQ=PARTITION_SIZE,  # type: ignore
         num_warps=4,
