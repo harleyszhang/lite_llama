@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from collections.abc import MutableSequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -198,12 +199,14 @@ class _NullPrefixCache:
         return 0.0
 
 
-def _discard(requests: list[Request], request: Request) -> None:
+def _discard(requests: MutableSequence[Request], request: Request) -> None:
     """Remove ``request`` from ``requests`` by identity, preserving order.
 
     :class:`Request` is a value-equal dataclass, so ``list.remove`` could drop a
     *different* request whose fields happen to match; identity is the only safe
-    key once two live requests can carry equal prompts.
+    key once two live requests can carry equal prompts. Works on any mutable
+    sequence — ``list`` and ``deque`` alike — because ``_admit`` must dequeue a
+    candidate that a preemption just pushed off the head of the waiting deque.
     """
     for index, candidate in enumerate(requests):
         if candidate is request:
@@ -233,9 +236,7 @@ class Scheduler:
         # Preemption lets the running set exceed the slot count (slots are
         # time-shared via recompute); otherwise concurrency is slot-capped.
         self.max_num_seqs = (
-            config.max_num_seqs
-            if config.enable_preemption
-            else min(config.max_num_seqs, num_slots)
+            config.max_num_seqs if config.enable_preemption else min(config.max_num_seqs, num_slots)
         )
 
         self._waiting: deque[Request] = deque()
@@ -326,8 +327,9 @@ class Scheduler:
             if request.prefill_done and id(request) not in in_prefill
         ]
 
-        return SchedulerOutput(prefill=prefill, decode=decode,
-                               prefill_chunk_lens=chunk_lens, preempted=preempted)
+        return SchedulerOutput(
+            prefill=prefill, decode=decode, prefill_chunk_lens=chunk_lens, preempted=preempted
+        )
 
     def _admit(self, prefill: list[Request], chunk_lens: list[int]) -> list[Request]:
         """Admit waiting requests, committing their first chunk (or whole prompt).
@@ -347,21 +349,30 @@ class Scheduler:
             if capacity <= 0:
                 break
             candidate = self._waiting[0]
-            if not self._free_slots:
-                preempted_victim = self._maybe_preempt(candidate, prefill)
-                if preempted_victim is None:
-                    break
-                preempted.append(preempted_victim)
 
             # The grid cost of adding this request is its chunk, not its whole
             # prompt: with chunking, a 4K prompt occupies one chunk column per
-            # step, which is exactly what the budget should price.
+            # step, which is exactly what the budget should price. Priced before
+            # any preemption: a victim evicted for an admission the budget then
+            # rejects would lose its KV for nothing.
             chunk = self._first_chunk_of(candidate)
             padded = max(longest, chunk) * (len(prefill) + 1)
             if prefill and padded > self.config.max_num_batched_tokens:
                 break
 
-            self._waiting.popleft()
+            preempted_here = False
+            if not self._free_slots:
+                preempted_victim = self._maybe_preempt(candidate, prefill)
+                if preempted_victim is None:
+                    break
+                preempted.append(preempted_victim)
+                preempted_here = True
+
+            # The victim ``_preempt`` just re-queued sits at the head now, so the
+            # candidate must leave by identity: ``popleft`` would dequeue the
+            # victim into limbo (in neither queue, never scheduled again) and
+            # leave the candidate queued for a second admission with two slots.
+            _discard(self._waiting, candidate)
             candidate.slot = self._free_slots.pop()
             candidate.status = RequestStatus.RUNNING
             self._running.append(candidate)
@@ -371,8 +382,9 @@ class Scheduler:
             # it. Never skip the whole prompt: at least one token must be
             # prefilled to produce the first logits, exactly as vLLM keeps the
             # last block uncached.
-            cached = min(self._prefix_cache.query(candidate.prompt_token_ids),
-                         candidate.prompt_len - 1)
+            cached = min(
+                self._prefix_cache.query(candidate.prompt_token_ids), candidate.prompt_len - 1
+            )
             candidate.num_cached_tokens = cached
             self._prefix_cache.register(candidate.prompt_token_ids)
             # num_computed_tokens tracks KV *actually resident in the slot*:
@@ -385,6 +397,13 @@ class Scheduler:
             chunk_lens.append(chunk)
             candidate.num_computed_tokens += chunk
             longest = max(longest, chunk)
+
+            if preempted_here:
+                # At most one eviction per step. The victim is re-queued at the
+                # front and re-admitted next, so continuing would evict a second
+                # request just to hand back a slot the first victim is about to
+                # reclaim anyway — double the KV discarded, same rotation.
+                break
 
         return preempted
 
@@ -440,10 +459,12 @@ class Scheduler:
     def _preempt(self, request: Request) -> None:
         """Evict a running request back to the waiting queue (recompute strategy).
 
-        The KV built so far is dropped: on re-admission the prompt is prefilled
-        again from its cached-prefix offset. Generated tokens are cleared so the
-        request restarts decoding from where recompute leaves off (its already
-        emitted tokens are preserved by the engine's output buffer, not here).
+        The KV built so far is dropped. The tokens already generated move into
+        the prompt — vLLM v1's recompute semantics — so re-admission replays
+        them and decoding continues the text the caller already saw, instead of
+        restarting from the bare prompt and diverging from it. The generation
+        cap shrinks by the moved tokens, keeping the request's *total* output
+        bounded by what it originally asked for.
         """
         if request.slot is not None:
             self._free_slots.append(request.slot)
@@ -451,7 +472,15 @@ class Scheduler:
         request.status = RequestStatus.WAITING
         request.num_computed_tokens = 0
         request.num_cached_tokens = 0
+        # Drop this request's hold on its cached prefix blocks (re-admission
+        # registers again — against the extended prompt). Skipping the release
+        # would inflate the block reference counts once per preempt cycle, and
+        # referenced blocks are never eviction candidates.
+        self._prefix_cache.release(request.prompt_token_ids)
+        moved = len(request.output_token_ids)
+        request.prompt_token_ids.extend(request.output_token_ids)
         request.output_token_ids.clear()
+        request.max_new_tokens -= moved
         self._discard_running(request)
         self._waiting.appendleft(request)  # re-queue at front, keeps FCFS age
         self.num_preemptions += 1
