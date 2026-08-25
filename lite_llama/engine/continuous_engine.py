@@ -61,7 +61,13 @@ from .detokenizer import IncrementalDetokenizer
 from .llm_engine import LLMEngine
 from .outputs import CompletionOutput, RequestOutput
 from .sampler import SamplingParams
-from .scheduler import Request, Scheduler, SchedulerConfig
+from .scheduler import (
+    DEFAULT_MAX_NUM_BATCHED_TOKENS,
+    DEFAULT_MAX_NUM_SEQS,
+    Request,
+    Scheduler,
+    SchedulerConfig,
+)
 from .stop_criteria import POLL_INTERVAL, detect_repetition
 
 
@@ -240,8 +246,8 @@ class ContinuousBatchingEngine:
         *,
         tokenizer: str | None = None,
         max_seq_len: int = 2048,
-        max_num_seqs: int = 32,
-        max_num_batched_tokens: int = 8192,
+        max_num_seqs: int = DEFAULT_MAX_NUM_SEQS,
+        max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS,
         max_gpu_num_blocks: int | None = None,
         device: str = "cuda",
         use_cuda_graph: bool = True,

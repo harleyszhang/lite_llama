@@ -49,6 +49,7 @@ from ..utils.logger import get_logger
 from .dp_load_balancer import LOAD_BALANCERS, make_load_balancer
 from .outputs import CompletionOutput, RequestOutput
 from .sampler import SamplingParams
+from .scheduler import DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_NUM_SEQS
 
 if TYPE_CHECKING:  # pragma: no cover - the worker imports these in its own process
     from .continuous_engine import ContinuousBatchingEngine
@@ -417,8 +418,8 @@ class DataParallelEngine:
         data_parallel_size: int = 1,
         tensor_parallel_size: int = 1,
         load_balancer: str = "round_robin",
-        max_num_seqs: int = 32,
-        max_num_batched_tokens: int = 8192,
+        max_num_seqs: int = DEFAULT_MAX_NUM_SEQS,
+        max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS,
         **engine_kwargs: Any,
     ) -> None:
         import torch
