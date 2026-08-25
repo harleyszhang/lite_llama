@@ -239,13 +239,24 @@ asyncio.run(main())
 
 ### Tensor Parallelism
 
-**Tensor parallelism** (30B MoE on 2× A10):
+Where data parallelism replicates the model, **tensor parallelism** splits the weights themselves — the only option when one card cannot hold the checkpoint. Pass `--tensor-parallel-size N` and the engine spawns the extra ranks itself; one GPU stays in one process, so a breakpoint in the engine loop is still a breakpoint in the kernel.
 
 ```bash
+# 30B MoE on 2x A10
 python -m lite_llama.cli chat \
     --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8 \
     --tensor-parallel-size 2
 ```
+
+```python
+from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
+
+engine = ContinuousBatchingEngine.from_pretrained("my_weight/Qwen3-8B", tensor_parallel_size=2)
+```
+
+The engine never learns how many processes run its model: it hands a plan to an `Executor` (`UniProcExecutor` for one GPU, `MultiprocExecutor` for many) and gets sampled tokens back. Because the plan is pure data, driver and follower ranks run one code path rather than two — no mirror process re-deriving the batch from a broadcast prompt, which is what used to turn any disagreement into an NCCL hang. Plans travel on a CPU (gloo) group so the control plane never stages through GPU memory, while the vocabulary-parallel sampler exchanges **two scalars per row** instead of gathering logits, keeping per-step traffic independent of vocabulary size.
+
+See [docs/tensor_parallel.md](docs/tensor_parallel.md) for the design, the sharding rules (including why QKV is split per segment under GQA), and what byte-exact parity between `tp=1` and `tp=2` can and cannot assert under fp16.
 
 ### Quantization
 
@@ -284,19 +295,23 @@ python -m lite_llama.cli chat --model-dir my_weight/Qwen3-0.6B --quantization fp
 python -m lite_llama.cli chat --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype fp8
 ```
 
-**Vision-language models** (Qwen3-VL / LLaVA with TP + quantization):
+**Vision-language models** (Qwen3-VL / LLaVA, single GPU):
 
 ```bash
-# Qwen3-VL vision chat with TP=2
+# Qwen3-VL vision chat
 python -m lite_llama.cli vl-chat \
     --model-dir /data/shared/llm_weights/Qwen3-VL-4B-Instruct \
-    --image photo.jpg --tensor-parallel-size 2
+    --image photo.jpg
 
-# LLaVA with INT8 quantisation + TP=2
+# LLaVA with INT8 quantisation
 python -m lite_llama.cli vl-chat \
     --model-dir /data/shared/llm_weights/llava-hf/llava-1.5-7b-hf \
-    --image photo.jpg --quantization int8 --tensor-parallel-size 2
+    --image photo.jpg --quantization int8
 ```
+
+> `vl-chat` is single-GPU: tensor parallelism runs through the continuous-batching
+> engine, which hosts text checkpoints only, so `--tensor-parallel-size > 1` exits with
+> that message rather than pretending.
 
 #### Qwen3-0.6B Benchmark 
 
@@ -361,7 +376,7 @@ with DataParallelEngine(model="my_weight/Qwen2.5-1.5B-Instruct", data_parallel_s
     outputs = engine.generate(prompts, SamplingParams(temperature=0.0))
 ```
 
-On 2× A10 (Qwen2.5-1.5B-Instruct): **weak scaling 2.00x** (100% linear, 1790 → 3580 tok/s), **strong scaling 1.67x** at batch 256, with byte-identical outputs. Compose it with TP — `data_parallel_size=2, tensor_parallel_size=2` — on a 4-GPU box.
+On 2× A10 (Qwen2.5-1.5B-Instruct): **weak scaling 2.00x** (100% linear, 1790 → 3580 tok/s) with byte-identical outputs. Compose it with TP — `data_parallel_size=2, tensor_parallel_size=2` — on a 4-GPU box.
 
 ## Architecture
 
@@ -380,6 +395,8 @@ lite_llama/
 │   ├── multimodal.py        # processor call + mrope position ids
 │   └── outputs.py           # RequestOutput / CompletionOutput
 ├── executor/
+│   ├── executor.py          # Executor seam: UniProc (1 GPU) / Multiproc (TP)
+│   ├── worker.py            # ModelInput: one model pass described as data
 │   ├── model_runner.py      # owns the model, KV cache and per-step forward
 │   ├── loader.py            # HF checkpoint -> fp16/8-bit parameters
 │   ├── weight_utils.py      # safetensors reading, FP8 passthrough
@@ -391,22 +408,27 @@ lite_llama/
 │   ├── api_server.py        # OpenAI-compatible FastAPI app
 │   └── protocol.py          # request/response schemas
 ├── kernels/                 # Triton kernels used by the models
-│   ├── w8a16.py             # fp8/int8 weight-only GEMM
-│   ├── w4a16.py             # AWQ/GPTQ int4 GEMM
-│   ├── smoothquant.py       # W8A8 dynamic quantisation GEMM
+│   ├── quantization/        # w8a16 / w4a16 / w8a8 / fp8 GEMMs
+│   ├── backends/            # probe + priority registry, per op
+│   ├── autotune/            # config search, keying and persistence
+│   ├── flashattention2_nopad.py / flashdecoding.py
 │   └── fused_moe.py         # MoE grouped GEMM (fp16/fp8/int8)
+├── modules/                 # layers, reusable across architectures
+│   ├── linear.py            # Column / Row / QKVParallelLinear
+│   ├── vocab_parallel.py    # VocabParallelEmbedding / ParallelLMHead
+│   ├── attention.py         # PagedAttention over the KV pool
+│   ├── mlp.py / moe.py      # FusedMLP, sparse MoE block
+│   ├── rotary_embedding.py  # RoPE / mrope tables
+│   └── quantization/        # QuantConfig registry + per-scheme methods
 ├── models/
 │   ├── config.py            # ModelConfig over the HF AutoConfig
 │   ├── registry.py          # model_type -> implementation class
 │   ├── weights.py           # HF checkpoint keys -> parameters (+ TP shard)
-│   ├── quantization.py      # QuantConfig registry (fp8/int8/int4/smoothquant)
-│   ├── linear.py            # ColumnParallelLinear / RowParallelLinear
 │   ├── interfaces.py        # MultiModalCausalLM, the multimodal capability
-│   ├── base.py              # PagedAttention, FusedMLP, DecoderLayer, CausalLM
-│   ├── rotary_embedding.py  # RoPE / mrope tables
+│   ├── base.py              # DecoderLayer, CausalLM, shared forward
 │   └── llama.py / qwen2.py / qwen3.py / qwen3_moe.py / llava.py / qwen3_vl.py
 ├── distributed/
-│   └── parallel_state.py    # TP process group, all-reduce, divide
+│   └── parallel_state.py    # dp x tp grid, NCCL data plane + gloo control plane
 └── utils/                   # chat templates, logger, image and path helpers
 ```
 
