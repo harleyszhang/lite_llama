@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .config_key import TuneKey
@@ -70,7 +70,7 @@ class ConfigStore:
             "dtype": key.dtype,
             "config": config,
             "latency_us": latency_us,
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
         }
         self._flush(key.op)
 

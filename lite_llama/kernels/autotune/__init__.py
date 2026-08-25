@@ -27,8 +27,8 @@ from .config_store import ConfigStore
 from .lookup import get_best_config, reset
 
 __all__ = [
-    "TuneKey",
     "ConfigStore",
+    "TuneKey",
     "bucket_m",
     "get_best_config",
     "make_shape_bucket",
