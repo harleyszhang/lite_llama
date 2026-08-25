@@ -11,9 +11,11 @@ online serving.
 
 :class:`DataParallelEngine` is orthogonal to both: it runs several whole-model
 replicas in separate processes and routes requests between them, for throughput once
-one GPU is saturated.
+one GPU is saturated. :class:`AsyncDataParallelEngine` puts an asyncio face on that
+for online serving, the way :class:`AsyncLLMEngine` does for a single replica.
 """
 
+from .async_data_parallel import AsyncDataParallelEngine
 from .async_engine import AsyncLLMEngine, StreamedOutput
 from .continuous_engine import ContinuousBatchingEngine
 from .data_parallel import DataParallelEngine
@@ -26,6 +28,7 @@ from .scheduler import Request, RequestStatus, Scheduler, SchedulerConfig
 
 __all__ = [
     "LLM",
+    "AsyncDataParallelEngine",
     "AsyncLLMEngine",
     "BatchedSamplingParams",
     "CompletionOutput",

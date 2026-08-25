@@ -24,6 +24,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from ..engine.async_data_parallel import AsyncDataParallelEngine
 from ..engine.async_engine import AsyncLLMEngine, StreamedOutput
 from ..engine.sampler import SamplingParams
 from ..utils.logger import get_logger
@@ -88,6 +89,14 @@ class ServerConfig:
             the engine spawns the follower ranks itself and the server is still
             one process with one scheduler.
         kv_cache_dtype: KV-cache element type (``"auto"`` or an fp8 spelling).
+        data_parallel_size: Whole-model replicas serving this one endpoint,
+            combined with ``tensor_parallel_size`` into the usual
+            ``dp x tp`` GPU grid. Above 1 the lifespan builds an
+            :class:`~lite_llama.engine.async_data_parallel.AsyncDataParallelEngine`
+            instead — the replicas multiply concurrent decode, which is what a
+            server is for; the fields above apply *per replica*.
+        load_balancer: Which replica each request is routed to, one of
+            :data:`~lite_llama.engine.dp_load_balancer.LOAD_BALANCERS`.
         chat_template: ``True`` applies the tokenizer's chat template to
             ``/v1/chat/completions`` messages. Turn it off for base models, which
             have no template and degenerate when given one.
@@ -104,6 +113,8 @@ class ServerConfig:
     quantization: str | None = None
     tensor_parallel_size: int = 1
     kv_cache_dtype: str = "auto"
+    data_parallel_size: int = 1
+    load_balancer: str = "round_robin"
     chat_template: bool = True
 
     @property
@@ -117,13 +128,20 @@ class OpenAIServer:
     """Wire-protocol adapter: OpenAI JSON in, engine calls out.
 
     Args:
-        engine: The async engine to serve from.
+        engine: The async engine to serve from — one replica's
+            :class:`~lite_llama.engine.async_engine.AsyncLLMEngine` or the
+            data-parallel front end over several. Either answers with the same
+            streamed chunks, which is all this layer reads.
         model_name: Name echoed back in responses.
         chat_template: Whether to apply the tokenizer's chat template.
     """
 
     def __init__(
-        self, engine: AsyncLLMEngine, model_name: str, *, chat_template: bool = True
+        self,
+        engine: AsyncLLMEngine | AsyncDataParallelEngine,
+        model_name: str,
+        *,
+        chat_template: bool = True,
     ) -> None:
         self.engine = engine
         self.model_name = model_name
@@ -222,38 +240,63 @@ class OpenAIServer:
         )
 
 
-def build_app(config: ServerConfig, engine: AsyncLLMEngine | None = None):
+def build_app(config: ServerConfig, engine: AsyncLLMEngine | AsyncDataParallelEngine | None = None):
     """Assemble the FastAPI application.
 
     Args:
         config: Engine and serving options.
-        engine: Pre-built engine; when omitted one is loaded on startup. Injecting
-            a fake here is what lets the protocol layer be tested without a GPU
-            or a checkpoint.
+        engine: Pre-built engine; when omitted one is loaded on startup — one
+            replica's async engine, or the data-parallel front end when
+            ``config.data_parallel_size`` is above 1. Injecting a fake here is
+            what lets the protocol layer be tested without a GPU or a checkpoint.
     """
     fastapi = _require_fastapi()
     from fastapi.responses import JSONResponse, StreamingResponse
 
     owns_engine = engine is None
-    state: dict[str, AsyncLLMEngine | OpenAIServer | None] = {"engine": engine, "server": None}
+    state: dict[
+        str, AsyncLLMEngine | AsyncDataParallelEngine | OpenAIServer | None
+    ] = {"engine": engine, "server": None}
 
     @asynccontextmanager
     async def lifespan(_app):
         if state["engine"] is None:
-            logger.info("loading %s for serving", config.model_dir)
-            state["engine"] = AsyncLLMEngine.from_pretrained(
-                config.model_dir,
-                max_seq_len=config.max_seq_len,
-                max_num_seqs=config.max_num_seqs,
-                max_num_batched_tokens=config.max_num_batched_tokens,
-                max_gpu_num_blocks=config.max_gpu_num_blocks,
-                device=config.device,
-                use_cuda_graph=config.use_cuda_graph,
-                quantization=config.quantization,
-                tensor_parallel_size=config.tensor_parallel_size,
-                kv_cache_dtype=config.kv_cache_dtype,
-            )
-        active: AsyncLLMEngine = state["engine"]
+            if config.data_parallel_size > 1:
+                # ``device`` is deliberately absent: a replica's device is its
+                # position in the grid, and the coordinator loads no model.
+                logger.info(
+                    "loading %s for serving on %d replicas",
+                    config.model_dir,
+                    config.data_parallel_size,
+                )
+                state["engine"] = AsyncDataParallelEngine(
+                    model=config.model_dir,
+                    data_parallel_size=config.data_parallel_size,
+                    load_balancer=config.load_balancer,
+                    max_seq_len=config.max_seq_len,
+                    max_num_seqs=config.max_num_seqs,
+                    max_num_batched_tokens=config.max_num_batched_tokens,
+                    max_gpu_num_blocks=config.max_gpu_num_blocks,
+                    use_cuda_graph=config.use_cuda_graph,
+                    quantization=config.quantization,
+                    tensor_parallel_size=config.tensor_parallel_size,
+                    kv_cache_dtype=config.kv_cache_dtype,
+                )
+            else:
+                logger.info("loading %s for serving", config.model_dir)
+                state["engine"] = AsyncLLMEngine.from_pretrained(
+                    config.model_dir,
+                    max_seq_len=config.max_seq_len,
+                    max_num_seqs=config.max_num_seqs,
+                    max_num_batched_tokens=config.max_num_batched_tokens,
+                    max_gpu_num_blocks=config.max_gpu_num_blocks,
+                    device=config.device,
+                    use_cuda_graph=config.use_cuda_graph,
+                    quantization=config.quantization,
+                    tensor_parallel_size=config.tensor_parallel_size,
+                    kv_cache_dtype=config.kv_cache_dtype,
+                )
+        active: AsyncLLMEngine | AsyncDataParallelEngine = state["engine"]
         active.start()
         state["server"] = OpenAIServer(
             active, config.model_name, chat_template=config.chat_template

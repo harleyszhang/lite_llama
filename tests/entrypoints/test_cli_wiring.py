@@ -205,3 +205,43 @@ class TestTensorParallelSurface:
         """
         for retired in ("_tp_mirror_worker", "_pack_sampling_params", "_unpack_sampling_params"):
             assert not hasattr(cli, retired), f"{retired} is back"
+
+
+class TestDataParallelSurface:
+    """``serve`` is the one command that wants more GPUs than one replica needs."""
+
+    @pytest.fixture
+    def captured_server(self, monkeypatch):
+        captured: dict = {}
+        from lite_llama.entrypoints import api_server
+
+        monkeypatch.setattr(
+            api_server, "run_server", lambda config, host, port: captured.update(config=config)
+        )
+        return captured
+
+    def test_serve_passes_the_data_parallel_grid_to_the_server(self, model_dir, captured_server):
+        args = build_parser().parse_args(
+            [
+                "serve",
+                "--model-dir",
+                str(model_dir),
+                "--data-parallel-size",
+                "2",
+                "--load-balancer",
+                "total_tokens",
+            ]
+        )
+
+        assert args.handler.run(args) == 0
+        assert captured_server["config"].data_parallel_size == 2
+        assert captured_server["config"].load_balancer == "total_tokens"
+        assert captured_server["config"].tensor_parallel_size == 1
+
+    def test_serve_defaults_to_one_replica(self, model_dir, captured_server):
+        """Without the flags a server run must stay exactly the engine it was."""
+        args = build_parser().parse_args(["serve", "--model-dir", str(model_dir)])
+
+        assert args.handler.run(args) == 0
+        assert captured_server["config"].data_parallel_size == 1
+        assert captured_server["config"].load_balancer == "round_robin"
