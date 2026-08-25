@@ -13,8 +13,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from ...kernels.quantization import fp8_matmul
 from ...kernels import fused_moe
+from ...kernels.quantization import fp8_matmul
 from .base_config import (
     FusedMoEMethodBase,
     LinearMethodBase,
@@ -24,10 +24,10 @@ from .base_config import (
 from .parameter import RawParameter
 from .utils import quantize_fp8_per_channel, quantize_fp8_per_token
 
-
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #
+
 
 class W8A8Fp8Config(QuantizationConfig):
     """True W8A8 with fp8-e4m3: weights per-channel, activations per-token.
@@ -38,7 +38,9 @@ class W8A8Fp8Config(QuantizationConfig):
 
     is_dynamic: bool = True
 
-    def __init__(self, group_n: int = 1, group_k: int = 1 << 30, ignored: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self, group_n: int = 1, group_k: int = 1 << 30, ignored: tuple[str, ...] = ()
+    ) -> None:
         super().__init__()
         self.group_n = group_n
         self.group_k = group_k
@@ -55,23 +57,12 @@ class W8A8Fp8Config(QuantizationConfig):
         return 89
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "W8A8Fp8Config":
+    def from_config(cls, config: dict[str, Any]) -> W8A8Fp8Config:
         ignored = tuple(config.get("modules_to_not_convert") or ())
         return cls(ignored=ignored)
 
-    def get_quant_method(
-        self, layer: nn.Module, prefix: str = ""
-    ) -> QuantizeMethodBase | None:
-        if not self.quantizes(prefix):
-            from .unquant import UnquantizedLinearMethod, UnquantizedFusedMoEMethod
-            from ...modules.moe import SparseMoeBlock
-            if isinstance(layer, SparseMoeBlock):
-                return UnquantizedFusedMoEMethod()
-            return UnquantizedLinearMethod()
-        from ...modules.moe import SparseMoeBlock
-        if isinstance(layer, SparseMoeBlock):
-            return W8A8Fp8MoEMethod()
-        return W8A8Fp8LinearMethod()
+    def get_quant_method(self, layer: nn.Module, prefix: str = "") -> QuantizeMethodBase | None:
+        return self._dispatch(layer, prefix, W8A8Fp8LinearMethod, W8A8Fp8MoEMethod)
 
     @property
     def storage_dtype(self) -> torch.dtype:
@@ -90,7 +81,9 @@ class W8A8Fp8LinearMethod(LinearMethodBase):
             torch.empty(*config.scale_shape(output_size, input_size), dtype=torch.float32)
         )
 
-    def apply(self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+    def apply(
+        self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
         config: W8A8Fp8Config = layer.quant  # type: ignore[assignment]
         qx, x_scale = quantize_fp8_per_token(x)
         return fp8_matmul(
@@ -103,7 +96,7 @@ class W8A8Fp8LinearMethod(LinearMethodBase):
             bias=bias,
         )
 
-    def quantize_from_fp16(self, layer: nn.Module, config: "QuantizationConfig") -> None:
+    def quantize_from_fp16(self, layer: nn.Module, config: QuantizationConfig) -> None:
         qweight, scale = quantize_fp8_per_channel(layer.weight.data)
         layer.weight = RawParameter(qweight)
         layer.weight_scale_inv = RawParameter(scale)
@@ -113,20 +106,27 @@ class W8A8Fp8MoEMethod(FusedMoEMethodBase):
     """W8A8 fp8 stacked experts: fp8 weights + per-token fp8 activations through grouped GEMM."""
 
     def create_weights(self, block: nn.Module) -> dict[str, nn.Parameter]:
+        config: W8A8Fp8Config = block.quant  # type: ignore[assignment]
         gate_up_n, gate_up_k = 2 * block.moe_intermediate_size, block.hidden_size
         down_n, down_k = block.hidden_size, block.moe_intermediate_size
         return {
             "gate_up_proj": RawParameter(
-                torch.empty(block.num_experts, gate_up_n, gate_up_k, dtype=torch.uint8)
+                torch.empty(block.num_experts, gate_up_n, gate_up_k, dtype=config.storage_dtype)
             ),
             "gate_up_proj_scale_inv": RawParameter(
-                torch.empty(block.num_experts, gate_up_n, 1, dtype=torch.float32)
+                torch.empty(
+                    block.num_experts,
+                    *config.scale_shape(gate_up_n, gate_up_k),
+                    dtype=torch.float32,
+                )
             ),
             "down_proj": RawParameter(
-                torch.empty(block.num_experts, down_n, down_k, dtype=torch.uint8)
+                torch.empty(block.num_experts, down_n, down_k, dtype=config.storage_dtype)
             ),
             "down_proj_scale_inv": RawParameter(
-                torch.empty(block.num_experts, down_n, 1, dtype=torch.float32)
+                torch.empty(
+                    block.num_experts, *config.scale_shape(down_n, down_k), dtype=torch.float32
+                )
             ),
         }
 
@@ -143,9 +143,8 @@ class W8A8Fp8MoEMethod(FusedMoEMethodBase):
             group_k=block.hidden_size,
         )
 
-    def quantize_from_fp16(self, block: nn.Module, config: "QuantizationConfig") -> None:
+    def quantize_from_fp16(self, block: nn.Module, config: QuantizationConfig) -> None:
         for name in ("gate_up_proj", "down_proj"):
             qweight, scale = quantize_fp8_per_channel(block.experts[name].data)
             block.experts[name] = RawParameter(qweight)
             block.experts[f"{name}_scale_inv"] = RawParameter(scale)
-

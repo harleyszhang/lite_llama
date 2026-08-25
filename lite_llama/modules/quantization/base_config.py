@@ -14,25 +14,20 @@ layers and the weight loader.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 from torch import nn
-
-if TYPE_CHECKING:
-    pass
-
 
 # --------------------------------------------------------------------------- #
 # Method base classes
 # --------------------------------------------------------------------------- #
 
+
 class QuantizeMethodBase(ABC):
     """Base class for all quantised (or unquantised) method strategies."""
 
-    def create_weights(
-        self, layer: nn.Module, *weight_args, **extra_weight_attrs
-    ) -> None:
+    def create_weights(self, layer: nn.Module, *weight_args, **extra_weight_attrs) -> None:
         """Allocate weight parameters on *layer*.
 
         The method decides what tensors exist (packed weight, scales, zeros)
@@ -45,11 +40,7 @@ class QuantizeMethodBase(ABC):
         """Execute the quantised (or plain) computation on *layer*."""
         raise NotImplementedError()
 
-    def process_weights_after_loading(self, layer: nn.Module) -> None:
-        """Post-load hook (e.g. transpose, repack). Default: no-op."""
-        return
-
-    def quantize_from_fp16(self, layer: nn.Module, config: "QuantizationConfig") -> None:
+    def quantize_from_fp16(self, layer: nn.Module, config: QuantizationConfig) -> None:
         """Convert a loaded fp16 weight to the quantised form, in-place.
 
         Used by the ``--quantization`` runtime path.
@@ -108,6 +99,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 # QuantizationConfig ABC
 # --------------------------------------------------------------------------- #
 
+
 class QuantizationConfig(ABC):
     """Per-checkpoint-format configuration (one subclass per precision).
 
@@ -150,14 +142,12 @@ class QuantizationConfig(ABC):
 
     @classmethod
     @abstractmethod
-    def from_config(cls, config: dict[str, Any]) -> "QuantizationConfig":
+    def from_config(cls, config: dict[str, Any]) -> QuantizationConfig:
         """Factory: build from HF ``quantization_config`` dict."""
         raise NotImplementedError()
 
     @abstractmethod
-    def get_quant_method(
-        self, layer: nn.Module, prefix: str = ""
-    ) -> QuantizeMethodBase | None:
+    def get_quant_method(self, layer: nn.Module, prefix: str = "") -> QuantizeMethodBase | None:
         """Return the method strategy for *layer* (or None to skip).
 
         When ``prefix`` matches one of the ``ignored`` names the config should
@@ -188,11 +178,33 @@ class QuantizationConfig(ABC):
     def quantizes(self, module_name: str) -> bool:
         """Whether ``module_name`` (HF-style path) is quantised by this config."""
         return not any(
-            module_name == ign or module_name.startswith(ign + ".")
-            for ign in self.ignored
+            module_name == ign or module_name.startswith(ign + ".") for ign in self.ignored
         )
 
-    # -- Convenience static helpers (sglang compat) ---------------------------
+    def _dispatch(
+        self,
+        layer: nn.Module,
+        prefix: str,
+        linear_method: type[LinearMethodBase],
+        moe_method: type[FusedMoEMethodBase],
+    ) -> QuantizeMethodBase:
+        """Pick *layer*'s strategy: stacked experts vs plain linear.
+
+        Every config dispatches the same way - only the two method classes
+        differ - so this one helper replaces the seven hand-rolled copies.
+        A prefix listed in ``ignored`` still gets real tensors, just the
+        fp16 (unquantised) methods.
+        """
+        from ..moe import SparseMoeBlock
+        from .unquant import UnquantizedFusedMoEMethod, UnquantizedLinearMethod
+
+        if not self.quantizes(prefix):
+            linear_method, moe_method = UnquantizedLinearMethod, UnquantizedFusedMoEMethod
+        if isinstance(layer, SparseMoeBlock):
+            return moe_method()
+        return linear_method()
+
+    # -- Convenience properties (sglang compat) -------------------------------
     @property
     def is_fp8(self) -> bool:
         """True if this is an fp8 weight format."""
@@ -207,19 +219,3 @@ class QuantizationConfig(ABC):
     def format(self) -> str:
         """Backward-compat alias for :meth:`get_name`."""
         return self.get_name()
-
-    @staticmethod
-    def get_from_keys(config: dict[str, Any], keys: list[str]) -> Any:
-        """Get a value from the model's quantization config."""
-        for key in keys:
-            if key in config:
-                return config[key]
-        raise ValueError(f"Cannot find any of {keys} in quantization config.")
-
-    @staticmethod
-    def get_from_keys_or(config: dict[str, Any], keys: list[str], default: Any) -> Any:
-        """Get an optional value from the model's quantization config."""
-        try:
-            return QuantizationConfig.get_from_keys(config, keys)
-        except ValueError:
-            return default

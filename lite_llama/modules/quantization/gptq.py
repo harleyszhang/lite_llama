@@ -15,8 +15,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from ...kernels.quantization import w4a16_matmul
 from ...kernels import fused_moe
+from ...kernels.quantization import w4a16_matmul
 from .base_config import (
     FusedMoEMethodBase,
     LinearMethodBase,
@@ -26,10 +26,10 @@ from .base_config import (
 from .parameter import RawParameter
 from .utils import quantize_int4_groupwise
 
-
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #
+
 
 class GPTQConfig(QuantizationConfig):
     """AutoGPTQ checkpoint config: group-wise int4 with configurable group size."""
@@ -52,7 +52,7 @@ class GPTQConfig(QuantizationConfig):
         return 75
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "GPTQConfig":
+    def from_config(cls, config: dict[str, Any]) -> GPTQConfig:
         bits = int(config.get("bits", 4))
         if bits != 4:
             raise ValueError(f"only 4-bit GPTQ is supported, got {bits}")
@@ -67,19 +67,8 @@ class GPTQConfig(QuantizationConfig):
         ignored = tuple(config.get("modules_to_not_convert") or ())
         return cls(group_size, ignored)
 
-    def get_quant_method(
-        self, layer: nn.Module, prefix: str = ""
-    ) -> QuantizeMethodBase | None:
-        if not self.quantizes(prefix):
-            from .unquant import UnquantizedLinearMethod, UnquantizedFusedMoEMethod
-            from ...modules.moe import SparseMoeBlock
-            if isinstance(layer, SparseMoeBlock):
-                return UnquantizedFusedMoEMethod()
-            return UnquantizedLinearMethod()
-        from ...modules.moe import SparseMoeBlock
-        if isinstance(layer, SparseMoeBlock):
-            return GPTQMoEMethod()
-        return GPTQLinearMethod()
+    def get_quant_method(self, layer: nn.Module, prefix: str = "") -> QuantizeMethodBase | None:
+        return self._dispatch(layer, prefix, GPTQLinearMethod, GPTQMoEMethod)
 
     @property
     def storage_dtype(self) -> torch.dtype:
@@ -88,12 +77,6 @@ class GPTQConfig(QuantizationConfig):
     @property
     def is_int4(self) -> bool:
         return True
-
-    def scale_shape(self, out_features: int, in_features: int) -> tuple[int, ...]:
-        return (out_features, (in_features + self.group_k - 1) // self.group_k)
-
-    def shard_is_aligned(self, size: int) -> bool:
-        return size % self.group_k == 0
 
 
 class GPTQLinearMethod(LinearMethodBase):
@@ -110,7 +93,9 @@ class GPTQLinearMethod(LinearMethodBase):
             torch.empty(*config.scale_shape(output_size, input_size), dtype=torch.float32)
         )
 
-    def apply(self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+    def apply(
+        self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
         return w4a16_matmul(
             x,
             layer.weight,
@@ -120,7 +105,7 @@ class GPTQLinearMethod(LinearMethodBase):
             bias=bias,
         )
 
-    def quantize_from_fp16(self, layer: nn.Module, config: "QuantizationConfig") -> None:
+    def quantize_from_fp16(self, layer: nn.Module, config: QuantizationConfig) -> None:
         cfg: GPTQConfig = config  # type: ignore[assignment]
         qweight, scales, zeros = quantize_int4_groupwise(layer.weight.data, cfg.group_k)
         layer.weight = RawParameter(qweight)
@@ -146,7 +131,9 @@ class GPTQMoEMethod(FusedMoEMethodBase):
         num_groups_d = (down_k + config.group_k - 1) // config.group_k
         return {
             "gate_up_proj": RawParameter(
-                torch.empty(block.num_experts, gate_up_n, gate_up_k // pack_factor, dtype=torch.int32)
+                torch.empty(
+                    block.num_experts, gate_up_n, gate_up_k // pack_factor, dtype=torch.int32
+                )
             ),
             "gate_up_proj_scale": RawParameter(
                 torch.empty(block.num_experts, gate_up_n, num_groups_gu, dtype=torch.float32)

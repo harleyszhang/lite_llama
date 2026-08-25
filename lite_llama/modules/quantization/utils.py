@@ -261,7 +261,7 @@ _ADAPTERS = {"awq": awq_adapt_key, "gptq": gptq_adapt_key}
 
 
 def adapt_int4_checkpoint(
-    checkpoint: Iterable[tuple[str, torch.Tensor]], quant: "QuantizationConfig"
+    checkpoint: Iterable[tuple[str, torch.Tensor]], quant: QuantizationConfig
 ) -> Iterable[tuple[str, torch.Tensor]]:
     """Rewrite an int4 checkpoint stream to the canonical w4a16 layout.
 
