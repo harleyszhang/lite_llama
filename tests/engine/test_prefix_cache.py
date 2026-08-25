@@ -50,9 +50,7 @@ class TestPrefixHashing:
         ("prompt_len", "block_size", "expected_blocks"),
         [(16, 4, 4), (17, 4, 4), (15, 4, 3), (32, 8, 4), (33, 8, 4)],
     )
-    def test_register_creates_exactly_full_blocks(
-        self, prompt_len, block_size, expected_blocks
-    ):
+    def test_register_creates_exactly_full_blocks(self, prompt_len, block_size, expected_blocks):
         cache = PrefixCache(block_size=block_size)
         cache.register(list(range(prompt_len)))
         assert cache.num_cached_blocks == expected_blocks
@@ -98,7 +96,7 @@ class TestPrefixMatching:
         cache = PrefixCache(block_size=4)
         a = list(range(16))
         cache.register(a)
-        b = list(range(8)) + [99, 98, 97, 96, 95, 94, 93, 92]
+        b = [*range(8), 99, 98, 97, 96, 95, 94, 93, 92]
         assert cache.query(b) == 8
 
     @pytest.mark.parametrize("diverge_at", [0, 1, 2, 3])
@@ -109,7 +107,9 @@ class TestPrefixMatching:
         original = list(range(16))
         cache.register(original)
         # Replace tokens starting at the given block boundary.
-        modified = original[: diverge_at * block_size] + [200 + i for i in range(16 - diverge_at * block_size)]
+        modified = original[: diverge_at * block_size] + [
+            200 + i for i in range(16 - diverge_at * block_size)
+        ]
         expected = diverge_at * block_size
         assert cache.query(modified) == expected
 
@@ -187,7 +187,7 @@ class TestReferenceCounting:
         """register() reports the reuse the caller gets (no separate query needed)."""
         cache = PrefixCache(block_size=4)
         tokens = list(range(16))
-        assert cache.register(tokens) == 0   # cold
+        assert cache.register(tokens) == 0  # cold
         assert cache.register(tokens) == 16  # warm: full prefix already cached
 
 
@@ -210,12 +210,12 @@ class TestLRUEviction:
     def test_query_touches_block_to_mru_so_it_surves_pressure(self):
         """A hit refreshes LRU position; a hot prefix is not evicted under pressure."""
         cache = PrefixCache(block_size=4, capacity=4)
-        warm = list(range(8))         # 2 blocks
+        warm = list(range(8))  # 2 blocks
         cold = list(range(100, 108))  # 2 blocks
         cache.register(warm)
-        cache.release(warm)           # warm -> evictable
+        cache.release(warm)  # warm -> evictable
         cache.register(cold)
-        cache.release(cold)           # cold -> evictable; 4 blocks total
+        cache.release(cold)  # cold -> evictable; 4 blocks total
         # Touch warm blocks (move to MRU) so cold is LRU.
         cache.query(warm)
         # Add 2 new blocks -> 6 > capacity 4 -> evict 2 LRU unreferenced.
@@ -359,7 +359,7 @@ class TestStatistics:
         cache = PrefixCache(block_size=4)
         shared = list(range(16))
         cache.register(shared)
-        cache.query(shared)           # 16 hit / 16 queried
+        cache.query(shared)  # 16 hit / 16 queried
         cache.query(list(range(100, 116)))  # 0 hit / 16 queried
         assert cache.stats.num_requests == 2
         assert cache.stats.queried_tokens == 32
@@ -441,9 +441,9 @@ class TestSchedulerIntegration:
             sched.add_request(_req(name, shared))
             sched.schedule()
             rates.append(sched.prefix_cache_hit_rate)
-        assert rates[0] == 0.0          # first request: cold
-        assert rates[1] > 0.0          # second: hit
-        assert rates[2] >= rates[1]    # third: hit rate monotonically non-decreasing
+        assert rates[0] == 0.0  # first request: cold
+        assert rates[1] > 0.0  # second: hit
+        assert rates[2] >= rates[1]  # third: hit rate monotonically non-decreasing
 
     def test_finish_releases_prefix_but_it_stays_cached(self):
         """After the first request finishes, its prefix survives (LRU persistence)."""
