@@ -45,7 +45,9 @@ class GPTQConfig(QuantizationConfig):
         return "gptq"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
-        return [torch.float16]
+        # w4a16 unpacks to fp32 and casts to the activation dtype, so bf16
+        # activations run through the same kernel since v0.9.
+        return [torch.float16, torch.bfloat16]
 
     @classmethod
     def get_min_capability(cls) -> int:

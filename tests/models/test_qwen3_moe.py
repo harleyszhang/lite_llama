@@ -55,7 +55,8 @@ def test_block_fp8_dequant(shape):
 
     deq = dequant_block_fp8(w8, scale_inv)
 
-    assert deq.dtype == torch.float16
+    # bf16 is the loader's default widening target since v0.9 (ROADMAP F5).
+    assert deq.dtype == torch.bfloat16
     assert deq.shape == w.shape
     # e4m3 keeps ~3 mantissa bits -> ~6% relative error per element.
     rel = ((deq.float() - w).abs() / w.abs().clamp_min(1e-3)).median()

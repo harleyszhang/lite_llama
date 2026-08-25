@@ -183,8 +183,8 @@ def load_lite_model(config: ModelConfig, directory: Path) -> nn.Module:
     """Build and fill the lite_llama model exactly as ``DefaultModelLoader`` does."""
     model_cls = ModelRegistry.resolve(config.model_type).load_class()
     model = model_cls(config)
-    materialise_parameters(model, "cpu")
-    model.load_weights(hf_weights_iterator(directory))
+    materialise_parameters(model, "cpu", dtype=config.dtype)
+    model.load_weights(hf_weights_iterator(directory, dequant_dtype=config.dtype))
     return model.eval()
 
 
@@ -208,7 +208,9 @@ def test_decoder_weights_land_in_the_right_place(model_type: str, tmp_path: Path
     hf = f"model.{lite}" if lite else "model."
 
     def same(hf_key: str, lite_key: str, index=(...,)) -> None:
-        assert torch.equal(params[lite_key].data[index], state[hf_key].half()), lite_key
+        # fp32 source tensors go through the same round-to-nearest-even cast the
+        # loader's ``copy_`` performs, so parity stays bit-exact in the model dtype.
+        assert torch.equal(params[lite_key].data[index], state[hf_key].to(config.dtype)), lite_key
 
     same(f"{hf}embed_tokens.weight", f"{lite}embed_tokens.weight")
     same(f"{hf}norm.weight", f"{lite}norm_weight")
@@ -318,14 +320,14 @@ def test_vision_tower_weights_land_in_the_right_place(model_type: str, tmp_path:
     }
     assert set(tower) == set(lite_tower)
     for name, tensor in tower.items():
-        assert torch.equal(lite_tower[name].data, tensor.half()), name
+        assert torch.equal(lite_tower[name].data, tensor.to(config.dtype)), name
 
 
 def test_llava_projector_weights_land_in_the_right_place(tmp_path: Path):
     state, config = write_hf_checkpoint(tmp_path, "llava")
     params = dict(load_lite_model(config, tmp_path).named_parameters())
     for leaf in ("linear_1.weight", "linear_1.bias", "linear_2.weight", "linear_2.bias"):
-        expected = state[f"model.multi_modal_projector.{leaf}"].half()
+        expected = state[f"model.multi_modal_projector.{leaf}"].to(config.dtype)
         assert torch.equal(params[f"multi_modal_projector.{leaf}"].data, expected), leaf
 
 
@@ -336,7 +338,7 @@ def test_lm_head_shipped_by_the_checkpoint_is_used_verbatim(model_type: str, tmp
     params = dict(load_lite_model(config, tmp_path).named_parameters())
     lite = _text_prefix(model_type)
 
-    assert torch.equal(params[f"{lite}lm_head.weight"].data, state["lm_head.weight"].half())
+    assert torch.equal(params[f"{lite}lm_head.weight"].data, state["lm_head.weight"].to(config.dtype))
 
 
 @pytest.mark.parametrize("model_type", ["qwen2", "qwen3", "qwen3_vl"])
@@ -395,22 +397,46 @@ def test_an_unexpected_checkpoint_key_fails_loudly(model_type: str, tmp_path: Pa
 # --------------------------------------------------------------------------- #
 
 
-def test_weights_are_cast_to_fp16_on_copy(tmp_path: Path):
-    """Checkpoints ship bf16/fp32; the kernels need fp16 and no extra pass over the weights."""
+def test_checkpoints_without_a_dtype_default_to_bf16(tmp_path: Path):
+    """No ``torch_dtype`` in config.json -> bf16 parameters, in one copy, no extra pass."""
     state, config = write_hf_checkpoint(tmp_path, "qwen3")
     assert state["model.embed_tokens.weight"].dtype == torch.float32
     model = load_lite_model(config, tmp_path)
-    assert all(p.dtype == torch.float16 for p in model.parameters())
+    assert config.dtype == torch.bfloat16
+    assert all(p.dtype == torch.bfloat16 for p in model.parameters())
 
 
-def test_bf16_checkpoints_match_an_explicit_half_cast(tmp_path: Path):
-    """bf16 -> fp16 must be the plain value cast, i.e. what the old converter stored."""
-    state, config = write_hf_checkpoint(tmp_path, "llama")
+def test_bf16_checkpoints_stay_bf16_verbatim(tmp_path: Path):
+    """An explicit bf16 ``torch_dtype`` loads bit-identically: no fp16 detour.
+
+    Published Qwen3 checkpoints ship this exact shape of config, so the default
+    path is also the exact-value path.
+    """
+    state, _ = write_hf_checkpoint(tmp_path, "llama")
+    body, _ = CASES["llama"]
+    (tmp_path / "config.json").write_text(json.dumps({**body, "torch_dtype": "bfloat16"}))
+    config = ModelConfig.from_pretrained(tmp_path, max_seq_len=128)
+    assert config.dtype == torch.bfloat16
     bf16 = {k: v.to(torch.bfloat16) for k, v in state.items()}
     _save(bf16, tmp_path)
 
     params = dict(load_lite_model(config, tmp_path).named_parameters())
-    assert torch.equal(params["embed_tokens.weight"].data, bf16["model.embed_tokens.weight"].half())
+    assert torch.equal(params["embed_tokens.weight"].data, bf16["model.embed_tokens.weight"])
+
+
+def test_fp16_checkpoints_stay_fp16(tmp_path: Path):
+    """The legacy fp16 path is kept: an fp16 checkpoint is not widened to bf16."""
+    state, _ = write_hf_checkpoint(tmp_path, "llama")
+    body, _ = CASES["llama"]
+    (tmp_path / "config.json").write_text(json.dumps({**body, "torch_dtype": "float16"}))
+    config = ModelConfig.from_pretrained(tmp_path, max_seq_len=128)
+    assert config.dtype == torch.float16
+    fp16 = {k: v.to(torch.float16) for k, v in state.items()}
+    _save(fp16, tmp_path)
+
+    params = dict(load_lite_model(config, tmp_path).named_parameters())
+    assert params["embed_tokens.weight"].data.dtype == torch.float16
+    assert torch.equal(params["embed_tokens.weight"].data, fp16["model.embed_tokens.weight"])
 
 
 def test_qwen3_vl_language_model_gets_mrope_and_the_right_base(tmp_path: Path):
@@ -453,5 +479,5 @@ def test_torch_bin_checkpoints_still_load(tmp_path: Path):
 
     params = dict(load_lite_model(config, tmp_path).named_parameters())
     assert torch.equal(
-        params["embed_tokens.weight"].data, state["model.embed_tokens.weight"].half()
+        params["embed_tokens.weight"].data, state["model.embed_tokens.weight"].to(config.dtype)
     )

@@ -56,25 +56,28 @@ def hf_weight_files(checkpoints_dir: str | Path) -> list[Path]:
     )
 
 
-def dequant_block_fp8(weight: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
+def dequant_block_fp8(
+    weight: torch.Tensor, scale_inv: torch.Tensor, dtype: torch.dtype = torch.bfloat16
+) -> torch.Tensor:
     """Dequantise a block-wise FP8 (e4m3) matrix: ``W[i,j] = w8[i,j] * s[i//B, j//B]``.
 
     The multiply runs in fp32; casting the fp8 values first is exact (every e4m3
     value is representable in fp32), so accuracy is governed solely by the final
-    cast to fp16.
+    cast to *dtype*.
     """
     w = weight.to(torch.float32)
     scale = scale_inv.to(torch.float32)
     scale = scale.repeat_interleave(FP8_BLOCK, dim=0).repeat_interleave(FP8_BLOCK, dim=1)
     # The trailing block is partial when a dimension is not a multiple of 128.
     scale = scale[: w.shape[0], : w.shape[1]]
-    return (w * scale).to(torch.float16)
+    return (w * scale).to(dtype)
 
 
 def hf_weights_iterator(
     checkpoints_dir: str | Path,
     device: str | torch.device = "cpu",
     dequantize_fp8: bool = True,
+    dequant_dtype: torch.dtype = torch.bfloat16,
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Stream ``(key, tensor)`` pairs from a checkpoint, tensors already on ``device``.
 
@@ -84,8 +87,10 @@ def hf_weights_iterator(
         device: Where the tensors land. Passing the compute device lets the
             caller copy straight into its parameters and makes the FP8
             dequantisation a GPU op.
-        dequantize_fp8: Whether to widen FP8 weights to fp16 and consume their
+        dequantize_fp8: Whether to widen FP8 weights to 16-bit and consume their
             scales, or hand both through untouched for a w8a16 model.
+        dequant_dtype: Element type widened FP8 weights land in; matches the
+            parameters the loader is about to copy into.
 
     Yields:
         Pairs in shard order.
@@ -94,13 +99,13 @@ def hf_weights_iterator(
     logger.info("Loading weights from %d file(s) in %s", len(files), checkpoints_dir)
     for path in files:
         if path.suffix == ".safetensors":
-            yield from _iter_safetensors(path, device, dequantize_fp8)
+            yield from _iter_safetensors(path, device, dequantize_fp8, dequant_dtype)
         else:
-            yield from _iter_torch_bin(path, device, dequantize_fp8)
+            yield from _iter_torch_bin(path, device, dequantize_fp8, dequant_dtype)
 
 
 def _iter_safetensors(
-    path: Path, device: str | torch.device, dequantize_fp8: bool
+    path: Path, device: str | torch.device, dequantize_fp8: bool, dequant_dtype: torch.dtype
 ) -> Iterator[tuple[str, torch.Tensor]]:
     from safetensors import safe_open
 
@@ -119,6 +124,7 @@ def _iter_safetensors(
                     dequant_block_fp8(
                         tensor.to(device),
                         shard.get_tensor(key.removesuffix(".weight") + _SCALE_SUFFIX).to(device),
+                        dequant_dtype,
                     )
                     if dequantize_fp8
                     # Reinterpret rather than convert: Ampere cannot compute on
@@ -129,7 +135,7 @@ def _iter_safetensors(
 
 
 def _iter_torch_bin(
-    path: Path, device: str | torch.device, dequantize_fp8: bool
+    path: Path, device: str | torch.device, dequantize_fp8: bool, dequant_dtype: torch.dtype
 ) -> Iterator[tuple[str, torch.Tensor]]:
     # mmap keeps the shard out of the process's resident set; weights_only rejects
     # the arbitrary-code-execution pickle payloads a downloaded .bin could carry.
@@ -143,7 +149,7 @@ def _iter_torch_bin(
         scale = scales.get(key.removesuffix(".weight") + _SCALE_SUFFIX)
         if scale is not None:
             tensor = (
-                dequant_block_fp8(tensor.to(device), scale.to(device))
+                dequant_block_fp8(tensor.to(device), scale.to(device), dequant_dtype)
                 if dequantize_fp8
                 else tensor.view(torch.uint8)
             )

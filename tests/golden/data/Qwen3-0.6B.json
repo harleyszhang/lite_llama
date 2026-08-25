@@ -1,0 +1,44 @@
+{
+ "single": [
+  " a topic that has captured the attention of many, especially in the context of the rapid advancements in machine learning and neural networks. As these technologies continue to evolve, the potential for AI to revolutionize various industries is immense. However, the path"
+ ],
+ "single_rp1.1": [
+  " a topic that has captured the attention of many, especially in the context of technological advancements and their implications for society. As we look ahead, it's clear that AI will continue to evolve, driven by both innovation and the need for ethical considerations"
+ ],
+ "batch_uniform": [
+  " What are the best practices for learning Python?\n\nI need to learn Python. I'm a beginner. What are the best practices for learning Python?\n\nI need to",
+  " What are the best practices for learning C++?\n\nI'm a beginner and I want to learn C++. I'm not familiar with C++ and I'm not"
+ ],
+ "batch_uniform_rp1.1": [
+  " What are the best practices for learning Python?\n\nI need to learn Python. I'm a beginner and want to get started with it. How can I start?",
+  " What are the best practices for learning C++?\n\nI'm a beginner and I want to learn C++. I need help with this. Please provide me with some"
+ ],
+ "batch_mixed": [
+  "Question\nOkay, so I need to figure out how to solve this problem. Let me start by reading the question again to make sure I understand it. The",
+  " the Roman Empire was one of the most powerful empires in the world. However, the Roman Empire was not a perfect empire. The Roman Empire was not a"
+ ],
+ "batch_mixed_rp1.1": [
+  "Question\nOkay, so I need to figure out how to solve this problem. Let me start by reading the question again carefully. The user mentioned a problem that",
+  " the Roman Empire was one of the most powerful empires in history. However, it is also a place where many people have had their lives changed by the events"
+ ],
+ "batch8": [
+  " to find a balance between the two things that are most important to me. I want to find a balance between the two things that are most important to me.",
+  " but it is not the best choice for some applications. What is the reason for this? What is the best choice for some applications? What is the reason for",
+  " What is the significance of the Civil War in the United States? What are the key events that led to the war? What are the main causes of the war",
+  " the answer is the first president of the United States is the first president of the United States is the first president of the United States is the first president of the",
+  " - Stack Overflow\nHow to learn c++, give me some code example.\nStack Overflow\nQuestions\nUsers\nStack Overflow\nHow to learn c++, give me",
+  " - Stack Overflow\nHow to learn python, give me some code examples.\nAsk Question\n0\nI need to learn Python. I have a basic understanding of",
+  " architecture, and explain how to use it in a practical way? Also, provide a list of 100+ articles on this topic, and explain the",
+  ", and explain the purpose of the model? Also, provide a sample code for the model. The user is a beginner, so the code should be simple and"
+ ],
+ "batch8_rp1.1": [
+  " to find a balance between the two things that are most important. I think that the two things that are most important are love and work. So, how can",
+  " but it is not the best choice for some applications. What are the reasons? Why do you think that VGG is still used in practice, even though it",
+  " What is the significance of the Civil War in modern times? How does it affect the current state of the United States?\n\nThe American Civil War was a conflict between",
+  " the answer is...??\nThe first president of the United States was George Washington. But wait, there's a twist here! The question might be testing your",
+  " - Stack Overflow\nHow to learn c++, give me some code example.\nStack overflow users, I need help. How to learn C++? Give me some",
+  " - Stack Overflow\nHow to learn python, give me some code examples.\nAsk Question\n0\nI need help with learning Python. I'm a beginner and",
+  " architecture, and explain how to use it in a practical way? Also, provide some examples of tasks that can be done with llm models like chatbots,",
+  ", and explain the purpose of each layer in a simple way? Also, provide some examples of applications for CNNs. Additionally, what is the difference between CNN"
+ ]
+}
