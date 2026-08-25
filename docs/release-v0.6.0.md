@@ -1,8 +1,6 @@
 # Release v0.6.0 — 分页 KV + viz 工具
 
-**Date:** 2026-08-23
-**Branch:** `main`
-**Theme:** FP8 KV 缓存 (2x 容量)、可视化工具 (viz.structure + viz.memory)、KV 水位线准入控制
+**Date:** 2026-08-23 **Branch:** `main` **Theme:** FP8 KV 缓存 (2x 容量)、可视化工具 (viz.structure + viz.memory)、KV 水位线准入控制
 
 ## Summary
 
@@ -36,8 +34,7 @@ python -m lite_llama.cli chat --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype 
 
 ## 2. Feature: viz.structure (模型结构树)
 
-新增 `lite_llama/tools/profiling/structure.py`，遍历 `nn.Module` 树导出缩进文本树，
-显示层类型、参数量和 dtype。
+新增 `lite_llama/tools/profiling/structure.py`，遍历 `nn.Module` 树导出缩进文本树，显示层类型、参数量和 dtype。
 
 ```python
 from lite_llama.tools.profiling import export_structure_tree
@@ -58,8 +55,7 @@ model: Qwen3Model
 
 ## 3. Feature: viz.memory (显存预算表)
 
-新增 `lite_llama/tools/profiling/memory.py`，从模型配置纯计算得到显存分解（无需 GPU），
-输出 markdown 表格。
+新增 `lite_llama/tools/profiling/memory.py`，从模型配置纯计算得到显存分解（无需 GPU），输出 markdown 表格。
 
 ```python
 from lite_llama.tools.profiling import export_memory_budget

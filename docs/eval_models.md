@@ -1,23 +1,19 @@
 # 精度评估
 
-`tests/evals/` 是对齐 vLLM `tests/evals/` 的精度回归套件：数据集 → 提示词 → 生成 →
-打分 → 与 `configs/*.yaml` 声明的阈值比对。当前实现 GSM8K。
+`tests/evals/` 是对齐 vLLM `tests/evals/` 的精度回归套件：数据集 → 提示词 → 生成 → 打分 → 与 `configs/*.yaml` 声明的阈值比对。当前实现 GSM8K。
 
-本文记录**实测结果**与复现方式。套件本身的设计与扩展方式见
-[`tests/evals/README.md`](../tests/evals/README.md)。
+本文记录**实测结果**与复现方式。套件本身的设计与扩展方式见 [`tests/evals/README.md`](../tests/evals/README.md)。
 
 ## GSM8K 实测结果
 
 评测口径与 vLLM 的 `tests/evals/gsm8k` 一致，两边数字可直接对比：
 
-- **提示词**：train split 的前 `num_fewshot` 条作为示例，接测试题，统一
-  `Question: ... \nAnswer: ...` 格式；题目取 test split 的前 N 条（固定前缀，不随机采样）；
+- **提示词**：train split 的前 `num_fewshot` 条作为示例，接测试题，统一 `Question: ... \nAnswer: ...` 格式；题目取 test split 的前 N 条（固定前缀，不随机采样）；
 - **解码**：greedy（`temperature=0`），关闭 `repetition_penalty` 与 `stop_on_repeat`；
 - **停止**：截断到下一个 `Question`；
 - **判分**：取 completion 里**最后一个整数**，与参考答案 `####` 后的数字做精确匹配。
 
-测试环境：NVIDIA A10（23 GB）× 1，torch 2.13.0+cu129 / triton 3.7.1 /
-transformers 5.15.0 / Python 3.13，fp16 权重，CUDA graph 开启。
+测试环境：NVIDIA A10（23 GB）× 1，torch 2.13.0+cu129 / triton 3.7.1 / transformers 5.15.0 / Python 3.13，fp16 权重，CUDA graph 开启。
 
 | 模型 | 题数 | few-shot | chat 模板 | **准确率** | 无效率 | 耗时 (s) | q/s | 生成吞吐 (tok/s) |
 | --- | ---: | ---: | :---: | ---: | ---: | ---: | ---: | ---: |
@@ -28,12 +24,9 @@ transformers 5.15.0 / Python 3.13，fp16 权重，CUDA graph 开启。
 
 `batch_size` 分别为 32（0.5B）与 16（1.5B），`max_gen_len=256`，`max_seq_len=2048`。
 
-两个模型上 200 题子集与 1319 题全量的差都在 1 个点以内（35.00 vs 35.94、
-63.00 vs 63.76），说明 200 题子集足以当日常回归的信号，全量留给需要参考数值的场合。
+两个模型上 200 题子集与 1319 题全量的差都在 1 个点以内（35.00 vs 35.94、 63.00 vs 63.76），说明 200 题子集足以当日常回归的信号，全量留给需要参考数值的场合。
 
-**无效率全程为 0**：每条 completion 都能解析出数字。这一列是判断"模型答错了"还是
-"评测根本没看到答案"的分界 —— 如果它显著大于 0，上面的准确率就不再是模型的性质，
-而是 `max_gen_len` 或提示词格式的问题。
+**无效率全程为 0**：每条 completion 都能解析出数字。这一列是判断"模型答错了"还是 "评测根本没看到答案"的分界 —— 如果它显著大于 0，上面的准确率就不再是模型的性质，而是 `max_gen_len` 或提示词格式的问题。
 
 ## 复现
 
@@ -53,17 +46,13 @@ python -m tests.evals.gsm8k --model-dir my_weight/Qwen2.5-1.5B-Instruct \
 python -m tests.evals.gsm8k --model-dir my_weight/Qwen2.5-0.5B --save-results eval_runs.jsonl
 ```
 
-首次运行会把 GSM8K 下载到 `~/.cache/lite_llama/evals/gsm8k/`（train 4.0 MB +
-test 736 KB）。`LITE_LLAMA_EVAL_DATA_DIR` 改缓存目录，`LITE_LLAMA_EVAL_BASE_URL`
-换下载源。
+首次运行会把 GSM8K 下载到 `~/.cache/lite_llama/evals/gsm8k/`（train 4.0 MB + test 736 KB）。`LITE_LLAMA_EVAL_DATA_DIR` 改缓存目录，`LITE_LLAMA_EVAL_BASE_URL` 换下载源。
 
-greedy 解码是确定性的：同一 checkpoint 重复跑得到逐字节相同的输出，因此准确率可精确复现
-（上表 0.5B/200 题的 35.00% 在独立脚本与 pytest 两条路径下取到同一个值）。
+greedy 解码是确定性的：同一 checkpoint 重复跑得到逐字节相同的输出，因此准确率可精确复现（上表 0.5B/200 题的 35.00% 在独立脚本与 pytest 两条路径下取到同一个值）。
 
 ## 敏感性验证
 
-只有一个准确率数字说明不了它测的是什么。下面几组都在 Qwen2.5-0.5B / 200 题上跑，
-用来确认口径本身没有引入偏差。
+只有一个准确率数字说明不了它测的是什么。下面几组都在 Qwen2.5-0.5B / 200 题上跑，用来确认口径本身没有引入偏差。
 
 | 变量 | 设置 | 准确率 | 无效率 | 说明 |
 | --- | --- | ---: | ---: | --- |
@@ -73,8 +62,7 @@ greedy 解码是确定性的：同一 checkpoint 重复跑得到逐字节相同�
 | few-shot | 5 | 35.00% | 0.00% | 基线 |
 | few-shot | 8 | 33.50% | 0.00% | 再加示例不再有增益 |
 
-`max_gen_len` 从 256 加到 512 准确率一字不差，配合 0% 的无效率，说明 256 的解码预算
-对 GSM8K 足够；这条是选 256 作默认值的依据，而不是拍脑袋。
+`max_gen_len` 从 256 加到 512 准确率一字不差，配合 0% 的无效率，说明 256 的解码预算对 GSM8K 足够；这条是选 256 作默认值的依据，而不是拍脑袋。
 
 chat 模板对 instruct 模型的影响单列（Qwen2.5-1.5B-Instruct / 200 题）：
 
@@ -83,9 +71,7 @@ chat 模板对 instruct 模型的影响单列（Qwen2.5-1.5B-Instruct / 200 题�
 | 关 | 54.50% | 0.00% |
 | 开 | **63.00%** | 0.00% |
 
-差 8.5 个点。instruct 模型被微调的格式是模板而不是裸文本，所以配置里
-`chat_template: true` 对它们不是可选项 —— 关掉测到的是"模型在陌生格式下的表现"。
-base 模型（Qwen2.5-0.5B）没有对应的微调格式，必须保持关闭。
+差 8.5 个点。instruct 模型被微调的格式是模板而不是裸文本，所以配置里 `chat_template: true` 对它们不是可选项 —— 关掉测到的是"模型在陌生格式下的表现"。 base 模型（Qwen2.5-0.5B）没有对应的微调格式，必须保持关闭。
 
 ## 阈值与回归判定
 
@@ -97,23 +83,18 @@ base 模型（Qwen2.5-0.5B）没有对应的微调格式，必须保持关闭。
 | `Qwen2.5-0.5B-full.yaml` | Qwen2.5-0.5B | 1319 | 0.36 | 0.03 |
 | `Qwen2.5-1.5B-Instruct.yaml` | Qwen2.5-1.5B-Instruct | 200 | 0.63 | 0.05 |
 
-用下界而不是相等：greedy 是确定性的，但 kernel 改动即便数值上没问题，也可能让若干道
-临界题翻面。容差吸收这部分抖动，超出就是真的回归。题数越多抖动越小，所以全量配置的
-容差收到 0.03。
+用下界而不是相等：greedy 是确定性的，但 kernel 改动即便数值上没问题，也可能让若干道临界题翻面。容差吸收这部分抖动，超出就是真的回归。题数越多抖动越小，所以全量配置的容差收到 0.03。
 
-另有 `max_invalid_rate` 单独断言无效率上限。两种失败模式要分开看：准确率低但无效率也低
-= 模型算错了；无效率高 = 评测没拿到答案，此时准确率不含任何关于模型的信息。
+另有 `max_invalid_rate` 单独断言无效率上限。两种失败模式要分开看：准确率低但无效率也低 = 模型算错了；无效率高 = 评测没拿到答案，此时准确率不含任何关于模型的信息。
 
 ## 未覆盖的模型
 
 `my_weight/` 下其余 checkpoint 没有纳入：
 
 - **Qwen3-0.6B**：目录里只有 `config.json`，没有 `*.safetensors`；
-- **llava-1.5-7b-hf / Qwen3-VL-4B-Instruct**：多模态，GSM8K 是纯文本任务，需要另配
-  视觉基准；
+- **llava-1.5-7b-hf / Qwen3-VL-4B-Instruct**：多模态，GSM8K 是纯文本任务，需要另配视觉基准；
 - **Qwen3-30B-A3B-Instruct-2507-FP8**：A10 的 23 GB 装不下。
 
-配置里点名的 checkpoint 不存在时用例自己 skip 并说明原因，所以
-`models-all.txt` 在任何机器上都能直接跑。
+配置里点名的 checkpoint 不存在时用例自己 skip 并说明原因，所以 `models-all.txt` 在任何机器上都能直接跑。
 
 补齐权重后新增一个 YAML、把文件名写进 `models-all.txt` 即可，无需改测试代码。

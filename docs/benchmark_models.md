@@ -159,8 +159,7 @@ python scripts/golden_tokens.py --check /tmp/golden.json --cuda-graph
 
 ### 量化内核性能（W8A16 / W4A16 / SmoothQuant）
 
-以下为量化 Triton 内核在 A10 (24 GB, SM86) 上的 `triton.testing.do_bench` 实测结果。
-基准为 cuBLAS fp16 `F.linear`；加速来自减半（或减至 1/4）的 HBM 权重读取量。
+以下为量化 Triton 内核在 A10 (24 GB, SM86) 上的 `triton.testing.do_bench` 实测结果。基准为 cuBLAS fp16 `F.linear`；加速来自减半（或减至 1/4）的 HBM 权重读取量。
 
 #### W8A16 (fp8-e4m3, 128×128 block scales)
 
@@ -172,8 +171,7 @@ python scripts/golden_tokens.py --check /tmp/golden.json --cuda-graph
 | 64×4096×4096 | 0.091 | 0.055 | **1.64×** | small prefill |
 | 512×4096×4096 | 0.191 | 0.280 | 0.68× | prefill (compute-bound) |
 
-结论：decode 阶段（M≤64）稳定 **1.6–1.7× 加速**；prefill 阶段（M≥512）内核为
-compute-bound，fp8 路径无优势（此时应回退到 cuBLAS fp16）。
+结论：decode 阶段（M≤64）稳定 **1.6–1.7× 加速**；prefill 阶段（M≥512）内核为 compute-bound，fp8 路径无优势（此时应回退到 cuBLAS fp16）。
 
 #### W4A16 (int4, group_size=128)
 
