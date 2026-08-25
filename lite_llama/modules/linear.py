@@ -15,6 +15,14 @@ so each is split by its own rule and the fused weight is assembled from the two.
 Parameter names deliberately match HuggingFace (``weight``, ``weight_scale_inv``),
 so :mod:`lite_llama.models.weights` needs no rule for them.
 
+Every parameter carries a ``weight_loader`` attribute, bound in
+:meth:`LinearBase.__init__`: given an incoming checkpoint tensor it narrows the
+tensor to this rank's slice, selects the block of a packed parameter the tensor
+belongs to (``shard_id``), copies, and returns the view written. The weight
+loading loop in :mod:`lite_llama.models.weights` only renames keys and calls
+the loader; all sharding geometry lives here, next to the shapes it derives
+from.
+
 Usage:
     self.qkv_proj = QKVParallelLinear(hidden, num_heads, num_kv_heads, head_dim)
     self.o_proj = RowParallelLinear(q_size, hidden, quant=quant)
@@ -25,7 +33,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ..distributed.parallel_state import all_reduce_tp, divide, get_tp_world_size
+from ..distributed.parallel_state import all_reduce_tp, divide, get_tp_rank, get_tp_world_size
 from .quantization import QuantizationConfig, UnquantizedLinearMethod
 
 
@@ -65,6 +73,11 @@ class LinearBase(nn.Module):
             if bias
             else None
         )
+        # One rule fills every parameter this layer owns: the weight, the quant
+        # method's scale grids and the bias are all direct attributes, so the
+        # non-recursive parameter iterator covers them all.
+        for param in self.parameters(recurse=False):
+            param.weight_loader = self._weight_loader
 
     def apply_linear(self, x: torch.Tensor) -> torch.Tensor:
         """The multiply itself, without any tensor-parallel communication."""
@@ -72,6 +85,32 @@ class LinearBase(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.apply_linear(x)
+
+    def _weight_loader(
+        self, param: torch.Tensor, loaded: torch.Tensor, shard_id=None
+    ) -> torch.Tensor:
+        """Fill ``param`` from one checkpoint tensor and return the view written.
+
+        This base implementation is the terminal step every subclass lands on:
+        check the incoming tensor fits, copy, report what was written (the
+        loader loop counts elements to verify coverage). Used directly for
+        replicated parameters. Subclasses with a sharding rule override it to
+        compute the destination view and narrow ``loaded`` first, then call
+        ``super()._weight_loader(view, loaded)``.
+
+        Args:
+            param: Parameter (or a view into one) to fill.
+            loaded: Checkpoint tensor, already at this rank's resolution.
+            shard_id: Which block of a packed parameter ``loaded`` belongs to
+                (q/k/v, gate/up); ``None`` for an unpacked parameter.
+        """
+        if param.shape != loaded.shape:
+            raise ValueError(
+                f"checkpoint tensor of shape {tuple(loaded.shape)} does not fit "
+                f"parameter view of shape {tuple(param.shape)}"
+            )
+        param.copy_(loaded)
+        return param
 
     @torch.no_grad()
     def quantize_(self, quant: QuantizationConfig) -> None:
@@ -129,6 +168,21 @@ class ColumnParallelLinear(LinearBase):
         _check_shard_alignment(quant, local_out, what)
         super().__init__(input_size, local_out, bias=bias, quant=quant)
         self.full_output_size = output_size
+
+    def _weight_loader(self, param, loaded, shard_id=None):
+        # ``shard_id`` selects a half of the packed gate/up pair (``FusedMLP``
+        # builds its fused projection from this class). The narrow is by
+        # proportion of the *incoming* tensor, so the scale grids — the same
+        # matrix at scale-block resolution — follow the same rule as the weight.
+        view = param.data
+        if shard_id is not None:
+            half = view.shape[0] // 2
+            view = view.narrow(0, shard_id * half, half)
+        world_size = get_tp_world_size()
+        if world_size > 1:
+            size = loaded.shape[0] // world_size
+            loaded = loaded.narrow(0, get_tp_rank() * size, size)
+        return super()._weight_loader(view, loaded)
 
 
 class QKVParallelLinear(LinearBase):
@@ -204,6 +258,23 @@ class QKVParallelLinear(LinearBase):
         """One GEMM, then three views — the call every attention block wants."""
         return self.split(self.apply_linear(x))
 
+    def _weight_loader(self, param, loaded, shard_id=None):
+        # ``shard_id`` is which of [q | k | v] arrived. The block boundaries
+        # come from this layer's own head geometry, scaled to the parameter's
+        # resolution: the factor is 1 for the weight and bias, ``group_n`` for
+        # a scale grid whose rows count scale blocks instead of channels.
+        if shard_id is None:
+            raise ValueError("qkv_proj is packed: a checkpoint tensor must name its block")
+        factor = (self.q_size + 2 * self.kv_size) // param.shape[0]
+        q_rows, kv_rows = self.q_size // factor, self.kv_size // factor
+        offset, rows = ((0, q_rows), (q_rows, kv_rows), (q_rows + kv_rows, kv_rows))[shard_id]
+        view = param.data.narrow(0, offset, rows)
+        world_size = get_tp_world_size()
+        if world_size > 1:
+            size = loaded.shape[0] // world_size
+            loaded = loaded.narrow(0, get_tp_rank() * size, size)
+        return super()._weight_loader(view, loaded)
+
     def extra_repr(self) -> str:
         fmt = self.quant.format if self.quant else "fp16"
         return (
@@ -245,6 +316,15 @@ class RowParallelLinear(LinearBase):
         _check_shard_alignment(quant, local_in, what)
         super().__init__(local_in, output_size, quant=quant)
         self.full_input_size = input_size
+
+    def _weight_loader(self, param, loaded, shard_id=None):
+        # The split is along the contracted dimension (columns of the weight,
+        # of the scale grid alike); no packed form of this layer exists.
+        world_size = get_tp_world_size()
+        if world_size > 1:
+            size = loaded.shape[1] // world_size
+            loaded = loaded.narrow(1, get_tp_rank() * size, size)
+        return super()._weight_loader(param.data, loaded)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return all_reduce_tp(self.apply_linear(x))
