@@ -2,20 +2,20 @@
 
 The package restructures the kernel stack into three tiers (ROADMAP foundation
 2): *ops* declares what each implementation can do as data, *impls* holds the
-implementations themselves, and :func:`select` picks one per call
+implementations themselves, and :func:`dispatch` picks one per call
 deterministically. Importing this package never imports torch;
 implementations are referenced as ``"module:attr"`` strings and loaded only
 when first dispatched.
 
 Usage:
-    from lite_llama.kernels.ops import KernelSpec, register, select
+    from lite_llama.kernels.ops import KernelSpec, register, dispatch
 
     register(KernelSpec(name="native/linear_torch", op="linear", ...))
-    sel = select("linear", dtype="bf16")
+    sel = dispatch("linear", dtype="bf16")
     fn = sel.load()
 """
 
-from .dispatch import DispatchKey, Selected, explain, invalidate_cache, select
+from .dispatch import DispatchKey, Selected, dispatch, explain, invalidate_cache
 from .interfaces import (
     LOGICAL_OPS,
     AttentionDecodeOp,
@@ -70,9 +70,9 @@ __all__ = [
     "Selected",
     "ShapeConstraint",
     "ShapeRequirement",
+    "dispatch",
     "explain",
     "invalidate_cache",
     "is_logical_op",
     "register",
-    "select",
 ]

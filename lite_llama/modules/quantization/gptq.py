@@ -16,12 +16,12 @@ import torch
 import torch.nn as nn
 
 from ...kernels import fused_moe
-from ...kernels.quantization import w4a16_matmul
 from .base_config import (
     FusedMoEMethodBase,
     LinearMethodBase,
     QuantizationConfig,
     QuantizeMethodBase,
+    run_quant_linear,
 )
 from .parameter import RawParameter
 from .utils import quantize_int4_groupwise
@@ -98,12 +98,13 @@ class GPTQLinearMethod(LinearMethodBase):
     def apply(
         self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        return w4a16_matmul(
+        return run_quant_linear(
+            "gptq",
             x,
             layer.weight,
-            layer.weight_scale,
-            layer.weight_zeros,
-            group_size=layer.quant.group_k,
+            weight_scale=layer.weight_scale,
+            weight_zeros=layer.weight_zeros,
+            group_k=layer.quant.group_k,
             bias=bias,
         )
 

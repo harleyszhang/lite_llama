@@ -12,6 +12,10 @@ from .activations import gelu, leaky_relu, relu, silu, tanh
 from .flashattention2_nopad import flash_attention2_no_pad
 from .flashdecoding import flash_decoding
 from .fused_moe import fused_moe, moe_align_block_size
+
+# Registers the native KernelSpec rows before anything can dispatch; the
+# registry module itself is torch-free, kernel modules stay lazy.
+from .impls.native import registry as _native_registry  # noqa: F401
 from .quantization import smoothquant_matmul, w4a16_matmul, w8a16_matmul
 from .rope_emb import rope_emb_forward
 from .skip_rmsnorm import skip_rmsnorm

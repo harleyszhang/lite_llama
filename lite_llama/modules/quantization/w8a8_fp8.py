@@ -14,15 +14,15 @@ import torch
 import torch.nn as nn
 
 from ...kernels import fused_moe
-from ...kernels.quantization import fp8_matmul
 from .base_config import (
     FusedMoEMethodBase,
     LinearMethodBase,
     QuantizationConfig,
     QuantizeMethodBase,
+    run_quant_linear,
 )
 from .parameter import RawParameter
-from .utils import quantize_fp8_per_channel, quantize_fp8_per_token
+from .utils import quantize_fp8_per_channel
 
 # --------------------------------------------------------------------------- #
 # Config
@@ -85,12 +85,12 @@ class W8A8Fp8LinearMethod(LinearMethodBase):
         self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         config: W8A8Fp8Config = layer.quant  # type: ignore[assignment]
-        qx, x_scale = quantize_fp8_per_token(x)
-        return fp8_matmul(
-            qx,
-            x_scale,
+        # per-token activation quantisation happens inside the selected impl
+        return run_quant_linear(
+            "w8a8_fp8",
+            x,
             layer.weight,
-            layer.weight_scale_inv,
+            weight_scale=layer.weight_scale_inv,
             group_n=config.group_n,
             group_k=min(config.group_k, layer.input_size),
             bias=bias,

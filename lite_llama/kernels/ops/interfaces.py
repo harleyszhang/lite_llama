@@ -1,9 +1,9 @@
-"""Logical-operator ABCs: the call contracts dispatch selects on.
+"""Logical-operator ABCs: the call contracts behind each dispatch().
 
 Each logical operator (ROADMAP foundation 2) owns exactly one stable ``op_id``
 and one abstract call signature. KernelSpec rows declare *which* op they
 implement; these ABCs define *how it is called*, so every backend picked by
-:func:`~lite_llama.kernels.ops.select` can be dropped in without touching the
+:func:`~lite_llama.kernels.ops.dispatch` can be dropped in without touching the
 model code. The signatures mirror the existing native kernels closely enough
 that the native impls are thin adapters, not rewrites.
 
@@ -223,7 +223,7 @@ class MoeOp(LogicalOp):
         group_n: int = 0,
         group_k: int = 0,
     ) -> torch.Tensor:
-        """Run all selected experts for every token.
+        """Run all dispatched experts for every token.
 
         Args:
             hidden_states: ``[tokens, hidden]`` activations.

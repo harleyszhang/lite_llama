@@ -11,12 +11,12 @@ import torch
 import torch.nn as nn
 
 from ...kernels import fused_moe
-from ...kernels.quantization import smoothquant_matmul
 from .base_config import (
     FusedMoEMethodBase,
     LinearMethodBase,
     QuantizationConfig,
     QuantizeMethodBase,
+    run_quant_linear,
 )
 from .parameter import RawParameter
 from .utils import quantize_int8_per_channel
@@ -78,10 +78,11 @@ class W8A8Int8LinearMethod(LinearMethodBase):
     def apply(
         self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        return smoothquant_matmul(
+        return run_quant_linear(
+            "w8a8_int8",
             x,
             layer.weight,
-            layer.weight_scale_inv,
+            weight_scale=layer.weight_scale_inv,
             bias=bias,
         )
 
