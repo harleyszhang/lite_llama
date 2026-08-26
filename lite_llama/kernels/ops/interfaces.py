@@ -1,0 +1,459 @@
+"""Logical-operator ABCs: the call contracts dispatch selects on.
+
+Each logical operator (ROADMAP foundation 2) owns exactly one stable ``op_id``
+and one abstract call signature. KernelSpec rows declare *which* op they
+implement; these ABCs define *how it is called*, so every backend picked by
+:func:`~lite_llama.kernels.ops.select` can be dropped in without touching the
+model code. The signatures mirror the existing native kernels closely enough
+that the native impls are thin adapters, not rewrites.
+
+Design rules:
+    * torch-free at runtime — torch appears only under ``TYPE_CHECKING`` so
+      importing this module stays cold-start friendly (annotations are lazy).
+    * A contract may be implemented by a plain function or a stateful class
+      (external backends often hold buffers); dispatch never requires an
+      isinstance check, the ABC is documentation plus a test hook.
+    * ``elementwise.*`` is an open namespace: the ABC pins the loose shape
+      contract, concrete ops (``elementwise.swiglu``, ...) register their own
+      spec rows.
+
+Usage:
+    from lite_llama.kernels.ops.interfaces import LinearOp
+
+    class TorchLinear(LinearOp):
+        def __call__(self, x, weight, *, bias=None, weight_scale=None,
+                     weight_zeros=None, group_n=0, group_k=0):
+            return torch.nn.functional.linear(x, weight, bias)
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any, ClassVar
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
+    import torch
+
+
+class LogicalOp(ABC):
+    """Base of every logical-operator contract.
+
+    ``op_id`` is the string the registry and dispatch key on; concrete
+    implementation classes do not need to redefine it — the KernelSpec they
+    are registered under already names the op. ``__call__`` stays abstract so
+    an unfinished contract cannot be instantiated silently.
+    """
+
+    op_id: ClassVar[str]
+
+    @abstractmethod
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Run the operator (overridden by each interface with its full signature)."""
+        raise NotImplementedError
+
+
+class AttentionPrefillOp(LogicalOp):
+    """Prefill attention over ragged (no-pad) batches."""
+
+    op_id = "attention.prefill"
+
+    @abstractmethod
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        sm_scale: float,
+        b_start_loc: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        max_seq_len: int,
+    ) -> torch.Tensor:
+        """Attend over freshly projected K/V for a ragged batch.
+
+        Args:
+            q: ``[total_tokens, num_heads, head_dim]`` packed query rows.
+            k, v: ``[total_kv, num_kv_heads, head_dim]`` packed key/value rows.
+            sm_scale: Softmax scale, ``1 / sqrt(head_dim)``.
+            b_start_loc: ``[batch]`` first packed row of each sequence.
+            b_seq_len: ``[batch]`` true length of each sequence.
+            max_seq_len: Longest sequence, sizing the flash tiles.
+
+        Returns:
+            ``[total_tokens, num_heads, head_dim]`` attention output.
+        """
+        raise NotImplementedError
+
+
+class AttentionDecodeOp(LogicalOp):
+    """Decode attention reading a paged KV cache."""
+
+    op_id = "attention.decode"
+
+    @abstractmethod
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        qk_scale: float,
+        b_req_tokens_table: torch.Tensor,
+        b_req_idx: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        max_actual_seq_len: int,
+        *,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
+    ) -> torch.Tensor:
+        """One-token-per-sequence attention against the paged cache.
+
+        Args:
+            q: ``[batch, num_heads, head_dim]`` — decode has ``seq_len == 1``.
+            k_cache: ``[max_tokens, num_kv_heads, head_dim]`` paged key cache.
+            v_cache: Paged value cache, same layout as ``k_cache``.
+            qk_scale: Softmax scale, ``1 / sqrt(head_dim)``.
+            b_req_tokens_table: ``[max_requests, max_seq_len]`` position-to-
+                cache-row map.
+            b_req_idx: ``[batch]`` request slot owning each batch row; batch
+                order is not slot order once requests come and go.
+            b_seq_len: ``[batch]`` history length per row, this step included.
+            max_actual_seq_len: Longest row, sizing the split-K grid.
+            k_scale: Dequantisation scale of an fp8 key cache (1.0 otherwise).
+            v_scale: Same for the value cache.
+
+        Returns:
+            ``[batch, num_heads, head_dim]`` attention output.
+        """
+        raise NotImplementedError
+
+
+class MlaDecodeOp(LogicalOp):
+    """Multi-head latent attention decode (placeholder until v0.10 wiring).
+
+    The latent cache is single-head (MQA over the compressed ``c_kv``), which
+    is the part every MLA backend shares; backend-specific head layouts stay
+    inside the impl and its LayoutRequirement.
+    """
+
+    op_id = "attention.mla_decode"
+
+    @abstractmethod
+    def __call__(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        cache_seqlens: torch.Tensor,
+        *,
+        max_seq_len: int,
+        sm_scale: float = 1.0,
+    ) -> torch.Tensor:
+        """Decode attention over the MLA latent KV cache.
+
+        Args:
+            q: ``[batch, num_heads, qk_head_dim]`` query per step.
+            kv_cache: ``[num_pages, page_size, kv_lora_dim]`` latent cache.
+            block_table: ``[batch, max_pages]`` page ids per sequence.
+            cache_seqlens: ``[batch]`` cached length per sequence.
+            max_seq_len: Longest row, sizing the kernel grid.
+            sm_scale: Softmax scale.
+
+        Returns:
+            ``[batch, num_heads, v_head_dim]`` attention output.
+        """
+        raise NotImplementedError
+
+
+class LinearOp(LogicalOp):
+    """Dense ``x @ weight.T (+ bias)``, quantised or not.
+
+    The signature is the superset of the quantised GEMMs (fp8 / int8 block /
+    smoothquant / int4): a scheme is a dispatch key dimension, the impl knows
+    which of the optional tensors it consumes and ignores the rest.
+    """
+
+    op_id = "linear"
+
+    @abstractmethod
+    def __call__(
+        self,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        *,
+        bias: torch.Tensor | None = None,
+        weight_scale: torch.Tensor | None = None,
+        weight_zeros: torch.Tensor | None = None,
+        group_n: int = 0,
+        group_k: int = 0,
+    ) -> torch.Tensor:
+        """Project activations.
+
+        Args:
+            x: ``[tokens, in_features]`` activations.
+            weight: ``[out_features, in_features]``, packed when quantised.
+            bias: Optional ``[out_features]`` additive bias.
+            weight_scale: Dequantisation scales; ``None`` for plain GEMM.
+            weight_zeros: Zero points for asymmetric int4; ``None`` symmetric.
+            group_n: Rows per scale block (``0`` = per-tensor).
+            group_k: Columns per scale block.
+
+        Returns:
+            ``[tokens, out_features]`` in ``x``'s dtype.
+        """
+        raise NotImplementedError
+
+
+class MoeOp(LogicalOp):
+    """Routed expert FFN: ``sum_k w_k * SwiGLU_k(x) @ W2_k.T``."""
+
+    op_id = "moe"
+
+    @abstractmethod
+    def __call__(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        *,
+        w1_scale: torch.Tensor | None = None,
+        w2_scale: torch.Tensor | None = None,
+        w1_zeros: torch.Tensor | None = None,
+        w2_zeros: torch.Tensor | None = None,
+        group_n: int = 0,
+        group_k: int = 0,
+    ) -> torch.Tensor:
+        """Run all selected experts for every token.
+
+        Args:
+            hidden_states: ``[tokens, hidden]`` activations.
+            w1: ``[E, 2 * intermediate, hidden]`` fused gate/up projections.
+            w2: ``[E, hidden, intermediate]`` down projections.
+            topk_weights: ``[tokens, top_k]`` routing weights.
+            topk_ids: ``[tokens, top_k]`` expert indices.
+            w1_scale, w2_scale: Per-expert dequant scales; ``None`` = plain.
+            w1_zeros, w2_zeros: Zero points for int4 experts.
+            group_n, group_k: Scale block geometry.
+
+        Returns:
+            ``[tokens, hidden]`` combined expert output.
+        """
+        raise NotImplementedError
+
+
+class DispatchOp(LogicalOp):
+    """All-to-all token routing to expert ranks (EP).
+
+    Native placeholder routes via ``torch.distributed.all_to_all``; deepep
+    lands in M2.5. The exact receive layout (seg_indptr vs masked_m) is
+    declared in the impl's LayoutRequirement, not invented ad hoc.
+    """
+
+    op_id = "comm.dispatch"
+
+    @abstractmethod
+    def __call__(
+        self,
+        x: torch.Tensor,
+        topk_idx: torch.Tensor,
+        *,
+        num_experts: int,
+    ) -> tuple[Any, ...]:
+        """Send each token copy to the ranks owning its experts.
+
+        Args:
+            x: ``[tokens, hidden]`` activations to route.
+            topk_idx: ``[tokens, top_k]`` global expert ids.
+            num_experts: Total experts across all ranks.
+
+        Returns:
+            Backend-specific receive bundle (received tokens plus the index
+            metadata :class:`CombineOp` needs); see the impl's layout tags.
+        """
+        raise NotImplementedError
+
+
+class CombineOp(LogicalOp):
+    """Gather expert outputs back and merge the routed copies."""
+
+    op_id = "comm.combine"
+
+    @abstractmethod
+    def __call__(
+        self,
+        x: torch.Tensor,
+        unsorted_src_idx: torch.Tensor,
+        unsorted_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Reverse of :class:`DispatchOp` for the same receive layout.
+
+        Args:
+            x: ``[recv_tokens, hidden]`` processed expert outputs.
+            unsorted_src_idx: Token-order metadata from dispatch.
+            unsorted_weights: Routing weight applied per received copy.
+
+        Returns:
+            ``[tokens, hidden]`` weighted sum back in request order.
+        """
+        raise NotImplementedError
+
+
+class RmsNormOp(LogicalOp):
+    """RMSNorm, optionally fused with the residual add (skip path)."""
+
+    op_id = "rmsnorm"
+
+    @abstractmethod
+    def __call__(
+        self,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        *,
+        eps: float = 1e-5,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Normalise the last dimension.
+
+        Args:
+            x: ``[..., hidden]`` activations.
+            weight: ``[hidden]`` learned scale.
+            eps: Variance floor.
+            residual: When given, added before normalising and the summed
+                input is returned as the new residual (skip_rmsnorm fused
+                path); ``None`` runs the plain norm.
+
+        Returns:
+            Normalised output, plus the new residual when ``residual`` is
+            given (two-tuple in that case, else a single tensor).
+        """
+        raise NotImplementedError
+
+
+class RopeOp(LogicalOp):
+    """Rotary position embedding applied to query and key."""
+
+    op_id = "rope"
+
+    @abstractmethod
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Rotate ``q``/``k`` in place where the layout allows.
+
+        Args:
+            q: ``[tokens, num_q_heads, head_dim]`` queries.
+            k: ``[tokens, num_kv_heads, head_dim]`` keys.
+            cos, sin: ``[batch, seq_len, head_dim]`` rotation tables; the
+                batch/seq geometry is derived from them, not passed twice.
+
+        Returns:
+            ``(q, k)`` after rotation — the input tensors when they were
+            adjacent-head contiguous, fresh copies otherwise.
+        """
+        raise NotImplementedError
+
+
+class KvWriteOp(LogicalOp):
+    """Scatter freshly computed K/V rows into the paged KV buffer."""
+
+    op_id = "kv_write"
+
+    @abstractmethod
+    def __call__(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        select_index: torch.Tensor,
+        kv_buffer: torch.Tensor,
+    ) -> None:
+        """Write each token's K and V into its allocated cache slot.
+
+        Args:
+            k: ``[tokens, num_kv_heads, head_dim]`` new key rows.
+            v: New value rows, same layout as ``k``.
+            select_index: ``[tokens]`` target cache row per token.
+            kv_buffer: ``[2 * max_tokens, num_kv_heads, head_dim]`` buffer
+                holding K in the first half and V in the second.
+
+        The buffer is modified in place; nothing is returned.
+        """
+        raise NotImplementedError
+
+
+class SampleOp(LogicalOp):
+    """Token sampling core (top-k / top-p) over the final logits."""
+
+    op_id = "sample"
+
+    @abstractmethod
+    def __call__(
+        self,
+        logits: torch.Tensor,
+        *,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        deterministic: bool = False,
+    ) -> torch.Tensor:
+        """Draw one token id per row.
+
+        Args:
+            logits: ``[batch, vocab]`` this rank's slice under TP.
+            temperature: Softmax temperature; ``1.0`` skips the division.
+            top_k: Keep only the k best logits (``0`` = off).
+            top_p: Nucleus sampling mass (``1.0`` = off).
+            deterministic: Greedy argmax, used for golden runs and tests.
+
+        Returns:
+            ``[batch]`` sampled token ids.
+        """
+        raise NotImplementedError
+
+
+class ElementwiseOp(LogicalOp):
+    """Pointwise transforms under the open ``elementwise.*`` namespace.
+
+    Concrete members (``elementwise.swiglu``, ``elementwise.silu``, ...)
+    register their own KernelSpec rows; this ABC only pins the loose shape
+    contract: row-major over the flattened token dimension, output dtype
+    tracks the input.
+    """
+
+    op_id = "elementwise"
+
+    @abstractmethod
+    def __call__(self, x: torch.Tensor, *args: torch.Tensor) -> torch.Tensor:
+        """Apply the transform; extra operands are member-specific."""
+        raise NotImplementedError
+
+
+#: The closed op catalogue dispatch and registration validate against.
+LOGICAL_OPS: dict[str, type[LogicalOp]] = {
+    cls.op_id: cls
+    for cls in (
+        AttentionPrefillOp,
+        AttentionDecodeOp,
+        MlaDecodeOp,
+        LinearOp,
+        MoeOp,
+        DispatchOp,
+        CombineOp,
+        RmsNormOp,
+        RopeOp,
+        KvWriteOp,
+        SampleOp,
+        ElementwiseOp,
+    )
+}
+
+
+def is_logical_op(op: str) -> bool:
+    """Return True when *op* is a known logical operator id.
+
+    ``elementwise.*`` is an open namespace, so any child of the root counts.
+    """
+    return op in LOGICAL_OPS or op.startswith("elementwise.")
