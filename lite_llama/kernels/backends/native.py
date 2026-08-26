@@ -125,3 +125,77 @@ register(
         golden=BASELINE,
     )
 )
+
+# --------------------------------------------------------------------------- #
+# moe — one row, because the kernel reads the format off the weight dtype
+# --------------------------------------------------------------------------- #
+register(
+    KernelSpec(
+        name="native/fused_moe",
+        op="moe",
+        backend="native",
+        target="lite_llama.kernels.fused_moe:fused_moe",
+        dtypes=("bf16", "fp16"),
+        # Every scheme the quantisation methods route here: fused_moe derives
+        # the expert format from w1.dtype (uint8 fp8-e4m3 / int8 / packed int32)
+        # rather than from a flag, so splitting the row per scheme would be one
+        # spec claim per branch of the same dispatch it already does internally.
+        schemes=(
+            "unquantized",
+            "fp8",
+            "w8a8_fp8",
+            "w8a8_int8",
+            "blockwise_int8",
+            "awq",
+            "gptq",
+        ),
+        golden=BASELINE,
+    )
+)
+
+# --------------------------------------------------------------------------- #
+# norm / rope / elementwise — the per-layer glue around the two GEMM domains
+# --------------------------------------------------------------------------- #
+register(
+    KernelSpec(
+        name="native/skip_rmsnorm",
+        op="rmsnorm",
+        backend="native",
+        target="lite_llama.kernels.skip_rmsnorm:skip_rmsnorm",
+        # One row covers both the fused (residual) and plain paths: the kernel
+        # picks between them on `residual is None`, and a backend that only has
+        # the plain one would be a different row, not a different flag.
+        dtypes=("bf16", "fp16"),
+        golden=BASELINE,
+    )
+)
+register(
+    KernelSpec(
+        name="native/rope_emb_forward",
+        op="rope",
+        backend="native",
+        target="lite_llama.kernels.rope_emb:rope_emb_forward",
+        dtypes=("bf16", "fp16"),
+        golden=BASELINE,
+    )
+)
+register(
+    KernelSpec(
+        name="native/swiglu_forward_fused",
+        op="elementwise.swiglu",
+        backend="native",
+        target="lite_llama.kernels.swiglu:swiglu_forward_fused",
+        dtypes=("bf16", "fp16"),
+        golden=BASELINE,
+    )
+)
+register(
+    KernelSpec(
+        name="native/swiglu_forward",
+        op="elementwise.swiglu_split",
+        backend="native",
+        target="lite_llama.kernels.swiglu:swiglu_forward",
+        dtypes=("bf16", "fp16"),
+        golden=BASELINE,
+    )
+)

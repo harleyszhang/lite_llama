@@ -39,13 +39,15 @@ from lite_llama.kernels.ops.interfaces import (
 
 
 class CpuRmsNorm(RmsNormOp):
-    def __call__(self, x, weight, *, eps=1e-5, residual=None):
+    def __call__(self, x, residual, weight, eps=1e-5):
         if residual is not None:
             residual = x + residual  # the Triton path stores the sum back into R
             x = residual
         var = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
         y = (x * torch.rsqrt(var + eps)).to(x.dtype) * weight
-        return (y, residual) if residual is not None else y
+        # Always a pair: on the plain path the second element is the input, so
+        # a decoder layer threads one pair through either path (see RmsNormOp).
+        return y, (residual if residual is not None else x)
 
 
 class CpuLinear(LinearOp):
@@ -178,7 +180,7 @@ class TestAbcEnforcement:
     def test_a_full_implementation_instanciates_and_calls(self) -> None:
         norm = CpuRmsNorm()
         x = torch.randn(2, 3, 8, dtype=torch.bfloat16)
-        y = norm(x, torch.ones(8))
+        y, _ = norm(x, None, torch.ones(8))
         assert y.shape == x.shape
 
 
@@ -212,7 +214,7 @@ SIGNATURES = {
     ),
     DispatchOp: (["x", "topk_idx"], ["num_experts"]),
     CombineOp: (["x", "unsorted_src_idx", "unsorted_weights"], []),
-    RmsNormOp: (["x", "weight"], ["eps", "residual"]),
+    RmsNormOp: (["x", "residual", "weight", "eps"], []),
     RopeOp: (["q", "k", "cos", "sin"], []),
     KvWriteOp: (["k", "v", "select_index", "kv_buffer"], []),
     SampleOp: (["logits"], ["temperature", "top_k", "top_p", "deterministic"]),
@@ -254,7 +256,7 @@ class TestCpuImplementations:
         residual = torch.randn(2, 4, 16, dtype=torch.float32)
         weight = torch.randn(16)
 
-        y, new_residual = CpuRmsNorm()(x, weight, eps=1e-6, residual=residual)
+        y, new_residual = CpuRmsNorm()(x, residual, weight, eps=1e-6)
 
         fused = x + residual
         var = fused.pow(2).mean(-1, keepdim=True)
@@ -262,12 +264,15 @@ class TestCpuImplementations:
         assert torch.allclose(y, ref_y, atol=1e-5)
         assert torch.allclose(new_residual, fused, atol=1e-6)
 
-    def test_rmsnorm_plain_path_returns_single_tensor(self) -> None:
+    def test_rmsnorm_plain_path_passes_the_input_through_as_residual(self) -> None:
+        # The pair shape is the same on both paths; what changes is what the
+        # second element means. Here it is the untouched input, which is what
+        # lets the caller keep one unpacking form.
         x = torch.randn(3, 8, dtype=torch.float32)
         weight = torch.ones(8)
-        y = CpuRmsNorm()(x, weight)
-        assert isinstance(y, torch.Tensor)
+        y, passthrough = CpuRmsNorm()(x, None, weight)
         assert y.shape == x.shape
+        assert passthrough is x
 
     def test_linear_scales_before_matmul(self) -> None:
         torch.manual_seed(1)

@@ -9,7 +9,9 @@ of the Triton rows live in ``tests/kernels/test_linear_dispatch.py``).
 from __future__ import annotations
 
 import ast
+import inspect
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import torch
@@ -18,7 +20,7 @@ import torch.nn.functional as F
 import lite_llama.kernels  # noqa: F401 — import side effect: native spec registration
 from lite_llama.kernels.backends import native as native_specs
 from lite_llama.kernels.linear import linear_torch
-from lite_llama.kernels.ops import REGISTRY, dispatch
+from lite_llama.kernels.ops import LOGICAL_OPS, REGISTRY, dispatch
 from lite_llama.kernels.ops.dispatch import resolve_target
 from lite_llama.modules.quantization.unquant import UnquantizedLinearMethod
 
@@ -52,6 +54,29 @@ ATTENTION_ROWS = {
 #: Layout tags the paged KV buffer of this repo satisfies.
 PAGED = frozenset({"kv:paged"})
 
+#: ``op -> row`` for the per-layer glue: one native row each, no choice to make.
+#: ``elementwise.*`` is two rows because the two arities are two contracts:
+#: the fused projection hands over one packed tensor, the split path two halves.
+GLUE_ROWS = {
+    "moe": "native/fused_moe",
+    "rmsnorm": "native/skip_rmsnorm",
+    "rope": "native/rope_emb_forward",
+    "elementwise.swiglu": "native/swiglu_forward_fused",
+    "elementwise.swiglu_split": "native/swiglu_forward",
+}
+
+#: Ops whose contract is declared but has no native row, with the reason. Pinned
+#: so the gap stays a decision on record rather than something forgotten:
+#: sampling already lives in the engine over a TP vocab slice, and EP comms need
+#: an expert-parallel group this repo does not have yet (both land in M2).
+OPS_WITHOUT_NATIVE_ROW = {
+    "sample": "engine.Sampler owns it, over a tensor-parallel vocab slice",
+    "comm.dispatch": "no EP group; MoE here is tensor parallel",
+    "comm.combine": "pairs with comm.dispatch",
+    "attention.mla_decode": "no MLA model in tree until v0.10",
+    "elementwise": "open namespace root; only its members register rows",
+}
+
 
 class TestNativeCatalogue:
     def test_linear_has_exactly_the_five_native_rows(self) -> None:
@@ -75,10 +100,6 @@ class TestNativeCatalogue:
         assert sel.spec.name == "native/linear_torch"
         with pytest.raises(LookupError, match="dtype"):
             dispatch("linear", dtype="fp32", scheme="fp8", shape={"m": 8, "n": 8, "k": 8})
-
-    def test_all_targets_resolve(self) -> None:
-        for spec in REGISTRY.implementations("linear"):
-            assert callable(resolve_target(spec.target)), spec.name
 
     def test_floor_row_is_the_native_floor(self) -> None:
         assert REGISTRY.native_floor("linear").name == "native/linear_torch"
@@ -109,10 +130,49 @@ class TestAttentionCatalogue:
         # the write, so the row must not gate on the activation dtype.
         assert dispatch("kv_write", dtype="u8", layout=PAGED).spec.name == "native/update_kv_buffer"
 
-    def test_all_targets_resolve(self) -> None:
-        for op in ATTENTION_ROWS:
-            for spec in REGISTRY.implementations(op):
-                assert callable(resolve_target(spec.target)), spec.name
+
+class TestGlueCatalogue:
+    """moe / rmsnorm / rope / elementwise: the domains between the two GEMMs."""
+
+    @pytest.mark.parametrize("op,row", sorted(GLUE_ROWS.items()))
+    def test_each_has_one_native_row(self, op: str, row: str) -> None:
+        assert {s.name for s in REGISTRY.implementations(op)} == {row}
+        assert REGISTRY.native_floor(op).name == row
+
+    @pytest.mark.parametrize("op,row", sorted(GLUE_ROWS.items()))
+    def test_dispatches_at_the_default_precision(self, op: str, row: str) -> None:
+        assert dispatch(op, dtype="bf16").spec.name == row
+
+    @pytest.mark.parametrize("op", sorted(GLUE_ROWS))
+    def test_rows_declare_only_measured_dtypes(self, op: str) -> None:
+        # bf16 (the default) and fp16 (what the kernel tests cover). fp32 is not
+        # claimed: no path in the repo runs these kernels at fp32, so declaring
+        # it would be an unbacked promise dispatch would happily act on.
+        for spec in REGISTRY.implementations(op):
+            assert set(spec.dtypes) == {"bf16", "fp16"}, spec.name
+        with pytest.raises(LookupError, match="dtype"):
+            dispatch(op, dtype="fp32")
+
+    def test_one_moe_row_serves_every_scheme(self) -> None:
+        # fused_moe reads the expert format off ``w1.dtype`` (uint8 -> fp8,
+        # int8, int32 -> int4), so the scheme is not a choice between rows;
+        # splitting them would write several specs for one internal branch.
+        row = REGISTRY.native_floor("moe")
+        for scheme in SCHEME_TO_ROW:
+            assert dispatch("moe", dtype="bf16", scheme=scheme).spec.name == row.name
+
+
+class TestContractCoverage:
+    def test_every_registered_op_is_a_declared_contract(self) -> None:
+        from lite_llama.kernels.ops import is_logical_op
+
+        for op in REGISTRY.ops():
+            assert is_logical_op(op), f"{op!r} has rows but no ABC"
+
+    def test_contracts_without_rows_are_the_documented_ones(self) -> None:
+        """A contract with no implementation is fine — silently is not."""
+        registered = set(REGISTRY.ops())
+        assert set(LOGICAL_OPS) - registered == set(OPS_WITHOUT_NATIVE_ROW)
 
 
 class TestLinearTorchFloor:
@@ -154,10 +214,64 @@ class TestRegistryStaysTorchFree:
 
     def test_rows_point_at_real_kernel_modules(self) -> None:
         """No wrapper tier: every target names a module under ``lite_llama.kernels``."""
-        for op in ["linear", *ATTENTION_ROWS]:
+        for op in REGISTRY.ops():
             for spec in REGISTRY.implementations(op):
                 module, attr = spec.target.split(":")
                 assert module.startswith("lite_llama.kernels."), spec.name
                 # ops/ is the contract layer; kernels never live there.
                 assert not module.startswith("lite_llama.kernels.ops"), spec.name
                 assert attr.isidentifier()
+
+    def test_every_row_resolves_to_a_callable(self) -> None:
+        for op in REGISTRY.ops():
+            for spec in REGISTRY.implementations(op):
+                assert callable(resolve_target(spec.target)), spec.name
+
+
+class TestTargetsMatchTheirContract:
+    """Parameter *names* are the contract, because nothing adapts them.
+
+    Dispatch hands the caller the kernel function itself — there is no wrapper
+    tier translating argument names on the way through. So a kernel whose
+    parameters merely happen to sit in the right order silently satisfies the
+    ABC while breaking any caller that passes one by keyword, and breaking the
+    next backend that reads the ABC to know what it must accept. This test is
+    what caught ``update_kv_buffer(K_Values, ...)`` and ``skip_rmsnorm(X, ...)``.
+    """
+
+    #: ``elementwise.*`` members declare their own arity under an ABC that is
+    #: deliberately ``(x, *args)``, so beyond "takes at least one operand" there
+    #: is nothing to compare; see :class:`ElementwiseOp`.
+    OPEN_ARITY = ("elementwise.",)
+
+    #: The arity each open-arity member promises in its own docstring: the fused
+    #: row takes the packed gate/up tensor, the split row takes the two halves.
+    ELEMENTWISE_ARITY: ClassVar[dict[str, int]] = {
+        "native/swiglu_forward_fused": 1,
+        "native/swiglu_forward": 2,
+    }
+
+    def _ops_to_check(self) -> list[str]:
+        return [op for op in sorted(REGISTRY.ops()) if not op.startswith(self.OPEN_ARITY)]
+
+    def test_parameter_names_match_the_abc(self) -> None:
+        for op in self._ops_to_check():
+            expected = [
+                p for p in inspect.signature(LOGICAL_OPS[op].__call__).parameters if p != "self"
+            ]
+            for spec in REGISTRY.implementations(op):
+                got = list(inspect.signature(resolve_target(spec.target)).parameters)
+                assert got == expected, (
+                    f"{spec.name} takes {got} but the {op!r} contract says {expected}"
+                )
+
+    def test_open_arity_members_keep_the_arity_they_advertise(self) -> None:
+        # The two swiglu rows differ only in arity, which is exactly why they are
+        # two ops rather than one: dispatch cannot guess how many tensors the
+        # call site holds, so the op id has to say it.
+        for op in sorted(REGISTRY.ops()):
+            if not op.startswith(self.OPEN_ARITY):
+                continue
+            for spec in REGISTRY.implementations(op):
+                params = inspect.signature(resolve_target(spec.target)).parameters
+                assert len(params) == self.ELEMENTWISE_ARITY[spec.name], spec.name

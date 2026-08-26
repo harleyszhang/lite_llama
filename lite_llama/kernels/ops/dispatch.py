@@ -13,8 +13,8 @@ steps (ROADMAP foundation 2, pillar 5):
 4. **Report** — ``explain`` renders the decision chain for humans;
    ``LITE_LLAMA_KERNEL_TRACE=1`` emits one JSON line per decision for tools.
 
-An explicit ``backend=`` (or ``LITE_LLAMA_FORCE_BACKEND``) narrows the field
-to that family and bypasses only the golden gate — the user asked for the
+An explicit ``backend=`` (or the ``LITE_LLAMA_*_BACKEND`` env vars) narrows the
+field to that family and bypasses only the golden gate — the user asked for the
 kernel by name, so accuracy evidence is their call, but a missing library or
 an unsupported dtype is physics and still excludes it.
 
@@ -45,6 +45,30 @@ FORCE_BACKEND_ENV = "LITE_LLAMA_FORCE_BACKEND"
 
 #: One JSON line per decision when set (op, backend, dtype, shape...).
 TRACE_ENV = "LITE_LLAMA_KERNEL_TRACE"
+
+
+def op_backend_env(op: str) -> str:
+    """Env var name pinning one op's backend: ``attention.decode`` ->
+    ``LITE_LLAMA_ATTENTION_DECODE_BACKEND``.
+
+    Per-op is the granularity that matters in practice: a machine may want
+    flashinfer for attention while linear stays on the native Triton GEMM, and
+    one global switch cannot express that. Inherited from the v0.8 backend
+    picker, which had these keys for its two hardcoded op families.
+    """
+    return f"LITE_LLAMA_{op.upper().replace('.', '_')}_BACKEND"
+
+
+def _forced_backend(op: str, explicit: str | None) -> str | None:
+    """Resolve the backend pin: argument, then per-op env, then global env.
+
+    Narrowest wins — an argument is the call site's own decision, a per-op key
+    is the operator's, and the global key is the run's.
+    """
+    return (
+        explicit or os.environ.get(op_backend_env(op)) or os.environ.get(FORCE_BACKEND_ENV) or None
+    )
+
 
 # --------------------------------------------------------------------------- #
 # Keys and results
@@ -271,7 +295,8 @@ def dispatch(
         shape: Symbolic dims the decision may depend on (``{"k": 4096}``).
         layout: Layout tags the call site can provide (``frozenset({"kv:paged"})``).
         backend: Pin the backend family; bypasses the golden gate but never
-            the physical ones. ``LITE_LLAMA_FORCE_BACKEND`` is the env form.
+            the physical ones. ``LITE_LLAMA_<OP>_BACKEND`` pins one op and
+            ``LITE_LLAMA_FORCE_BACKEND`` the whole run.
         platform_info: Hardware snapshot; defaults to the detected platform.
             Injectable so tests (and tools) run on imagined machines.
         registry: Table to dispatch over; tests use a private instance.
@@ -281,7 +306,7 @@ def dispatch(
             forced backend that is not usable here) — failing loud beats
             running a wrong kernel.
     """
-    forced = backend or os.environ.get(FORCE_BACKEND_ENV) or None
+    forced = _forced_backend(op, backend)
     info = platform_info if platform_info is not None else current_platform().detect()
     key = DispatchKey(
         op=op,
