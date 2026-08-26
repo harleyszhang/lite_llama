@@ -15,7 +15,19 @@ from .utils import quantize_fp8_per_tensor
 
 
 class BaseKVCacheMethod(QuantizeMethodBase, ABC):
-    """Abstract base for KV-cache quantisation strategies."""
+    """Abstract base for KV-cache quantisation strategies.
+
+    Attributes:
+        k_scale: Per-tensor scale the write side applied to keys, which the read
+            side must divide back out. It belongs to the strategy rather than to
+            the attention layer because the two halves are only correct together:
+            a layer holding its own copy of the scale can disagree with the
+            method that quantised the bytes, and nothing would report it.
+        v_scale: Same for values.
+    """
+
+    k_scale: float = 1.0
+    v_scale: float = 1.0
 
     @abstractmethod
     def quantize_kv(self, k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

@@ -1,9 +1,23 @@
-"""Attention modules: fused-QKV projection, RoPE, paged KV cache I/O.
+"""Paged attention: the KV-cache write plus the phase-appropriate kernel call.
 
-:class:`Attention` is the self-attention building block shared by every decoder
-model; :class:`PagedAttention` is its lower half — the part that owns the KV
-cache write and picks the prefill/decode kernel. They are separate classes so a
-model variant can swap the cache strategy without touching the projections.
+:class:`PagedAttention` is the lower half of an attention block. It owns
+everything that depends on *how K/V are stored* — the write into the paged
+buffer, the fp8 quantisation on the way in, the dequantisation scales the
+decode kernel needs, and the prefill/decode split — and nothing that depends on
+how q/k/v were produced. The projections, q/k norm and RoPE live one level up
+in :class:`~lite_llama.models.base.Attention`, so a model with a different
+composition (MLA) can reuse this half, and a different cache strategy can
+replace it without touching any projection.
+
+The kernels are called by name (``update_kv_buffer``, ``flash_attention2_no_pad``,
+``flash_decoding``): reading this file tells you exactly which kernel runs.
+Which *backend* provides them is declared as data in
+:mod:`lite_llama.kernels.backends` and resolved by
+:mod:`lite_llama.kernels.ops`.
+
+Usage:
+    attn = PagedAttention(num_kv_heads, head_dim, kv_cache_dtype=torch.bfloat16)
+    out = attn(xq, xk, xv, atten_info, layer_index, is_prefill=True)
 """
 
 from __future__ import annotations
@@ -13,33 +27,21 @@ import math
 import torch
 import torch.nn as nn
 
-from ..kernels import (
-    flash_attention2_no_pad,
-    flash_decoding,
-    rope_emb_forward,
-    skip_rmsnorm,
-    update_kv_buffer,
-)
-from ..models.config import ModelConfig
-from .linear import QKVParallelLinear, RowParallelLinear
-from .quantization import QuantizationConfig
+from ..kernels import flash_attention2_no_pad, flash_decoding, update_kv_buffer
 from .quantization.kv_cache import get_kv_cache_method
-
-# The prefill kernel evaluates exp2 rather than exp, so its softmax scale has to
-# absorb log2(e). The decode kernel uses exp directly and takes the plain scale.
-_LOG2E = 1.4426950408889634
 
 
 class PagedAttention(nn.Module):
     """Writes K/V into the paged cache and runs the phase-appropriate kernel.
 
-    Both phases share the cache layout ``[max_tokens, 2 * num_kv_heads, head_dim]``
-    where the K heads occupy the first half and the V heads the second.
+    Both phases share the cache layout ``[2 * max_tokens, num_kv_heads, head_dim]``
+    where the K rows occupy the first half and the V rows the second.
 
     Args:
-        num_kv_heads: Number of key/value heads (may be smaller than the query
-            head count for grouped-query attention).
-        head_dim: Size of a single attention head.
+        num_kv_heads: Number of key/value heads on this rank (may be smaller
+            than the query head count for grouped-query attention). Needed here
+            to split the buffer's K half from its V half.
+        head_dim: Size of a single attention head; sets the softmax scale.
         kv_cache_dtype: Element type of the cache — the activation dtype stores
             K/V verbatim; ``torch.uint8`` stores e4m3 bytes (vLLM's fp8 KV
             cache), quantised here on write and widened by the decode kernel.
@@ -52,7 +54,7 @@ class PagedAttention(nn.Module):
         self,
         num_kv_heads: int,
         head_dim: int,
-        kv_cache_dtype: torch.dtype = torch.float16,
+        kv_cache_dtype: torch.dtype = torch.bfloat16,
     ) -> None:
         super().__init__()
         self.num_kv_heads = num_kv_heads
@@ -76,6 +78,7 @@ class PagedAttention(nn.Module):
         atten_info,
         layer_index: int,
     ) -> None:
+        """Scatter this step's K/V into their allocated cache rows."""
         if self.kv_cache_method is not None:
             xk, xv = self.kv_cache_method.quantize_kv(xk, xv)
 
@@ -91,6 +94,9 @@ class PagedAttention(nn.Module):
     ) -> torch.Tensor:
         """Prefill: causal attention over the freshly computed q/k/v.
 
+        The kernel reads the unquantised tensors it was handed, not the cache —
+        the write above only has to make them available to later decode steps.
+
         Returns:
             ``[tokens, num_heads, head_dim]``.
         """
@@ -99,7 +105,7 @@ class PagedAttention(nn.Module):
             xq,
             xk,
             xv,
-            self.scale * _LOG2E,
+            self.scale,
             atten_info.b_start_loc,
             atten_info.b_seq_len,
             atten_info.max_actual_seq_len,
@@ -145,109 +151,3 @@ class PagedAttention(nn.Module):
         if is_prefill:
             return self.context_forward(xq, xk, xv, atten_info, layer_index)
         return self.token_forward(xq, xk, xv, atten_info, layer_index)
-
-
-class Attention(nn.Module):
-    """Fused-QKV self-attention with RoPE and optional per-head q/k normalisation.
-
-    q, k and v are one :class:`~lite_llama.modules.linear.QKVParallelLinear` weight, so
-    the block runs two GEMMs rather than three. Under tensor parallelism the heads are
-    dealt out across ranks: that layer is column-parallel (each rank owns
-    ``num_heads / tp`` query heads and the KV heads that go with them, so its KV cache
-    is that much smaller too) and ``o_proj`` is row-parallel, contributing this block's
-    only all-reduce.
-
-    Args:
-        config: Model config supplying the head geometry.
-        qkv_bias: Whether q/k/v projections carry a bias (true for Qwen2).
-        use_qk_norm: Whether q and k are RMSNormed per head before RoPE (Qwen3).
-        quant: Quantisation layout of the projections, or ``None`` for fp16.
-    """
-
-    def __init__(
-        self,
-        config: ModelConfig,
-        *,
-        qkv_bias: bool = False,
-        use_qk_norm: bool = False,
-        quant: QuantizationConfig | None = None,
-    ) -> None:
-        super().__init__()
-        self.head_dim = config.head_dim
-        self.hidden_size = config.hidden_size
-        self.rms_norm_eps = config.rms_norm_eps
-        self.use_qk_norm = use_qk_norm
-
-        self.qkv_proj = QKVParallelLinear(
-            config.hidden_size,
-            config.num_heads,
-            config.num_kv_heads,
-            config.head_dim,
-            bias=qkv_bias,
-            quant=quant,
-        )
-        # This rank's share of the head geometry, read back from the layer that owns
-        # the weight rather than divided a second time here. Attention width is
-        # independent of the residual stream width (Qwen3).
-        self.num_heads = self.qkv_proj.num_heads
-        self.num_kv_heads = self.qkv_proj.num_kv_heads
-        self.q_size = self.qkv_proj.q_size
-        self.kv_size = self.qkv_proj.kv_size
-
-        self.o_proj = RowParallelLinear(
-            config.q_size, self.hidden_size, quant=quant, what="query features"
-        )
-
-        if use_qk_norm:
-            # Normalises over head_dim, so it is replicated rather than sharded.
-            self.q_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=config.dtype))
-            self.k_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=config.dtype))
-
-        self.attn = PagedAttention(
-            self.num_kv_heads, self.head_dim, kv_cache_dtype=config.kv_cache_torch_dtype
-        )
-
-    def _project_qkv(
-        self,
-        x: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Project, reshape to per-head layout, normalise (optionally) and apply RoPE."""
-        batch_size, seq_len, _ = x.shape
-        x = x.view(-1, self.hidden_size)
-
-        xq, xk, xv = self.qkv_proj.project(x)
-
-        num_tokens = batch_size * seq_len
-        xq = xq.view(num_tokens, self.num_heads, self.head_dim)
-        xk = xk.view(num_tokens, self.num_kv_heads, self.head_dim)
-        xv = xv.view(num_tokens, self.num_kv_heads, self.head_dim)
-
-        if self.use_qk_norm:
-            # RMSNorm over head_dim, i.e. independently per head.
-            xq, _ = skip_rmsnorm(xq, None, self.q_norm_weight, self.rms_norm_eps)
-            xk, _ = skip_rmsnorm(xk, None, self.k_norm_weight, self.rms_norm_eps)
-
-        cos, sin = position_embeddings
-        xq, xk = rope_emb_forward(xq, xk, cos, sin, batch_size, seq_len)
-        return xq, xk, xv
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        atten_info,
-        layer_index: int,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-    ) -> torch.Tensor:
-        batch_size, seq_len, _ = x.shape
-        xq, xk, xv = self._project_qkv(x, position_embeddings)
-
-        # The phase comes from whoever prepared the metadata, not from seq_len:
-        # a single-token prompt is still a prefill, and guessing ``seq_len > 1``
-        # would route it through the decode kernel by accident.
-        attn_output = self.attn(
-            xq, xk, xv, atten_info, layer_index, is_prefill=atten_info.is_prefill
-        )
-        # Back to the residual-stream layout before the output projection.
-        attn_output = attn_output.view(batch_size, seq_len, self.q_size)
-        return self.o_proj(attn_output)

@@ -190,21 +190,20 @@ DP:                    Frontend ── Router(P10) ── EngineCore 进程 × d
 
 **② 一个签名(ABC,吃语义张量,不含 layout)**:所有实现共享同一 `forward()` 签名与语义,`forward_native`(纯 PyTorch/参考实现)是**正确性基准**,必须存在。这一模式项目已有雏形——`models/quantization/methods/base.py` 的 `LinearQuantMethod.apply(layer, x)`,推广到全部算子即可。layout 差异(DeepGEMM 要转置权重、FlashInfer 要自己的 KV 布局)不进签名,进元数据。
 
-**③ N 份实现(按来源分目录)**:
+**③ N 份实现(不新增目录层,只多一张声明清单)**:三个正交的位置回答三个问题——
 ```
 kernels/
-  ops/            # 逻辑算子签名(ABC) + 注册表,torch-free,不含实现
-    registry.py   # register / select / explain
-    attention.py linear.py moe.py ...
-  impls/
-    native/       # 纯 Triton,永远存在=保底行+golden 基准
-      attention_prefill_triton.py   ← 现 flash_attention2_nopad
-      attention_decode_triton.py    ← 现 flash_decoding
-      linear_triton.py  moe_triton.py  ← 现 fused_moe
-    external/     # 可选,import 失败即 is_available()=False
-      linear_deepgemm.py  attention_flashinfer.py
+  flashattention2_nopad.py  flashdecoding.py  linear.py      # 谁来算:算子实现本体,模型层按名字直调
+  update_kv_buffer.py  fused_moe.py  quantization/  ...
+  ops/            # 选谁算:逻辑算子签名(ABC) + 注册表 + 确定性 dispatch,torch-free
+    spec.py  registry.py  dispatch.py  interfaces.py
+  backends/       # 能算什么:一个后端一个模块,纯数据(KernelSpec 行)
+    native.py     # 保底行 + golden 基准,target 直指上面的 kernel 模块
+    flashinfer.py  deepgemm.py  tileops.py  ...   # v0.9 外部后端,import 失败即 available()=False
 ```
-迁移=纯搬运+删 `benchmarks/kernels/` 下两个 legacy attention 文件。
+**刻意不做的事**:不建 `impls/` 这类中间目录,也不写转发适配器。KernelSpec 的 `target` 是 `"module:attr"` 字符串,直接指向真实 kernel 函数,所以 `modules/attention.py` 里读到的仍是 `flash_attention2_no_pad` / `flash_decoding` 这种一眼可辨的算子名,而不是某个包装层。代价是 kernel 的公开签名必须干净——例如 `flash_attention2_no_pad` 原先要求调用方自己乘 `log2(e)`,这个 kernel 私有约定已下沉到 wrapper 内部,契约统一成 plain `1/sqrt(d)`。
+
+迁移=就地补 `backends/native.py` 的行 + 删 `benchmarks/kernels/` 下两个 legacy attention 文件。
 
 **④ 一份元数据清单(声明式,集中一处,torch-free)**:借 sglang `KernelSpec`——注册时只存 `target="module:attr"` 字符串,**惰性 import**,注册全程不加载 torch/kernel(保证冷启动秒级、CPU 机器可 `import`)。每份实现声明:
 
@@ -237,7 +236,7 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
 
 - **强制后端开关**(`LITE_LLAMA_FORCE_BACKEND=native`):对标 sglang `SGLANG_FORCE_FUSED_OP_BACKEND`,二分数值 bug 时把整模型钉到 native。
 - **调用 trace**(对标 sglang `enable_fused_op_trace`):记录每次调用的 (op, backend, shape/dtype),**直接产出 ops-collector(地基 3 的 collect 阶段)要的真实 shape 清单**。
-- 外部后端全放 `impls/external/`,全部 optional extra,永不进核心依赖。
+- 外部后端各自占一个 `kernels/backends/<backend>.py`(只有 KernelSpec 行,没有实现代码),全部 optional extra,永不进核心依赖。
 
 ### 落地顺序
 
@@ -501,7 +500,7 @@ class AttentionOp(ABC):
     @abstractmethod
     def forward(self, q, k, v, metadata: AttentionMetadata, layer_idx: int) -> Tensor: ...
 
-# impls/native/
+# kernels/ 下的实现本体,由 backends/native.py 的行指名
 class FlashAttn2Prefill(AttentionOp): ...    # 现 flash_attention2_nopad
 class FlashDecoding(AttentionOp): ...        # 现 flash_decoding
 class MLADecode(AttentionOp): ...            # MLA decode 路径
