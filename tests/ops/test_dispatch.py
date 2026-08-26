@@ -23,7 +23,12 @@ from lite_llama.kernels.ops import (
     ShapeRequirement,
     dispatch,
 )
-from lite_llama.kernels.ops.dispatch import dtype_label, resolve_target, set_perf_provider
+from lite_llama.kernels.ops.dispatch import (
+    dtype_label,
+    op_backend_env,
+    resolve_target,
+    set_perf_provider,
+)
 from lite_llama.platform.spec import PlatformInfo
 
 A10 = PlatformInfo("cuda", 8, 6, "NVIDIA A10")
@@ -80,6 +85,7 @@ def external(name: str, **over) -> KernelSpec:
 def _no_env_overrides(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("LITE_LLAMA_FORCE_BACKEND", raising=False)
     monkeypatch.delenv("LITE_LLAMA_KERNEL_TRACE", raising=False)
+    monkeypatch.delenv(op_backend_env("test.op"), raising=False)
 
 
 class TestRegistry:
@@ -279,6 +285,36 @@ class TestForcedBackend:
         monkeypatch.setenv("LITE_LLAMA_FORCE_BACKEND", "x")
         sel = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         assert sel.spec.name == "x/a"
+
+    def test_op_id_becomes_an_env_key(self) -> None:
+        # Dots are not legal in a shell variable name, so they become '_'.
+        assert op_backend_env("attention.decode") == "LITE_LLAMA_ATTENTION_DECODE_BACKEND"
+        assert op_backend_env("linear") == "LITE_LLAMA_LINEAR_BACKEND"
+
+    def test_per_op_env_pins_just_that_op(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        reg = make_reg(native(), external("x/a"))
+        reg.register(native(name="native/other", op="other.op"))
+        monkeypatch.setenv(op_backend_env("test.op"), "x")
+        assert dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg).spec.name == "x/a"
+        # The neighbouring op is untouched — that separation is the whole point
+        # of having per-op keys next to the global one.
+        other = dispatch("other.op", dtype="bf16", platform_info=A10, registry=reg)
+        assert other.spec.name == "native/other"
+
+    def test_per_op_env_beats_the_global_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Narrower wins: the run says "x everywhere", the op says "native here".
+        reg = make_reg(native(), external("x/a", priority=99))
+        monkeypatch.setenv("LITE_LLAMA_FORCE_BACKEND", "x")
+        monkeypatch.setenv(op_backend_env("test.op"), "native")
+        sel = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        assert sel.spec.name == "native/floor"
+
+    def test_backend_argument_beats_every_env_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        reg = make_reg(native(), external("x/a", priority=99))
+        monkeypatch.setenv("LITE_LLAMA_FORCE_BACKEND", "x")
+        monkeypatch.setenv(op_backend_env("test.op"), "x")
+        sel = dispatch("test.op", dtype="bf16", backend="native", platform_info=A10, registry=reg)
+        assert sel.spec.name == "native/floor"
 
     def test_forcing_a_missing_backend_fails_loud(self) -> None:
         reg = make_reg(native())

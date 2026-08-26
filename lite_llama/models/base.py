@@ -133,7 +133,7 @@ class Attention(nn.Module):
             xk, _ = skip_rmsnorm(xk, None, self.k_norm_weight, self.rms_norm_eps)
 
         cos, sin = position_embeddings
-        xq, xk = rope_emb_forward(xq, xk, cos, sin, batch_size, seq_len)
+        xq, xk = rope_emb_forward(xq, xk, cos, sin)
         return xq, xk, xv
 
     def forward(

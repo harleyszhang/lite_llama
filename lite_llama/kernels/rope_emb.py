@@ -10,7 +10,7 @@ copied out and back, which is what keeps the fused QKV projection
 (:class:`~lite_llama.modules.linear.QKVParallelLinear`) a net win.
 
 Usage:
-    q, k = rope_emb_forward(q, k, cos, sin, batch_size, seq_len)
+    q, k = rope_emb_forward(q, k, cos, sin)
 """
 
 import triton
@@ -30,7 +30,6 @@ def _triton_rope_emb(
     sin_b_stride,
     sin_s_stride,
     sl,
-    bs: tl.constexpr,
     n_qh: tl.constexpr,
     n_kh: tl.constexpr,
     hd: tl.constexpr,
@@ -99,18 +98,29 @@ def _rows_are_contiguous(tensor) -> bool:
     return tensor.stride(2) == 1 and tensor.stride(1) == tensor.shape[2]
 
 
-def rope_emb_forward(q, k, cos, sin, batch_size, seq_len):
-    """
-    q: (batch_size * seq_len, n_q_heads, head_dim)
-    k: (batch_size * seq_len, n_k_heads, head_dim)
-    cos, sin: (batch_size, seq_len, head_dim)
+def rope_emb_forward(q, k, cos, sin):
+    """Rotate ``q`` and ``k`` by the positions encoded in ``cos``/``sin``.
 
-    q and k are rotated in place and returned; a tensor whose heads are not adjacent
-    within a row is materialised first, in which case the copy is what comes back.
+    Args:
+        q: ``(batch_size * seq_len, n_q_heads, head_dim)`` queries.
+        k: ``(batch_size * seq_len, n_k_heads, head_dim)`` keys.
+        cos: ``(batch_size, seq_len, head_dim)`` rotation table. The batch and
+            sequence geometry the kernel indexes with comes from here rather
+            than from separate arguments: passing it twice only creates a way
+            for the two to disagree, and the kernel would read ``cos`` with the
+            caller's numbers either way.
+        sin: Same shape as ``cos``.
+
+    Returns:
+        ``(q, k)`` rotated in place; a tensor whose heads are not adjacent
+        within a row is materialised first, in which case the copy is what
+        comes back.
     """
     N, n_qh, HEAD_DIM = q.shape
     _, n_kh, _ = k.shape
-    assert batch_size * seq_len == N
+    batch_size, seq_len = cos.shape[0], cos.shape[1]
+    if batch_size * seq_len != N:
+        raise ValueError(f"cos/sin describe {batch_size}x{seq_len} positions but q has {N} tokens")
 
     pad_hd = triton.next_power_of_2(HEAD_DIM)
     pad_n_qh = triton.next_power_of_2(n_qh)
@@ -139,7 +149,6 @@ def rope_emb_forward(q, k, cos, sin, batch_size, seq_len):
         sin.stride(0),
         sin.stride(1),
         seq_len,
-        batch_size,
         n_qh,
         n_kh,
         HEAD_DIM,

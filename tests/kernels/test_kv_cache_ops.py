@@ -6,7 +6,7 @@ attention that reads the cache several layers later. Neither has a natural
 "looks wrong" signature.
 
 * ``update_kv_buffer`` scatters freshly computed K/V rows into the pool:
-  K lands in the first ``num_kv_heads`` rows of ``KV_Buffer[Select_Index[i]]``
+  K lands in the first ``num_kv_heads`` rows of ``kv_buffer[select_index[i]]``
   and V in the second half. The rows it must *not* touch matter as much as the
   ones it writes, so untouched rows are asserted too.
 * ``update_kv_index`` records where a token landed:
@@ -51,7 +51,7 @@ def test_scatter_writes_selected_rows(num_tokens, num_kv_heads, head_dim):
 
 
 def test_scatter_leaves_other_rows_untouched():
-    """Rows outside ``Select_Index`` must keep their previous contents.
+    """Rows outside ``select_index`` must keep their previous contents.
 
     A kernel that wrote a whole block instead of the selected rows would still
     pass the positive assertion above while trampling a neighbour's history.
