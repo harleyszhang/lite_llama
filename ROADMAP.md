@@ -213,7 +213,8 @@ kernels/
     spec.py  registry.py  dispatch.py  interfaces.py
   backends/       # 能算什么:一个后端一个模块,纯数据(KernelSpec 行)
     native.py     # 保底行 + golden 基准,target 直指上面的 kernel 模块
-    flashinfer.py  deepgemm.py  tileops.py  ...   # v0.9 外部后端,import 失败即 available()=False
+    flashinfer.py  deepgemm.py  tileops.py  flashmla.py  deepep.py   # v0.9 外部后端
+    probe.py      # 装没装 + 怎么装:available() 探测 + 安装配方(BackendInstall)
 ```
 **刻意不做的事**:不建 `impls/` 这类中间目录,也不写转发适配器。KernelSpec 的 `target` 是 `"module:attr"` 字符串,直接指向真实 kernel 函数,所以 `modules/attention.py` 里读到的仍是 `flash_attention2_no_pad` / `flash_decoding` 这种一眼可辨的算子名,而不是某个包装层。代价是 kernel 的公开签名必须干净——例如 `flash_attention2_no_pad` 原先要求调用方自己乘 `log2(e)`,这个 kernel 私有约定已下沉到 wrapper 内部,契约统一成 plain `1/sqrt(d)`。
 
@@ -250,7 +251,8 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
 
 - **强制后端开关**:对标 sglang `SGLANG_FORCE_FUSED_OP_BACKEND`,二分数值 bug 时把整模型钉到 native。两级粒度,越窄越优先——`backend=` 参数 > per-op `LITE_LLAMA_<OP>_BACKEND`(如 `LITE_LLAMA_ATTENTION_DECODE_BACKEND`) > 全局 `LITE_LLAMA_FORCE_BACKEND`。per-op 才是实际需要的粒度:一台机器可能想让 attention 走 flashinfer 而 linear 留在 native Triton GEMM。
 - **调用 trace**(对标 sglang `enable_fused_op_trace`):记录每次调用的 (op, backend, shape/dtype),**直接产出 ops-collector(地基 3 的 collect 阶段)要的真实 shape 清单**。
-- 外部后端各自占一个 `kernels/backends/<backend>.py`(只有 KernelSpec 行,没有实现代码),全部 optional extra,永不进核心依赖。
+- 外部后端各自占一个 `kernels/backends/<backend>.py`(只有 KernelSpec 行,没有实现代码),永不进核心依赖。**探测用真 import 而非 `find_spec`**:这些库是编译扩展或 JIT,"目录在"与"这张卡上能加载"是两个问题,dispatch 只关心后者(`backends/probe.py`)。
+- **安装方式不是一句话**:五个后端里只有 flashinfer 是 wheel(`lite-llama[flashinfer]`),TileOPs 的 extra 只装得动前置 TileLang,DeepGEMM / FlashMLA / DeepEP 是带 submodule 的源码编译(DeepEP 还要先装 NVSHMEM)。所以后三者**不给 extra**——给一个装不了东西的 extra 比不给更误导——安装配方作为数据写在各自模块的 `INSTALL` 里,由 `survey()` 打出来。
 
 ### 落地顺序
 
