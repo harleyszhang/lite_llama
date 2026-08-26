@@ -120,22 +120,23 @@ batch-shape stable: 7/9; on a tie: [('batch6', 4), ('mixed', 1)]
 
 ![tensor parallel](./images/tensor_parallel.gif)
 
-所以每个集合通信都会把自己的 op 与 payload 报给一本账（`lite_llama/distributed/collective_log.py`）：
+所以每个集合通信都会把自己的 op 与 payload 报给一本账（`lite_llama/tools/observability/collective_stats.py`）。记账放在 `tools/observability/` 而不是 `distributed/` 里：`distributed/` 负责跑线路，不负责给线路算账，这样这个包本身不带任何上报机器。
 
 ```python
-from lite_llama.distributed import record_collectives
+from lite_llama.tools.observability import Collective, CollectiveStats
 
-with record_collectives() as ledger:
+with CollectiveStats.collect() as stats:
     engine.step()
-print(ledger.report())
-assert ledger.tally("all_gather").nbytes < 1024   # 关于流量的一句主张
+print(stats.report())
+assert stats.tally(Collective.ALL_GATHER).nbytes < 1024   # 关于流量的一句主张
 ```
 
-四个设计点：
+五个设计点：
 
-- **窗口式，不是全局的。** 没人开窗时模块级的 `_OPEN` 是空 tuple，埋点的代价就是这一个 `if`。测量因此天然是**有作用域的**——问的是"这一步花了多少"，而不是"进程启动以来累计多少"。
+- **窗口式，不是全局的。** 没人开窗时那个 ContextVar 是空 tuple，埋点的代价就是这一个 `if`。测量因此天然是**有作用域的**——问的是"这一步花了多少"，而不是"进程启动以来累计多少"。
+- **打开的窗口存在 `ContextVar` 里，不是模块全局变量里。** 于是一个窗口只属于开它的那个线程和 asyncio task。DP 副本是并发推进的（`async_data_parallel.py`），窗口若共享，每个副本的 per-step 测量都会把兄弟副本的流量算进来——得到的是一个看起来完全合理、但恰好错了 DP 倍的数字。
 - **窗口可嵌套，事件计入所有打开的窗口。** per-step 窗口套在 whole-run 窗口里，一趟就同时拿到两份数据，调用方不需要做减法。
-- **plane 是 op 的属性，不是调用点的属性。** `broadcast_object` 是控制面（pickle 对象走 gloo），其余是数据面（张量走 NCCL）。二者是设计上互相交换的关系——花两个标量的控制流量换掉一次词表规模的 gather——所以按调用点打标签迟早会漂。
+- **op 与 plane 是枚举，不是字符串。** 打错一个 op 名，字符串写法会安静地开出一行新账，让本该记录的那一行报 0——而"报 0"恰恰是这个模块唯一要回答的问题（这个通信到底有没有发生）。`Collective` 是封闭集合，plane 由 `Collective.plane` 给出：`broadcast_object` 是控制面（pickle 对象走 gloo），其余是数据面（张量走 NCCL）。二者是设计上互相交换的关系——花两个标量的控制流量换掉一次词表规模的 gather——所以按调用点打标签迟早会漂。报告、断言和 GIF 面板都从这一处取 plane。
 - **记账点在 world-of-one 早退之后。** 单卡下的 no-op collective 不搬字节，记它就是在量调用点而不是量线路。`broadcast_object_tp` 的字节数需要第二次 pickle，所以只在有窗口打开时才算，并且**在广播之后**算——这样 follower 报的数就是 driver 发出去的数。
 
 实测一次真实的 tp=2 运行（Qwen2.5-1.5B-Instruct，4 条 prompt，24 步，rank 0 视角）：
@@ -152,7 +153,7 @@ total                         1464     29.2 MB   (data 29.2 MB, control 10.0 KB)
 
 两个读法。**层拿走了全部流量**：28 层各两次 row-parallel all-reduce，一步 decode 171 KB，一步 prefill 22.7 MB。**采样没有**：一行一步 12 B（`all_reduce_max` + `all_gather`），而同一行如果 gather logits 是 148.4 KB——**12,661 倍**。控制面全程 10 KB，也就是说"plan 走 gloo"这个选择的代价在总账里是 0.03%。
 
-这本账也让一类新的断言成为可能（`tests/distributed/test_collective_log.py`）：把词表从 4096 放大到 32768，采样流量必须**一个字节都不变**。这是区分"分片采样"和"gather 后采样"的唯一检查。
+这本账也让一类新的断言成为可能（`tests/tools/test_collective_stats.py`）：把词表从 4096 放大到 32768，采样流量必须**一个字节都不变**。这是区分"分片采样"和"gather 后采样"的唯一检查。
 
 GIF 由 `scripts/gen_collective_gif.py` 生成，驱动的是真实 tp=2 引擎，每个字节都是量出来的（唯一一条算术而非测量的是"if gathered"那一行，它描述的是另一种实现）。
 
@@ -162,7 +163,7 @@ GIF 由 `scripts/gen_collective_gif.py` 生成，驱动的是真实 tp=2 引擎�
 | --- | ---: | --- |
 | `tests/distributed/test_tp_control_plane.py` | 7 | CPU（gloo 控制面 + 存活检测） |
 | `tests/distributed/test_parallel_sampling.py` | 9 | CPU（分布式采样数学） |
-| `tests/distributed/test_collective_log.py` | 19 | CPU（记账窗口 + gloo 双 rank + 词表无关性） |
+| `tests/tools/test_collective_stats.py` | 20 | CPU（记账窗口 + 并发隔离 + gloo 双 rank + 词表无关性） |
 | `tests/distributed/test_vocab_parallel.py` | 13 | CPU + GPU（vocab 分片；2 个需 4 卡） |
 | `tests/distributed/test_qkv_parallel.py` | 17 | CPU（段级切分与权重映射） |
 | `tests/distributed/test_tp_engine.py` | 9 | GPU（需 2 卡，端到端） |

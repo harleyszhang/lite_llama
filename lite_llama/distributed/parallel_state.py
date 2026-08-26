@@ -19,8 +19,8 @@ Each replica gets *two* groups over the same ranks: an NCCL one for the data pla
 (activations, logits) and a gloo one for the control plane
 (:func:`broadcast_object_tp`), because the thing a driver rank has to tell its workers
 is a Python object, not a device tensor. Every collective here reports its payload to
-:mod:`lite_llama.distributed.collective_log`, so the traffic a step costs is a number
-a test or a profile can read instead of an intuition.
+:mod:`lite_llama.tools.observability.collective_stats`, so the traffic a step costs is
+a number a test or a profile can read instead of an intuition.
 
 Usage:
     init_parallel(global_rank=3, tp_size=2, dp_size=2)   # replica 1, tp rank 1
@@ -36,8 +36,8 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
+from ..tools.observability import Collective, CollectiveStats
 from ..utils.logger import get_logger
-from .collective_log import is_recording, record_collective
 
 _log = get_logger(__name__)
 
@@ -236,7 +236,7 @@ def divide(a: int, b: int, what: str = "") -> int:
 # --------------------------------------------------------------------------- #
 # Collectives
 #
-# Each one reports to the collective ledger *after* the world-of-one early return:
+# Each one reports to :class:`CollectiveStats` *after* the world-of-one early return:
 # a no-op collective moves no bytes, so counting it would measure call sites rather
 # than traffic.
 # --------------------------------------------------------------------------- #
@@ -250,7 +250,7 @@ def all_reduce_tp(tensor: torch.Tensor) -> torch.Tensor:
     if _TP_WORLD_SIZE <= 1:
         return tensor
     dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=_TP_GROUP)
-    record_collective("all_reduce", _payload(tensor))
+    CollectiveStats.record(Collective.ALL_REDUCE, _payload(tensor))
     return tensor
 
 
@@ -266,7 +266,7 @@ def all_reduce_max_tp(tensor: torch.Tensor) -> torch.Tensor:
     if _TP_WORLD_SIZE <= 1:
         return tensor
     dist.all_reduce(tensor, op=dist.ReduceOp.MAX, group=_TP_GROUP)
-    record_collective("all_reduce_max", _payload(tensor))
+    CollectiveStats.record(Collective.ALL_REDUCE_MAX, _payload(tensor))
     return tensor
 
 
@@ -284,7 +284,7 @@ def all_gather_tp(tensor: torch.Tensor, dim: int = -1) -> torch.Tensor:
     tensor = tensor.contiguous()
     parts = [torch.empty_like(tensor) for _ in range(_TP_WORLD_SIZE)]
     dist.all_gather(parts, tensor, group=_TP_GROUP)
-    record_collective("all_gather", _payload(tensor))
+    CollectiveStats.record(Collective.ALL_GATHER, _payload(tensor))
     return torch.cat(parts, dim=dim)
 
 
@@ -303,7 +303,7 @@ def broadcast_tp(tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
     # ``src`` is the *global* rank of the broadcast root within the TP group.
     global_src = _DP_RANK * _TP_WORLD_SIZE + src
     dist.broadcast(tensor, src=global_src, group=_TP_GROUP)
-    record_collective("broadcast", _payload(tensor))
+    CollectiveStats.record(Collective.BROADCAST, _payload(tensor))
     return tensor
 
 
@@ -328,11 +328,11 @@ def broadcast_object_tp(obj: Any = None, src: int = 0) -> Any:
     payload = [obj]
     global_src = _DP_RANK * _TP_WORLD_SIZE + src
     dist.broadcast_object_list(payload, src=global_src, group=_TP_CPU_GROUP)
-    # Sizing a plan means pickling it a second time, so it happens only while a ledger
+    # Sizing a plan means pickling it a second time, so it happens only while a window
     # is open: observability may cost something when asked for, never when not. Sized
     # after the broadcast so a follower reports the same bytes the driver sent.
-    if is_recording():
-        record_collective("broadcast_object", len(pickle.dumps(payload[0])))
+    if CollectiveStats.collecting():
+        CollectiveStats.record(Collective.BROADCAST_OBJECT, len(pickle.dumps(payload[0])))
     return payload[0]
 
 
@@ -356,5 +356,5 @@ def all_reduce_min(value: int) -> int:
     device = torch.device("cuda", torch.cuda.current_device()) if on_gpu else None
     tensor = torch.tensor([value], dtype=torch.int64, device=device)
     dist.all_reduce(tensor, op=dist.ReduceOp.MIN, group=_TP_GROUP)
-    record_collective("all_reduce_min", _payload(tensor))
+    CollectiveStats.record(Collective.ALL_REDUCE_MIN, _payload(tensor))
     return int(tensor.item())

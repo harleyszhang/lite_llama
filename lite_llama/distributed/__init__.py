@@ -1,6 +1,10 @@
-"""Parallelism state: the DP x TP rank grid, the collectives TP needs, and their bill."""
+"""Parallelism state: the DP x TP rank grid and the collectives TP needs.
 
-from .collective_log import CollectiveLedger, Tally, human_bytes, record_collectives
+What those collectives cost is counted by
+:mod:`lite_llama.tools.observability.collective_stats`, which is where the reporting
+lives — this package runs the wire, it does not account for it.
+"""
+
 from .parallel_state import (
     all_reduce_min,
     all_reduce_tp,
@@ -19,8 +23,6 @@ from .parallel_state import (
 )
 
 __all__ = [
-    "CollectiveLedger",
-    "Tally",
     "all_reduce_min",
     "all_reduce_tp",
     "broadcast_object_tp",
@@ -33,8 +35,6 @@ __all__ = [
     "get_tp_world_size",
     "get_world_size",
     "grid_coordinates",
-    "human_bytes",
     "init_parallel",
     "init_tensor_parallel",
-    "record_collectives",
 ]
