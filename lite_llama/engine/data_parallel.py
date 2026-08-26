@@ -297,6 +297,7 @@ def _dp_worker(
     engine_kwargs: dict[str, Any],
     max_num_seqs: int,
     max_num_batched_tokens: int,
+    enable_prefix_cache: bool,
     request_queue: mp.Queue,
     result_queue: mp.Queue,
 ) -> None:
@@ -333,6 +334,9 @@ def _dp_worker(
             minus ``device``.
         max_num_seqs: Requests this replica may keep in flight.
         max_num_batched_tokens: Padded token budget for one prefill group.
+        enable_prefix_cache: Leader-only, and separate from ``engine_kwargs`` for
+            that reason: the prefix cache is a scheduler concern, and a follower
+            has no scheduler to give it to.
         request_queue: Leader-only inbound queue; followers are handed a dummy.
         result_queue: Where ``("ready" | "done" | "error" | "delta" | ...
             | "failed", ...)`` messages go back.
@@ -356,6 +360,7 @@ def _dp_worker(
                 device=device,
                 max_num_seqs=max_num_seqs,
                 max_num_batched_tokens=max_num_batched_tokens,
+                enable_prefix_cache=enable_prefix_cache,
                 **engine_kwargs,
             )
         else:
@@ -402,6 +407,10 @@ class DataParallelEngine:
         max_num_seqs: Requests each replica keeps in flight. Per replica, not in
             total: DP multiplies concurrency along with throughput.
         max_num_batched_tokens: Padded token budget for one prefill group.
+        enable_prefix_cache: Give every replica a prefix cache. Each one is *local*:
+            replicas share no KV, so a prompt whose prefix was prefilled on replica 0
+            hits nothing on replica 1. That is what ``load_balancer="cache_aware"``
+            exists to fix, and the two are meant to be turned on together.
         **engine_kwargs: Forwarded verbatim to each replica's :class:`LLM`
             (``max_seq_len``, ``quantization``, ``use_cuda_graph``, ...). ``device``
             is not accepted: it is derived from the replica's position in the grid.
@@ -420,6 +429,7 @@ class DataParallelEngine:
         load_balancer: str = "round_robin",
         max_num_seqs: int = DEFAULT_MAX_NUM_SEQS,
         max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS,
+        enable_prefix_cache: bool = False,
         **engine_kwargs: Any,
     ) -> None:
         import torch
@@ -483,6 +493,7 @@ class DataParallelEngine:
                     self._engine_kwargs,
                     max_num_seqs,
                     max_num_batched_tokens,
+                    enable_prefix_cache,
                     self._request_queues[global_rank // tensor_parallel_size],
                     self._result_queue,
                 ),
@@ -560,23 +571,57 @@ class DataParallelEngine:
             self._tokenizer = LLMEngine._load_tokenizer(self.model)
         return self._tokenizer
 
-    def _estimate_tokens(self, prompts: list[str]) -> list[int]:
-        """Token count per prompt — the unit a token-aware balancer needs.
+    def _tokenize_for_routing(self, prompts: list[str]) -> list[list[int]] | None:
+        """Prompt token ids for the balancer, or ``None`` if it reads neither ids nor lengths.
 
         Prompt *characters* are not prompt tokens: the ratio swings from ~1 for CJK to
         ~6 for whitespace-heavy code, so routing on ``len(prompt)`` silently mis-sizes
         every non-English batch. The tokenizer is the only honest answer, and it is
         called once for the whole batch.
 
-        Returns zeros — and never touches the tokenizer — when the configured policy
-        does not read the estimate, so ``round_robin`` stays free.
-        """
-        if not self._balancer.needs_token_estimate:
-            return [0] * len(prompts)
-        encoded = self.tokenizer(prompts, add_special_tokens=True)["input_ids"]
-        return [len(ids) for ids in encoded]
+        One pass serves both kinds of token-aware policy — a length is ``len(ids)`` — so
+        there is never a reason to tokenise twice. ``round_robin`` reads neither, and for
+        it this returns ``None`` without ever touching the tokenizer, which is also what
+        keeps a router that never needs one from loading it at all.
 
-    def _route(self, estimates: list[int]) -> list[list[int]]:
+        The ids must agree with what the replica itself would produce, because
+        ``cache_aware`` hashes them to guess what that replica already has cached; this
+        uses the same tokenizer and the same ``add_special_tokens=True`` as
+        :class:`~lite_llama.engine.continuous_engine.ContinuousBatchingEngine` does on
+        admission.
+        """
+        balancer = self._balancer
+        if not (balancer.needs_token_estimate or balancer.needs_token_ids):
+            return None
+        encoded = self.tokenizer(prompts, add_special_tokens=True)["input_ids"]
+        return [list(ids) for ids in encoded]
+
+    def _select(self, token_ids: list[int] | None) -> int:
+        """One routing decision — the only place a balancer's arguments are assembled.
+
+        Both entry points (batched :meth:`generate` and the async engine's per-request
+        stream) route through here so a new policy cannot be wired correctly in one and
+        starved in the other.
+
+        Args:
+            token_ids: The prompt's tokens, or ``None`` when the policy asked for
+                neither ids nor lengths.
+
+        Raises:
+            ValueError: The policy reads ids but none were supplied. Routing on ``None``
+                would silently degrade ``cache_aware`` to ``total_tokens`` — every
+                request a cache miss, with nothing in the output to say so.
+        """
+        if token_ids is None and self._balancer.needs_token_ids:
+            raise ValueError(
+                f"{type(self._balancer).__name__} routes on prompt tokens, but none were "
+                "supplied; _tokenize_for_routing must run first"
+            )
+        return self._balancer.select(
+            estimated_tokens=0 if token_ids is None else len(token_ids), token_ids=token_ids
+        )
+
+    def _route(self, num_prompts: int, token_ids: list[list[int]] | None = None) -> list[list[int]]:
         """Ask the balancer which replica each prompt goes to.
 
         Returns one index list per replica: replica ``r`` should generate
@@ -585,13 +630,23 @@ class DataParallelEngine:
         batched forward, while the *choice* stays a per-request policy — so swapping in
         a load-aware balancer changes the split without touching this code.
 
+        Decisions are made in order and each one is told to the balancer immediately, so
+        a load-aware policy sees the prompts it has already placed in this same batch
+        rather than routing all of them against an idle pool.
+
         Args:
-            estimates: Prompt lengths in tokens, from :meth:`_estimate_tokens`.
+            num_prompts: How many prompts to place.
+            token_ids: Per-prompt tokens from :meth:`_tokenize_for_routing`.
+
+        Raises:
+            ValueError: ``token_ids`` was given but does not have ``num_prompts``
+                entries, which would misalign every decision after the first gap.
         """
+        if token_ids is not None and len(token_ids) != num_prompts:
+            raise ValueError(f"expected {num_prompts} token id lists, got {len(token_ids)}")
         buckets: list[list[int]] = [[] for _ in range(self.data_parallel_size)]
-        for index, estimated_tokens in enumerate(estimates):
-            replica = self._balancer.select(estimated_tokens=estimated_tokens)
-            buckets[replica].append(index)
+        for index in range(num_prompts):
+            buckets[self._select(None if token_ids is None else token_ids[index])].append(index)
         return buckets
 
     def generate(
@@ -624,8 +679,8 @@ class DataParallelEngine:
         if not prompts:
             return []
 
-        estimates = self._estimate_tokens(prompts)
-        buckets = self._route(estimates)
+        token_ids = self._tokenize_for_routing(prompts)
+        buckets = self._route(len(prompts), token_ids)
         dispatched = 0
         for replica, indices in enumerate(buckets):
             if not indices:
@@ -660,7 +715,8 @@ class DataParallelEngine:
         # too: skipping it would leak in-flight load forever.
         for replica, indices in enumerate(buckets):
             for index in indices:
-                self._balancer.release(replica, estimated_tokens=estimates[index])
+                estimate = 0 if token_ids is None else len(token_ids[index])
+                self._balancer.release(replica, estimated_tokens=estimate)
 
         if failure is not None:
             raise failure

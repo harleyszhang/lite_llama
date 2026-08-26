@@ -78,6 +78,11 @@ class AsyncDataParallelEngine(DataParallelEngine):
         max_num_seqs: Requests each replica keeps in flight. Per replica: DP
             multiplies concurrency along with throughput.
         max_num_batched_tokens: Padded token budget for one prefill group.
+        enable_prefix_cache: Give every replica a prefix cache. Pairs with
+            ``load_balancer="cache_aware"``, which is what stops the caches from
+            being ``data_parallel_size`` unrelated ones — and where the online path
+            has the advantage over the batch API, since requests arrive over time
+            and a prefix populated by one can still be hot for the next.
         **engine_kwargs: Forwarded verbatim to each replica's engine, as for
             :class:`~lite_llama.engine.data_parallel.DataParallelEngine`.
             ``device`` is not accepted; it is derived from the grid position.
@@ -91,6 +96,7 @@ class AsyncDataParallelEngine(DataParallelEngine):
         load_balancer: str = "round_robin",
         max_num_seqs: int = DEFAULT_MAX_NUM_SEQS,
         max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS,
+        enable_prefix_cache: bool = False,
         **engine_kwargs: Any,
     ) -> None:
         super().__init__(
@@ -100,6 +106,7 @@ class AsyncDataParallelEngine(DataParallelEngine):
             load_balancer=load_balancer,
             max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
+            enable_prefix_cache=enable_prefix_cache,
             **engine_kwargs,
         )
         self._streams: dict[str, _RequestStream] = {}
@@ -150,9 +157,7 @@ class AsyncDataParallelEngine(DataParallelEngine):
             self._streams.clear()
         for stream in streams:
             stream.push(None)
-        await asyncio.get_running_loop().run_in_executor(
-            None, DataParallelEngine.shutdown, self
-        )
+        await asyncio.get_running_loop().run_in_executor(None, DataParallelEngine.shutdown, self)
 
     async def __aenter__(self) -> AsyncDataParallelEngine:
         self.start()
@@ -203,8 +208,10 @@ class AsyncDataParallelEngine(DataParallelEngine):
         with self._lock:
             self._streams[request_id] = stream
 
-        estimate = self._estimate_tokens([prompt])[0]
-        replica = self._balancer.select(estimated_tokens=estimate)
+        token_ids = self._tokenize_for_routing([prompt])
+        prompt_ids = None if token_ids is None else token_ids[0]
+        estimate = 0 if prompt_ids is None else len(prompt_ids)
+        replica = self._select(prompt_ids)
         self._request_queues[replica].put(("add", request_id, prompt, sampling_params))
         try:
             while True:
