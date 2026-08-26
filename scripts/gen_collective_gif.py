@@ -13,7 +13,7 @@ Nothing here is staged. The engine is a real
 :class:`~lite_llama.engine.continuous_engine.ContinuousBatchingEngine` with
 ``tensor_parallel_size=2``, so this process *is* rank 0 and the follower is a real
 process on the second GPU; every number comes from a
-:func:`~lite_llama.distributed.record_collectives` window wrapped around
+:meth:`~lite_llama.tools.observability.CollectiveStats.collect` window wrapped around
 :meth:`step`, nested inside a window over the whole run. The one figure that is
 arithmetic rather than measurement is the "if gathered" line, which is what one rank
 would contribute to an all-gather of the logits — the alternative implementation, not
@@ -35,9 +35,15 @@ from PIL import Image, ImageDraw, ImageFont
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from lite_llama.distributed import Tally, human_bytes, record_collectives  # noqa: E402
 from lite_llama.engine.continuous_engine import ContinuousBatchingEngine  # noqa: E402
 from lite_llama.engine.sampler import SamplingParams  # noqa: E402
+from lite_llama.tools.observability import (  # noqa: E402
+    Collective,
+    CollectiveStats,
+    Plane,
+    Tally,
+    human_bytes,
+)
 from lite_llama.utils.prompt_templates import get_prompter  # noqa: E402
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
@@ -57,7 +63,7 @@ PROMPTS = [
 #: Ops that exist only because the vocabulary is sharded — the sampler's own traffic.
 #: ``all_reduce`` is excluded because the layers use it too, and the claim being shown
 #: is about sampling alone.
-VOCAB_OPS = ("all_reduce_max", "all_gather")
+VOCAB_OPS = (Collective.ALL_REDUCE_MAX, Collective.ALL_GATHER)
 
 #: Bytes per logit for the "if the logits were gathered" comparison. The checkpoints
 #: here are fp16, and understating the alternative is the right way round: the claim is
@@ -83,19 +89,23 @@ class Frame:
     phase: str
     sampled_rows: int = 0
     rows: list[tuple[str, str, int, str]] = field(default_factory=list)
-    step_tallies: dict[str, Tally] = field(default_factory=dict)
-    run_tallies: dict[str, Tally] = field(default_factory=dict)
+    step_tallies: dict[Collective, Tally] = field(default_factory=dict)
+    run_tallies: dict[Collective, Tally] = field(default_factory=dict)
     step_bytes: int = 0
     run_bytes: int = 0
     vocab_bytes: int = 0
     gathered_bytes: int = 0
 
 
-def _plane(op: str) -> tuple[str, tuple[int, int, int]]:
-    return ("control", CONTROL_FG) if op == "broadcast_object" else ("data", DATA_FG)
+def _colour(op: Collective) -> tuple[int, int, int]:
+    """One colour per plane, so the two budgets read apart at a glance.
+
+    Which plane an op is on comes from the op itself; this only picks the ink.
+    """
+    return CONTROL_FG if op.plane is Plane.CONTROL else DATA_FG
 
 
-def _vocab_bytes(tallies: dict[str, Tally]) -> int:
+def _vocab_bytes(tallies: dict[Collective, Tally]) -> int:
     return sum(tallies.get(op, Tally()).nbytes for op in VOCAB_OPS)
 
 
@@ -131,13 +141,13 @@ def record(model_dir: str, max_gen_len: int) -> tuple[list[Frame], str]:
 
     frames: list[Frame] = []
     try:
-        with record_collectives() as run:
+        with CollectiveStats.collect() as run:
             while engine.has_unfinished_requests():
                 # Exact, not a guess: a request with no output tokens can only be
                 # advanced by a prefill pass.
                 phase = "prefill" if any(not r.output_token_ids for r in requests) else "decode"
                 settled = {r.request_id for r in requests if r.is_finished}
-                with record_collectives() as step:
+                with CollectiveStats.collect() as step:
                     advanced = engine.step()
                 # Rows the sampler saw: those that kept a token, plus those whose token
                 # was a stop token — sampled all the same, then dropped as model
@@ -217,10 +227,10 @@ def _draw_ledger(draw, x0: float, y0: float, width: float, frame: Frame, fonts) 
     bar_x, bar_w = x0 + 12, width - 24
     scale = max((tally.nbytes for tally in frame.step_tallies.values()), default=0)
     for op in frame.run_tallies:
-        plane, colour = _plane(op)
+        colour = _colour(op)
         step_bytes = frame.step_tallies.get(op, Tally()).nbytes
         run_bytes = frame.run_tallies[op].nbytes
-        draw.text((bar_x, y), f"{op:<17s}{plane:<8s}", fill=colour, font=body)
+        draw.text((bar_x, y), f"{op:<17s}{op.plane:<8s}", fill=colour, font=body)
         draw.text(
             (bar_x + 300, y),
             f"{human_bytes(step_bytes):>9s} /{human_bytes(run_bytes):>9s}",
