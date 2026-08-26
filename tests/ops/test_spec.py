@@ -154,9 +154,9 @@ class TestTorchFreeRegistration:
                 names = [node.module or ""]
             else:
                 continue
-            assert not any(
-                n.split(".")[0] in {"torch", "triton"} for n in names
-            ), f"ops/spec.py must stay torch-free, found import of {names}"
+            assert not any(n.split(".")[0] in {"torch", "triton"} for n in names), (
+                f"ops/spec.py must stay torch-free, found import of {names}"
+            )
 
     def test_capability_composes_with_platform(self) -> None:
         """The spec tier reuses platform's requirement type — one vocabulary."""
