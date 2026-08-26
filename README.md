@@ -261,14 +261,14 @@ That last claim is not an argument — it is measured. Every collective reports 
 ![tensor parallel](./docs/images/tensor_parallel.gif)
 
 ```python
-from lite_llama.distributed import record_collectives
+from lite_llama.tools.observability import CollectiveStats
 
-with record_collectives() as ledger:
+with CollectiveStats.collect() as stats:
     engine.step()
-print(ledger.report())          # per-op calls and bytes, split data / control plane
+print(stats.report())          # per-op calls and bytes, split data / control plane
 ```
 
-Recording is windowed, so the default path costs one `if`; windows nest, so a per-step ledger inside a whole-run ledger comes out of a single pass. Regenerate the GIF above with `python scripts/gen_collective_gif.py` — it drives a real `tp=2` engine and every byte in it is a measurement.
+Recording is windowed, so the default path costs one `if`; windows nest, so a per-step window inside a whole-run window comes out of a single pass. Regenerate the GIF above with `python scripts/gen_collective_gif.py` — it drives a real `tp=2` engine and every byte in it is a measurement.
 
 See [docs/tensor_parallel.md](docs/tensor_parallel.md) for the design, the sharding rules (including why QKV is split per segment under GQA), and what byte-exact parity between `tp=1` and `tp=2` can and cannot assert under fp16.
 
