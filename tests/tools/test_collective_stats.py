@@ -1,6 +1,6 @@
-"""Assert what the collective ledger claims: the bytes, not the calls.
+"""Assert what the collective stats claim: the bytes, not the calls.
 
-The ledger exists to make one design decision measurable — vocabulary-parallel
+Recording exists to make one design decision measurable — vocabulary-parallel
 sampling exchanges a couple of scalars per row instead of gathering logits — so these
 tests are about *payloads*. They come in two halves. The bookkeeping half runs on
 plain CPU with no process group at all, because windowing, nesting and plane
@@ -14,24 +14,25 @@ all-gathers logits, and it is invisible in output text — a gathering sampler p
 exactly the same tokens, just slower per step as the vocabulary grows.
 
 Usage:
-    pytest tests/distributed/test_collective_log.py      # no GPU needed
+    pytest tests/tools/test_collective_stats.py      # no GPU needed
 """
 
 from __future__ import annotations
+
+import asyncio
 
 import pytest
 import torch
 
 from lite_llama.distributed import parallel_state as ps
-from lite_llama.distributed.collective_log import (
-    CollectiveLedger,
+from lite_llama.engine.sampler import global_argmax, local_vocab_offset, sharded_top_p
+from lite_llama.tools.observability import (
+    Collective,
+    CollectiveStats,
+    Plane,
     Tally,
     human_bytes,
-    is_recording,
-    record_collective,
-    record_collectives,
 )
-from lite_llama.engine.sampler import global_argmax, local_vocab_offset, sharded_top_p
 from tests.distributed.tp_harness import run_on_tp_ranks
 
 BATCH = 8
@@ -46,55 +47,55 @@ CANDIDATES = 32
 # --------------------------------------------------------------------------- #
 def test_nothing_is_recorded_until_a_window_is_open():
     """Instrumentation that is on by default is instrumentation nobody trusts to be
-    free; the disabled path must not even reach a ledger."""
-    assert not is_recording()
-    record_collective("all_reduce", 4096)  # falls on the floor
+    free; the disabled path must not even reach a stats."""
+    assert not CollectiveStats.collecting()
+    CollectiveStats.record(Collective.ALL_REDUCE, 4096)  # falls on the floor
 
-    with record_collectives() as ledger:
-        assert is_recording()
-    assert ledger.nbytes == 0
-    assert not is_recording()
+    with CollectiveStats.collect() as stats:
+        assert CollectiveStats.collecting()
+    assert stats.nbytes == 0
+    assert not CollectiveStats.collecting()
 
 
 def test_calls_and_bytes_accumulate_per_op():
-    with record_collectives() as ledger:
-        record_collective("all_reduce", 1024)
-        record_collective("all_reduce", 512)
-        record_collective("broadcast", 8)
+    with CollectiveStats.collect() as stats:
+        CollectiveStats.record(Collective.ALL_REDUCE, 1024)
+        CollectiveStats.record(Collective.ALL_REDUCE, 512)
+        CollectiveStats.record(Collective.BROADCAST, 8)
 
-    assert ledger.tally("all_reduce") == Tally(calls=2, nbytes=1536)
-    assert ledger.tally("broadcast") == Tally(calls=1, nbytes=8)
-    assert (ledger.calls, ledger.nbytes) == (3, 1544)
+    assert stats.tally(Collective.ALL_REDUCE) == Tally(calls=2, nbytes=1536)
+    assert stats.tally(Collective.BROADCAST) == Tally(calls=1, nbytes=8)
+    assert (stats.calls, stats.nbytes) == (3, 1544)
 
 
 def test_an_op_that_never_ran_reports_zero_rather_than_raising():
     """``tally(...).nbytes == 0`` is how *absence* is asserted, so it has to be a
     number: the claim "the sampler never gathers logits" should read as traffic."""
-    with record_collectives() as ledger:
-        record_collective("all_reduce", 16)
+    with CollectiveStats.collect() as stats:
+        CollectiveStats.record(Collective.ALL_REDUCE, 16)
 
-    assert ledger.tally("all_gather") == Tally(calls=0, nbytes=0)
+    assert stats.tally(Collective.ALL_GATHER) == Tally(calls=0, nbytes=0)
 
 
 def test_the_heaviest_op_is_reported_first():
     """Ordering by traffic, not by name or by call order: the first row of a report
     should be the one worth optimising."""
-    with record_collectives() as ledger:
-        record_collective("broadcast_object", 300)
-        record_collective("all_reduce", 40_000)
-        record_collective("broadcast", 4)
+    with CollectiveStats.collect() as stats:
+        CollectiveStats.record(Collective.BROADCAST_OBJECT, 300)
+        CollectiveStats.record(Collective.ALL_REDUCE, 40_000)
+        CollectiveStats.record(Collective.BROADCAST, 4)
 
-    assert list(ledger.tallies()) == ["all_reduce", "broadcast_object", "broadcast"]
+    assert list(stats.tallies()) == ["all_reduce", "broadcast_object", "broadcast"]
 
 
 def test_nested_windows_each_see_their_own_span():
-    """A per-step ledger inside a whole-run ledger, collected in one pass — which is
+    """A per-step window inside a whole-run window, collected in one pass — which is
     how the visualisation gets both without the caller subtracting anything."""
-    with record_collectives() as run:
-        record_collective("all_reduce", 100)
-        with record_collectives() as step:
-            record_collective("all_reduce", 200)
-        record_collective("all_reduce", 400)
+    with CollectiveStats.collect() as run:
+        CollectiveStats.record(Collective.ALL_REDUCE, 100)
+        with CollectiveStats.collect() as step:
+            CollectiveStats.record(Collective.ALL_REDUCE, 200)
+        CollectiveStats.record(Collective.ALL_REDUCE, 400)
 
     assert step.nbytes == 200
     assert run.nbytes == 700
@@ -102,38 +103,60 @@ def test_nested_windows_each_see_their_own_span():
 
 def test_a_window_closes_even_when_its_block_raises():
     """A failed step must not leave recording switched on for the rest of the process."""
-    with pytest.raises(RuntimeError), record_collectives():
+    with pytest.raises(RuntimeError), CollectiveStats.collect():
         raise RuntimeError("step blew up")
 
-    assert not is_recording()
+    assert not CollectiveStats.collecting()
 
 
 def test_planes_are_a_property_of_the_op():
     """Which plane a collective uses is decided by the collective, not by its caller,
     so the split cannot drift between call sites."""
-    with record_collectives() as ledger:
-        record_collective("all_reduce", 2048)  # tensors, NCCL
-        record_collective("broadcast_object", 256)  # pickled plan, gloo
+    with CollectiveStats.collect() as stats:
+        CollectiveStats.record(Collective.ALL_REDUCE, 2048)  # tensors, NCCL
+        CollectiveStats.record(Collective.BROADCAST_OBJECT, 256)  # pickled plan, gloo
 
-    assert ledger.plane_bytes("data") == 2048
-    assert ledger.plane_bytes("control") == 256
-    with pytest.raises(ValueError, match=r"data.*control"):
-        ledger.plane_bytes("nccl")
+    assert stats.bytes_on(Plane.DATA) == 2048
+    assert stats.bytes_on(Plane.CONTROL) == 256
+    with pytest.raises(ValueError, match=r"not a valid Plane"):
+        stats.bytes_on("nccl")
+
+
+def test_concurrent_tasks_do_not_share_a_window():
+    """DP replicas step concurrently, and each one's window must count only its own.
+
+    The windows live in a ContextVar, so a task opening one cannot be seen by its
+    siblings. Held as a module global instead, both windows would be open at once and
+    every replica would be billed the whole grid's traffic — a plausible number, and
+    wrong by exactly the DP degree.
+    """
+
+    async def step(nbytes: int) -> int:
+        with CollectiveStats.collect() as stats:
+            await asyncio.sleep(0)  # hand over while this window is open
+            CollectiveStats.record(Collective.ALL_REDUCE, nbytes)
+            await asyncio.sleep(0)
+        return stats.nbytes
+
+    async def concurrently() -> list[int]:
+        return list(await asyncio.gather(step(100), step(2000)))
+
+    assert asyncio.run(concurrently()) == [100, 2000]
 
 
 def test_a_report_names_every_op_and_totals_both_planes():
-    with record_collectives() as ledger:
-        record_collective("all_reduce", 1_048_576)
-        record_collective("broadcast_object", 512)
+    with CollectiveStats.collect() as stats:
+        CollectiveStats.record(Collective.ALL_REDUCE, 1_048_576)
+        CollectiveStats.record(Collective.BROADCAST_OBJECT, 512)
 
-    report = ledger.report()
+    report = stats.report()
     assert "all_reduce" in report and "broadcast_object" in report
     assert "1.0 MB" in report and "512 B" in report
     assert "data 1.0 MB" in report and "control 512 B" in report
 
 
-def test_an_empty_ledger_says_so_instead_of_printing_a_header():
-    assert "no collectives" in CollectiveLedger().report()
+def test_an_empty_window_says_so_instead_of_printing_a_header():
+    assert "no collectives" in CollectiveStats().report()
 
 
 @pytest.mark.parametrize(
@@ -148,28 +171,28 @@ def test_bytes_are_formatted_the_way_a_bandwidth_budget_is_read(nbytes, text):
 # --------------------------------------------------------------------------- #
 def test_a_world_of_one_records_nothing_because_it_moves_nothing():
     """Single-GPU code calls the same collectives, which return early. Counting those
-    would measure call sites; the ledger is about the wire."""
-    with record_collectives() as ledger:
+    would measure call sites; the count is about the wire."""
+    with CollectiveStats.collect() as stats:
         ps.all_reduce_tp(torch.ones(1024))
         ps.broadcast_tp(torch.ones(1024))
         ps.all_gather_tp(torch.ones(1024))
         ps.broadcast_object_tp({"plan": [1, 2, 3]})
 
-    assert ledger.calls == 0
+    assert stats.calls == 0
 
 
 # --------------------------------------------------------------------------- #
 # Real collectives, over gloo
 # --------------------------------------------------------------------------- #
 def _all_reduce_payload(rank: int) -> tuple[int, int]:
-    with record_collectives() as ledger:
+    with CollectiveStats.collect() as stats:
         ps.all_reduce_tp(torch.ones(1024, dtype=torch.float32))
-    tally = ledger.tally("all_reduce")
+    tally = stats.tally(Collective.ALL_REDUCE)
     return tally.calls, tally.nbytes
 
 
 def test_an_all_reduce_is_billed_its_tensor_on_every_rank():
-    """Every rank contributes the whole tensor, so every rank's ledger reads the same:
+    """Every rank contributes the whole tensor, so every rank's tally reads the same:
     a reduce is not a scatter, and a per-rank division here would understate it."""
     assert run_on_tp_ranks(_all_reduce_payload, tp_size=2, backend="gloo") == [
         (1, 4096),
@@ -179,12 +202,12 @@ def test_an_all_reduce_is_billed_its_tensor_on_every_rank():
 
 def _control_plane_payload(rank: int) -> tuple[int, int, int]:
     plan = {"slots": list(range(64)), "step": 7}
-    with record_collectives() as ledger:
+    with CollectiveStats.collect() as stats:
         ps.broadcast_object_tp(plan if rank == 0 else None)
     return (
-        ledger.tally("broadcast_object").calls,
-        ledger.plane_bytes("control"),
-        ledger.plane_bytes("data"),
+        stats.tally(Collective.BROADCAST_OBJECT).calls,
+        stats.bytes_on(Plane.CONTROL),
+        stats.bytes_on(Plane.DATA),
     )
 
 
@@ -209,12 +232,12 @@ def _sampling_traffic(rank: int, vocab: int, greedy: bool) -> tuple[int, int, in
     local_logits = torch.randn(BATCH, local_width, generator=generator)
     offset = local_vocab_offset(local_width) or 0
 
-    with record_collectives() as ledger:
+    with CollectiveStats.collect() as stats:
         if greedy:
             global_argmax(local_logits, offset)
         else:
             sharded_top_p(local_logits, 0.8, 0.95, offset, k=CANDIDATES)
-    return ledger.nbytes, ledger.tally("all_gather").nbytes, vocab
+    return stats.nbytes, stats.tally(Collective.ALL_GATHER).nbytes, vocab
 
 
 def _greedy_small(rank: int) -> tuple[int, int, int]:
@@ -242,7 +265,7 @@ def test_sampling_traffic_does_not_grow_with_the_vocabulary(small, large, how):
 
     An implementation that all-gathered the logits would pass every correctness test
     in this directory — same tokens, same log-probs — and would move eight times as
-    many bytes here. Only the ledger can tell the two apart.
+    many bytes here. Only a byte count can tell the two apart.
     """
     narrow = run_on_tp_ranks(small, tp_size=2, backend="gloo")
     wide = run_on_tp_ranks(large, tp_size=2, backend="gloo")
