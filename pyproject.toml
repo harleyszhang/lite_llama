@@ -46,6 +46,19 @@ eval = ["sentence-transformers>=4.0", "pyyaml>=6.0"]
 # generation does not drag a web stack in; the imports live inside
 # lite_llama/entrypoints/api_server.py and name this extra when it is missing.
 serve = ["fastapi>=0.110", "uvicorn[standard]>=0.27", "pydantic>=2.0"]
+# External kernel backends (ROADMAP foundation 2). Never core dependencies: a
+# missing library must degrade to the native Triton floor, which is what
+# lite_llama/kernels/backends/probe.py probes for and dispatch acts on.
+#
+# Only two of the five backends have anything pip can resolve. flashinfer ships
+# a wheel (distribution `flashinfer-python`, import `flashinfer`); TileOPs has
+# no release yet, so its extra carries the TileLang prerequisite and the library
+# itself comes from a clone. DeepGEMM, FlashMLA and DeepEP are recursive clones
+# built against the local CUDA — DeepEP also needs NVSHMEM — so they get no
+# extra rather than an extra that installs nothing: their verified build recipes
+# live in each backend module's INSTALL and are printed by `survey()`.
+flashinfer = ["flashinfer-python>=0.2"]
+tileops = ["tilelang>=0.1.9,<0.2.0"]
 
 [dependency-groups]
 dev = [
