@@ -98,6 +98,42 @@ class SlotBatch:
         self._host_lens: list[int] = []
 
     # ------------------------------------------------------------------ steps #
+    def copy_prefix(self, segments: Sequence[tuple[int, int, int, int]]) -> None:
+        """Move reused prefix K/V between slots, before the pass that reads it.
+
+        Fixed slot regions buy a decode step free of index bookkeeping, but they
+        leave no indirection to share rows through: slot ``s`` owns rows
+        ``[s * max_seq_len, (s + 1) * max_seq_len)`` and its attention reads that
+        region and nothing else. Reusing a prefix therefore means physically
+        moving its K/V -- one contiguous run per layer, costing the K/V bytes,
+        against a prefill that would have run the whole transformer over those
+        tokens instead.
+
+        Source and destination share their in-slot offset: a chained block hash
+        pins a block to one absolute prompt position, so a prefix that matches at
+        all matches at the same rows.
+
+        Runs execute in the order given, and that order matters: a slot freed this
+        step can be handed to a new occupant while an earlier request is still
+        copying out of it. The scheduler emits runs in admission order, so every
+        read of a slot precedes the write that repurposes it, and the whole list
+        precedes the forward that overwrites the rest.
+
+        Args:
+            segments: ``(src_slot, dst_slot, start_token, num_tokens)`` runs.
+                Empty on a prefix-cache miss, which is the common case, and also
+                when the reuse needed no move because the request landed on the
+                slot already holding its prefix.
+        """
+        if not segments:
+            return
+        width = self.max_seq_len
+        for layer in self._runner.kv_cache_manager.gpu_kv_buffer:
+            for src_slot, dst_slot, start, length in segments:
+                src = src_slot * width + start
+                dst = dst_slot * width + start
+                layer[dst : dst + length].copy_(layer[src : src + length])
+
     def begin_prefill(
         self,
         slots: Sequence[int],
