@@ -8,11 +8,10 @@ mapping. Each of those is exercised separately below against
 
 Two conventions drive the assertions:
 
-* **The scale carries log2(e).** The kernel evaluates ``exp2`` rather than
-  ``exp``, so callers pass ``1/sqrt(d) * log2(e)`` -- this is what
-  :class:`~lite_llama.models.base.PagedAttention` does. Passing the plain scale
-  yields a valid-looking but differently-normalised softmax, so these tests
-  supply the scale exactly as the model does and give the reference the plain one.
+* **The scale is the plain one.** The kernel evaluates ``exp2`` rather than
+  ``exp`` and folds ``log2(e)`` in itself, so caller and reference are handed
+  the same ``1/sqrt(d)``. If that fold ever moves back out to the callers,
+  these tests turn into a differently-normalised softmax and fail.
 * **Inputs are cast to fp16.** The entry point is wrapped in
   ``custom_fwd(cast_inputs=torch.float16)``, so tolerances are fp16-sized
   whatever dtype goes in.
@@ -27,9 +26,6 @@ import torch
 
 from lite_llama.kernels import flash_attention2_no_pad
 from tests.reference import varlen_causal_attention
-
-# The prefill kernel evaluates exp2; see lite_llama/models/base.py.
-_LOG2E = 1.4426950408889634
 
 # The kernel keeps an fp32 accumulator, but inputs and the PV product are fp16,
 # so error scales with sequence length and head_dim.
@@ -55,10 +51,10 @@ def _packed_qkv(seq_lens, num_q_heads, num_kv_heads, head_dim):
 
 
 def _run(q, k, v, b_start_loc, b_seq_len, head_dim):
-    """Invoke kernel and reference with their respective scale conventions."""
+    """Invoke kernel and reference with the same plain softmax scale."""
     plain_scale = 1.0 / math.sqrt(head_dim)
     out = flash_attention2_no_pad(
-        q, k, v, plain_scale * _LOG2E, b_start_loc, b_seq_len, int(b_seq_len.max())
+        q, k, v, plain_scale, b_start_loc, b_seq_len, int(b_seq_len.max())
     )
     ref = varlen_causal_attention(q, k, v, b_start_loc, b_seq_len, plain_scale)
     return out, ref
@@ -123,7 +119,7 @@ def test_first_token_attends_only_itself():
     head_dim, seq_len = 64, 32
     q, k, v, b_start_loc, b_seq_len = _packed_qkv([seq_len], 4, 4, head_dim)
     out = flash_attention2_no_pad(
-        q, k, v, (1.0 / math.sqrt(head_dim)) * _LOG2E, b_start_loc, b_seq_len, seq_len
+        q, k, v, 1.0 / math.sqrt(head_dim), b_start_loc, b_seq_len, seq_len
     )
     torch.testing.assert_close(out[0].float(), v[0].float(), rtol=_RTOL, atol=_ATOL)
 
@@ -137,7 +133,7 @@ def test_sequences_do_not_leak_into_each_other():
     head_dim = 64
     seq_lens = [24, 40]
     q, k, v, b_start_loc, b_seq_len = _packed_qkv(seq_lens, 4, 4, head_dim)
-    scale = (1.0 / math.sqrt(head_dim)) * _LOG2E
+    scale = 1.0 / math.sqrt(head_dim)
     max_len = max(seq_lens)
     split = seq_lens[0]
 

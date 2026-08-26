@@ -7,10 +7,10 @@ The layer/model level (:class:`~lite_llama.models.base.DecoderLayer`,
 :mod:`lite_llama.models`.
 
 Import the public API from here:
-    ``from lite_llama.modules import Attention, ColumnParallelLinear``
+    ``from lite_llama.modules import ColumnParallelLinear, PagedAttention``
 """
 
-from .attention import Attention, PagedAttention
+from .attention import PagedAttention
 from .linear import (
     ColumnParallelLinear,
     LinearBase,
@@ -24,7 +24,6 @@ from .rotary_embedding import MRotaryEmbedding, RotaryEmbedding
 from .vocab_parallel import ParallelLMHead, VocabParallelEmbedding, vocab_shard
 
 __all__ = [
-    "Attention",
     "ColumnParallelLinear",
     "FusedMLP",
     "LinearBase",

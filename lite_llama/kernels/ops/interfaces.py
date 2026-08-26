@@ -4,8 +4,8 @@ Each logical operator (ROADMAP foundation 2) owns exactly one stable ``op_id``
 and one abstract call signature. KernelSpec rows declare *which* op they
 implement; these ABCs define *how it is called*, so every backend picked by
 :func:`~lite_llama.kernels.ops.dispatch` can be dropped in without touching the
-model code. The signatures mirror the existing native kernels closely enough
-that the native impls are thin adapters, not rewrites.
+model code. The signatures follow the in-tree kernels, so the native rows point
+straight at those kernels instead of at wrappers.
 
 Design rules:
     * torch-free at runtime — torch appears only under ``TYPE_CHECKING`` so
@@ -376,8 +376,9 @@ class KvWriteOp(LogicalOp):
             k: ``[tokens, num_kv_heads, head_dim]`` new key rows.
             v: New value rows, same layout as ``k``.
             select_index: ``[tokens]`` target cache row per token.
-            kv_buffer: ``[2 * max_tokens, num_kv_heads, head_dim]`` buffer
-                holding K in the first half and V in the second.
+            kv_buffer: ``[max_tokens, 2 * num_kv_heads, head_dim]`` buffer whose
+                head axis holds the K heads first, then the V heads — so one
+                token's K and V are adjacent in memory rather than a pool apart.
 
         The buffer is modified in place; nothing is returned.
         """
