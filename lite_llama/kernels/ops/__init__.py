@@ -15,7 +15,14 @@ Usage:
     fn = sel.load()
 """
 
-from .dispatch import DispatchKey, Selected, dispatch, explain, invalidate_cache
+from .dispatch import (
+    DispatchKey,
+    Selected,
+    dispatch,
+    explain,
+    invalidate_cache,
+    op_backend_env,
+)
 from .interfaces import (
     LOGICAL_OPS,
     AttentionDecodeOp,
@@ -74,5 +81,6 @@ __all__ = [
     "explain",
     "invalidate_cache",
     "is_logical_op",
+    "op_backend_env",
     "register",
 ]

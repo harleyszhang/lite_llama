@@ -40,20 +40,29 @@ def _swiglu_forward_kernel(
     tl.store(c_ptr + col_offsets, c_row, mask=mask)
 
 
-def swiglu_forward(a, b):
-    ori_shape = a.shape  # ori_shape is [batch_size, seq_len, hidden_size]
+def swiglu_forward(gate, up):
+    """silu(gate) * up with the two projection halves as separate tensors.
+
+    Args:
+        gate: ``[..., n_cols]`` gate projection.
+        up: Same shape as ``gate``.
+
+    Returns:
+        ``[..., n_cols]`` product, in the inputs' dtype.
+    """
+    ori_shape = gate.shape  # ori_shape is [batch_size, seq_len, hidden_size]
 
     n_cols = ori_shape[-1]
-    a = a.view(-1, n_cols)
-    b = b.view(-1, n_cols)
-    c = torch.empty_like(a)
-    n_rows = a.shape[0]
+    gate = gate.view(-1, n_cols)
+    up = up.view(-1, n_cols)
+    c = torch.empty_like(gate)
+    n_rows = gate.shape[0]
 
     BLOCK_SIZE, num_warps = calculate_settings(n_cols)
 
     _swiglu_forward_kernel[(n_rows,)](
-        a,
-        b,
+        gate,
+        up,
         c,
         c.stride(-2),  # c.stride(-2) = n_cols
         n_cols=n_cols,

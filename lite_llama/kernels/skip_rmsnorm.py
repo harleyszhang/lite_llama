@@ -81,19 +81,33 @@ def skip_rms_norm_kernel(
 
 
 @torch.no_grad()
-def skip_rmsnorm(X, residual, weight, eps=1e-5):
-    orig_shape = X.shape
-    X = X.contiguous().view(-1, orig_shape[-1])
+def skip_rmsnorm(x, residual, weight, eps=1e-5):
+    """Normalise the last dimension of ``x``, folding in the residual add.
 
-    M, N = X.shape  # n_rows, n_cols
+    Args:
+        x: ``(..., hidden)`` activations.
+        residual: ``(..., hidden)`` running residual, added to ``x`` before
+            normalising and updated in place; ``None`` runs the plain norm.
+        weight: ``(hidden,)`` learned scale.
+        eps: Added to the mean square before the reciprocal square root.
+
+    Returns:
+        ``(normalised, residual)``. With no residual the second element is the
+        (reshaped) input itself, so the caller can keep threading one pair
+        through the stack instead of branching on which path ran.
+    """
+    orig_shape = x.shape
+    x = x.contiguous().view(-1, orig_shape[-1])
+
+    M, N = x.shape  # n_rows, n_cols
     BLOCK_SIZE, num_warps = calculate_settings(N)
-    Y = torch.empty_like(X)
+    Y = torch.empty_like(x)
 
     if residual is not None:
         residual = residual.contiguous().view(-1, N)
         skip_rms_norm_kernel[M,](
             Y,
-            X,
+            x,
             residual,
             weight,
             N,
@@ -111,7 +125,7 @@ def skip_rmsnorm(X, residual, weight, eps=1e-5):
     else:
         rms_norm_kernel[M,](
             Y,
-            X,
+            x,
             weight,
             N,
             1,
@@ -122,4 +136,4 @@ def skip_rmsnorm(X, residual, weight, eps=1e-5):
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=num_warps,
         )
-        return Y.view(orig_shape), X.view(orig_shape)
+        return Y.view(orig_shape), x.view(orig_shape)
