@@ -1,6 +1,6 @@
 """Deterministic dispatch: filter, rank, cache — and be able to say why.
 
-``select(op, ...)`` answers "which implementation runs here?" in four fixed
+``dispatch(op, ...)`` answers "which implementation runs here?" in four fixed
 steps (ROADMAP foundation 2, pillar 5):
 
 1. **Filter** — availability probe, capability window, dtype, scheme, hard
@@ -19,7 +19,7 @@ kernel by name, so accuracy evidence is their call, but a missing library or
 an unsupported dtype is physics and still excludes it.
 
 Usage:
-    sel = select("linear", dtype="bf16", scheme="w8a16_fp8", shape={"k": 4096})
+    sel = dispatch("linear", dtype="bf16", scheme="w8a16_fp8", shape={"k": 4096})
     fn = sel.load()      # imports the implementation lazily
     print(sel.explain()) # why this one won
 """
@@ -40,7 +40,7 @@ from ...platform.spec import PlatformInfo, capabilities_match
 from .registry import REGISTRY, OpRegistry, register  # noqa: F401 (re-export)
 from .spec import KernelSpec
 
-#: Global override honoured by every select() call when no explicit backend=.
+#: Global override honoured by every dispatch() call when no explicit backend=.
 FORCE_BACKEND_ENV = "LITE_LLAMA_FORCE_BACKEND"
 
 #: One JSON line per decision when set (op, backend, dtype, shape...).
@@ -80,7 +80,7 @@ class DispatchKey:
 
 @dataclass(frozen=True)
 class Selected:
-    """The outcome of one :func:`select` call, with its full audit trail.
+    """The outcome of one :func:`dispatch` call, with its full audit trail.
 
     Attributes:
         spec: The winning implementation's declaration.
@@ -112,7 +112,7 @@ class Selected:
             lines.append(f"  [{name}] excluded: {reason}")
         for loser in self.runners_up:
             lines.append(f"  [{loser.name}] feasible, ranked below ({_rank_text(loser, self.key)})")
-        lines.append(f"  [{self.spec.name}] selected (rank={_rank_text(self.spec, self.key)})")
+        lines.append(f"  [{self.spec.name}] dispatched (rank={_rank_text(self.spec, self.key)})")
         return "\n".join(lines)
 
 
@@ -238,7 +238,7 @@ def _rank_key(spec: KernelSpec, key: DispatchKey) -> tuple:
         perf if perf is not None else math.inf,  # measured fastest first
         -spec.shape.preference_score(key.shape_dict),  # then shape fit
         -spec.priority,  # then static priority
-        spec.name,  # final tie-break keeps selection deterministic
+        spec.name,  # final tie-break keeps the decision deterministic
     )
 
 
@@ -250,7 +250,7 @@ def _rank_text(spec: KernelSpec, key: DispatchKey) -> str:
     )
 
 
-def select(
+def dispatch(
     op: str,
     *,
     dtype: Any,
@@ -331,8 +331,8 @@ def select(
 
 
 def explain(op: str, **key_kwargs: Any) -> str:
-    """Decision chain for one select() call; runs the selection if needed."""
-    sel = select(op, **key_kwargs)
+    """Decision chain for one dispatch() call; runs the dispatch if needed."""
+    sel = dispatch(op, **key_kwargs)
     return sel.explain()
 
 

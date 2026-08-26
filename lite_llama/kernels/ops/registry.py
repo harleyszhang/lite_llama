@@ -32,7 +32,7 @@ class OpRegistry:
     def __init__(self) -> None:
         self._by_name: dict[str, KernelSpec] = {}
         self._by_op: dict[str, list[KernelSpec]] = {}
-        # Populated by dispatch.select; invalidated by notify_change on every
+        # Populated by dispatch(); invalidated by notify_change on every
         # registration. Keyed by dispatch.DispatchKey, typed loosely here to
         # keep this module independent of the dispatch import.
         self._decisions: dict = {}

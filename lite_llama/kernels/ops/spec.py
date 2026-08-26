@@ -120,7 +120,7 @@ class LayoutRequirement:
 
     Attributes:
         required: Tags the call site (or a registered layout conversion) must
-            supply before this implementation may be selected.
+            supply before this implementation may be dispatched.
     """
 
     required: tuple[str, ...] = ()
