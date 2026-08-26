@@ -1,0 +1,337 @@
+"""Tests for the registry and deterministic dispatch (ROADMAP foundation 2).
+
+Everything runs on CPU against a private :class:`OpRegistry` and injected
+:class:`PlatformInfo` snapshots — the whole point of the design is that the
+selection logic is testable without any hardware. Probes point at functions
+defined in this very module (importable under its pytest module name).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+
+import pytest
+
+from lite_llama.kernels.ops import (
+    CapabilityRequirement,
+    GoldenRecord,
+    KernelSpec,
+    LayoutRequirement,
+    OpRegistry,
+    ShapeConstraint,
+    ShapeRequirement,
+    select,
+)
+from lite_llama.kernels.ops.dispatch import dtype_label, resolve_target, set_perf_provider
+from lite_llama.platform.spec import PlatformInfo
+
+A10 = PlatformInfo("cuda", 8, 6, "NVIDIA A10")
+H100 = PlatformInfo("cuda", 9, 0, "NVIDIA H100")
+
+#: Coloured log output carries these; strip before parsing the JSON payload.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+VERIFIED = GoldenRecord(verified=True, max_abs_diff=0.0, baseline="self")
+
+
+# Probes referenced by specs below; module-level so they resolve through this
+# test module's own import path.
+def _probe_yes() -> bool:
+    return True
+
+
+def _probe_no() -> bool:
+    return False
+
+
+def make_reg(*specs: KernelSpec) -> OpRegistry:
+    reg = OpRegistry()
+    for s in specs:
+        reg.register(s)
+    return reg
+
+
+def native(**over) -> KernelSpec:
+    """The always-eligible floor row every op must ship."""
+    base = {
+        "name": "native/floor",
+        "op": "test.op",
+        "backend": "native",
+        "target": "math:sin",
+        "golden": VERIFIED,
+    }
+    return KernelSpec(**{**base, **over})
+
+
+def external(name: str, **over) -> KernelSpec:
+    base = {
+        "name": name,
+        "op": "test.op",
+        "backend": name.split("/")[0],
+        "target": "math:cos",
+        "available": "tests.ops.test_dispatch:_probe_yes",
+        "golden": VERIFIED,
+    }
+    return KernelSpec(**{**base, **over})
+
+
+@pytest.fixture(autouse=True)
+def _no_env_overrides(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("LITE_LLAMA_FORCE_BACKEND", raising=False)
+    monkeypatch.delenv("LITE_LLAMA_KERNEL_TRACE", raising=False)
+
+
+class TestRegistry:
+    def test_register_and_lookup(self) -> None:
+        reg = make_reg(native())
+        assert [s.name for s in reg.implementations("test.op")] == ["native/floor"]
+        assert reg.spec("native/floor") is reg.implementations("test.op")[0]
+
+    def test_duplicate_identical_registration_is_idempotent(self) -> None:
+        reg = make_reg(native())
+        reg.register(native())
+        assert len(reg.implementations("test.op")) == 1
+
+    def test_conflicting_registration_raises(self) -> None:
+        reg = make_reg(native())
+        with pytest.raises(ValueError, match="different spec"):
+            reg.register(native(priority=5))
+
+    def test_native_floor_helper(self) -> None:
+        reg = make_reg(native(), external("flashinfer/fast"))
+        assert reg.native_floor("test.op").name == "native/floor"
+
+    def test_registration_invalidates_cached_decisions(self) -> None:
+        reg = make_reg(native(priority=0))
+        first = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        assert first.spec.name == "native/floor"
+        # A faster external row lands; the cached decision must not survive it.
+        reg.register(external("flashinfer/fast", priority=10))
+        second = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        assert second.spec.name == "flashinfer/fast"
+
+
+class TestFiltering:
+    def test_unknown_op_lists_alternatives(self) -> None:
+        reg = make_reg(native())
+        with pytest.raises(LookupError, match="registered"):
+            select("nope.op", dtype="bf16", platform_info=A10, registry=reg)
+
+    def test_dtype_and_scheme_gates(self) -> None:
+        reg = make_reg(native(), external("x/a", dtypes=("fp16",), schemes=("fp8",)))
+        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        assert sel.spec.name == "native/floor"
+        assert "dtype" in sel.rejections["x/a"]
+
+        sel = select("test.op", dtype="fp16", scheme="fp8", platform_info=A10, registry=reg)
+        assert sel.spec.name == "x/a"
+
+    def test_capability_window_filters_and_explains(self) -> None:
+        reg = make_reg(
+            native(),
+            external("d/hopper", capability=(CapabilityRequirement("cuda", min_cc=(9, 0)),)),
+        )
+        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        assert sel.spec.name == "native/floor"
+        assert "capability" in sel.rejections["d/hopper"]
+
+        sel = select("test.op", dtype="bf16", platform_info=H100, registry=reg)
+        assert sel.spec.name == "d/hopper"  # registration order keeps it above the floor
+
+    def test_probe_false_excludes_with_reason(self) -> None:
+        reg = make_reg(
+            native(), external("x/broken", available="tests.ops.test_dispatch:_probe_no")
+        )
+        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        assert sel.spec.name == "native/floor"
+        assert "library unavailable" in sel.rejections["x/broken"]
+
+    def test_shape_hard_gate(self) -> None:
+        reg = make_reg(
+            native(),
+            external(
+                "x/tiled",
+                priority=1,
+                shape=ShapeRequirement(hard=(ShapeConstraint("k", "mod", 16),)),
+            ),
+        )
+        sel = select("test.op", dtype="bf16", shape={"k": 40}, platform_info=A10, registry=reg)
+        assert sel.spec.name == "native/floor"
+        assert "shape" in sel.rejections["x/tiled"]
+
+        sel = select("test.op", dtype="bf16", shape={"k": 64}, platform_info=A10, registry=reg)
+        assert sel.spec.name == "x/tiled"
+
+    def test_layout_tag_gate(self) -> None:
+        reg = make_reg(
+            native(),
+            external("x/paged", priority=1, layout=LayoutRequirement(required=("kv:paged",))),
+        )
+        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        assert sel.spec.name == "native/floor"
+        assert "kv:paged" in sel.rejections["x/paged"]
+
+        sel = select(
+            "test.op", dtype="bf16", layout=frozenset({"kv:paged"}), platform_info=A10, registry=reg
+        )
+        assert sel.spec.name == "x/paged"
+
+    def test_unverified_golden_excluded_from_default_dispatch(self) -> None:
+        reg = make_reg(native(), external("x/unverified", golden=GoldenRecord()))
+        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        assert sel.spec.name == "native/floor"
+        assert "golden" in sel.rejections["x/unverified"]
+
+
+class TestRanking:
+    def test_priority_orders_unmeasured_rows(self) -> None:
+        reg = make_reg(native(), external("x/low", priority=1), external("x/high", priority=9))
+        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        assert sel.spec.name == "x/high"
+
+    def test_shape_preference_beats_priority(self) -> None:
+        reg = make_reg(
+            native(),
+            external(
+                "x/loves_128",
+                priority=1,
+                shape=ShapeRequirement(prefer=(ShapeConstraint("m", "mod", 128),)),
+            ),
+            external("x/blank", priority=9),
+        )
+        sel = select("test.op", dtype="bf16", shape={"m": 256}, platform_info=A10, registry=reg)
+        assert sel.spec.name == "x/loves_128"
+
+    def test_frozen_measurement_beats_everything(self) -> None:
+        reg = make_reg(native(), external("x/slow", priority=9), external("x/measured", priority=0))
+
+        def measured_wins(spec: KernelSpec, key: object) -> float | None:
+            return 1.5 if spec.name == "x/measured" else None
+
+        set_perf_provider(measured_wins)
+        try:
+            sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+            assert sel.spec.name == "x/measured"
+            assert "perf=1.500ms" in sel.explain()
+        finally:
+            set_perf_provider(lambda spec, key: None)
+
+    def test_name_is_the_final_tie_break(self) -> None:
+        reg = make_reg(native(), external("b/row"), external("a/row"))
+        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        assert sel.spec.name == "a/row"  # equal specs -> lexicographic, not import order
+
+
+class TestCachingAndDeterminism:
+    def test_same_key_returns_the_same_decision_object(self) -> None:
+        reg = make_reg(native(), external("x/a"))
+        a = select("test.op", dtype="bf16", shape={"k": 7}, platform_info=A10, registry=reg)
+        b = select("test.op", dtype="bf16", shape={"k": 7}, platform_info=A10, registry=reg)
+        assert a is b  # cached
+
+    def test_different_shape_is_a_different_key(self) -> None:
+        reg = make_reg(
+            native(),
+            external(
+                "x/shape",
+                priority=1,
+                shape=ShapeRequirement(hard=(ShapeConstraint("k", "min", 8),)),
+            ),
+        )
+        small = select("test.op", dtype="bf16", shape={"k": 4}, platform_info=A10, registry=reg)
+        big = select("test.op", dtype="bf16", shape={"k": 64}, platform_info=A10, registry=reg)
+        assert small.spec.name == "native/floor"
+        assert big.spec.name == "x/shape"
+
+    def test_platform_is_part_of_the_key(self) -> None:
+        reg = make_reg(
+            native(),
+            external("d/hopper", capability=(CapabilityRequirement("cuda", min_cc=(9, 0)),)),
+        )
+        assert (
+            select("test.op", dtype="bf16", platform_info=A10, registry=reg).spec.name
+            == "native/floor"
+        )
+        assert (
+            select("test.op", dtype="bf16", platform_info=H100, registry=reg).spec.name
+            == "d/hopper"
+        )
+
+
+class TestForcedBackend:
+    def test_explicit_backend_pins_the_family(self) -> None:
+        reg = make_reg(native(), external("x/a", priority=99))
+        sel = select("test.op", dtype="bf16", backend="native", platform_info=A10, registry=reg)
+        assert sel.spec.name == "native/floor"
+
+    def test_forced_backend_bypasses_only_the_golden_gate(self) -> None:
+        reg = make_reg(native(), external("x/unverified", golden=GoldenRecord()))
+        sel = select("test.op", dtype="bf16", backend="x", platform_info=A10, registry=reg)
+        assert sel.spec.name == "x/unverified"
+        # ...but physical gates still hold: a dtype it cannot run excludes it.
+        reg2 = make_reg(native(), external("x/fp16only", dtypes=("fp16",), golden=GoldenRecord()))
+        with pytest.raises(LookupError, match="dtype"):
+            select("test.op", dtype="bf16", backend="x", platform_info=A10, registry=reg2)
+
+    def test_env_variable_forces_globally(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        reg = make_reg(native(), external("x/a"))
+        monkeypatch.setenv("LITE_LLAMA_FORCE_BACKEND", "x")
+        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        assert sel.spec.name == "x/a"
+
+    def test_forcing_a_missing_backend_fails_loud(self) -> None:
+        reg = make_reg(native())
+        with pytest.raises(LookupError, match="forced"):
+            select("test.op", dtype="bf16", backend="flashinfer", platform_info=A10, registry=reg)
+
+
+class TestExplainAndTrace:
+    def test_explain_names_the_winner_and_every_loser(self) -> None:
+        reg = make_reg(
+            native(),
+            external("x/lo", priority=1),
+            external("d/hopper", capability=(CapabilityRequirement("cuda", min_cc=(9, 0)),)),
+        )
+        text = select("test.op", dtype="bf16", platform_info=A10, registry=reg).explain()
+        assert "[x/lo] selected" in text
+        assert "[d/hopper] excluded: capability" in text
+        # The floor was feasible but outranked: explain must say so, not hide it.
+        assert "[native/floor] feasible, ranked below" in text
+
+    def test_trace_emits_one_json_line(
+        self, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture
+    ) -> None:
+        monkeypatch.setenv("LITE_LLAMA_KERNEL_TRACE", "1")
+        reg = make_reg(native())
+        select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        # The project logger propagates to a coloured stderr handler only, so
+        # assert on the emitted line instead of caplog.
+        out = capfd.readouterr().err
+        line = next((l for l in out.splitlines() if '"op":' in l), "")
+        assert line, f"no trace JSON in stderr:\n{out}"
+        # The coloured stderr handler appends ANSI resets around the payload.
+        payload = json.loads(_ANSI_RE.sub("", line[line.index("{") :]))
+        assert payload["op"] == "test.op"
+        assert payload["kernel"] == "native/floor"
+        assert payload["dtype"] == "bf16"
+
+
+class TestTargetResolution:
+    def test_load_resolves_the_target_lazily(self) -> None:
+        import math
+
+        reg = make_reg(native())  # target is math:sin
+        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        assert sel.load() is math.sin
+
+    def test_resolve_failure_names_the_target(self) -> None:
+        with pytest.raises(ImportError, match="cannot resolve kernel target"):
+            resolve_target("no.such.module:attr")
+
+    def test_dtype_label_maps_torch_types(self) -> None:
+        import torch
+
+        assert dtype_label(torch.bfloat16) == "bf16"
+        assert dtype_label(torch.float16) == "fp16"
+        assert dtype_label("bf16") == "bf16"  # labels pass through
