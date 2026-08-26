@@ -23,6 +23,7 @@ The end-to-end tier needs two GPUs; it skips rather than fails on one.
 
 from __future__ import annotations
 
+import inspect
 import itertools
 import queue
 from collections.abc import Iterable
@@ -33,7 +34,7 @@ import pytest
 import torch
 
 from lite_llama import LLM, DataParallelEngine, RequestOutput, SamplingParams
-from lite_llama.engine.data_parallel import _SHUTDOWN, _ReplicaLoop
+from lite_llama.engine.data_parallel import _SHUTDOWN, _dp_worker, _ReplicaLoop
 from lite_llama.engine.scheduler import Request, RequestStatus
 
 # Enough KV for the short generations here, small enough that two replicas plus the
@@ -98,8 +99,9 @@ class _RouteHarness:
     """Minimal object carrying just what ``DataParallelEngine._route`` reads.
 
     ``_route`` only touches ``data_parallel_size`` and ``_balancer``, so a full engine
-    (and its GPUs) is unnecessary to test how prompts are bucketed. It is handed token
-    *estimates*, one per prompt, which is what the router computes up front.
+    (and its GPUs) is unnecessary to test how prompts are bucketed. It is handed the
+    prompts' *token ids*, which is what the router tokenises up front; a policy that
+    only wants a length takes it from ``len(ids)``.
     """
 
     def __init__(self, dp_size: int, policy: str = "round_robin"):
@@ -108,23 +110,29 @@ class _RouteHarness:
         self.data_parallel_size = dp_size
         self._balancer = make_load_balancer(policy, dp_size)
 
+    _select = DataParallelEngine._select
     route = DataParallelEngine._route
 
 
+def _ids(*lengths: int) -> list[list[int]]:
+    """One distinct token-id list per length, sharing no prefix with the others."""
+    return [[tag * 100_000 + i for i in range(n)] for tag, n in enumerate(lengths, 1)]
+
+
 def test_route_buckets_round_robin():
-    buckets = _RouteHarness(dp_size=2).route([1, 1, 1, 1, 1])
+    buckets = _RouteHarness(dp_size=2).route(5)
     assert buckets == [[0, 2, 4], [1, 3]]
 
 
 def test_route_covers_every_prompt_exactly_once():
-    buckets = _RouteHarness(dp_size=3).route([1] * 10)
+    buckets = _RouteHarness(dp_size=3).route(10)
     assigned = sorted(i for bucket in buckets for i in bucket)
     assert assigned == list(range(10))
 
 
 def test_route_leaves_idle_replicas_empty():
     """Fewer prompts than replicas is legal: the extra replicas get nothing."""
-    buckets = _RouteHarness(dp_size=4).route([1, 1])
+    buckets = _RouteHarness(dp_size=4).route(2)
     assert buckets == [[0], [1], [], []]
 
 
@@ -134,22 +142,89 @@ def test_route_sends_a_long_prompt_and_the_short_ones_apart():
     This is the routing-level consequence of the balancer reading the estimate: the
     three short prompts must not be striped onto the replica already holding 1k tokens.
     """
-    buckets = _RouteHarness(dp_size=2, policy="total_tokens").route([1000, 10, 10, 10])
+    token_ids = _ids(1000, 10, 10, 10)
+    buckets = _RouteHarness(dp_size=2, policy="total_tokens").route(4, token_ids)
     assert buckets == [[0], [1, 2, 3]]
+
+
+def test_route_rejects_a_token_id_list_that_does_not_cover_the_batch():
+    """A short ``token_ids`` would misalign every decision after the gap, silently."""
+    harness = _RouteHarness(dp_size=2, policy="total_tokens")
+    with pytest.raises(ValueError, match="expected 3 token id lists, got 2"):
+        harness.route(3, _ids(10, 10))
+
+
+def test_route_refuses_to_route_cache_aware_without_the_ids():
+    """``cache_aware`` on zero ids is ``total_tokens`` wearing its name — so it raises.
+
+    Nothing about the output would look wrong: every request would simply be routed as a
+    cache miss. That is exactly the kind of silent downgrade a stated contract is for.
+    """
+    harness = _RouteHarness(dp_size=2, policy="cache_aware")
+    with pytest.raises(ValueError, match="routes on prompt tokens"):
+        harness.route(2)
+
+
+def test_route_instantiates_fewer_copies_of_each_shared_prefix():
+    """End of the wiring: ids reach the balancer, so affinity survives the router.
+
+    The quantity that matters is how many replicas each distinct prefix ends up prefilled
+    on. Every extra one is a preamble computed twice and a second copy taking cache
+    capacity. Four prefixes over two replicas, arriving shuffled so that no policy is
+    helped by the order lining up with the stripe.
+
+    Not asserted as "one replica per prefix": while the pool is still cold an idle replica
+    is genuinely the better place for a request, even at the price of warming a second
+    copy, and the policy is right to say so. What it must not do is keep paying that price
+    once the prefix is hot somewhere — which is what the strict inequality catches, and
+    what would vanish if ``_route`` dropped the ids.
+    """
+    groups = [[group * 10_000 + i for i in range(512)] for group in range(4)]
+    arrivals = [0, 2, 1, 3, 0, 0, 3, 1, 2, 1, 3, 2, 1, 0, 2, 3]
+    token_ids = [[*groups[group], 900_000 + i] for i, group in enumerate(arrivals)]
+
+    def copies(policy: str) -> int:
+        buckets = _RouteHarness(dp_size=2, policy=policy).route(len(arrivals), token_ids)
+        return len({(arrivals[i], replica) for replica, b in enumerate(buckets) for i in b})
+
+    assert copies("total_tokens") == 8  # every prefix on both replicas
+    assert copies("cache_aware") < 8
 
 
 # --------------------------------------------------------------------------- #
 # The process grid (no GPU work)
 # --------------------------------------------------------------------------- #
 def test_token_estimates_are_skipped_when_no_policy_reads_them():
-    """``round_robin`` must never load a tokenizer — the estimate would be dead cost.
+    """``round_robin`` must never load a tokenizer — the pass would be dead cost.
 
     Reaching ``self.tokenizer`` on the harness would raise ``AttributeError``, so this
-    asserts the short circuit rather than the number.
+    asserts the short circuit rather than the ids.
     """
     harness = _RouteHarness(dp_size=2)
-    estimates = DataParallelEngine._estimate_tokens(harness, ["a", "bb", "ccc"])
-    assert estimates == [0, 0, 0]
+    assert DataParallelEngine._tokenize_for_routing(harness, ["a", "bb", "ccc"]) is None
+
+
+@pytest.mark.parametrize("policy", ["total_tokens", "cache_aware"])
+def test_a_token_aware_policy_gets_one_tokenizer_pass(policy):
+    """Both token-aware policies are served by the same single batched call.
+
+    Two flags, one pass: a length is ``len(ids)``, so tokenising twice would be the
+    router paying for the same work under two names.
+    """
+    calls = []
+
+    class _Tokenizing(_RouteHarness):
+        def __call__(self, prompts, add_special_tokens):
+            calls.append((tuple(prompts), add_special_tokens))
+            return {"input_ids": [list(range(len(p))) for p in prompts]}
+
+        tokenizer = property(lambda self: self)
+
+    harness = _Tokenizing(dp_size=2, policy=policy)
+    ids = DataParallelEngine._tokenize_for_routing(harness, ["a", "bb", "ccc"])
+
+    assert calls == [(("a", "bb", "ccc"), True)]
+    assert [len(x) for x in ids] == [1, 2, 3]
 
 
 def test_a_replica_shares_one_queue_across_its_ranks():
@@ -195,8 +270,10 @@ class _FakeQueue:
         return self.items.pop(0)
 
 
-#: Position of the request queue in the arguments ``_dp_worker`` is spawned with.
-_REQUEST_QUEUE_ARG = 8
+#: Position of the request queue in the arguments ``_dp_worker`` is spawned with, read
+#: from the signature rather than written down: this test is about *which* queue each
+#: rank gets, and a hard-coded index turns any new worker argument into a failure here.
+_REQUEST_QUEUE_ARG = list(inspect.signature(_dp_worker).parameters).index("request_queue")
 
 
 class _FakeProcess:
@@ -669,7 +746,7 @@ class TestTwoReplicas:
 
         reference = LLM(model=str(model_dir), max_seq_len=512, max_gpu_num_blocks=_KV_TOKENS)
         try:
-            for bucket in engine._route(engine._estimate_tokens(_PROMPTS)):
+            for bucket in engine._route(len(_PROMPTS), engine._tokenize_for_routing(_PROMPTS)):
                 expected = reference.generate([_PROMPTS[i] for i in bucket], _GREEDY)
                 for index, out in zip(bucket, expected, strict=True):
                     assert dp_texts[index] == out.text

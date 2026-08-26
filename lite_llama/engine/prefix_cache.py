@@ -24,23 +24,54 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
+import struct
 from collections import OrderedDict
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
+#: Tokens per prefix-cache block; 16 mirrors vLLM's default page granularity.
+#: It lives here rather than on the scheduler because everyone who computes a
+#: block hash has to agree on it -- the replica's own cache and the DP router's
+#: affinity index -- and only one of those owns a scheduler.
+PREFIX_CACHE_BLOCK_SIZE = 16
 
-def _iter_block_hashes(token_ids: list[int], block_size: int, seed: int):
+
+def iter_block_hashes(token_ids: Sequence[int], block_size: int, seed: int = 0) -> Iterator[int]:
     """Yield one chained hash per full block of *token_ids*.
 
     Each block's hash folds in the previous block's hash (and a per-cache
     ``seed``), so identical hashes imply identical prefixes rather than merely
     identical block contents at some offset. A trailing partial block is skipped:
     a half-filled block's KV is not reusable until it is complete.
+
+    The digest is ``blake2b`` rather than the builtin ``hash()`` because these
+    values are a *cross-process contract*: the DP router hashes a prompt to find
+    which replica already holds its prefix, and the replica hashes it again to
+    look the blocks up. Builtin ``hash()`` is in fact stable for tuples of ints
+    (``PYTHONHASHSEED`` randomises only str/bytes), but that is a property of one
+    interpreter build rather than a promise, and a router that disagreed with its
+    replicas would not raise -- it would quietly route every request as a miss.
+
+    Args:
+        token_ids: Prompt tokens, each fitting in 32 bits.
+        block_size: Tokens per block. Must match every party that hashes.
+        seed: Salt folded into the chain, isolating one cache's hashes from
+            another's. Must match every party that hashes.
+
+    Yields:
+        One 64-bit hash per complete block, in prefix order.
+
+    Raises:
+        struct.error: A token id is negative or does not fit in 32 bits.
     """
-    parent = seed
+    parent = seed & 0xFFFFFFFFFFFFFFFF
+    layout = f"<Q{block_size}I"
     num_full = len(token_ids) // block_size
     for b in range(num_full):
-        block = tuple(token_ids[b * block_size : (b + 1) * block_size])
-        parent = hash((parent, block))
+        block = token_ids[b * block_size : (b + 1) * block_size]
+        digest = hashlib.blake2b(struct.pack(layout, parent, *block), digest_size=8)
+        parent = int.from_bytes(digest.digest(), "little")
         yield parent
 
 
@@ -129,7 +160,10 @@ class PrefixCache:
         capacity: Maximum resident blocks. ``None`` means unbounded (no
             eviction) -- set it in memory-constrained deployments.
         hash_seed: Salt folded into every block hash, isolating one cache's
-            hashes from another's (e.g. per-tenant) to avoid cross-hits.
+            hashes from another's (e.g. per-tenant) to avoid cross-hits. Under
+            data parallelism every replica -- and the router's affinity index --
+            must be given the same seed, or the router's guess about who holds a
+            prefix never matches what the replicas actually cached.
     """
 
     def __init__(
@@ -166,7 +200,7 @@ class PrefixCache:
         self.stats.num_requests += 1
         self.stats.queried_tokens += len(token_ids)
         cached = 0
-        for h in _iter_block_hashes(token_ids, self.block_size, self.hash_seed):
+        for h in iter_block_hashes(token_ids, self.block_size, self.hash_seed):
             block = self._blocks.get(h)
             if block is None:
                 break
@@ -246,7 +280,7 @@ class PrefixCache:
         blocks = upto_tokens // self.block_size
         if blocks <= 0:
             return
-        for index, h in enumerate(_iter_block_hashes(token_ids, self.block_size, self.hash_seed)):
+        for index, h in enumerate(iter_block_hashes(token_ids, self.block_size, self.hash_seed)):
             if index >= blocks:
                 break
             block = self._blocks.get(h)
@@ -264,7 +298,7 @@ class PrefixCache:
         counting_hit = True
         copyable = 0
         segments: list[list[int]] = []
-        for index, h in enumerate(_iter_block_hashes(token_ids, self.block_size, self.hash_seed)):
+        for index, h in enumerate(iter_block_hashes(token_ids, self.block_size, self.hash_seed)):
             block = self._blocks.get(h)
             if block is None:
                 counting_hit = False
@@ -300,7 +334,7 @@ class PrefixCache:
         remains resident and hittable until capacity pressure reclaims it, so a
         finished request still leaves its prefix warm for the next one.
         """
-        for h in _iter_block_hashes(token_ids, self.block_size, self.hash_seed):
+        for h in iter_block_hashes(token_ids, self.block_size, self.hash_seed):
             block = self._blocks.get(h)
             if block is not None and block.ref_cnt > 0:
                 block.ref_cnt -= 1

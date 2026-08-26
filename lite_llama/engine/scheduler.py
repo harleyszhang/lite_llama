@@ -32,7 +32,7 @@ from collections.abc import MutableSequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from .prefix_cache import PrefixCache, PrefixMatch
+from .prefix_cache import PREFIX_CACHE_BLOCK_SIZE, PrefixCache, PrefixMatch
 from .sampler import SamplingParams
 
 
@@ -130,9 +130,6 @@ class Request:
 
 DEFAULT_MAX_NUM_SEQS = 32
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
-
-#: Prefix-cache block granularity in tokens, mirroring vLLM's page granularity.
-PREFIX_CACHE_BLOCK_SIZE = 16
 
 
 @dataclass(frozen=True)
