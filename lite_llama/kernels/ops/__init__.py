@@ -16,6 +16,23 @@ Usage:
 """
 
 from .dispatch import DispatchKey, Selected, explain, invalidate_cache, select
+from .interfaces import (
+    LOGICAL_OPS,
+    AttentionDecodeOp,
+    AttentionPrefillOp,
+    CombineOp,
+    DispatchOp,
+    ElementwiseOp,
+    KvWriteOp,
+    LinearOp,
+    LogicalOp,
+    MlaDecodeOp,
+    MoeOp,
+    RmsNormOp,
+    RopeOp,
+    SampleOp,
+    is_logical_op,
+)
 from .registry import REGISTRY, OpRegistry, register
 from .spec import (
     CapabilityRequirement,
@@ -28,19 +45,34 @@ from .spec import (
 )
 
 __all__ = [
+    "LOGICAL_OPS",
     "REGISTRY",
+    "AttentionDecodeOp",
+    "AttentionPrefillOp",
     "CapabilityRequirement",
+    "CombineOp",
     "ConstraintKind",
     "DispatchKey",
+    "DispatchOp",
+    "ElementwiseOp",
     "GoldenRecord",
     "KernelSpec",
+    "KvWriteOp",
     "LayoutRequirement",
+    "LinearOp",
+    "LogicalOp",
+    "MlaDecodeOp",
+    "MoeOp",
     "OpRegistry",
+    "RmsNormOp",
+    "RopeOp",
+    "SampleOp",
     "Selected",
     "ShapeConstraint",
     "ShapeRequirement",
     "explain",
     "invalidate_cache",
+    "is_logical_op",
     "register",
     "select",
 ]
