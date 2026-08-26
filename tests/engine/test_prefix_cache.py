@@ -5,7 +5,7 @@ LRU eviction order, salting, stats, reset) and SGLang's ``test_radix_cache_unit`
 (prefix matching at arbitrary divergence depth, repeating tokens, page
 alignment, reference counting), adapted to lite_llama's ``PrefixCache`` API.
 
-Eight test classes, each owning one concern:
+Nine test classes, each owning one concern:
 
     TestPrefixHashing       — block boundaries, trailing partial, block sizes
     TestPrefixMatching      — divergence at every depth, repeating tokens
@@ -15,6 +15,7 @@ Eight test classes, each owning one concern:
     TestCacheIsolation      — hash_seed salting, reset semantics
     TestStatistics          — cumulative counters, hit-rate, eviction count
     TestSchedulerIntegration— admission path, finish release, preemption reset
+    TestBlockCopyReuse      — block→slot ownership, copy plans, same-slot reuse
 """
 
 from __future__ import annotations
@@ -483,13 +484,199 @@ class TestSchedulerIntegration:
         pytest.fail("expected at least one preemption within 6 steps")
 
     def test_prefix_cache_with_chunked_prefill(self):
-        """Cached prefix reduces the chunkable remainder."""
+        """Reuse is capped by what the sharer has actually executed, not hashed.
+
+        ``a``'s whole prompt is hashed the moment it is admitted, so all 8 blocks
+        are cache *hits* for ``b``. Only the first 4 are reusable: reuse means
+        copying real K/V out of a slot, and when ``b`` arrives ``a`` has executed
+        one 64-token chunk, so rows for its second chunk hold nothing yet. ``b``
+        recomputes the rest and becomes their owner in turn.
+        """
         sched = self._sched(max_chunk_size=64)
         shared = list(range(128))  # 8 blocks of 16
         sched.add_request(_req("a", shared))
-        sched.schedule()  # commits a's first chunk and registers its prompt
+        sched.schedule()  # plans a's first chunk and registers its prompt
         # req b shares prefix — its uncached remainder is smaller.
         sched.add_request(_req("b", shared + list(range(1000, 1064))))
         out = sched.schedule()
         b = next(r for r in out.prefill if r.request_id == "b")
-        assert b.num_cached_tokens >= 112  # at least 7 of 8 blocks
+        assert b.num_cached_tokens == 64  # a's executed chunk, 4 of 8 blocks
+        assert b.prefix_copies == ((0, 0, 64),)  # copied out of a's slot
+        assert b.num_computed_tokens == 64 + 64  # reused prefix + this chunk
+
+
+# --------------------------------------------------------------------------- #
+# 9. Block copy: which hits are actually reusable, and where from
+# --------------------------------------------------------------------------- #
+class TestBlockCopyReuse:
+    """A hit is bookkeeping; reuse needs K/V that some slot still holds.
+
+    Without a block table there is no indirection to share rows through, so a
+    matched prefix is reused by copying it into the requester's own slot. That
+    splits every hit in two: ``num_tokens`` (the hash matched) and
+    ``copyable_tokens`` (a slot still holds the K/V). These tests pin the gap
+    between them, since it is the whole reason prefill cannot simply be skipped.
+    """
+
+    BLOCK = 16
+
+    def _cache(self) -> PrefixCache:
+        return PrefixCache(block_size=self.BLOCK, capacity=256)
+
+    def _sched(self) -> Scheduler:
+        config = SchedulerConfig(
+            max_seq_len=4096,
+            max_num_seqs=8,
+            max_num_batched_tokens=65536,
+            max_chunk_size=0,
+            enable_prefix_cache=True,
+            enable_preemption=False,
+        )
+        return Scheduler(config, num_slots=8)
+
+    # ------------------------------------------------------------ ownership #
+    def test_a_hit_with_no_live_copy_is_not_reusable(self):
+        """Hashes outlive K/V, so a full hit can still be worth nothing."""
+        cache = self._cache()
+        prompt = list(range(64))
+        assert cache.register(prompt) == 0  # first sight: nothing to hit yet
+        match = cache.admit(prompt)
+        assert match.num_tokens == 64  # every block is a hit
+        assert match.copyable_tokens == 0  # no slot ever claimed them
+        assert match.segments == ()
+
+    def test_owned_blocks_merge_into_one_run(self):
+        """Adjacent blocks of one owner cost one copy, not one copy per block."""
+        cache = self._cache()
+        prompt = list(range(64))
+        cache.register(prompt)
+        cache.assign_owner(prompt, slot=3, upto_tokens=64)
+        match = cache.admit(prompt)
+        assert match.copyable_tokens == 64
+        assert match.segments == ((3, 0, 64),)  # 4 blocks, 1 run
+
+    def test_invalidating_the_slot_keeps_the_hit_but_kills_the_copy(self):
+        """Handing a slot on costs the copy source, not the cache entry."""
+        cache = self._cache()
+        prompt = list(range(64))
+        cache.register(prompt)
+        cache.assign_owner(prompt, slot=3, upto_tokens=64)
+        cache.invalidate_slot(3)
+        match = cache.admit(prompt)
+        assert match.num_tokens == 64  # the hash is still true
+        assert match.copyable_tokens == 0  # nobody holds the K/V now
+
+    def test_ownership_reaches_only_as_far_as_the_owner_executed(self):
+        """Claims are bounded by computed tokens, not by prompt length."""
+        cache = self._cache()
+        prompt = list(range(64))
+        cache.register(prompt)
+        cache.assign_owner(prompt, slot=1, upto_tokens=32)  # two chunks in
+        match = cache.admit(prompt)
+        assert match.num_tokens == 64
+        assert match.copyable_tokens == 32
+        assert match.segments == ((1, 0, 32),)
+
+    def test_a_run_ends_where_the_owner_changes(self):
+        """Two owners of one prefix produce two copies, in prompt order."""
+        cache = self._cache()
+        prompt = list(range(64))
+        cache.register(prompt)
+        cache.assign_owner(prompt, slot=0, upto_tokens=32)  # blocks 0-1
+        # Blocks 0-1 already have an owner and keep it; only 2-3 are up for grabs.
+        cache.assign_owner(prompt, slot=1, upto_tokens=64)
+        match = cache.admit(prompt)
+        assert match.copyable_tokens == 64
+        assert match.segments == ((0, 0, 32), (1, 32, 32))
+
+    def test_reuse_stops_at_the_first_block_without_a_copy(self):
+        """A slot is read from row 0 up, so a gap ends the reuse for good.
+
+        Blocks 0-1 and 3 have live copies but block 2 does not. Block 3 cannot be
+        used despite being both cached and resident: attention over rows
+        ``[0, n)`` has no way to skip the hole in the middle.
+        """
+        cache = self._cache()
+        prompt = list(range(64))
+        cache.register(prompt)
+        cache.assign_owner(prompt, slot=0, upto_tokens=32)  # blocks 0-1
+        cache.assign_owner(prompt, slot=1, upto_tokens=48)  # block 2
+        cache.assign_owner(prompt, slot=2, upto_tokens=64)  # block 3
+        cache.invalidate_slot(1)  # block 2 loses its only copy
+        match = cache.admit(prompt)
+        assert match.num_tokens == 64  # all four still hit
+        assert match.copyable_tokens == 32  # reuse stops at the hole
+        assert match.segments == ((0, 0, 32),)
+
+    # ------------------------------------------------------------- scheduler #
+    def test_same_step_admissions_cannot_share(self):
+        """K/V exists a step after it is planned, so the twin gets nothing.
+
+        Both requests are admitted in one call, so when ``b`` is matched ``a``'s
+        first chunk has been *planned* and nothing more. Offering ``a``'s rows
+        here would have ``b`` attend over cache the model has not written.
+        """
+        sched = self._sched()
+        shared = list(range(64))
+        sched.add_request(_req("a", shared))
+        sched.add_request(_req("b", shared))
+        out = sched.schedule()
+        b = next(r for r in out.prefill if r.request_id == "b")
+        assert b.num_cached_tokens == 0
+        assert b.prefix_copies == ()
+
+    def test_landing_on_the_slot_holding_the_prefix_copies_nothing(self):
+        """The cheapest hit: the rows are already where attention will look.
+
+        ``a`` frees slot 0 and ``b`` is handed it straight back, so ``b``'s prefix
+        is bit-for-bit already in place -- reuse without moving a byte. Note the
+        one token short of the whole prompt: something must run to produce logits.
+        """
+        sched = self._sched()
+        shared = list(range(64))
+        sched.add_request(_req("a", shared))
+        a = sched.schedule().prefill[0]
+        freed = a.slot  # finish() clears it
+        sched.finish(a, "eos")
+        sched.add_request(_req("b", shared))
+        out = sched.schedule()
+        b = next(r for r in out.prefill if r.request_id == "b")
+        assert b.slot == freed  # freed slot handed straight back
+        assert b.num_cached_tokens == 63  # whole prompt bar the last token
+        assert b.prefix_copies == ()  # nothing to move
+        assert b.num_computed_tokens == 64  # reused 63 + the 1-token chunk
+
+    def test_copying_from_a_running_sharer_names_its_slot(self):
+        """A different slot means a real copy, sourced from the sharer's rows."""
+        sched = self._sched()
+        shared = list(range(64))
+        sched.add_request(_req("a", shared))
+        a = sched.schedule().prefill[0]  # plans a's whole prompt
+        sched.add_request(_req("b", shared + list(range(100, 120))))
+        out = sched.schedule()  # promotes a's ownership first
+        b = next(r for r in out.prefill if r.request_id == "b")
+        assert b.slot != a.slot
+        assert b.num_cached_tokens == 64
+        assert b.prefix_copies == ((a.slot, 0, 64),)
+        assert b.num_computed_tokens == 84  # 64 reused + 20 own tokens
+
+    def test_a_slot_reused_by_a_stranger_stops_being_a_source(self):
+        """``c`` must not inherit rows that ``b`` overwrote with its own prompt.
+
+        ``a`` computes a prefix in slot 0 and finishes; ``b`` takes slot 0 with an
+        unrelated prompt and refills it. ``c`` shares ``a``'s prefix and still
+        hits on hash, but there is no live copy left to take it from.
+        """
+        sched = self._sched()
+        shared = list(range(64))
+        sched.add_request(_req("a", shared))
+        a = sched.schedule().prefill[0]
+        freed = a.slot  # finish() clears it
+        sched.finish(a, "eos")
+        sched.add_request(_req("b", list(range(500, 564))))
+        b = next(r for r in sched.schedule().prefill if r.request_id == "b")
+        assert b.slot == freed  # b overwrites the rows a left
+        sched.add_request(_req("c", shared))
+        c = next(r for r in sched.schedule().prefill if r.request_id == "c")
+        assert c.num_cached_tokens == 0
+        assert c.prefix_copies == ()

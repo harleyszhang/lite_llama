@@ -86,6 +86,11 @@ class ModelInput:
         gen_counts: Tokens already generated per sampled sequence. Doubles as the
             column its next token is written to and as the width of its
             repetition-penalty window.
+        prefix_copies: ``(src_slot, dst_slot, start_token, num_tokens)`` runs of
+            prefix-cache K/V to copy in before the pass runs, so its extend rows
+            can attend over a prefix they never computed. Empty on a miss. Every
+            tensor-parallel rank replays them against its own shard, which is why
+            they travel with the plan rather than being applied by the driver.
     """
 
     kind: PassKind
@@ -96,6 +101,7 @@ class ModelInput:
     sampling: tuple[SamplingParams, ...]
     sampled: tuple[int, ...]
     gen_counts: tuple[int, ...]
+    prefix_copies: tuple[tuple[int, int, int, int], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.slots:
@@ -175,6 +181,9 @@ class ModelWorker:
             still owe tokens (a prompt chunk that did not finish) runs the model —
             its K/V has to land — and returns an empty tensor.
         """
+        # Before the forward, so extend rows resuming on a reused prefix find it
+        # in their own slot. Same stream, so the ordering needs no synchronisation.
+        self._slot_batch.copy_prefix(model_input.prefix_copies)
         logits = self._forward(model_input)
         if logits is None:
             return self._no_tokens

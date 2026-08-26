@@ -88,16 +88,24 @@ def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
     Chunk ``i`` writes cache rows ``[num_computed_tokens - chunk,
     num_computed_tokens)`` of its slot — the scheduler has already advanced the
     counter, so this reads the chunk's span off the request rather than tracking
-    it separately.
+    it separately. A chunk that resumes on a prefix-cache hit also carries the
+    copies that put that prefix in its slot.
     """
     slots, starts, lens, tokens = [], [], [], []
     sampled, requests = [], []
+    copies: list[tuple[int, int, int, int]] = []
     for row, (request, chunk) in enumerate(chunks):
         start = request.num_computed_tokens - chunk
         slots.append(request.slot)
         starts.append(start)
         lens.append(request.num_computed_tokens)
         tokens.extend(request.prompt_token_ids[start : request.num_computed_tokens])
+        # The scheduler names the source slot and offset; the destination is this
+        # request's own slot, which only the plan knows about.
+        copies += [
+            (src_slot, request.slot, start_token, length)
+            for src_slot, start_token, length in request.prefix_copies
+        ]
         if request.num_computed_tokens == request.prompt_len:
             # Only a chunk that finished its prompt has a next token to sample,
             # and a pass mixes the two: the admission budget happily takes a
@@ -118,6 +126,7 @@ def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
             # A first token has no generated history yet, so the repetition
             # penalty is a no-op here whatever the request configured.
             gen_counts=(0,) * len(requests),
+            prefix_copies=tuple(copies),
         ),
         requests,
     )
