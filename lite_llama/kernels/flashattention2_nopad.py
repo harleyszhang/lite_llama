@@ -3,6 +3,11 @@
 Sequences are packed without padding and indexed by cumulative-length offsets.
 Uses the v2 work partition (parallelise over query blocks, rescale softmax once).
 
+``sm_scale`` is the plain ``1 / sqrt(head_dim)``: the inner loop evaluates
+``exp2`` rather than ``exp``, and folding ``log2(e)`` into the scale is this
+function's own business — the caller passes the same number every attention
+backend takes.
+
 Usage:
     out = flash_attention2_no_pad(q, k, v, sm_scale, b_start_loc, b_seq_len, max_seq_len)
 """
@@ -11,6 +16,9 @@ import torch
 import triton
 import triton.language as tl
 from torch.amp import custom_fwd
+
+#: ``exp(x) == exp2(x * log2(e))`` — the kernel takes the exp2 route.
+_LOG2E = 1.4426950408889634
 
 configs_tma = [
     triton.Config({"BLOCK_M_SIZE": BM, "BLOCK_N_SIZE": BN}, num_stages=stages, num_warps=warps)
@@ -177,11 +185,22 @@ def flash_attention2_no_pad(
     b_seq_len,
     max_seq_len,
 ):
-    """Compute Flash-attention, can't support fp32 input
-    参数:
-        q: Query tensor, shape: [bs*m_size, n_heads, head_dim], decode 阶段, q 的 seq_len 和 k v 不一致, 其值为 1
-        k: Key tensor,  shape: [bs*n_size, n_heads, head_dim].
-        v: Value tensor, shape is consistent with k.
+    """Causal prefill attention over a packed (no-pad) ragged batch.
+
+    Args:
+        q: ``[total_tokens, num_heads, head_dim]`` packed query rows.
+        k: ``[total_kv, num_kv_heads, head_dim]`` freshly projected keys; ``v``
+            has the same layout. Grouped-query attention is handled inside the
+            kernel from the head-count ratio.
+        v: Value rows, laid out like ``k``.
+        sm_scale: Plain softmax scale, ``1 / sqrt(head_dim)``.
+        b_start_loc: ``[batch]`` first packed row of each sequence.
+        b_seq_len: ``[batch]`` true length of each sequence.
+        max_seq_len: Longest sequence, sizing the query-block grid.
+
+    Returns:
+        ``[total_tokens, num_heads, head_dim]`` attention output. fp32 inputs
+        are not supported (``custom_fwd`` casts them down).
     """
     output = torch.empty_like(q)
     batchs = b_seq_len.shape[0]
@@ -212,7 +231,9 @@ def flash_attention2_no_pad(
         output,
         b_start_loc,
         b_seq_len,
-        sm_scale,
+        # Fold log2(e) here, once, instead of trusting every caller to know
+        # that this kernel's softmax runs on exp2.
+        sm_scale * _LOG2E,
         n_heads,
         num_kv_groups,
         q.stride(0),

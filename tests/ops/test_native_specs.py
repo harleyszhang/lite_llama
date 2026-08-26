@@ -1,9 +1,9 @@
-"""Tests for the native linear rows: registration, routing and the floor impl.
+"""Tests for the native spec rows: registration, routing and the floor impl.
 
 Importing :mod:`lite_llama.kernels` registers the native spec rows as a side
 effect; these tests pin that catalogue and the scheme→row routing on CPU —
 no kernel runs here, only dispatch and the ``F.linear`` floor (GPU numerics
-of the Triton adapters live in ``tests/kernels/test_linear_dispatch.py``).
+of the Triton rows live in ``tests/kernels/test_linear_dispatch.py``).
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ import torch
 import torch.nn.functional as F
 
 import lite_llama.kernels  # noqa: F401 — import side effect: native spec registration
-from lite_llama.kernels.impls.native import registry as native_registry
-from lite_llama.kernels.impls.native.linear_torch import linear_torch
+from lite_llama.kernels.backends import native as native_specs
+from lite_llama.kernels.linear import linear_torch
 from lite_llama.kernels.ops import REGISTRY, dispatch
 from lite_llama.kernels.ops.dispatch import resolve_target
 from lite_llama.modules.quantization.unquant import UnquantizedLinearMethod
@@ -40,6 +40,17 @@ LINEAR_ROWS = {
     "native/linear_w8a8_int8",
     "native/linear_w8a8_fp8",
 }
+
+#: ``op -> row``, the attention domain. One native row each, so the assertions
+#: are about the *gates* on those rows rather than about a choice.
+ATTENTION_ROWS = {
+    "attention.prefill": "native/flash_attention2_no_pad",
+    "attention.decode": "native/flash_decoding",
+    "kv_write": "native/update_kv_buffer",
+}
+
+#: Layout tags the paged KV buffer of this repo satisfies.
+PAGED = frozenset({"kv:paged"})
 
 
 class TestNativeCatalogue:
@@ -73,6 +84,37 @@ class TestNativeCatalogue:
         assert REGISTRY.native_floor("linear").name == "native/linear_torch"
 
 
+class TestAttentionCatalogue:
+    @pytest.mark.parametrize("op,row", sorted(ATTENTION_ROWS.items()))
+    def test_each_phase_has_its_native_row(self, op: str, row: str) -> None:
+        assert {s.name for s in REGISTRY.implementations(op)} == {row}
+        assert REGISTRY.native_floor(op).name == row
+
+    def test_paged_rows_need_the_layout_tag(self) -> None:
+        # The cache-facing rows read this repo's paged buffer. Without the tag
+        # the call site is describing some other pool, and dispatch must say so
+        # instead of handing over a kernel that would read the wrong strides.
+        for op in ("attention.decode", "kv_write"):
+            with pytest.raises(LookupError, match="layout"):
+                dispatch(op, dtype="bf16")
+            assert dispatch(op, dtype="bf16", layout=PAGED).spec.name == ATTENTION_ROWS[op]
+
+    def test_prefill_reads_no_cache_so_needs_no_layout(self) -> None:
+        # Prefill attends the freshly projected tensors, not the cache.
+        sel = dispatch("attention.prefill", dtype="bf16")
+        assert sel.spec.name == ATTENTION_ROWS["attention.prefill"]
+
+    def test_kv_write_accepts_quantised_rows(self) -> None:
+        # An fp8 cache is written as uint8 bytes: quantisation happens before
+        # the write, so the row must not gate on the activation dtype.
+        assert dispatch("kv_write", dtype="u8", layout=PAGED).spec.name == "native/update_kv_buffer"
+
+    def test_all_targets_resolve(self) -> None:
+        for op in ATTENTION_ROWS:
+            for spec in REGISTRY.implementations(op):
+                assert callable(resolve_target(spec.target)), spec.name
+
+
 class TestLinearTorchFloor:
     def test_matches_f_linear_on_cpu(self) -> None:
         torch.manual_seed(0)
@@ -100,7 +142,7 @@ class TestUnquantMethodRoutesThroughDispatch:
 class TestRegistryStaysTorchFree:
     def test_registry_module_declares_no_torch_import(self) -> None:
         """Registration must not pay the torch import — targets are strings."""
-        tree = ast.parse(Path(native_registry.__file__).read_text(encoding="utf-8"))
+        tree = ast.parse(Path(native_specs.__file__).read_text(encoding="utf-8"))
         names: list[str] = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -108,10 +150,14 @@ class TestRegistryStaysTorchFree:
             elif isinstance(node, ast.ImportFrom):
                 names.append(node.module or "")
         offenders = [n for n in names if n.split(".")[0] in {"torch", "triton"}]
-        assert not offenders, f"registry.py must stay torch-free, found {offenders}"
+        assert not offenders, f"native.py must stay torch-free, found {offenders}"
 
-    def test_adapters_reference_only_existing_targets(self) -> None:
-        for spec in REGISTRY.implementations("linear"):
-            module, attr = spec.target.split(":")
-            assert module.startswith("lite_llama.kernels.impls.native.")
-            assert attr.isidentifier()
+    def test_rows_point_at_real_kernel_modules(self) -> None:
+        """No wrapper tier: every target names a module under ``lite_llama.kernels``."""
+        for op in ["linear", *ATTENTION_ROWS]:
+            for spec in REGISTRY.implementations(op):
+                module, attr = spec.target.split(":")
+                assert module.startswith("lite_llama.kernels."), spec.name
+                # ops/ is the contract layer; kernels never live there.
+                assert not module.startswith("lite_llama.kernels.ops"), spec.name
+                assert attr.isidentifier()
