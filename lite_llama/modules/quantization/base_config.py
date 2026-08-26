@@ -219,3 +219,50 @@ class QuantizationConfig(ABC):
     def format(self) -> str:
         """Backward-compat alias for :meth:`get_name`."""
         return self.get_name()
+
+
+# --------------------------------------------------------------------------- #
+# Kernel dispatch helper (single registry — ROADMAP foundation 2)
+# --------------------------------------------------------------------------- #
+
+
+def run_quant_linear(
+    scheme: str,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    *,
+    bias: torch.Tensor | None = None,
+    weight_scale: torch.Tensor | None = None,
+    weight_zeros: torch.Tensor | None = None,
+    group_n: int = 0,
+    group_k: int = 0,
+) -> torch.Tensor:
+    """Route one quantised (or plain) projection through kernel dispatch.
+
+    This is the *only* call site ``LinearMethodBase.apply`` implementations
+    need: the scheme string (a ``BASE_QUANTIZATION_METHODS`` key) becomes a
+    dispatch-key dimension, dtype and shape come from the tensors, and the
+    selected implementation arrives behind the common :class:`LinearOp`
+    signature — so native Triton, deepgemm or tileops rows are interchangeable
+    without touching any method class.
+    """
+    from lite_llama.kernels.ops import dispatch
+    from lite_llama.kernels.ops.dispatch import dtype_label
+
+    n, k = weight.shape[-2:]
+    m = x.numel() // x.shape[-1]
+    selected = dispatch(
+        "linear",
+        dtype=dtype_label(x.dtype),
+        scheme=scheme,
+        shape={"m": m, "n": n, "k": k},
+    )
+    return selected.load()(
+        x,
+        weight,
+        bias=bias,
+        weight_scale=weight_scale,
+        weight_zeros=weight_zeros,
+        group_n=group_n,
+        group_k=group_k,
+    )

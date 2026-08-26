@@ -21,7 +21,7 @@ from lite_llama.kernels.ops import (
     OpRegistry,
     ShapeConstraint,
     ShapeRequirement,
-    select,
+    dispatch,
 )
 from lite_llama.kernels.ops.dispatch import dtype_label, resolve_target, set_perf_provider
 from lite_llama.platform.spec import PlatformInfo
@@ -104,11 +104,11 @@ class TestRegistry:
 
     def test_registration_invalidates_cached_decisions(self) -> None:
         reg = make_reg(native(priority=0))
-        first = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        first = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         assert first.spec.name == "native/floor"
         # A faster external row lands; the cached decision must not survive it.
         reg.register(external("flashinfer/fast", priority=10))
-        second = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        second = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         assert second.spec.name == "flashinfer/fast"
 
 
@@ -116,15 +116,15 @@ class TestFiltering:
     def test_unknown_op_lists_alternatives(self) -> None:
         reg = make_reg(native())
         with pytest.raises(LookupError, match="registered"):
-            select("nope.op", dtype="bf16", platform_info=A10, registry=reg)
+            dispatch("nope.op", dtype="bf16", platform_info=A10, registry=reg)
 
     def test_dtype_and_scheme_gates(self) -> None:
         reg = make_reg(native(), external("x/a", dtypes=("fp16",), schemes=("fp8",)))
-        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        sel = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         assert sel.spec.name == "native/floor"
         assert "dtype" in sel.rejections["x/a"]
 
-        sel = select("test.op", dtype="fp16", scheme="fp8", platform_info=A10, registry=reg)
+        sel = dispatch("test.op", dtype="fp16", scheme="fp8", platform_info=A10, registry=reg)
         assert sel.spec.name == "x/a"
 
     def test_capability_window_filters_and_explains(self) -> None:
@@ -132,18 +132,18 @@ class TestFiltering:
             native(),
             external("d/hopper", capability=(CapabilityRequirement("cuda", min_cc=(9, 0)),)),
         )
-        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        sel = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         assert sel.spec.name == "native/floor"
         assert "capability" in sel.rejections["d/hopper"]
 
-        sel = select("test.op", dtype="bf16", platform_info=H100, registry=reg)
+        sel = dispatch("test.op", dtype="bf16", platform_info=H100, registry=reg)
         assert sel.spec.name == "d/hopper"  # registration order keeps it above the floor
 
     def test_probe_false_excludes_with_reason(self) -> None:
         reg = make_reg(
             native(), external("x/broken", available="tests.ops.test_dispatch:_probe_no")
         )
-        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        sel = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         assert sel.spec.name == "native/floor"
         assert "library unavailable" in sel.rejections["x/broken"]
 
@@ -156,11 +156,11 @@ class TestFiltering:
                 shape=ShapeRequirement(hard=(ShapeConstraint("k", "mod", 16),)),
             ),
         )
-        sel = select("test.op", dtype="bf16", shape={"k": 40}, platform_info=A10, registry=reg)
+        sel = dispatch("test.op", dtype="bf16", shape={"k": 40}, platform_info=A10, registry=reg)
         assert sel.spec.name == "native/floor"
         assert "shape" in sel.rejections["x/tiled"]
 
-        sel = select("test.op", dtype="bf16", shape={"k": 64}, platform_info=A10, registry=reg)
+        sel = dispatch("test.op", dtype="bf16", shape={"k": 64}, platform_info=A10, registry=reg)
         assert sel.spec.name == "x/tiled"
 
     def test_layout_tag_gate(self) -> None:
@@ -168,18 +168,18 @@ class TestFiltering:
             native(),
             external("x/paged", priority=1, layout=LayoutRequirement(required=("kv:paged",))),
         )
-        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        sel = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         assert sel.spec.name == "native/floor"
         assert "kv:paged" in sel.rejections["x/paged"]
 
-        sel = select(
+        sel = dispatch(
             "test.op", dtype="bf16", layout=frozenset({"kv:paged"}), platform_info=A10, registry=reg
         )
         assert sel.spec.name == "x/paged"
 
     def test_unverified_golden_excluded_from_default_dispatch(self) -> None:
         reg = make_reg(native(), external("x/unverified", golden=GoldenRecord()))
-        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        sel = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         assert sel.spec.name == "native/floor"
         assert "golden" in sel.rejections["x/unverified"]
 
@@ -187,7 +187,7 @@ class TestFiltering:
 class TestRanking:
     def test_priority_orders_unmeasured_rows(self) -> None:
         reg = make_reg(native(), external("x/low", priority=1), external("x/high", priority=9))
-        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        sel = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         assert sel.spec.name == "x/high"
 
     def test_shape_preference_beats_priority(self) -> None:
@@ -200,7 +200,7 @@ class TestRanking:
             ),
             external("x/blank", priority=9),
         )
-        sel = select("test.op", dtype="bf16", shape={"m": 256}, platform_info=A10, registry=reg)
+        sel = dispatch("test.op", dtype="bf16", shape={"m": 256}, platform_info=A10, registry=reg)
         assert sel.spec.name == "x/loves_128"
 
     def test_frozen_measurement_beats_everything(self) -> None:
@@ -211,7 +211,7 @@ class TestRanking:
 
         set_perf_provider(measured_wins)
         try:
-            sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+            sel = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
             assert sel.spec.name == "x/measured"
             assert "perf=1.500ms" in sel.explain()
         finally:
@@ -219,15 +219,15 @@ class TestRanking:
 
     def test_name_is_the_final_tie_break(self) -> None:
         reg = make_reg(native(), external("b/row"), external("a/row"))
-        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        sel = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         assert sel.spec.name == "a/row"  # equal specs -> lexicographic, not import order
 
 
 class TestCachingAndDeterminism:
     def test_same_key_returns_the_same_decision_object(self) -> None:
         reg = make_reg(native(), external("x/a"))
-        a = select("test.op", dtype="bf16", shape={"k": 7}, platform_info=A10, registry=reg)
-        b = select("test.op", dtype="bf16", shape={"k": 7}, platform_info=A10, registry=reg)
+        a = dispatch("test.op", dtype="bf16", shape={"k": 7}, platform_info=A10, registry=reg)
+        b = dispatch("test.op", dtype="bf16", shape={"k": 7}, platform_info=A10, registry=reg)
         assert a is b  # cached
 
     def test_different_shape_is_a_different_key(self) -> None:
@@ -239,8 +239,8 @@ class TestCachingAndDeterminism:
                 shape=ShapeRequirement(hard=(ShapeConstraint("k", "min", 8),)),
             ),
         )
-        small = select("test.op", dtype="bf16", shape={"k": 4}, platform_info=A10, registry=reg)
-        big = select("test.op", dtype="bf16", shape={"k": 64}, platform_info=A10, registry=reg)
+        small = dispatch("test.op", dtype="bf16", shape={"k": 4}, platform_info=A10, registry=reg)
+        big = dispatch("test.op", dtype="bf16", shape={"k": 64}, platform_info=A10, registry=reg)
         assert small.spec.name == "native/floor"
         assert big.spec.name == "x/shape"
 
@@ -250,11 +250,11 @@ class TestCachingAndDeterminism:
             external("d/hopper", capability=(CapabilityRequirement("cuda", min_cc=(9, 0)),)),
         )
         assert (
-            select("test.op", dtype="bf16", platform_info=A10, registry=reg).spec.name
+            dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg).spec.name
             == "native/floor"
         )
         assert (
-            select("test.op", dtype="bf16", platform_info=H100, registry=reg).spec.name
+            dispatch("test.op", dtype="bf16", platform_info=H100, registry=reg).spec.name
             == "d/hopper"
         )
 
@@ -262,28 +262,28 @@ class TestCachingAndDeterminism:
 class TestForcedBackend:
     def test_explicit_backend_pins_the_family(self) -> None:
         reg = make_reg(native(), external("x/a", priority=99))
-        sel = select("test.op", dtype="bf16", backend="native", platform_info=A10, registry=reg)
+        sel = dispatch("test.op", dtype="bf16", backend="native", platform_info=A10, registry=reg)
         assert sel.spec.name == "native/floor"
 
     def test_forced_backend_bypasses_only_the_golden_gate(self) -> None:
         reg = make_reg(native(), external("x/unverified", golden=GoldenRecord()))
-        sel = select("test.op", dtype="bf16", backend="x", platform_info=A10, registry=reg)
+        sel = dispatch("test.op", dtype="bf16", backend="x", platform_info=A10, registry=reg)
         assert sel.spec.name == "x/unverified"
         # ...but physical gates still hold: a dtype it cannot run excludes it.
         reg2 = make_reg(native(), external("x/fp16only", dtypes=("fp16",), golden=GoldenRecord()))
         with pytest.raises(LookupError, match="dtype"):
-            select("test.op", dtype="bf16", backend="x", platform_info=A10, registry=reg2)
+            dispatch("test.op", dtype="bf16", backend="x", platform_info=A10, registry=reg2)
 
     def test_env_variable_forces_globally(self, monkeypatch: pytest.MonkeyPatch) -> None:
         reg = make_reg(native(), external("x/a"))
         monkeypatch.setenv("LITE_LLAMA_FORCE_BACKEND", "x")
-        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        sel = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         assert sel.spec.name == "x/a"
 
     def test_forcing_a_missing_backend_fails_loud(self) -> None:
         reg = make_reg(native())
         with pytest.raises(LookupError, match="forced"):
-            select("test.op", dtype="bf16", backend="flashinfer", platform_info=A10, registry=reg)
+            dispatch("test.op", dtype="bf16", backend="flashinfer", platform_info=A10, registry=reg)
 
 
 class TestExplainAndTrace:
@@ -293,8 +293,8 @@ class TestExplainAndTrace:
             external("x/lo", priority=1),
             external("d/hopper", capability=(CapabilityRequirement("cuda", min_cc=(9, 0)),)),
         )
-        text = select("test.op", dtype="bf16", platform_info=A10, registry=reg).explain()
-        assert "[x/lo] selected" in text
+        text = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg).explain()
+        assert "[x/lo] dispatched" in text
         assert "[d/hopper] excluded: capability" in text
         # The floor was feasible but outranked: explain must say so, not hide it.
         assert "[native/floor] feasible, ranked below" in text
@@ -304,7 +304,7 @@ class TestExplainAndTrace:
     ) -> None:
         monkeypatch.setenv("LITE_LLAMA_KERNEL_TRACE", "1")
         reg = make_reg(native())
-        select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         # The project logger propagates to a coloured stderr handler only, so
         # assert on the emitted line instead of caplog.
         out = capfd.readouterr().err
@@ -322,7 +322,7 @@ class TestTargetResolution:
         import math
 
         reg = make_reg(native())  # target is math:sin
-        sel = select("test.op", dtype="bf16", platform_info=A10, registry=reg)
+        sel = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         assert sel.load() is math.sin
 
     def test_resolve_failure_names_the_target(self) -> None:

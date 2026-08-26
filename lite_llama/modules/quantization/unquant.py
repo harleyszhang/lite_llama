@@ -6,7 +6,6 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from ...kernels import fused_moe
 from .base_config import (
@@ -14,11 +13,12 @@ from .base_config import (
     LinearMethodBase,
     QuantizationConfig,
     QuantizeMethodBase,
+    run_quant_linear,
 )
 
 
 class UnquantizedLinearMethod(LinearMethodBase):
-    """Plain fp16 weight multiplied by ``F.linear``."""
+    """Plain weight projected via kernel dispatch (``F.linear`` floor row)."""
 
     def create_weights(self, layer: nn.Module, input_size: int, output_size: int, **kw) -> None:
         layer.weight = nn.Parameter(
@@ -28,7 +28,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
     def apply(
         self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        return F.linear(x, layer.weight, bias)
+        return run_quant_linear("unquantized", x, layer.weight, bias=bias)
 
 
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
