@@ -1,6 +1,6 @@
 """Scatter freshly computed K/V rows into the paged KV buffer.
 
-Writes each token's K and V into its allocated slot (``Select_Index``) in the
+Writes each token's K and V into its allocated slot (``select_index``) in the
 global cache buffer, where K occupies the first ``num_kv_heads`` rows and V the
 second half. Taking the two projections as separate pointers — rather than a
 ``torch.cat`` the caller would have to build per layer per step — keeps the
@@ -76,51 +76,50 @@ def _fwd_kernel_update_kv(
 
 
 @torch.no_grad()
-def update_kv_buffer(K_Values, V_Values, Select_Index, KV_Buffer):
-    """
-    The kernel writes K into the first num_kv_heads rows of each cache
-    entry and V into the second half.
+def update_kv_buffer(k, v, select_index, kv_buffer):
+    """Scatter the K/V rows of ``select_index.shape[0]`` tokens into the cache.
 
-    参数：
-        - Select_Index: prefill 阶段 batch_size * seq_len, decode 阶段 batch_size。
-            Select_Index[i] 表示 K_Values/V_Values 的第 i 行 应该被复制到 KV_Buffer
-            的第 Select_Index[i] 行。
-        - K_Values: 尺寸为 [select_indexs, num_kv_heads, head_dim]。
-        - V_Values: 尺寸为 [select_indexs, num_kv_heads, head_dim]，与 K_Values 同形。
-        - KV_Buffer: 尺寸为 [max_num_tokens, num_kv_heads * 2, head_dim]，K 头在前 V 头在后。
-    输出:
-        KV_Buffer 张量被填, KV_Buffer[Select_Index[i], :num_kv_heads, :] = K[i, :, :] 且
-        KV_Buffer[Select_Index[i], num_kv_heads:, :] = V[i, :, :]。
+    Args:
+        k: ``(tokens, num_kv_heads, head_dim)`` freshly projected keys.
+        v: Same shape as ``k``.
+        select_index: ``(tokens,)`` destination slots. Row ``i`` of ``k``/``v``
+            lands in cache row ``select_index[i]`` — one entry per token during
+            prefill, one per sequence during decode.
+        kv_buffer: ``(max_num_tokens, num_kv_heads * 2, head_dim)`` cache, K
+            heads first and V heads second.
+
+    Returns:
+        Nothing; ``kv_buffer`` is written in place.
     """
-    seq_len = Select_Index.shape[0]     # number_tokens
-    head_num = KV_Buffer.shape[1] // 2  # one side of the fused K/V rows
-    head_dim = KV_Buffer.shape[2]
-    assert K_Values.shape == (seq_len, head_num, head_dim) and V_Values.shape == (
+    seq_len = select_index.shape[0]  # number_tokens
+    head_num = kv_buffer.shape[1] // 2  # one side of the fused K/V rows
+    head_dim = kv_buffer.shape[2]
+    assert k.shape == (seq_len, head_num, head_dim) and v.shape == (
         seq_len,
         head_num,
         head_dim,
     ), (
         f"K/V projections must be [{seq_len}, {head_num}, {head_dim}] to match the "
-        f"cache buffer, got {tuple(K_Values.shape)} / {tuple(V_Values.shape)}"
+        f"cache buffer, got {tuple(k.shape)} / {tuple(v.shape)}"
     )
     BLOCK_HEAD = triton.next_power_of_2(head_num)
     grid = (seq_len,)
     num_warps = 1
 
     _fwd_kernel_update_kv[grid](
-        K_Values,
-        V_Values,
-        Select_Index,
-        KV_Buffer,
-        K_Values.stride(0),
-        K_Values.stride(1),
-        K_Values.stride(2),
-        V_Values.stride(0),
-        V_Values.stride(1),
-        V_Values.stride(2),
-        KV_Buffer.stride(0),
-        KV_Buffer.stride(1),
-        KV_Buffer.stride(2),
+        k,
+        v,
+        select_index,
+        kv_buffer,
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        kv_buffer.stride(0),
+        kv_buffer.stride(1),
+        kv_buffer.stride(2),
         head_num,
         BLOCK_DMODEL=head_dim,
         BLOCK_HEAD=BLOCK_HEAD,

@@ -244,9 +244,17 @@ class MoeOp(LogicalOp):
 class DispatchOp(LogicalOp):
     """All-to-all token routing to expert ranks (EP).
 
-    Native placeholder routes via ``torch.distributed.all_to_all``; deepep
-    lands in M2.5. The exact receive layout (seg_indptr vs masked_m) is
-    declared in the impl's LayoutRequirement, not invented ad hoc.
+    No native row, and deliberately so: MoE in this repo is *tensor* parallel —
+    every rank runs every expert over its slice of the intermediate dimension
+    (:class:`lite_llama.modules.moe.SparseMoeBlock`), so there is no EP group to
+    all-to-all across, and the local permute half of the job already lives
+    inside ``fused_moe``'s ``moe_align_block_size``. A placeholder written now
+    would be untestable code duplicating an existing sort. The EP group and the
+    deepep rows arrive together in M2.5; the contract is declared here so the
+    receive layout is fixed before then.
+
+    The exact receive layout (seg_indptr vs masked_m) is declared in the impl's
+    LayoutRequirement, not invented ad hoc.
     """
 
     op_id = "comm.dispatch"
@@ -274,7 +282,11 @@ class DispatchOp(LogicalOp):
 
 
 class CombineOp(LogicalOp):
-    """Gather expert outputs back and merge the routed copies."""
+    """Gather expert outputs back and merge the routed copies.
+
+    Shares :class:`DispatchOp`'s reason for having no native row: the two are
+    one protocol and must land in the same version as the EP group.
+    """
 
     op_id = "comm.combine"
 
@@ -307,24 +319,25 @@ class RmsNormOp(LogicalOp):
     def __call__(
         self,
         x: torch.Tensor,
+        residual: torch.Tensor | None,
         weight: torch.Tensor,
-        *,
         eps: float = 1e-5,
-        residual: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Normalise the last dimension.
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Normalise the last dimension, folding in the residual add when asked.
 
         Args:
             x: ``[..., hidden]`` activations.
+            residual: When given, added to ``x`` before normalising; ``None``
+                runs the plain norm. Positional and mandatory because the two
+                paths return the same pair either way and the caller has to
+                say which one it wants.
             weight: ``[hidden]`` learned scale.
             eps: Variance floor.
-            residual: When given, added before normalising and the summed
-                input is returned as the new residual (skip_rmsnorm fused
-                path); ``None`` runs the plain norm.
 
         Returns:
-            Normalised output, plus the new residual when ``residual`` is
-            given (two-tuple in that case, else a single tensor).
+            ``(normalised, residual)``, always a pair. The second element is the
+            summed input on the fused path and ``x`` itself on the plain one, so
+            a decoder layer can thread it into the next norm without branching.
         """
         raise NotImplementedError
 
@@ -386,7 +399,16 @@ class KvWriteOp(LogicalOp):
 
 
 class SampleOp(LogicalOp):
-    """Token sampling core (top-k / top-p) over the final logits."""
+    """Token sampling core (top-k / top-p) over the final logits.
+
+    No native row registers against this contract yet: sampling in this repo
+    lives in :class:`lite_llama.engine.sampler.Sampler`, which is torch ops over
+    a *tensor-parallel slice* of the vocabulary and carries repetition penalties
+    and per-row parameters that no kernel signature covers. Adding a second
+    sampler under ``kernels/`` just to fill the catalogue would give sampling two
+    places to disagree. The contract exists for flashinfer's fused top-k/top-p
+    sampler (M2.1), which is when the engine path becomes the native row.
+    """
 
     op_id = "sample"
 
@@ -418,10 +440,11 @@ class SampleOp(LogicalOp):
 class ElementwiseOp(LogicalOp):
     """Pointwise transforms under the open ``elementwise.*`` namespace.
 
-    Concrete members (``elementwise.swiglu``, ``elementwise.silu``, ...)
-    register their own KernelSpec rows; this ABC only pins the loose shape
-    contract: row-major over the flattened token dimension, output dtype
-    tracks the input.
+    Concrete members register their own KernelSpec rows and each pins its own
+    arity: ``elementwise.swiglu`` takes the packed ``[tokens, 2 * inter]``
+    gate/up tensor a fused projection produces, ``elementwise.swiglu_split``
+    takes the two halves separately. This ABC only pins what they share:
+    row-major over the flattened token dimension, output dtype tracks the input.
     """
 
     op_id = "elementwise"

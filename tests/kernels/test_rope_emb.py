@@ -11,6 +11,9 @@ from output shapes alone:
   across the full head dim; feeding the second half in would rotate twice.
 * **It mutates q and k in place** and returns the same tensors. A caller that
   needs the pre-rotation values must clone first.
+* **The batch/seq geometry comes from cos/sin,** not from arguments the caller
+  repeats. Tables that describe a different number of positions than q holds
+  tokens is a caller bug, and the kernel would otherwise index past them.
 
 The previous test for this kernel pasted a second copy of the Triton source into
 the test file and never ran at all -- ``@triton.jit`` cannot read the source of
@@ -58,7 +61,7 @@ def test_matches_reference(batch_size, seq_len, num_q_heads, num_kv_heads, head_
     q_ref = rope_half_split(q.clone(), cos, sin, batch_size, seq_len)
     k_ref = rope_half_split(k.clone(), cos, sin, batch_size, seq_len)
 
-    q_out, k_out = rope_emb_forward(q, k, cos, sin, batch_size, seq_len)
+    q_out, k_out = rope_emb_forward(q, k, cos, sin)
 
     torch.testing.assert_close(q_out.float(), q_ref.float(), rtol=_RTOL, atol=_ATOL)
     torch.testing.assert_close(k_out.float(), k_ref.float(), rtol=_RTOL, atol=_ATOL)
@@ -71,7 +74,7 @@ def test_rotates_in_place():
     cos, sin = _cos_sin(1, 4, 64)
 
     original = q.clone()
-    q_out, _ = rope_emb_forward(q, k, cos, sin, 1, 4)
+    q_out, _ = rope_emb_forward(q, k, cos, sin)
 
     assert q_out.data_ptr() == q.data_ptr()
     assert not torch.allclose(q.float(), original.float())
@@ -90,7 +93,7 @@ def test_zero_angle_is_identity():
     sin = torch.zeros(1, tokens, head_dim, device="cuda", dtype=torch.float16)
 
     q_before, k_before = q.clone(), k.clone()
-    q_out, k_out = rope_emb_forward(q, k, cos, sin, 1, tokens)
+    q_out, k_out = rope_emb_forward(q, k, cos, sin)
 
     torch.testing.assert_close(q_out.float(), q_before.float(), rtol=_RTOL, atol=_ATOL)
     torch.testing.assert_close(k_out.float(), k_before.float(), rtol=_RTOL, atol=_ATOL)
@@ -110,7 +113,7 @@ def test_rotation_preserves_pairwise_norm():
     cos, sin = _cos_sin(1, tokens, head_dim)
 
     before = q.clone().float()
-    q_out, _ = rope_emb_forward(q, k, cos, sin, 1, tokens)
+    q_out, _ = rope_emb_forward(q, k, cos, sin)
     after = q_out.float()
 
     norm_before = before[..., :half].pow(2) + before[..., half:].pow(2)
@@ -129,6 +132,22 @@ def test_distinct_positions_get_distinct_rotations():
     k = torch.ones(seq_len, 2, head_dim, device="cuda", dtype=torch.float16)
     cos, sin = _cos_sin(1, seq_len, head_dim)
 
-    q_out, _ = rope_emb_forward(q, k, cos, sin, 1, seq_len)
+    q_out, _ = rope_emb_forward(q, k, cos, sin)
 
     assert not torch.allclose(q_out[0].float(), q_out[1].float())
+
+
+def test_mismatched_table_geometry_is_rejected():
+    """cos/sin describing a different token count must raise, not read past.
+
+    The kernel derives ``batch_size``/``seq_len`` from the tables, so a caller
+    whose q has more tokens than the tables cover would have those extra rows
+    indexed out of bounds — silently, on a shape that looks plausible.
+    """
+    head_dim = 64
+    q = torch.randn(8, 4, head_dim, device="cuda", dtype=torch.float16)
+    k = torch.randn(8, 2, head_dim, device="cuda", dtype=torch.float16)
+    cos, sin = _cos_sin(1, 4, head_dim)  # 4 positions for 8 tokens
+
+    with pytest.raises(ValueError, match="positions"):
+        rope_emb_forward(q, k, cos, sin)

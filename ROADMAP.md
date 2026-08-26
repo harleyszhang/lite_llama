@@ -180,15 +180,29 @@ DP:                    Frontend ── Router(P10) ── EngineCore 进程 × d
 
 参考 sglang `python/sglang/kernels`(spec/registry/selector/fused_op)的成熟设计,并补上它刻意留白的一环:**如何自动调到性能最佳的实现**。
 
-> **现状(v0.9.0)**:`kernels/backends/registry.py` 已有雏形——`Backend` dataclass + `probe()` + `priority` 排序 + `explain()` + 环境变量覆盖 + 缺库回退。但它只有 **probe+priority** 两根支柱,**缺 ABC 签名、声明式元数据清单、确定性 dispatch、layout 转换、golden 门禁、perf_key 排序**。换言之:能选后端,但不能按 shape/dtype/精度的差异选,也不能保证选择是"实测最快"。本节描述的是从雏形到完整链路的升级路径。
+> **现状(v0.9.0)**:五根支柱的**机制**已在 `kernels/ops/` 落地——ABC 签名(`interfaces.py`)、声明式 KernelSpec 清单(`backends/<backend>.py`)、确定性 dispatch + 逐条拒绝理由的 `explain` + 调用 trace(`dispatch.py`)。v0.8 的雏形 `kernels/backends/registry.py`(只有 probe+priority 两根支柱)已降级为兼容 shim:`lite_llama` 内无调用方,仅 `scripts/gen_backend_registry_gif.py` 还在用,v0.10 与该脚本一并删除;它唯一未被 ops 吸收的能力(per-op 环境变量)已泛化为对每个注册 op 都生效的 `op_backend_env()`。
+>
+> **仍缺的是数据而非机制**:`golden.verified` 与 `perf_key` 两个字段 dispatch 已在过滤/排序时读取,但对齐门禁工具与冻结的实测记录分别要到 M3.1 / M3.2 才产出;`layout` 目前只做"不满足即排除",尚不会自动插入转换。
 
 ### 五根支柱
 
-**① 一个逻辑算子**:收敛成固定清单,只定义"算什么",id 用 `<group>.<name>`:
-`attention.prefill / attention.decode / linear / moe / rmsnorm / rope / kv_write / sample`。
+**① 一个逻辑算子**:收敛成固定清单,只定义"算什么",id 用 `<group>.<name>`。v0.9.0 共 12 个契约,其中 7 个已有 native 实现行:
+`attention.prefill / attention.decode / linear / moe / rmsnorm / rope / kv_write`。
+`elementwise` 是开放命名空间,它的两个成员 `elementwise.swiglu`(packed)与 `elementwise.swiglu_split`(两半分开)各占一行,差别只在 arity——所以注册表里共 9 个 op id。
+剩下 5 个契约**刻意只声明、不注册 native 行**——契约先定住,实现随对应里程碑到位:
+
+| 契约 | 为何没有 native 行 |
+|---|---|
+| `sample` | 采样归 `engine/sampler.py`,它跑在 TP 切分后的 vocab 分片上并带 repetition penalty;再写一份等于让采样有两处可分歧 |
+| `comm.dispatch` / `comm.combine` | 本仓 MoE 是 **TP**(每 rank 跑全部专家的一段 intermediate),没有 EP 组可 all-to-all;本地 permute 那半已由 `fused_moe` 的 `moe_align_block_size` 承担。EP 组与 deepep 行同在 M2.5 落地 |
+| `attention.mla_decode` | 树内尚无 MLA 模型,flashmla 行 + 单层 harness 在 M2.4 |
+| `elementwise` | 开放命名空间的根本身,只有成员注册行 |
+
+这份清单由 `tests/ops/test_native_specs.py` 的 `OPS_WITHOUT_NATIVE_ROW` 精确断言——"某个契约没有实现"可以,但不能悄悄没有。
 现有 `flashattention2_nopad.py`、`flashdecoding.py` 命名混乱的根因就是缺这层——它们其实是 `attention.prefill` / `attention.decode` 两个逻辑算子的不同实现(legacy v1/v2 学习型 kernel 已移入 `benchmarks/kernels/`,随本迁移一并删除)。
 
 **② 一个签名(ABC,吃语义张量,不含 layout)**:所有实现共享同一 `forward()` 签名与语义,`forward_native`(纯 PyTorch/参考实现)是**正确性基准**,必须存在。这一模式项目已有雏形——`models/quantization/methods/base.py` 的 `LinearQuantMethod.apply(layer, x)`,推广到全部算子即可。layout 差异(DeepGEMM 要转置权重、FlashInfer 要自己的 KV 布局)不进签名,进元数据。
+**形参名也是契约的一部分**:因为支柱③ 刻意不写适配层,dispatch 把 kernel 函数本身交给调用方,所以"形参顺序对得上但名字不对"会无声通过。`tests/ops/test_native_specs.py::TestTargetsMatchTheirContract` 逐名比对 target 与 ABC——正是它抓出 `update_kv_buffer(K_Values, ...)` 与 `skip_rmsnorm(X, ...)` 两处漂移。
 
 **③ N 份实现(不新增目录层,只多一张声明清单)**:三个正交的位置回答三个问题——
 ```
@@ -234,7 +248,7 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
 
 ### 配套设施(直接复用 sglang 思路)
 
-- **强制后端开关**(`LITE_LLAMA_FORCE_BACKEND=native`):对标 sglang `SGLANG_FORCE_FUSED_OP_BACKEND`,二分数值 bug 时把整模型钉到 native。
+- **强制后端开关**:对标 sglang `SGLANG_FORCE_FUSED_OP_BACKEND`,二分数值 bug 时把整模型钉到 native。两级粒度,越窄越优先——`backend=` 参数 > per-op `LITE_LLAMA_<OP>_BACKEND`(如 `LITE_LLAMA_ATTENTION_DECODE_BACKEND`) > 全局 `LITE_LLAMA_FORCE_BACKEND`。per-op 才是实际需要的粒度:一台机器可能想让 attention 走 flashinfer 而 linear 留在 native Triton GEMM。
 - **调用 trace**(对标 sglang `enable_fused_op_trace`):记录每次调用的 (op, backend, shape/dtype),**直接产出 ops-collector(地基 3 的 collect 阶段)要的真实 shape 清单**。
 - 外部后端各自占一个 `kernels/backends/<backend>.py`(只有 KernelSpec 行,没有实现代码),全部 optional extra,永不进核心依赖。
 
