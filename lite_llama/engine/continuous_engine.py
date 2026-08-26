@@ -263,6 +263,7 @@ class ContinuousBatchingEngine:
         quantization: str | None = None,
         tensor_parallel_size: int = 1,
         kv_cache_dtype: str = "auto",
+        enable_prefix_cache: bool = False,
     ) -> ContinuousBatchingEngine:
         """Load a checkpoint and wrap it in a continuous-batching engine.
 
@@ -291,6 +292,11 @@ class ContinuousBatchingEngine:
                 to agree with it.
             kv_cache_dtype: KV-cache element type, forwarded to the engine
                 (``"auto"`` for fp16, or an fp8 spelling to halve the cache).
+            enable_prefix_cache: Reuse the K/V of prompt prefixes already resident
+                in the cache instead of re-prefilling them. Off by default because
+                it only pays when prompts share a prefix -- a system prompt, a
+                few-shot preamble, a chat history -- and otherwise costs a hash per
+                block. See :mod:`lite_llama.engine.prefix_cache`.
 
         Raises:
             NotImplementedError: The checkpoint is multimodal.
@@ -339,6 +345,7 @@ class ContinuousBatchingEngine:
             max_seq_len=engine.max_seq_len,
             max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
+            enable_prefix_cache=enable_prefix_cache,
         )
         executor: Executor | None = None
         if get_tp_world_size() > 1:
