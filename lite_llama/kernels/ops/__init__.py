@@ -1,9 +1,9 @@
 """Logical-operator layer: torch-free specs, registry and deterministic dispatch.
 
-The package restructures the kernel stack into three tiers (ROADMAP foundation
-2): *ops* declares what each implementation can do as data, *impls* holds the
-implementations themselves, and :func:`dispatch` picks one per call
-deterministically. Importing this package never imports torch;
+Three questions, three places (ROADMAP foundation 2): the kernels themselves
+live in :mod:`lite_llama.kernels`, each backend declares what its kernels can
+do as data in :mod:`lite_llama.kernels.backends`, and :func:`dispatch` picks one
+row per call deterministically. Importing this package never imports torch;
 implementations are referenced as ``"module:attr"`` strings and loaded only
 when first dispatched.
 

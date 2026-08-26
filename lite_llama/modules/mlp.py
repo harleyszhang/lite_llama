@@ -24,7 +24,7 @@ class FusedMLP(nn.Module):
 
     Each rank stores its own slice of *both* halves (gate rows then up rows),
     which is the layout the fused activation kernel assumes; the K/V pair in
-    :class:`~lite_llama.modules.attention.Attention` is fused the same way.
+    :class:`~lite_llama.models.base.Attention` is fused the same way.
     """
 
     def __init__(self, config: ModelConfig, quant: QuantizationConfig | None = None) -> None:

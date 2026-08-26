@@ -1,30 +1,52 @@
-"""Triton rows for the ``linear`` op — the four quantised GEMMs behind one signature.
+"""Entry points of the ``linear`` logical op: one per quantisation scheme.
 
-Each scheme gets its own entry point because the numeric format is a dispatch
-key dimension, not a runtime branch: dispatch already knows the scheme when
-it picks the row, so the loaded implementation can assume its format and map
-straight onto the existing Triton kernels in
-:mod:`lite_llama.kernels.quantization` (which stay untouched — these are
-adapters, not rewrites). ``w8a8_fp8`` additionally quantises activations
-per token inside the impl; that is an implementation detail the caller never
-sees, exactly like the per-token int8 quantisation inside the SmoothQuant
-kernel.
+The projection GEMM is the same operation in every model, but the numeric
+format decides which kernel runs it. That format is a *dispatch key*, not a
+runtime branch: :func:`~lite_llama.kernels.ops.dispatch` already knows the
+scheme when it picks a row, so each function below may assume its own format
+and map straight onto the Triton kernels in
+:mod:`lite_llama.kernels.quantization` — no ``if scheme ==`` chain anywhere on
+the hot path. All of them share the
+:class:`~lite_llama.kernels.ops.interfaces.LinearOp` signature so a caller
+never has to know which one it got; scales it does not have are simply
+``None``.
 
 Usage:
-    y = linear_w8a16(x, qweight, weight_scale=scales, group_n=1, group_k=138)
+    y = linear_torch(x, weight, bias=bias)                       # unquantised
+    y = linear_w8a16(x, qweight, weight_scale=scales, group_k=128)  # fp8/int8 weight
 """
 
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
-from lite_llama.kernels.quantization import (
-    fp8_matmul,
-    smoothquant_matmul,
-    w4a16_matmul,
-    w8a16_matmul,
-)
-from lite_llama.modules.quantization.utils import quantize_fp8_per_token
+from .quantization import fp8_matmul, smoothquant_matmul, w4a16_matmul, w8a16_matmul
+
+
+def linear_torch(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    *,
+    bias: torch.Tensor | None = None,
+    weight_scale: torch.Tensor | None = None,
+    weight_zeros: torch.Tensor | None = None,
+    group_n: int = 0,
+    group_k: int = 0,
+) -> torch.Tensor:
+    """Unquantised floor: ``F.linear``, i.e. cuBLAS.
+
+    This is the row every scheme can fall back to and the one the golden
+    baselines are measured against — cuBLAS is the correct floor here, a Triton
+    tile would be the optimisation. A quantised scheme reaching this function
+    fails loudly instead of silently running a plain GEMM on packed bytes.
+    """
+    if weight_scale is not None or weight_zeros is not None:
+        raise ValueError(
+            "native/linear_torch serves the unquantised floor; a quantised "
+            "scheme reached it, which is a dispatch or registration bug"
+        )
+    return F.linear(x, weight, bias)
 
 
 def linear_w8a16(
@@ -86,7 +108,17 @@ def linear_w8a8_fp8(
     group_n: int = 0,
     group_k: int = 0,
 ) -> torch.Tensor:
-    """True W8A8 fp8: per-token activation quantisation feeding the fp8 GEMM."""
+    """True W8A8 fp8: per-token activation quantisation feeding the fp8 GEMM.
+
+    Quantising the activations is part of running this format, so it happens
+    here rather than in the caller — the same way the SmoothQuant kernel
+    quantises its own activations internally.
+    """
+    # Imported lazily: the helper lives with the quantisation *methods*, and
+    # this module is itself loaded lazily by dispatch, so nothing pays for it
+    # unless an fp8 checkpoint is actually served.
+    from ..modules.quantization.utils import quantize_fp8_per_token
+
     if weight_scale is None:
         raise ValueError("linear_w8a8_fp8 needs weight_scale (block-wise fp8)")
     qx, x_scale = quantize_fp8_per_token(x)

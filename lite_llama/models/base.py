@@ -2,7 +2,8 @@
 
 LLaMA, Qwen2 and Qwen3 differ only in a few knobs — q/k/v bias, per-head q/k
 RMSNorm, and how wide the attention projections are versus the residual stream.
-Everything else (KV-cache write, the prefill/decode kernel split, SwiGLU MLP,
+Everything else (the attention composition — fused-QKV projection, q/k norm,
+RoPE — the KV-cache write, the prefill/decode kernel split, SwiGLU MLP,
 pre-norm residual wiring, the forward skeleton) is assembled here once in
 :class:`DecoderLayer` / :class:`CausalLM` from the building blocks in
 :mod:`lite_llama.modules`; concrete models only declare their differences.
@@ -22,19 +23,138 @@ from typing import Any, ClassVar
 import torch
 import torch.nn as nn
 
-from ..kernels import skip_rmsnorm
+from ..kernels import rope_emb_forward, skip_rmsnorm
 from ..modules import (
-    Attention,
     FusedMLP,
     LinearBase,
+    PagedAttention,
     ParallelLMHead,
+    QKVParallelLinear,
     RotaryEmbedding,
+    RowParallelLinear,
     SparseMoeBlock,
     VocabParallelEmbedding,
 )
 from ..modules.quantization import QuantizationConfig, adapt_int4_checkpoint
 from . import weights
 from .config import ModelConfig
+
+
+class Attention(nn.Module):
+    """Fused-QKV self-attention with RoPE and optional per-head q/k normalisation.
+
+    The model-layer half of the attention block: this class owns the
+    projections and their composition (project → per-head reshape → q/k norm →
+    RoPE → :class:`~lite_llama.modules.attention.PagedAttention` → output
+    projection), while the paged-cache write and the prefill/decode kernel call
+    live in :class:`~lite_llama.modules.attention.PagedAttention`. A model
+    family that composes attention differently (MLA, v0.10) overrides
+    :meth:`CausalLM._build_attention` and replaces this block whole — the
+    ROADMAP prerequisite that motivated the split.
+
+    q, k and v are one :class:`~lite_llama.modules.linear.QKVParallelLinear` weight, so
+    the block runs two GEMMs rather than three. Under tensor parallelism the heads are
+    dealt out across ranks: that layer is column-parallel (each rank owns
+    ``num_heads / tp`` query heads and the KV heads that go with them, so its KV cache
+    is that much smaller too) and ``o_proj`` is row-parallel, contributing this block's
+    only all-reduce.
+
+    Args:
+        config: Model config supplying the head geometry.
+        qkv_bias: Whether q/k/v projections carry a bias (true for Qwen2).
+        use_qk_norm: Whether q and k are RMSNormed per head before RoPE (Qwen3).
+        quant: Quantisation layout of the projections, or ``None`` for fp16.
+    """
+
+    def __init__(
+        self,
+        config: ModelConfig,
+        *,
+        qkv_bias: bool = False,
+        use_qk_norm: bool = False,
+        quant: QuantizationConfig | None = None,
+    ) -> None:
+        super().__init__()
+        self.head_dim = config.head_dim
+        self.hidden_size = config.hidden_size
+        self.rms_norm_eps = config.rms_norm_eps
+        self.use_qk_norm = use_qk_norm
+
+        self.qkv_proj = QKVParallelLinear(
+            config.hidden_size,
+            config.num_heads,
+            config.num_kv_heads,
+            config.head_dim,
+            bias=qkv_bias,
+            quant=quant,
+        )
+        # This rank's share of the head geometry, read back from the layer that owns
+        # the weight rather than divided a second time here. Attention width is
+        # independent of the residual stream width (Qwen3).
+        self.num_heads = self.qkv_proj.num_heads
+        self.num_kv_heads = self.qkv_proj.num_kv_heads
+        self.q_size = self.qkv_proj.q_size
+        self.kv_size = self.qkv_proj.kv_size
+
+        self.o_proj = RowParallelLinear(
+            config.q_size, self.hidden_size, quant=quant, what="query features"
+        )
+
+        if use_qk_norm:
+            # Normalises over head_dim, so it is replicated rather than sharded.
+            self.q_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=config.dtype))
+            self.k_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=config.dtype))
+
+        self.attn = PagedAttention(
+            self.num_kv_heads,
+            self.head_dim,
+            kv_cache_dtype=config.kv_cache_torch_dtype,
+        )
+
+    def _project_qkv(
+        self,
+        x: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Project, reshape to per-head layout, normalise (optionally) and apply RoPE."""
+        batch_size, seq_len, _ = x.shape
+        x = x.view(-1, self.hidden_size)
+
+        xq, xk, xv = self.qkv_proj.project(x)
+
+        num_tokens = batch_size * seq_len
+        xq = xq.view(num_tokens, self.num_heads, self.head_dim)
+        xk = xk.view(num_tokens, self.num_kv_heads, self.head_dim)
+        xv = xv.view(num_tokens, self.num_kv_heads, self.head_dim)
+
+        if self.use_qk_norm:
+            # RMSNorm over head_dim, i.e. independently per head.
+            xq, _ = skip_rmsnorm(xq, None, self.q_norm_weight, self.rms_norm_eps)
+            xk, _ = skip_rmsnorm(xk, None, self.k_norm_weight, self.rms_norm_eps)
+
+        cos, sin = position_embeddings
+        xq, xk = rope_emb_forward(xq, xk, cos, sin, batch_size, seq_len)
+        return xq, xk, xv
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        atten_info,
+        layer_index: int,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        batch_size, seq_len, _ = x.shape
+        xq, xk, xv = self._project_qkv(x, position_embeddings)
+
+        # The phase comes from whoever prepared the metadata, not from seq_len:
+        # a single-token prompt is still a prefill, and guessing ``seq_len > 1``
+        # would route it through the decode kernel by accident.
+        attn_output = self.attn(
+            xq, xk, xv, atten_info, layer_index, is_prefill=atten_info.is_prefill
+        )
+        # Back to the residual-stream layout before the output projection.
+        attn_output = attn_output.view(batch_size, seq_len, self.q_size)
+        return self.o_proj(attn_output)
 
 
 class DecoderLayer(nn.Module):
@@ -54,6 +174,7 @@ class DecoderLayer(nn.Module):
         use_qk_norm: bool = False,
         quant: QuantizationConfig | None = None,
         mlp: nn.Module | None = None,
+        attention: nn.Module | None = None,
     ) -> None:
         super().__init__()
         self.rms_norm_eps = config.rms_norm_eps
@@ -63,7 +184,12 @@ class DecoderLayer(nn.Module):
         self.post_attention_layernorm_weight = nn.Parameter(
             torch.ones(config.hidden_size, dtype=config.dtype)
         )
-        self.self_attn = Attention(config, qkv_bias=qkv_bias, use_qk_norm=use_qk_norm, quant=quant)
+        # 注意力块同理：CausalLM._build_attention 注入，MLA 变体（v0.10）换掉整块
+        self.self_attn = (
+            attention
+            if attention is not None
+            else Attention(config, qkv_bias=qkv_bias, use_qk_norm=use_qk_norm, quant=quant)
+        )
         # MoE 变体由 CausalLM._build_mlp 注入 SparseMoeBlock;默认 dense SwiGLU
         self.mlp = mlp if mlp is not None else FusedMLP(config, quant)
 
@@ -135,9 +261,7 @@ class CausalLM(nn.Module):
         self.layers = nn.ModuleList(
             DecoderLayer(
                 config,
-                qkv_bias=self.qkv_bias,
-                use_qk_norm=self.use_qk_norm,
-                quant=self._layer_quant(i),
+                attention=self._build_attention(config, i),
                 mlp=self._build_mlp(config, i),
             )
             for i in range(config.num_layers)
@@ -161,6 +285,21 @@ class CausalLM(nn.Module):
         if self.quant is None:
             return None
         return self.quant if self.quant.quantizes(f"{self.hf_prefix}layers.{layer_index}") else None
+
+    def _build_attention(self, config: ModelConfig, layer_index: int) -> nn.Module:
+        """Per-layer attention block factory.
+
+        The standard GQA composition (fused QKV, q/k norm, RoPE, paged
+        attention) lives in :class:`Attention` here at the model layer since
+        the M1.5 split; an MLA variant (v0.10) overrides this hook to swap
+        the whole block — the ROADMAP prerequisite that motivated the split.
+        """
+        return Attention(
+            config,
+            qkv_bias=self.qkv_bias,
+            use_qk_norm=self.use_qk_norm,
+            quant=self._layer_quant(layer_index),
+        )
 
     def _build_mlp(self, config: ModelConfig, layer_index: int) -> nn.Module:
         """Per-layer MLP factory; MoE 变体覆盖它以按层返回 SparseMoeBlock。"""
