@@ -68,12 +68,51 @@ class PrefixCacheStats:
         return self.hit_tokens / self.queried_tokens
 
 
+@dataclass(frozen=True)
+class PrefixMatch:
+    """What a prompt may reuse, and where the reusable K/V must be copied from.
+
+    Attributes:
+        num_tokens: Leading prompt tokens whose blocks are cached, block-aligned.
+            This is the hit-rate numerator, and it is *not* how much prefill can
+            be skipped: a block can be cached (its hash is still true) while no
+            slot holds its K/V any more.
+        copyable_tokens: Leading prompt tokens whose K/V is both cached and still
+            resident in some slot, hence reusable by copying instead of
+            recomputing. Always ``<= num_tokens``, and always a prefix -- reuse
+            stops at the first block without a live copy, because attention reads
+            a slot's rows contiguously from 0.
+        segments: ``(src_slot, start_token, num_tokens)`` runs covering exactly
+            ``copyable_tokens``, merged across adjacent blocks sharing an owner.
+            The destination offset is ``start_token`` again: a chained hash pins a
+            block to one absolute prompt position, so source and destination rows
+            always line up.
+    """
+
+    num_tokens: int = 0
+    copyable_tokens: int = 0
+    segments: tuple[tuple[int, int, int], ...] = ()
+
+
 @dataclass
 class _CachedBlock:
-    """One resident prefix block: its chained hash and live reference count."""
+    """One resident prefix block: its chained hash, references, and live copy.
+
+    Attributes:
+        block_hash: Chained hash identifying this block *and* every block before
+            it, so it names a prefix rather than a bag of tokens.
+        ref_cnt: Live requests holding this block; zero does not evict.
+        owner_slot: Cache slot whose rows currently hold this block's K/V, or
+            ``None`` when no live copy exists. The hash alone is bookkeeping:
+            reusing a block means reading real K/V out of some slot, and under the
+            fixed-slot layout a slot's rows are overwritten wholesale when it is
+            handed to a new request. So a block may be hittable yet unreadable,
+            in which case the requester recomputes it and becomes the new owner.
+    """
 
     block_hash: int
     ref_cnt: int = 0
+    owner_slot: int | None = None
 
 
 class PrefixCache:
@@ -108,6 +147,11 @@ class PrefixCache:
         self.hash_seed = hash_seed
         #: block-hash -> _CachedBlock, ordered least- to most-recently-used.
         self._blocks: OrderedDict[int, _CachedBlock] = OrderedDict()
+        #: slot -> hashes it is the live copy of. A reverse index because
+        #: :meth:`invalidate_slot` runs on every admission and would otherwise
+        #: scan the whole pool, which is sized by the KV cache rather than by
+        #: the prompt and so would dominate the admission path.
+        self._owned: dict[int, set[int]] = {}
         self.stats = PrefixCacheStats()
 
     # ------------------------------------------------------------------ lookup #
@@ -139,9 +183,88 @@ class PrefixCache:
         call -- i.e. the reuse this request enjoys. Newly created blocks may
         trigger LRU eviction of unreferenced blocks when over capacity.
         """
+        return self._reference_blocks(token_ids).num_tokens
+
+    def admit(self, token_ids: list[int]) -> PrefixMatch:
+        """One-pass :meth:`query` + :meth:`register`, for the admission path.
+
+        The scheduler needs both answers about the same prompt in the same
+        breath: how much of it is already cached, and a reference on every block
+        so the prefix survives while the request runs. Asking as two calls hashes
+        the prompt twice -- 256 chained block hashes for a 4 k-token prompt, all
+        of it duplicate, on the critical path of every admission -- and the
+        second traversal cannot see anything the first did not, because
+        :meth:`register` already reports the hit length that preceded it.
+
+        Counts towards the hit-rate statistics exactly as :meth:`query` does.
+
+        Returns:
+            The full :class:`PrefixMatch`, whose ``copyable_tokens`` (not
+            ``num_tokens``) is what prefill may actually skip.
+        """
+        self.stats.num_requests += 1
+        self.stats.queried_tokens += len(token_ids)
+        match = self._reference_blocks(token_ids)
+        self.stats.hit_tokens += match.num_tokens
+        return match
+
+    def invalidate_slot(self, slot: int) -> None:
+        """Forget that *slot* holds any block's K/V, as it changes hands.
+
+        A slot owns one contiguous ``max_seq_len`` region that its next occupant
+        refills from that occupant's own token 0, so every block this slot was the
+        live copy of becomes unreadable the moment the slot is handed over. The
+        blocks stay cached and stay hittable -- their hashes are still true, and
+        whoever recomputes them next becomes the new owner -- they merely stop
+        being copy sources.
+
+        Must run *after* the new occupant's match, not before: a freed slot keeps
+        its rows until they are overwritten, so the commonest hit of all is the
+        request that lands on the slot whose prefix it wanted. Invalidating first
+        would throw that away; invalidating after leaves the new occupant's own
+        blocks briefly ownerless, which costs nothing because it re-claims them
+        one step later as the request that now genuinely holds them.
+        """
+        for block_hash in self._owned.pop(slot, ()):
+            block = self._blocks.get(block_hash)
+            if block is not None and block.owner_slot == slot:
+                block.owner_slot = None
+
+    def assign_owner(self, token_ids: list[int], slot: int, upto_tokens: int) -> None:
+        """Record *slot* as the live copy of the ownerless blocks it now holds.
+
+        Callers must have *executed* the prefill covering ``upto_tokens``, not
+        merely scheduled it. Under a committing scheduler those are different
+        moments: ``num_computed_tokens`` advances when a chunk is planned, one
+        engine step before its K/V exists, and a block claimed at planning time
+        would be offered as a copy source to the next admission in that same
+        step -- which would read cache rows the model had not written yet.
+
+        Blocks that already have an owner keep it: one live copy is all a copy
+        needs, and leaving the incumbent alone keeps segment lists short.
+        """
+        blocks = upto_tokens // self.block_size
+        if blocks <= 0:
+            return
+        for index, h in enumerate(_iter_block_hashes(token_ids, self.block_size, self.hash_seed)):
+            if index >= blocks:
+                break
+            block = self._blocks.get(h)
+            if block is not None and block.owner_slot is None:
+                block.owner_slot = slot
+                self._owned.setdefault(slot, set()).add(h)
+
+    def _reference_blocks(self, token_ids: list[int]) -> PrefixMatch:
+        """Take a reference on every full block, creating the missing ones.
+
+        Returns the leading reuse the caller inherits: the cached length, plus
+        the shorter copyable length and the segments realising it.
+        """
         hit = 0
         counting_hit = True
-        for h in _iter_block_hashes(token_ids, self.block_size, self.hash_seed):
+        copyable = 0
+        segments: list[list[int]] = []
+        for index, h in enumerate(_iter_block_hashes(token_ids, self.block_size, self.hash_seed)):
             block = self._blocks.get(h)
             if block is None:
                 counting_hit = False
@@ -151,8 +274,24 @@ class PrefixCache:
                 hit += self.block_size
             block.ref_cnt += 1
             self._blocks.move_to_end(h)  # newest / just-touched -> MRU
+
+            # The copy plan tracks the *unbroken* run of cached blocks that still
+            # have a live copy: the first gap ends it, because a slot's rows are
+            # only meaningful read from 0 up.
+            if (
+                copyable == index * self.block_size
+                and counting_hit
+                and block.owner_slot is not None
+            ):
+                start = index * self.block_size
+                previous = segments[-1] if segments else None
+                if previous is not None and previous[0] == block.owner_slot:
+                    previous[2] += self.block_size  # extend the run in place
+                else:
+                    segments.append([block.owner_slot, start, self.block_size])
+                copyable += self.block_size
         self._evict_to_capacity()
-        return hit
+        return PrefixMatch(hit, copyable, tuple(tuple(run) for run in segments))
 
     def release(self, token_ids: list[int]) -> None:
         """Drop one reference per block; blocks stay cached (LRU) at zero.
@@ -174,7 +313,10 @@ class PrefixCache:
         for h in list(self._blocks.keys()):
             if len(self._blocks) <= self.capacity:
                 break
-            if self._blocks[h].ref_cnt == 0:
+            block = self._blocks[h]
+            if block.ref_cnt == 0:
+                if block.owner_slot is not None:
+                    self._owned.get(block.owner_slot, set()).discard(h)
                 del self._blocks[h]
                 self.stats.evictions += 1
 
