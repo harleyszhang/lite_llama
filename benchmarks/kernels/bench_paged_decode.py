@@ -16,17 +16,19 @@ it replaced:
     bandwidth at batch >= 8, and 55% at batch 1 where there is not enough work to
     cover launch latency.
 ``contiguous``
-    Same kernel, sequence rows laid out consecutively. Measures about 1% faster
-    than ``production``: at 2 KiB per cache row a random gather runs near
-    streaming speed, so paging is not what a decode regression would be hiding
-    in. Kept as the bound it establishes.
+    Same kernel, sequence rows laid out consecutively. Measures 2-4% faster than
+    ``production``: at 2 KiB per cache row a random gather runs near streaming
+    speed, so paging is not what a decode regression would be hiding in. Kept as
+    the bound it establishes — it says the whole of paging is worth a few
+    percent, so a change claiming more than that is measuring something else.
 ``split_alloc``
     Two separately allocated caches instead of views into one buffer, halving the
-    row stride. Measures *identical* to ``production`` — 8 heads x 128 dim fp16
-    is already 16 cache lines per side, so no line's useful payload changes.
-    Worth keeping as a regression guard for smaller head geometries (MQA, or
-    64-dim heads), where the row approaches a single line and the stride starts
-    to matter.
+    row stride. Never beats ``production``: equal at three of the four shapes and
+    8% *slower* at one, which is the wrong direction for a stride explanation. 8
+    heads x 128 dim fp16 is already 16 cache lines per side, so halving the
+    stride changes no line's useful payload. Worth keeping as a regression guard
+    for smaller head geometries (MQA, or 64-dim heads), where the row approaches
+    a single line and the stride starts to matter.
 ``fp8_pool``
     e4m3 bytes in a uint8 container with caller-side scales. Halves the traffic
     but only takes 6-10% off the time, so its %bw drops from 67% to 37%: the fp8
@@ -204,8 +206,8 @@ def main() -> None:
         # The measurement mistake, quantified: same kernel, k/v as two separate
         # allocations. Built by copying the views out, which is precisely the
         # ``.contiguous()`` kv_pool refuses to do for the production row. It came
-        # out equal to production here, which is a result about this geometry,
-        # not a reason to stop checking.
+        # out equal to production or slower here, which is a result about this
+        # geometry, not a reason to stop checking.
         pool = paged_pool(lens, num_kv_heads=hkv, head_dim=head_dim, layout="fragmented")
         split = PagedPool(
             buffer=pool.buffer,
@@ -225,11 +227,12 @@ def main() -> None:
     report(rows)
     print(
         "\nRead the table as: production is the kernel's speed, and the rows below it\n"
-        "are bounds that turned out to be tight — contiguous and split_alloc within\n"
-        "1% of it, so neither paging nor the combined-buffer stride is where decode\n"
-        "time goes at this head geometry. fp8_pool is the row to read differently:\n"
-        "half the bytes for 6-10% less time means it is dequant-bound, so its lower\n"
-        "%bw is a different bottleneck rather than a regression."
+        "are bounds that turned out to be tight — contiguous is 2-4% ahead and\n"
+        "split_alloc never ahead at all, so neither paging nor the combined-buffer\n"
+        "stride is where decode time goes at this head geometry. fp8_pool is the row\n"
+        "to read differently: half the bytes for 6-10% less time means it is\n"
+        "dequant-bound, so its lower %bw is a different bottleneck rather than a\n"
+        "regression."
     )
 
 

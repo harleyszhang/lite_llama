@@ -25,8 +25,9 @@ from lite_llama.kernels.ops import GoldenRecord, KernelSpec, LayoutRequirement, 
 #: The native rows define the golden baseline themselves.
 BASELINE = GoldenRecord(verified=True, max_abs_diff=0.0, baseline="native")
 
-#: The paged KV buffer this repo's cache manager allocates:
-#: ``[2 * max_tokens, num_kv_heads, head_dim]``, K in the first half.
+#: The paged KV buffer this repo's cache manager allocates
+#: (``kv_cache_manager.py``): ``[max_tokens, 2 * num_kv_heads, head_dim]``, the
+#: K heads first then the V heads, so one token's K and V are adjacent.
 PAGED_KV = LayoutRequirement(required=("kv:paged",))
 
 # --------------------------------------------------------------------------- #
