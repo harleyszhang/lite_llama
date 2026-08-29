@@ -570,19 +570,258 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
 
 # 十一、版本计划
 
-| 版本 | 主题 | 内容 | 验收 |
-|---|---|---|---|
-| **v0.4** | 可信基线 | 修 TP 采样 RNG 不同步;acc.golden 强制门禁(GPU runner、禁静默 skip、扩 continuous/量化/VL/DP);perf.watchdog;AWQ/GPTQ 修复或撤下宣称 | 无卡时 CI 明确报"未验证"而非绿;TP=2 采样不 diverge |
-| **v0.5** | 自动化调优 | autotune(collect+search+persist)应用到 fused_moe / nopad / 量化 GEMM;w4a16 重写为 `tl.dot`;P1 megakernel 雏形(先融 RMSNorm+QKV) | 高频 shape 有落盘配置;w4a16 出前后对比数字 |
-| **v0.6** | 分页 KV | 地基 1,真分页 KV, KV 布局可插拔并存迁移;请求级 alloc/free + watermark 准入;viz.flow;viz.structure(L1 文本树) + viz.memory(L1 静态预算表) | 两种布局 golden 都绿;decode 无 D2H 同步;请求结束 block 即回收;能导出结构树/显存预算表 |
-| **v0.7** | 调度能力 | chunked prefill + prefix caching;抢占(recompute/swap-out);调度 policy 化合并双引擎循环;P5 overlap 进 CUDA graph;MTP 接入 | 长 prompt 期间 decode 不停顿;共享前缀命中率可观测;缺块时能抢占而非拒绝 |
-| **v0.8.0** | **多进程隔离引擎 + 并行修复与 module 补齐(地基 0)** | **并行 bug 修复包(问题 4/5/6,小改不动架构)**:DP×TP 死锁(spawn dp×tp 进程网格)、`all_reduce_min` device index(`_TP_RANK`→`torch.cuda.current_device()`)、DP 路由 token 估计(字符数→token 数)+ balancer 命名对齐 SGLang 语义;**引擎重构**:Executor 抽象(UniProc/Multiproc 双实现,对标 vLLM `v1/executor/`);SchedulerOutput 广播(gloo 控制面)+镜像进程模式退场;TP 接入 ContinuousBatchingEngine(摘 `NotImplementedError`);DP worker 换常驻引擎循环;`AsyncLLMEngine` 支持 TP;进程网格一次 spawn(dp×tp);**并行 module 补齐(A11)**:`QKVParallelLinear`(q|kv 两段 fused 一次 GEMM,按 head 对齐切) + `VocabParallelEmbedding`/`ParallelLMHead` 按 vocab 切分 + 去中心化 log_softmax 分布式采样(标量 logsumexp 规约 + 局部 top-k gather,详见第四节) | bug 修复:TP=2 采样不 diverge;DP×TP 2×2 能起能推理(不再死锁);引擎:TP=2 下 continuous golden 全绿;在线服务×TP=2 可跑;单卡默认仍单进程(pdb 冒烟);mock 进程网格断言 SchedulerOutput 广播一致;module:TP=2 采样 logprob 与 TP=1 逐元素一致,embed+lm_head 显存减半 |
-| **v0.9** | 多后端 + overlap 骨架 | 地基 2 雏形(注册表+探测+选择+explain+acc.align);先做 linear;attention 接口拆薄;overlap 调度器抽象 + L1 跨 stream;A9 Platform 抽象(设备探测+能力声明,CUDA 先行,ROCm/CPU 预留接口) | 一条命令切后端并解释;缺库自动回退;L1 有 timeline 佐证;Platform 可 mock 测试 |
-| **v0.10** | 可观测性 + 算子分发 | 地基 2 升级:ABC 签名+声明式清单+确定性 dispatch(从雏形到完整链路);F6 logprobs/prompt_logprobs;A7 运行时可观测性(observe.metrics+observe.trace)+ `/metrics` Prometheus 端点 + OTLP 追踪导出;单层 harness(F1) | logprobs 与 HF 对齐;每 step 有 per-request 延迟分解;dispatcher 按 shape/dtype 选实现并 explain;Prometheus 可抓取到标准 metric |
-| **v0.11** | 前沿架构 + 结构化输出 | MLA(DeepSeek-V2-Lite 端到端 + V3/V4 单层);F7 结构化输出(grammar bitmask 作用于 sampler);F8 reasoning parser / tool parser(think 标签拆分 + tool_calls 流式解析);SWA;acc.bisect;通信原语补全 | HF 单层 max-abs-diff 达阈值;JSON Schema 约束下输出 100% 合法;reasoning_content/tool_calls 与 vLLM 输出对齐;SWA 与 full attention 混合可跑 |
-| **v0.11.5** | 计算通信重叠 | 三条 ping-pong 轴(A/B/C);L2 ping-pong + L3 分解 + L4 tile-signaling 原语;P8 DP+CUDA Graph(先做);Nsight 对照报告 | overlap on/off 有对照数据;DP+CUDA Graph 下 decode 无退化 |
-| **v0.12** | 异步调度 + KV 传输 | P9 引擎级异步调度(地基 0 的异步化终态:EngineCore 独立进程+ZMQ+N-batch 流水线);P10 DP 负载均衡策略族(含 cache-aware);DP attention(MLA+EP 组合);Router 雏形(metrics 反馈路由+健康检查);`KVTransfer` 统一抽象;分层存储;PD 分离 1P1D;CP/PCP;L5 MoE all-to-all 重叠;专家负载均衡 | 1P1D 端到端可演示;N=2 时 CPU 等待 < N=1 的 50%;DP 副本负载倾斜 <10%;前缀溢出 CPU 后命中率不降 |
-| **v0.13** | 前沿注意力 + TP Graph | P8 TP+CUDA Graph(锁步 capture+replay);DSA indexer;HCA;attention external 后端接入(FA3 sm90+ / FlashInfer);EP(EP=2);DCP(DCP=2);perf.timeline + viz.schedule | TP+CUDA Graph 下 all-reduce 不挂死;DSA top-K 选择正确;external 后端 capability 命中/回退路径均可测;EP 可跑并有数据 |
-| **v0.14** | 投机解码全家桶 | P4:ngram(prompt lookup)先行(无 draft 模型,最简验证 verify 链路);MTP;DFlash(借 target lm_head 的无 head draft);DSpark;统一 draft-verify 接口 + 在线接受率自适应 | 重复前缀负载 ngram 接受长度 ≥2;MTP mean accept 有报告;verify 正确性 golden 全绿 |
-| **v1.0** | 收口 | API 冻结、完整 benchmark 矩阵、文档站 | 公开 API 语义稳定 |
- 
+条目沿用前文的标号:F / A / P 系列见"框架差异化亮点"一节,地基 0-3 见第三节,L1-L5 与 ping-pong 轴 A/B/C 见第六节。
+
+每个版本都有一项固定交付物:该版本支持的全部模型跑一遍性能(TTFT / TPOT / TPS)与精度(golden 逐 token + 数据集分数)benchmark,与上一版同配置结果并列,归档为 `docs/release-vX.Y.Z.md`,原始数据落 `docs/benchmark_logs/*.json`。这部分基线不在各版本重复,各版本的 **benchmark** 只写该版本**新增的对照维度**——新做的东西必须给出"比什么快了/退了多少"的对照,否则不算做完。
+
+执行路径是工具而非人工:采集入口统一挂到 Makefile 的 `bench-*` 目标(`benchmarks/bench_*.py` + `examples/benchmark.py`),`perf.watchdog` 与上一版最优比对并标出劣化项,`acc.golden` 出精度门禁、`acc.bisect` 定位精度断层,最后由一个 release-bench agent 按固定模板汇总成发版文档。人只审两处:被标红的劣化项,和结论段的因果解释。工具链自身在 v0.4(watchdog 入库)与 v0.5(autotune collect)成型,所以 v0.4 那份报告的作用是立零点,没有上一版可比。
+
+当前状态:v0.4 - v0.8.0 已发版(发版文档与原始数据如上所述);v0.9 进行中,节内按"已完成 / 剩余"标注;v0.10 起未动。
+
+## v0.4 可信基线(已发版)
+
+- **fix**
+  - TP 采样 RNG 不同步
+  - AWQ/GPTQ:修通,或撤下对外的支持声明
+- **test**
+  - acc.golden 升为强制门禁:上 GPU runner、禁止静默 skip、覆盖面扩到 continuous / 量化 / VL / DP
+  - perf.watchdog:benchmark 入库,劣化超阈值报警
+- **benchmark**
+  - 立零点:全部在库模型跑 `bench_e2e` 与 `bench_hf_baseline`,同 prompt 同口径,作为后续版本的对照基准
+  - 量化路径(fp8 / W8A16 / W4A16 / SmoothQuant)单列一张表,性能与精度成对给出
+- **验收**
+  - 无卡时 CI 明确报"未验证",不再判绿
+  - TP=2 采样不 diverge
+
+## v0.5 自动化调优(已发版)
+
+- **feat**
+  - autotune 三阶段(collect / search / persist)接入 `fused_moe`、`flashattention2_nopad`、量化 GEMM
+  - P1 megakernel 雏形:先融 RMSNorm + QKV
+- **refactor**
+  - w4a16 用 `tl.dot` 重写
+- **benchmark**
+  - 调优命中与未命中同 shape 对照,按算子分列,说明搜到的配置比启发式好在哪
+  - w4a16 重写前后、megakernel 融合前后:TPOT + kernel launch 次数
+- **验收**
+  - 高频 shape 的调优配置落盘,启动命中即用
+  - w4a16 给出重写前后的对比数字
+
+## v0.6 分页 KV(已发版)
+
+- **feat**
+  - 地基 1 落地:真分页 KV,block_size > 1 且不再按 max_seq_len 预占
+  - 请求级 alloc/free + watermark 准入,取代 `free_all` 全量重置
+  - viz.flow:调度决策、slot 分配、抢占、prefill/decode 切换
+  - viz.structure 先出文本树,viz.memory 先出静态预算表
+- **refactor**
+  - KV 布局做成可插拔:新旧两种布局并存,并给出迁移路径
+- **benchmark**
+  - 新旧 KV 布局同配置对照:TPS、可容纳并发数、峰值显存
+  - watermark 准入下的显存水位曲线与请求拒绝率
+- **验收**
+  - 两种布局的 golden 都绿
+  - decode 路径无 D2H 同步
+  - 请求结束即回收其 block,不等全批结束
+  - 能导出结构树与显存预算表
+
+## v0.7 调度能力(已发版)
+
+- **feat**
+  - chunked prefill + prefix caching
+  - 抢占:缺块时把低优先序列踢回 waiting,recompute 与 swap-out 两条路径
+  - P5 overlap 进 CUDA graph
+  - MTP 接入
+- **refactor**
+  - 调度 policy 化,两个引擎循环合并为一份
+- **benchmark**
+  - chunked prefill on/off 在长短 prompt 混合负载下的 TTFT-TPOT 权衡曲线
+  - prefix caching:命中率随共享前缀比例的变化,以及命中带来的 TTFT 降幅
+  - 抢占触发时的 P99 尾延迟,recompute 与 swap-out 分别计
+- **验收**
+  - 长 prompt 期间 decode 不停顿
+  - 共享前缀命中率可观测
+  - 缺块时能抢占而非拒绝请求
+
+## v0.8.0 多进程隔离引擎 + 并行修复与 module 补齐(地基 0,已发版)
+
+- **fix**(并行 bug 修复包:问题 4/5/6,小改不动架构)
+  - DP×TP 死锁:改为一次 spawn 出 dp×tp 进程网格
+  - `all_reduce_min` 取错 device index:`_TP_RANK` 换成 `torch.cuda.current_device()`
+  - DP 路由的 token 数估算:从字符数改为真实 token 数,balancer 命名对齐 SGLang 语义
+- **refactor**(引擎重构)
+  - Executor 抽象:UniProc / Multiproc 两份实现,对标 vLLM `v1/executor/`
+  - SchedulerOutput 经 gloo 控制面广播,镜像进程模式退场
+  - DP worker 从一次性 `generate()` 换成常驻引擎循环
+  - 进程网格一次 spawn(dp×tp),不再分层拉起
+- **feat**
+  - TP 接入 ContinuousBatchingEngine,摘掉 `NotImplementedError`
+  - `AsyncLLMEngine` 支持 TP
+  - 并行 module 补齐(A11):`QKVParallelLinear`(q 与 kv 两段 fused 成一次 GEMM,按 head 边界切)、`VocabParallelEmbedding` / `ParallelLMHead` 按 vocab 切分、去中心化 log_softmax 分布式采样(标量 logsumexp 规约 + 局部 top-k gather,详见第四节)
+- **benchmark**
+  - TP=1/2 扩展效率,并给出 all-reduce 在单 step 中的占比
+  - 单进程 executor 与多进程 executor 的单 step 主机侧开销差(单卡不该因重构变慢)
+  - DP×TP 2×2 聚合吞吐与副本间负载倾斜度
+- **验收**
+  - bug 修复:TP=2 采样不 diverge;DP×TP 2×2 能起能推理,不再死锁
+  - 引擎:TP=2 下 continuous golden 全绿;在线服务 × TP=2 可跑;单卡默认仍走单进程(pdb 能断点);mock 进程网格断言各 rank 收到的 SchedulerOutput 一致
+  - module:TP=2 的采样 logprob 与 TP=1 逐元素一致;embed + lm_head 显存减半
+
+## v0.9 多后端 + overlap 骨架(进行中)
+
+- **feat(已完成)**
+  - 地基 2:实际落地形态超出本版"雏形"目标,直接按三层建满
+    - `kernels/ops/` 按算子域分组(gemm / attention / moe / layernorm / rope / activation / sampling / kvcache / embeddings / quantization),每组 `__init__.py` 持有该算子全部注册行,共 11 个算子 21 行
+    - `kernels/dispatcher/` 是 torch-free 机制层:KernelSpec 六维声明(available / capability / dtypes+schemes / shape 硬约束+偏好 / layout / golden)+ 注册表 + dispatch 四步(filter → rank → cache → report)。explain 打印逐条拒绝理由与落选者排名,`LITE_LLAMA_KERNEL_TRACE=1` 输出 JSON 决策线
+    - `kernels/backend/` 一库一包(flashinfer / deepgemm / flashmla / deepep)+ probe 真 import 探测:缺库是排名事件,不是崩溃
+    - golden gate:未验证(verified=False)的行默认不参与 dispatch,只有显式 `backend=`(参数或 `LITE_LLAMA_*_BACKEND` 环境变量)可越过;flashinfer 的 attention / rmsnorm / rope / sample 行已带 max-abs-diff 记录
+    - 默认全 native:外部行 priority=UNMEASURED(-1) 排在 native(0) 之下,翻盘等 v0.10 冻结实测数据接线
+  - A9 Platform 抽象:设备探测 + 能力声明(CapabilityRequirement),dispatch 按 capability 过滤(deepgemm / flashmla 的 sm90+ 窗口在 A10 上被拒),可 mock 测试
+  - prefix caching 支持 DP:负载均衡按前缀亲和路由,各副本的 cache 合成一个池
+- **refactor(已完成)**
+  - attention 接口拆薄:`PagedAttention` 下沉到 modules/(KV 写入 + prefill/decode 分派),`models/base.py` 的 Attention 只管投影与 RoPE;dispatch 在构造期一次决策,热路径是普通属性调用,MLA 才接得进来
+- **feat(剩余)**
+  - overlap 调度器抽象 + L1 跨 stream 重叠
+- **顺带提前入库**(归属后继版本,在此记账)
+  - v0.11 的 MLA 算子侧:`MinimalMlaLayer` 单层 harness + flashmla 后端行(golden 未验证,默认不 dispatch)
+  - v0.13 的 FlashInfer attention 后端行(prefill + decode 两行,golden 已验证)
+- **benchmark**
+  - (已完成)同 shape 下 native 与 flashinfer 逐一对照(`bench_flashinfer` 等已入库);静态 priority 顺序与实测顺序的出入,即是 v0.10 换成实测排序的依据
+  - L1 跨 stream 重叠 on/off 的端到端差值,附 timeline 佐证
+- **验收**
+  - (已达成)一条命令切后端,并能解释为何选它
+  - (已达成)缺库时自动回退到 native
+  - L1 重叠有 timeline 作佐证
+  - (已达成)Platform 可 mock 测试
+
+## v0.10 可观测性 + 算子分发
+
+- **feat**
+  - 地基 2 收尾:原计划"从雏形升级",但声明式 KernelSpec 清单、确定性 dispatch、registry 雏形与 `gen_backend_registry_gif.py` 的退场已随 v0.9 提前完成,本版只补两件
+    - 冻结实测排序接线:autotune store 经 `set_perf_provider` 接进 dispatch 的 rank 步,排序依据从静态 priority 换成预先冻结的实测记录——同一 key 永远选同一实现,外部后端实测更快时才真正翻盘
+    - ABC 签名:评估给全部实现统一 `forward()` 语义(现以 target 字符串 + 各 ops 组注释钉死的调用契约替代);签名统一是"kernel 函数本体直接交给调用方、不必写转发适配器"的前提
+  - F6 logprobs / prompt_logprobs
+  - A7 运行时可观测性(observe.metrics + observe.trace)+ `/metrics` Prometheus 端点 + OTLP 追踪导出
+- **test**
+  - F1 单层 harness(MLA 侧已有 `MinimalMlaLayer` 作 benchmark 载体先行入库,正式 harness 待做)
+- **benchmark**
+  - dispatch 开销:首次决策与缓存命中路径的单次调用耗时,以及冻结实测排序相对 v0.9 静态 priority 的端到端收益
+  - logprobs / prompt_logprobs 开启后的额外 TPOT
+  - metrics 与 trace 全开时的性能损耗,超阈值则要么降采样要么改实现
+- **验收**
+  - logprobs 与 HF 对齐
+  - 每 step 给出 per-request 的延迟分解
+  - dispatcher 按 shape / dtype 选实现,并能 explain 决策链(v0.9 已达成,此处作回归项)
+  - Prometheus 能抓到标准 metric
+
+## v0.11 前沿架构 + 结构化输出
+
+- **feat**
+  - MLA:DeepSeek-V2-Lite 端到端 + V3/V4 单层
+  - F7 结构化输出:grammar bitmask 作用于 sampler
+  - F8 reasoning parser / tool parser:think 标签拆分 + tool_calls 流式解析
+  - SWA / HCA / DSA 等新 module 接入,先打通正确性
+  - 通信原语补全:all_gather / reduce_scatter / all_to_all / P2P send-recv
+- **test**
+  - 新增算子 / module / 模型的精度与性能测试
+  - acc.bisect:整模型对 HF 逐层对比,自动定位第一个超阈的层
+- **benchmark**
+  - MLA 模型首份报告,与同尺寸 MHA 模型并列,标出 KV 占用的差距
+  - 结构化输出与 reasoning parser 开启后的 TPOT 影响(bitmask 与流式解析各自的开销)
+  - SWA 在长上下文下相对 full attention 的显存与延迟对照
+- **验收**
+  - HF 单层 max-abs-diff 达阈值
+  - JSON Schema 约束下输出 100% 合法
+  - reasoning_content / tool_calls 与 vLLM 输出对齐
+  - SWA 与 full attention 混用可跑
+
+## v0.11.5 计算通信重叠
+
+- **feat**
+  - B 轴(Memory-Compute)与 C 轴(Compute-Comm)落地:L2 粗粒度 ping-pong + L3 GEMM 输出分解 + L4 tile-signaling 原语(A 轴归 P9,在 v0.12)
+  - P8 DP + CUDA Graph 先行:DP 副本互不通信,各自 capture 各自 replay,无锁步约束
+- **docs**
+  - Nsight 对照报告:确认三条轴是否真重叠
+- **benchmark**
+  - L2 / L3 / L4 逐级叠加的收益分解,PCIe 与 NVLink 两种拓扑分列(L4 在 PCIe 上收益有限,如实标注)
+  - DP + CUDA Graph 的 decode TPOT 与 capture 耗时、显存增量
+- **验收**
+  - 每个 overlap policy 有 on/off 对照数据,断言气泡减少幅度而非只断言"能跑"
+  - DP + CUDA Graph 下 decode 无退化
+
+## v0.12 异步调度 + KV 传输
+
+- **feat**
+  - P9 引擎级异步调度(地基 0 的异步化终态,即 A 轴):EngineCore 独立进程 + ZMQ + N-batch 流水线
+  - P10 DP 负载均衡策略族:round-robin / 最少请求数 / 最少 token 数 / cache-aware
+  - DP attention:MLA + EP 组合
+  - Router 雏形:metrics 反馈路由 + 健康检查
+  - 分层存储:CPU 层与磁盘层作为 KV 的 tier provider,目标是 prefix cache 溢出后仍命中,而非扩 KV 容量
+  - PD 分离 1P1D
+  - CP / PCP
+  - L5 MoE all-to-all 重叠
+  - 专家负载均衡
+- **refactor**
+  - `KVTransfer` 统一抽象:`GPU ↔ CPU`(主层)、`CPU ↔ 磁盘`(二级层,经主层中转)、`GPU ↔ 远端 GPU`(PD 拓扑)三条路径收进同一套接口。本版内它要先于分层存储与 PD 落地,那两者都建在它上面
+- **benchmark**
+  - 1P1D 与同卡数单实例对照:TTFT、TPS、KV 传输在 TTFT 中的占比
+  - N-batch 流水线 N=1/2 的 CPU 等待时长与 GPU 空闲比
+  - 四种 DP 路由策略在倾斜负载下的副本利用率,cache-aware 单独看命中率增益
+  - prefix 溢出到 CPU / 磁盘后的命中率与换回延迟
+- **验收**
+  - 1P1D 端到端可演示
+  - N=2 时 CPU 等待 < N=1 的 50%
+  - DP 副本负载倾斜 < 10%
+  - 前缀溢出到 CPU 后命中率不降
+
+## v0.13 前沿注意力 + TP Graph
+
+- **feat**
+  - P8 TP + CUDA Graph:所有 rank 锁步 capture 与 replay,保证 collective 调用顺序一致
+  - DSA indexer:top-K 选择下沉为 Triton kernel(`tl.argsort` + `tl.gather`)
+  - HCA:近距 chunk 走 full prefill,远距 chunk 经 chunk 级聚合后做 sparse attention
+  - attention external 后端接入:FA3(sm90+)/ FlashInfer(后者已随 v0.9 提前入库)
+  - EP(EP=2)
+  - DCP(DCP=2)
+  - perf.timeline + viz.schedule
+- **benchmark**
+  - TP + CUDA Graph on/off 的 decode TPOT,补上 v0.8 起一直缺的这块
+  - external attention 后端与原生 Triton 实现在多档 seq_len / batch 上的对照
+  - EP=2 与 TP MoE 同卡数对照;DCP=2 在长上下文 decode 上的扩展效率
+- **验收**
+  - TP + CUDA Graph 下 all-reduce 不挂死
+  - DSA top-K 选择正确
+  - external 后端的 capability 命中与回退两条路径均可测
+  - EP 可跑并有数据
+
+## v0.14 投机解码全家桶(P4)
+
+- **feat**
+  - ngram(prompt lookup)先行:不需 draft 模型,用最简路径验证 verify 链路
+  - MTP
+  - DFlash:借 target lm_head 的无 head draft
+  - DSpark
+  - 在线接受率自适应调 draft 长度
+- **refactor**
+  - 统一 draft-verify 接口,按模型形态自动选策略
+- **benchmark**
+  - 四种 draft 方式的 mean accept length 与端到端加速比,verify 开销单独计,并按负载类型(重复前缀 / 代码 / 开放问答)分列
+  - 接受率自适应开启前后的对照,含 draft 长度的实际分布
+- **验收**
+  - 重复前缀负载下 ngram 接受长度 ≥ 2
+  - MTP mean accept 有报告
+  - verify 正确性 golden 全绿
+
+## v1.0 收口
+
+- **chore**
+  - 公开 API 冻结
+- **test**
+  - 全量回归:golden、精度门禁、服务端 API 三套一次跑绿
+- **docs**
+  - 文档站
+- **benchmark**
+  - 全矩阵收口:模型 × 并行配置 × 后端 三维覆盖,并与 vLLM / SGLang 在同机同配置下对照
+  - 汇总 v0.4 到 v1.0 的性能演进曲线,逐版标注收益来自哪项改动
+- **验收**
+  - 公开 API 语义稳定
