@@ -15,16 +15,60 @@ one GPU is saturated. :class:`AsyncDataParallelEngine` puts an asyncio face on t
 for online serving, the way :class:`AsyncLLMEngine` does for a single replica.
 """
 
-from .async_data_parallel import AsyncDataParallelEngine
-from .async_engine import AsyncLLMEngine, StreamedOutput
-from .continuous_engine import ContinuousBatchingEngine
-from .data_parallel import DataParallelEngine
-from .generator import TextGenerator, VisionGenerator
-from .llm import LLM
-from .llm_engine import LLMEngine
-from .outputs import CompletionOutput, RequestOutput
-from .sampler import BatchedSamplingParams, Sampler, SamplingParams, sample_top_p
-from .scheduler import Request, RequestStatus, Scheduler, SchedulerConfig
+from __future__ import annotations
+
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .async_data_parallel import AsyncDataParallelEngine
+    from .async_engine import AsyncLLMEngine, StreamedOutput
+    from .continuous_engine import ContinuousBatchingEngine
+    from .data_parallel import DataParallelEngine
+    from .generator import TextGenerator, VisionGenerator
+    from .llm import LLM
+    from .llm_engine import LLMEngine
+    from .outputs import CompletionOutput, RequestOutput
+    from .sampler import BatchedSamplingParams, Sampler, SamplingParams, sample_top_p
+    from .scheduler import Request, RequestStatus, Scheduler, SchedulerConfig
+
+
+_EXPORTS: dict[str, tuple[str, str]] = {
+    "LLM": (".llm", "LLM"),
+    "AsyncDataParallelEngine": (".async_data_parallel", "AsyncDataParallelEngine"),
+    "AsyncLLMEngine": (".async_engine", "AsyncLLMEngine"),
+    "BatchedSamplingParams": (".sampler", "BatchedSamplingParams"),
+    "CompletionOutput": (".outputs", "CompletionOutput"),
+    "ContinuousBatchingEngine": (".continuous_engine", "ContinuousBatchingEngine"),
+    "DataParallelEngine": (".data_parallel", "DataParallelEngine"),
+    "LLMEngine": (".llm_engine", "LLMEngine"),
+    "Request": (".scheduler", "Request"),
+    "RequestOutput": (".outputs", "RequestOutput"),
+    "RequestStatus": (".scheduler", "RequestStatus"),
+    "Sampler": (".sampler", "Sampler"),
+    "SamplingParams": (".sampler", "SamplingParams"),
+    "Scheduler": (".scheduler", "Scheduler"),
+    "SchedulerConfig": (".scheduler", "SchedulerConfig"),
+    "StreamedOutput": (".async_engine", "StreamedOutput"),
+    "TextGenerator": (".generator", "TextGenerator"),
+    "VisionGenerator": (".generator", "VisionGenerator"),
+    "sample_top_p": (".sampler", "sample_top_p"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve the engine facade without importing unrelated GPU modules."""
+    try:
+        module_name, attribute = _EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+    value = getattr(import_module(module_name, __name__), attribute)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | _EXPORTS.keys())
 
 __all__ = [
     "LLM",

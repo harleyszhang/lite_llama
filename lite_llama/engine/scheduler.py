@@ -27,8 +27,7 @@ Usage:
 from __future__ import annotations
 
 import time
-from collections import deque
-from collections.abc import MutableSequence
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -165,6 +164,23 @@ class SchedulerConfig:
     prefix_cache_blocks: int | None = None
     enable_preemption: bool = False
 
+    def __post_init__(self) -> None:
+        if self.max_seq_len < 2:
+            raise ValueError(f"max_seq_len must be >= 2, got {self.max_seq_len}")
+        if self.max_num_seqs < 1:
+            raise ValueError(f"max_num_seqs must be >= 1, got {self.max_num_seqs}")
+        if self.max_num_batched_tokens < 1:
+            raise ValueError(
+                "max_num_batched_tokens must be >= 1, "
+                f"got {self.max_num_batched_tokens}"
+            )
+        if self.max_chunk_size < 0:
+            raise ValueError(f"max_chunk_size must be >= 0, got {self.max_chunk_size}")
+        if self.prefix_cache_blocks is not None and self.prefix_cache_blocks < 1:
+            raise ValueError(
+                f"prefix_cache_blocks must be >= 1 or None, got {self.prefix_cache_blocks}"
+            )
+
 
 @dataclass(frozen=True)
 class SchedulerOutput:
@@ -223,14 +239,13 @@ class _NullPrefixCache:
         return 0.0
 
 
-def _discard(requests: MutableSequence[Request], request: Request) -> None:
+def _discard(requests: list[Request], request: Request) -> None:
     """Remove ``request`` from ``requests`` by identity, preserving order.
 
     :class:`Request` is a value-equal dataclass, so ``list.remove`` could drop a
     *different* request whose fields happen to match; identity is the only safe
-    key once two live requests can carry equal prompts. Works on any mutable
-    sequence — ``list`` and ``deque`` alike — because ``_admit`` must dequeue a
-    candidate that a preemption just pushed off the head of the waiting deque.
+    key once two live requests can carry equal prompts. The running batch is
+    deliberately a small ordered list, capped by ``max_num_seqs``.
     """
     for index, candidate in enumerate(requests):
         if candidate is request:
@@ -263,8 +278,14 @@ class Scheduler:
             config.max_num_seqs if config.enable_preemption else min(config.max_num_seqs, num_slots)
         )
 
-        self._waiting: deque[Request] = deque()
+        # Ordered map = FCFS iteration plus constant-time cancellation. Serving
+        # queues can be much deeper than the running batch, so a deque scan on
+        # every disconnected client becomes measurable under overload.
+        self._waiting: OrderedDict[str, Request] = OrderedDict()
         self._running: list[Request] = []
+        # vLLM keeps the same registry: lifecycle operations address requests
+        # by id, so lookup and duplicate-live-id rejection stay constant-time.
+        self._requests: dict[str, Request] = {}
         self._free_slots: list[int] = list(reversed(range(num_slots)))
         # Null Object when disabled, so the hot path pays no branches for the
         # feature being off.
@@ -301,6 +322,11 @@ class Scheduler:
         Raises:
             ValueError: The prompt is empty, or leaves no room to generate.
         """
+        if request.request_id in self._requests:
+            raise ValueError(f"request id {request.request_id!r} is already active")
+        if request.status is not RequestStatus.WAITING or request.slot is not None:
+            raise ValueError("only a fresh waiting request can be submitted")
+
         limit = self.config.max_seq_len
         if request.prompt_len == 0:
             raise ValueError(f"request {request.request_id} has an empty prompt")
@@ -314,7 +340,8 @@ class Scheduler:
         requested = request.params.max_gen_len
         request.max_new_tokens = min(requested, room) if requested else room
         request.status = RequestStatus.WAITING
-        self._waiting.append(request)
+        self._requests[request.request_id] = request
+        self._waiting[request.request_id] = request
 
     def abort(self, request_id: str) -> Request | None:
         """Drop a request wherever it is; returns it, or ``None`` if unknown.
@@ -322,20 +349,18 @@ class Scheduler:
         A running request releases its slot immediately, so an abandoned HTTP
         connection frees capacity on the next step rather than at its length cap.
         """
-        for request in self._waiting:
-            if request.request_id == request_id:
-                # By identity: Request is a value-equal dataclass, so
-                # ``deque.remove`` would drop whichever queued request compares
-                # equal first -- not necessarily this one.
-                _discard(self._waiting, request)
-                request.status = RequestStatus.FINISHED
-                request.finish_reason = "abort"
-                return request
-        for request in self._running:
-            if request.request_id == request_id:
-                self.finish(request, "abort")
-                return request
-        return None
+        request = self._requests.get(request_id)
+        if request is None:
+            return None
+        if request.status is RequestStatus.WAITING:
+            self._waiting.pop(request_id, None)
+            request.status = RequestStatus.FINISHED
+            request.finish_reason = "abort"
+            request.finish_time = time.monotonic()
+            self._requests.pop(request_id, None)
+        else:
+            self.finish(request, "abort")
+        return request
 
     # -------------------------------------------------------------- scheduling #
     def schedule(self) -> SchedulerOutput:
@@ -404,7 +429,7 @@ class Scheduler:
             capacity = self.max_num_seqs - len(self._running)
             if capacity <= 0:
                 break
-            candidate = self._waiting[0]
+            candidate = next(iter(self._waiting.values()))
 
             # The grid cost of adding this request is its chunk, not its whole
             # prompt: with chunking, a 4K prompt occupies one chunk column per
@@ -424,11 +449,9 @@ class Scheduler:
                 preempted.append(preempted_victim)
                 preempted_here = True
 
-            # The victim ``_preempt`` just re-queued sits at the head now, so the
-            # candidate must leave by identity: ``popleft`` would dequeue the
-            # victim into limbo (in neither queue, never scheduled again) and
-            # leave the candidate queued for a second admission with two slots.
-            _discard(self._waiting, candidate)
+            # A preempted victim may just have been inserted at the head, so
+            # remove the original candidate by id rather than popping the head.
+            self._waiting.pop(candidate.request_id)
             candidate.slot = self._free_slots.pop()
             candidate.status = RequestStatus.RUNNING
             self._running.append(candidate)
@@ -487,7 +510,11 @@ class Scheduler:
         """Next chunk for a request whose prefill is already under way."""
         remaining = request.prompt_len - request.num_computed_tokens
         size = self.config.max_chunk_size
-        return remaining if size <= 0 else min(remaining, size)
+        if size <= 0:
+            return remaining
+        # vLLM's chunked prefill consumes at most the iteration token budget.
+        # Without this cap, one long request violates the advertised ceiling.
+        return min(remaining, size, self.config.max_num_batched_tokens)
 
     def _first_chunk_of(self, request: Request) -> int:
         """Chunk estimate for pricing a fresh admission against the token budget.
@@ -500,7 +527,9 @@ class Scheduler:
         overflows ``max_num_batched_tokens``.
         """
         size = self.config.max_chunk_size
-        return request.prompt_len if size <= 0 else min(request.prompt_len, size)
+        if size <= 0:
+            return request.prompt_len
+        return min(request.prompt_len, size, self.config.max_num_batched_tokens)
 
     def _promote_pending_owners(self) -> None:
         """Hand prefix ownership to the slots that now really hold the K/V.
@@ -622,24 +651,34 @@ class Scheduler:
         request.output_token_ids.clear()
         request.max_new_tokens -= moved
         self._discard_running(request)
-        self._waiting.appendleft(request)  # re-queue at front, keeps FCFS age
+        self._waiting[request.request_id] = request
+        self._waiting.move_to_end(request.request_id, last=False)
         self.num_preemptions += 1
 
     def finish(self, request: Request, reason: str) -> None:
         """Retire a running request and return its slot to the pool."""
         if request.status is RequestStatus.FINISHED:
             return
+        was_running = request.status is RequestStatus.RUNNING
         request.status = RequestStatus.FINISHED
         request.finish_reason = reason
         request.finish_time = time.monotonic()
         if request.slot is not None:
             self._free_slots.append(request.slot)
             request.slot = None
-        self._discard_running(request)
-        self._settle_pending_owner(request)
-        # Drop this request's hold on its cached prefix blocks. A shared prefix
-        # survives as long as any other live request still references it.
-        self._prefix_cache.release(request.prompt_token_ids)
+        if was_running:
+            self._discard_running(request)
+            self._settle_pending_owner(request)
+            # Drop this request's hold on its cached prefix blocks. A shared
+            # prefix survives as long as another live request references it.
+            self._prefix_cache.release(request.prompt_token_ids)
+        else:
+            # Public callers may retire a queued request directly. It has not
+            # registered cache blocks, so releasing them here would decrement a
+            # different request's references when the prompts match.
+            self._waiting.pop(request.request_id, None)
+        if self._requests.get(request.request_id) is request:
+            self._requests.pop(request.request_id)
 
     def _discard_running(self, request: Request) -> None:
         """Remove ``request`` from the running list by identity."""
@@ -659,7 +698,7 @@ class Scheduler:
     @property
     def waiting(self) -> list[Request]:
         """Queued requests, in arrival order."""
-        return list(self._waiting)
+        return list(self._waiting.values())
 
     @property
     def num_waiting(self) -> int:

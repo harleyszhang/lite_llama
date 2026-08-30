@@ -83,6 +83,8 @@ class SamplingParams:
             raise ValueError(f"temperature must be >= 0, got {self.temperature}")
         if not 0.0 < self.top_p <= 1.0:
             raise ValueError(f"top_p must be in (0, 1], got {self.top_p}")
+        if self.max_gen_len is not None and self.max_gen_len < 1:
+            raise ValueError(f"max_gen_len must be >= 1 or None, got {self.max_gen_len}")
         if self.repetition_penalty <= 0:
             raise ValueError(f"repetition_penalty must be > 0, got {self.repetition_penalty}")
 
@@ -161,7 +163,7 @@ _TOP_P_CANDIDATES = 1024
 
 
 def sample_top_p(
-    probs: torch.Tensor, top_p: float | torch.Tensor, k: int = _TOP_P_CANDIDATES
+    probs: torch.Tensor, top_p: float | torch.Tensor, k: int | None = _TOP_P_CANDIDATES
 ) -> torch.Tensor:
     """Nucleus (top-p) sampling.
 
@@ -179,12 +181,18 @@ def sample_top_p(
         probs: ``[batch, vocab]`` probability distribution.
         top_p: Cumulative probability threshold; a ``[batch, 1]`` tensor gives
             each row its own threshold.
-        k: Candidate pool size, clamped to the vocabulary.
+        k: Candidate pool size, clamped to the vocabulary. ``None`` uses the
+            full vocabulary for exact sampling of flat distributions.
 
     Returns:
         ``[batch, 1]`` sampled token ids.
     """
-    k = min(k, probs.shape[-1])
+    # top_p=1 is ordinary categorical sampling. Avoiding topk here is both exact
+    # (the fixed candidate pool otherwise drops the long tail) and considerably
+    # cheaper for the common OpenAI-compatible default.
+    if not isinstance(top_p, torch.Tensor) and top_p == 1.0:
+        return torch.multinomial(probs, num_samples=1)
+    k = probs.shape[-1] if k is None else min(k, probs.shape[-1])
     top_probs, top_idx = torch.topk(probs, k, dim=-1)  # already descending
     return _draw_from_nucleus(top_probs, top_idx, top_p)
 
@@ -258,7 +266,7 @@ def sharded_top_p(
     temperature: float | torch.Tensor,
     top_p: float | torch.Tensor,
     vocab_offset: int,
-    k: int = _TOP_P_CANDIDATES,
+    k: int | None = _TOP_P_CANDIDATES,
 ) -> torch.Tensor:
     """Nucleus sampling over a vocabulary split across TP ranks.
 
@@ -278,11 +286,12 @@ def sharded_top_p(
     scaled = local_logits.float() / temperature
     log_z = vocab_logsumexp(scaled)
 
-    k = min(k, scaled.shape[-1])
-    local_top, local_ids = torch.topk(scaled, k, dim=-1)
+    local_k = scaled.shape[-1] if k is None else min(k, scaled.shape[-1])
+    local_top, local_ids = torch.topk(scaled, local_k, dim=-1)
     pool = all_gather_tp(local_top)
     pool_ids = all_gather_tp(local_ids + vocab_offset)
-    top_probs, order = torch.topk((pool - log_z).exp(), k, dim=-1)
+    global_k = pool.shape[-1] if k is None else min(k, pool.shape[-1])
+    top_probs, order = torch.topk((pool - log_z).exp(), global_k, dim=-1)
     return _draw_from_nucleus(top_probs, pool_ids.gather(-1, order), top_p)
 
 
@@ -310,6 +319,10 @@ class BatchedSamplingParams:
             softmax and the sort entirely.
         any_penalty: Whether any row has a penalty other than ``1.0``; when not,
             the generated-span gather can be skipped.
+        all_top_p_one: Whether every stochastic row is plain categorical
+            sampling, enabling a sort-free single-device path.
+        needs_full_vocab: Whether any stochastic row needs the probability tail
+            that the normal bounded candidate pool omits.
     """
 
     temperature: torch.Tensor
@@ -318,6 +331,8 @@ class BatchedSamplingParams:
     greedy: torch.Tensor
     all_greedy: bool
     any_penalty: bool
+    all_top_p_one: bool
+    needs_full_vocab: bool
 
     @classmethod
     def build(
@@ -342,6 +357,11 @@ class BatchedSamplingParams:
             greedy=torch.tensor(greedy_flags, dtype=torch.bool, device=device).unsqueeze(-1),
             all_greedy=all(greedy_flags),
             any_penalty=any(p.repetition_penalty != 1.0 for p in params),
+            all_top_p_one=all(p.is_greedy or p.top_p == 1.0 for p in params),
+            # A stochastic top_p=1 row must retain the whole distribution. In a
+            # mixed batch the other rows still need sorting, so use the exact
+            # full-vocabulary pool for the shared pass.
+            needs_full_vocab=any(not p.is_greedy and p.top_p == 1.0 for p in params),
         )
 
 
@@ -382,6 +402,8 @@ class Sampler:
             top_p=params.top_p,
             all_greedy=params.is_greedy,
             greedy=None,
+            all_top_p_one=params.top_p == 1.0,
+            needs_full_vocab=params.top_p == 1.0,
         )
 
     @torch.inference_mode()
@@ -417,6 +439,8 @@ class Sampler:
             top_p=params.top_p,
             all_greedy=params.all_greedy,
             greedy=params.greedy,
+            all_top_p_one=params.all_top_p_one,
+            needs_full_vocab=params.needs_full_vocab,
         )
 
     def _draw(
@@ -429,6 +453,8 @@ class Sampler:
         top_p: float | torch.Tensor,
         all_greedy: bool,
         greedy: torch.Tensor | None,
+        all_top_p_one: bool = False,
+        needs_full_vocab: bool = False,
     ) -> torch.Tensor:
         """Shared body of :meth:`sample` and :meth:`sample_batched`.
 
@@ -447,12 +473,26 @@ class Sampler:
             greedy_ids = torch.argmax(logits, dim=-1, keepdim=True)
             if all_greedy:
                 return greedy_ids
-            sampled_ids = sample_top_p(torch.softmax(logits / temperature, dim=-1), top_p)
+            probs = torch.softmax(logits / temperature, dim=-1)
+            if all_top_p_one:
+                sampled_ids = torch.multinomial(probs, num_samples=1)
+            else:
+                sampled_ids = sample_top_p(
+                    probs,
+                    top_p,
+                    k=None if needs_full_vocab else _TOP_P_CANDIDATES,
+                )
         else:
             greedy_ids = global_argmax(logits, offset)
             if all_greedy:
                 return greedy_ids
-            sampled_ids = sharded_top_p(logits, temperature, top_p, offset)
+            sampled_ids = sharded_top_p(
+                logits,
+                temperature,
+                top_p,
+                offset,
+                k=None if needs_full_vocab or all_top_p_one else _TOP_P_CANDIDATES,
+            )
 
         if greedy is None:
             return sampled_ids

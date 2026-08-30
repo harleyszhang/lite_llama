@@ -12,28 +12,67 @@ Which implementation actually runs is a separate question, answered by
 from the per-backend spec rows in :mod:`lite_llama.kernels.backends`.
 """
 
-from .activations import gelu, leaky_relu, relu, silu, tanh
+from __future__ import annotations
+
+from collections.abc import Callable
+from importlib import import_module
+from typing import Any
+
+from .backends import native as _native_specs  # noqa: F401
 
 # Registers the native KernelSpec rows before anything can dispatch; the rows
 # are data pointing at the kernel modules below, so nothing loads eagerly.
-from .backends import native as _native_specs  # noqa: F401
-from .flashattention2_nopad import flash_attention2_no_pad
-from .flashdecoding import flash_decoding
-from .fused_moe import fused_moe, moe_align_block_size
-from .linear import (
-    linear_torch,
-    linear_w4a16,
-    linear_w8a8_fp8,
-    linear_w8a8_int8,
-    linear_w8a16,
-)
-from .quantization import smoothquant_matmul, w4a16_matmul, w8a16_matmul
-from .rope_emb import rope_emb_forward
-from .skip_rmsnorm import skip_rmsnorm
-from .swiglu import swiglu_forward, swiglu_forward_fused
-from .update_kv_buffer import update_kv_buffer
-from .update_kv_index import update_kv_index
-from .vocab_embedding import vocab_parallel_embedding
+
+
+_EXPORTS: dict[str, tuple[str, str]] = {
+    "flash_attention2_no_pad": (".flashattention2_nopad", "flash_attention2_no_pad"),
+    "flash_decoding": (".flashdecoding", "flash_decoding"),
+    "fused_moe": (".fused_moe", "fused_moe"),
+    "gelu": (".activations", "gelu"),
+    "leaky_relu": (".activations", "leaky_relu"),
+    "linear_torch": (".linear", "linear_torch"),
+    "linear_w4a16": (".linear", "linear_w4a16"),
+    "linear_w8a8_fp8": (".linear", "linear_w8a8_fp8"),
+    "linear_w8a8_int8": (".linear", "linear_w8a8_int8"),
+    "linear_w8a16": (".linear", "linear_w8a16"),
+    "moe_align_block_size": (".fused_moe", "moe_align_block_size"),
+    "relu": (".activations", "relu"),
+    "rope_emb_forward": (".rope_emb", "rope_emb_forward"),
+    "silu": (".activations", "silu"),
+    "skip_rmsnorm": (".skip_rmsnorm", "skip_rmsnorm"),
+    "smoothquant_matmul": (".quantization", "smoothquant_matmul"),
+    "swiglu_forward": (".swiglu", "swiglu_forward"),
+    "swiglu_forward_fused": (".swiglu", "swiglu_forward_fused"),
+    "tanh": (".activations", "tanh"),
+    "update_kv_buffer": (".update_kv_buffer", "update_kv_buffer"),
+    "update_kv_index": (".update_kv_index", "update_kv_index"),
+    "vocab_parallel_embedding": (".vocab_embedding", "vocab_parallel_embedding"),
+    "w4a16_matmul": (".quantization", "w4a16_matmul"),
+    "w8a16_matmul": (".quantization", "w8a16_matmul"),
+}
+
+
+def _lazy_kernel(name: str) -> Callable[..., Any]:
+    """Return a stable call site that resolves its Triton target once."""
+    target: Callable[..., Any] | None = None
+
+    def call(*args: Any, **kwargs: Any) -> Any:
+        nonlocal target
+        if target is None:
+            module_name, attribute = _EXPORTS[name]
+            target = getattr(import_module(module_name, __name__), attribute)
+        return target(*args, **kwargs)
+
+    call.__name__ = name
+    call.__qualname__ = name
+    call.__module__ = __name__
+    return call
+
+
+# Model modules bind these names at import time. Bind lightweight trampolines,
+# so importing a model or inspecting its config never imports Triton; the first
+# real kernel call resolves and caches the implementation behind the trampoline.
+globals().update({name: _lazy_kernel(name) for name in _EXPORTS})
 
 __all__ = [
     "flash_attention2_no_pad",

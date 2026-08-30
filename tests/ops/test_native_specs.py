@@ -9,6 +9,7 @@ of the Triton rows live in ``tests/kernels/test_linear_dispatch.py``).
 from __future__ import annotations
 
 import ast
+import importlib.util
 import inspect
 from pathlib import Path
 from typing import ClassVar
@@ -23,6 +24,8 @@ from lite_llama.kernels.linear import linear_torch
 from lite_llama.kernels.ops import LOGICAL_OPS, REGISTRY, dispatch
 from lite_llama.kernels.ops.dispatch import resolve_target
 from lite_llama.modules.quantization.unquant import UnquantizedLinearMethod
+
+TRITON_AVAILABLE = importlib.util.find_spec("triton") is not None
 
 #: scheme key -> spec name, the routing every quant method relies on.
 SCHEME_TO_ROW = {
@@ -222,6 +225,7 @@ class TestRegistryStaysTorchFree:
                 assert not module.startswith("lite_llama.kernels.ops"), spec.name
                 assert attr.isidentifier()
 
+    @pytest.mark.skipif(not TRITON_AVAILABLE, reason="resolving GPU targets requires Triton")
     def test_every_row_resolves_to_a_callable(self) -> None:
         for op in REGISTRY.ops():
             for spec in REGISTRY.implementations(op):
@@ -254,6 +258,7 @@ class TestTargetsMatchTheirContract:
     def _ops_to_check(self) -> list[str]:
         return [op for op in sorted(REGISTRY.ops()) if not op.startswith(self.OPEN_ARITY)]
 
+    @pytest.mark.skipif(not TRITON_AVAILABLE, reason="resolving GPU targets requires Triton")
     def test_parameter_names_match_the_abc(self) -> None:
         for op in self._ops_to_check():
             expected = [
@@ -265,6 +270,7 @@ class TestTargetsMatchTheirContract:
                     f"{spec.name} takes {got} but the {op!r} contract says {expected}"
                 )
 
+    @pytest.mark.skipif(not TRITON_AVAILABLE, reason="resolving GPU targets requires Triton")
     def test_open_arity_members_keep_the_arity_they_advertise(self) -> None:
         # The two swiglu rows differ only in arity, which is exactly why they are
         # two ops rather than one: dispatch cannot guess how many tensors the

@@ -168,7 +168,7 @@ class ModelWorker:
         # Sampling knobs cost four small uploads to rebuild, so a steady batch
         # reuses them; the key is the plan's own rows, which needs no cooperation
         # from whoever mutates the running set.
-        self._sampling_key: tuple[SamplingParams, ...] | None = None
+        self._sampling_key: tuple[tuple[float, float, float, bool], ...] | None = None
         self._sampling: BatchedSamplingParams | None = None
 
     @torch.inference_mode()
@@ -278,12 +278,19 @@ class ModelWorker:
 
         Four small uploads and a handful of comprehensions per build, which a
         steady decode batch — the same requests, step after step — should not pay
-        every step. :class:`SamplingParams` is frozen, so the cache key is an
-        equality test over at most ``max_num_seqs`` immutable rows.
+        every step. The key snapshots the four scalars that affect those
+        tensors, so an in-place change to the user-facing parameters cannot
+        leave stale values on the device.
         """
-        if params != self._sampling_key:
+        # SamplingParams is intentionally a user-facing mutable dataclass. Do
+        # not cache by object equality: the old key held the same objects, so an
+        # in-place mutation compared equal to itself and left stale GPU knobs.
+        key = tuple(
+            (p.temperature, p.top_p, p.repetition_penalty, p.is_greedy) for p in params
+        )
+        if key != self._sampling_key:
             self._sampling = BatchedSamplingParams.build(params, self._device)
-            self._sampling_key = params
+            self._sampling_key = key
         return self._sampling  # type: ignore[return-value]
 
     # --------------------------------------------------------------- internals #

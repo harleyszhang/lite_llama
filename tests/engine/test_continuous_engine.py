@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from lite_llama.engine.async_engine import AsyncLLMEngine
@@ -117,6 +118,27 @@ def test_the_eos_stop_token_is_not_counted_as_output():
     engine.step()
 
     assert request.output_token_ids == [_WORD]
+    engine.shutdown()
+
+
+def test_duplicate_live_request_ids_are_rejected_without_losing_state():
+    engine = _build_engine([[_WORD], [_EOS]])
+    first = engine.add_request("first", request_id="same")
+
+    with pytest.raises(ValueError, match="already active"):
+        engine.add_request("second", request_id="same")
+
+    assert engine.scheduler.waiting == [first]
+    engine.shutdown()
+
+
+def test_generated_request_ids_skip_user_supplied_ids():
+    engine = _build_engine([[_WORD], [_EOS]])
+    explicit = engine.add_request("first", request_id="req-0")
+    generated = engine.add_request("second")
+
+    assert explicit.request_id == "req-0"
+    assert generated.request_id == "req-1"
     engine.shutdown()
 
 

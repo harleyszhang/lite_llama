@@ -46,6 +46,22 @@ _GOLDEN_DIRS = ("golden",)
 _GOLDEN_STRICT = os.environ.get("LITE_LLAMA_GOLDEN_STRICT", "") == "1"
 
 
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
+    """Do not import Triton-only test modules on a machine without CUDA.
+
+    Marker selection happens after Python imports a test module. On macOS the
+    project intentionally does not install Triton, so merely collecting
+    ``tests/kernels`` would fail before the automatic ``gpu`` skip can apply.
+    """
+    if torch.cuda.is_available():
+        return None
+    try:
+        relative = collection_path.relative_to(REPO_ROOT)
+    except ValueError:
+        return None
+    return relative.parts[:2] == ("tests", "kernels") or None
+
+
 def _resolve_model_dir() -> Path:
     """Absolute path of the checkpoint under test, without validating it."""
     candidate = Path(os.environ.get("LITE_LLAMA_TEST_MODEL_DIR", DEFAULT_MODEL_DIR))

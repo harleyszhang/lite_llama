@@ -43,7 +43,7 @@ import itertools
 import time
 from collections.abc import Sequence
 from multiprocessing.process import BaseProcess
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
@@ -58,7 +58,6 @@ from ..executor.worker import ModelInput, PassKind
 from ..models.config import read_model_type
 from ..models.registry import ModelRegistry
 from .detokenizer import IncrementalDetokenizer
-from .llm_engine import LLMEngine
 from .outputs import CompletionOutput, RequestOutput
 from .sampler import SamplingParams
 from .scheduler import (
@@ -69,6 +68,9 @@ from .scheduler import (
     SchedulerConfig,
 )
 from .stop_criteria import POLL_INTERVAL, detect_repetition
+
+if TYPE_CHECKING:
+    from .llm_engine import LLMEngine
 
 
 class _Work(NamedTuple):
@@ -303,6 +305,10 @@ class ContinuousBatchingEngine:
             ValueError: ``tensor_parallel_size`` contradicts a group this process
                 is already a member of.
         """
+        # Keep CPU-only planning and fake-executor tests importable without
+        # Triton. A real model is the only path that needs the GPU engine.
+        from .llm_engine import LLMEngine
+
         spec = ModelRegistry.resolve(read_model_type(model))
         if spec.is_multimodal:
             raise NotImplementedError(
@@ -372,8 +378,12 @@ class ContinuousBatchingEngine:
             request_id: Caller-supplied id; generated when omitted.
             prompt_token_ids: Pre-tokenised prompt, to skip re-encoding.
         """
+        if request_id is None:
+            request_id = f"req-{next(self._request_ids)}"
+            while request_id in self._detokenizers:
+                request_id = f"req-{next(self._request_ids)}"
         request = Request(
-            request_id=request_id or f"req-{next(self._request_ids)}",
+            request_id=request_id,
             prompt=prompt,
             prompt_token_ids=(
                 prompt_token_ids

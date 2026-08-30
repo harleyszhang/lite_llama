@@ -65,14 +65,18 @@ def test_insert_prompt_omits_the_system_message_when_unset():
 # --------------------------------------------------------------------------- #
 # CLI integration (base-vs-instruct routing)
 # --------------------------------------------------------------------------- #
-def test_cli_build_returns_none_for_the_base_style():
-    """Base models take the ``"empty"`` style and get no prompter at all (verbatim)."""
+def test_cli_build_returns_none_for_a_base_checkpoint(tmp_path):
+    """Base checkpoints get no prompter and therefore receive prompts verbatim."""
     from lite_llama.cli import PrompterResolver
 
-    assert PrompterResolver.build("empty", _FakeTokenizer()) is None
+    model_dir = tmp_path / "Qwen2.5-0.5B"
+    model_dir.mkdir()
+    assert PrompterResolver.build(str(model_dir), _FakeTokenizer()) is None
 
 
-def test_cli_build_uses_a_chat_prompter_for_an_instruct_style():
+def test_cli_build_uses_a_chat_prompter_for_an_instruct_checkpoint(tmp_path):
     from lite_llama.cli import PrompterResolver
 
-    assert isinstance(PrompterResolver.build("qwen2", _FakeTokenizer()), ChatPrompter)
+    model_dir = tmp_path / "Qwen2.5-0.5B-Instruct"
+    model_dir.mkdir()
+    assert isinstance(PrompterResolver.build(str(model_dir), _FakeTokenizer()), ChatPrompter)
