@@ -10,6 +10,7 @@ benchmarks/ 下的脚本测量同一组 prompts,指标口径对齐 vLLM/TensorRT
     expand_prompts() 把 prompts 循环补齐到指定 batch
     BenchResult      指标值对象,负责把自身渲染成一行表格
     LiteBackend      lite_llama 策略:stream 逐步打点,TTFT/TPOT 直接可读
+    VisionBackend    多模态策略:VisionGenerator 逐请求串行 stream 打点
     HFBackend        HF transformers 策略:generate 无逐步回调,两段式拆 TTFT
     print_table()    按插入顺序打印对比表
 """
@@ -139,6 +140,99 @@ class LiteBackend:
     def close(self) -> None:
         # TextGenerator 内部引擎/执行器/KV 管理器存在互引用,显式 gc 才能
         # 真正释放显存;否则同进程再建第二个后端时 KV profiling 会拿到 0 tokens。
+        import gc
+
+        del self._gen
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
+class VisionBackend:
+    """多模态测量策略:VisionGenerator 逐请求串行 stream 打点。
+
+    lite_llama 的多模态路径逐请求服务(processor 单请求),因此
+    ``--batch`` 语义变为串行请求数:TTFT 取每请求各自的首 token 时延均值,
+    TPOT 取所有请求 decode 步间隔的均值,TPS 为整轮串行循环的聚合吞吐。
+    图像统一 672x672 resize,钉死动态分辨率视觉塔(Qwen3-VL)的视觉 token 数。
+    decode 步照常走 CUDA graph 重放——视觉 token 此刻已在 KV cache 里,
+    捕获与重放的都是纯文本步。
+    """
+
+    def __init__(self, model_dir: str, use_cuda_graph: bool, image_path: str, **gen_kwargs):
+        from PIL import Image
+
+        from lite_llama import VisionGenerator
+        from lite_llama.models.config import read_model_type
+
+        self._image = Image.open(image_path).convert("RGB").resize((672, 672), Image.BICUBIC)
+        self._gen = VisionGenerator(
+            checkpoints_dir=model_dir, use_cuda_graph=use_cuda_graph, **gen_kwargs
+        )
+        # llava 要求显式 <image> 标记 + vicuna 轮次;Qwen3-VL 的 preparer
+        # (与 HF 侧 chat template) 自己插入视觉占位符,普通问题直接进。
+        if read_model_type(model_dir) == "llava":
+
+            def wrap(prompt: str) -> str:
+                return f"USER: <image>\n{prompt} ASSISTANT:"
+
+        else:
+
+            def wrap(prompt: str) -> str:
+                return prompt
+
+        self._wrap = wrap
+
+    def measure(self, prompts: list[str], max_gen_len: int, greedy: bool) -> BenchResult:
+        from lite_llama import SamplingParams
+
+        params = (
+            SamplingParams(temperature=0.0, max_gen_len=max_gen_len)
+            if greedy
+            else SamplingParams(max_gen_len=max_gen_len, **SAMPLE_KW)
+        )
+
+        # Warm up autotune + graph capture so the measured run is steady state.
+        for _ in range(2):
+            list(
+                self._gen.stream(
+                    self._wrap(prompts[0]), [self._image],
+                    SamplingParams(temperature=0.0, max_gen_len=8),
+                )
+            )
+
+        torch.cuda.synchronize()
+        t_start = time.perf_counter()
+        req_ttfts: list[float] = []
+        step_deltas: list[float] = []
+        for prompt in prompts:
+            req_start = time.perf_counter()
+            first = True
+            prev = 0.0
+            for _delta in self._gen.stream(self._wrap(prompt), [self._image], params):
+                now = time.perf_counter()
+                if first:
+                    req_ttfts.append(now - req_start)
+                    first = False
+                else:
+                    step_deltas.append(now - prev)
+                prev = now
+        torch.cuda.synchronize()
+        total = time.perf_counter() - t_start
+
+        # Every request contributed its first token plus len(step deltas per
+        # request) decode tokens; deltas were only collected after each first.
+        gen_tokens = len(req_ttfts) + len(step_deltas)
+        return BenchResult(
+            ttft_ms=(statistics.mean(req_ttfts) if req_ttfts else 0.0) * 1000,
+            tpot_ms=(statistics.mean(step_deltas) * 1000) if step_deltas else 0.0,
+            tpot_p50_ms=(statistics.median(step_deltas) * 1000) if step_deltas else 0.0,
+            total_s=total,
+            steps=len(req_ttfts) + len(step_deltas),
+            batch=len(prompts),
+            gen_tokens=gen_tokens,
+        )
+
+    def close(self) -> None:
         import gc
 
         del self._gen

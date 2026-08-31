@@ -105,16 +105,16 @@ COMMON_OPTIONS: tuple[CliOption, ...] = (
 
 
 def _cuda_graph_option(*, default: bool) -> CliOption:
-    """The one CUDA-graph flag every *text* command takes.
+    """The one CUDA-graph flag every command that talks to an engine takes.
 
     ``argparse.BooleanOptionalAction`` registers both spellings — positive
     ``--cuda-graph`` and negative ``--no-cuda-graph`` — against a single
     boolean dest, so no command needs a second flag with the opposite sense
     (the ``use or not no_`` double negative ``from_args`` used to carry). Only
     the default differs by command, and it lives here in the declaration,
-    where a flag's semantics belong. Vision commands do not register it: that
-    path decodes eager by construction, and a flag it would silently ignore
-    is worse than no flag.
+    where a flag's semantics belong: throughput commands (``batch``,
+    ``serve``) capture by default, the REPLs (``chat``, ``vl-chat``) run
+    eager — one turn in flight never amortises capture latency.
     """
     return CliOption(
         "--cuda-graph",
@@ -136,8 +136,11 @@ class BaseOptions:
     """Construction options every engine build shares, text or vision.
 
     Exactly the fields :class:`~lite_llama.engine.generator.VisionGenerator`
-    takes — which is why the vision command parses these and nothing more:
-    it no longer carries a CUDA-graph switch it would only have to refuse.
+    takes, ``use_cuda_graph`` included. Multimodal models used to be refused
+    at the capture boundary; a decode step with no vision payload is the
+    same graph text models replay (the vision tokens are ordinary KV-cache
+    rows by then), so vl-chat now parses the same switch the text commands
+    take.
     """
 
     model_dir: str
@@ -147,6 +150,7 @@ class BaseOptions:
     quantization: str | None = None
     kv_cache_dtype: str = "auto"
     tensor_parallel_size: int = 1
+    use_cuda_graph: bool = False
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> BaseOptions:
@@ -170,15 +174,19 @@ class BaseOptions:
             "quantization": getattr(args, "quantization", None),
             "kv_cache_dtype": getattr(args, "kv_cache_dtype", "auto"),
             "tensor_parallel_size": getattr(args, "tensor_parallel_size", 1),
+            # ``cuda_graph`` is the dest every --cuda-graph flag writes (text
+            # commands and vl-chat alike); the fallback fires only if a command
+            # forgot to register the flag, and eager is the safe default.
+            "use_cuda_graph": getattr(args, "cuda_graph", False),
         }
 
     def build_vision_generator(self) -> VisionGenerator:
-        # CUDA Graph capture 只接了文本 decode 路径,vl-chat 不传该参数
         return VisionGenerator(
             checkpoints_dir=self.model_dir,
             max_seq_len=self.max_seq_len,
             max_gpu_num_blocks=self.max_gpu_num_blocks,
             device=self.device,
+            use_cuda_graph=self.use_cuda_graph,
             quantization=self.quantization,
             tensor_parallel_size=self.tensor_parallel_size,
             kv_cache_dtype=self.kv_cache_dtype,
@@ -195,14 +203,6 @@ class TextEngineOptions(BaseOptions):
     an engine whose executor drives them, so a command only picks its
     concurrency.
     """
-
-    use_cuda_graph: bool = False
-
-    @classmethod
-    def from_args(cls, args: argparse.Namespace) -> TextEngineOptions:
-        # ``cuda_graph`` is the dest every text command's --cuda-graph flag
-        # writes; the fallback only fires if a command forgot to register it.
-        return cls(**BaseOptions._collect(args), use_cuda_graph=getattr(args, "cuda_graph", False))
 
     def build_engine(
         self,
@@ -371,6 +371,9 @@ class VlChatCommand(CliCommand):
     help = "Single-turn image-conditioned chat"
 
     def add_arguments(self, sub: argparse.ArgumentParser) -> None:
+        # Same REPL trade-off as ``chat``: one turn in flight never amortises
+        # capture latency, so graphs are opt-in here.
+        _cuda_graph_option(default=False).register(sub)
         CliOption(
             "--image",
             {"nargs": "+", "required": True, "help": "One or more image paths"},

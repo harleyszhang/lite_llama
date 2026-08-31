@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from lite_llama import cli
-from lite_llama.cli import EngineOptions, build_parser
+from lite_llama.cli import BaseOptions, TextEngineOptions, build_parser
 
 
 @pytest.fixture
@@ -30,9 +30,9 @@ def model_dir(tmp_path):
     return tmp_path
 
 
-def options_for(argv: list[str], model_dir) -> EngineOptions:
+def options_for(argv: list[str], model_dir) -> TextEngineOptions:
     args = build_parser().parse_args([*argv, "--model-dir", str(model_dir)])
-    return EngineOptions.from_args(args)
+    return TextEngineOptions.from_args(args)
 
 
 class FakeEngine:
@@ -71,7 +71,7 @@ class FakeEngine:
 
 def run_chat(monkeypatch, model_dir, engine: FakeEngine, typed: list[str], *argv: str) -> int:
     """Drive the chat REPL over ``engine``, feeding ``typed`` at the prompt."""
-    monkeypatch.setattr(EngineOptions, "build_engine", lambda self, **_kwargs: engine)
+    monkeypatch.setattr(TextEngineOptions, "build_engine", lambda self, **_kwargs: engine)
     lines = iter(typed)
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
     args = build_parser().parse_args(["chat", "--model-dir", str(model_dir), *argv])
@@ -83,7 +83,7 @@ class TestCudaGraphDefaults:
 
     def test_chat_captures_graphs_only_when_asked(self, model_dir):
         assert options_for(["chat"], model_dir).use_cuda_graph is False
-        assert options_for(["chat", "--use-cuda-graph"], model_dir).use_cuda_graph is True
+        assert options_for(["chat", "--cuda-graph"], model_dir).use_cuda_graph is True
 
     def test_a_throughput_command_captures_unless_refused(self, model_dir):
         """``batch`` and ``serve`` exist for tokens per second; eager decode is opt-in."""
@@ -91,6 +91,35 @@ class TestCudaGraphDefaults:
         assert options_for(["batch", "--no-cuda-graph"], model_dir).use_cuda_graph is False
         assert options_for(["serve"], model_dir).use_cuda_graph is True
         assert options_for(["serve", "--no-cuda-graph"], model_dir).use_cuda_graph is False
+
+
+class TestVlChatCudaGraph:
+    """``vl-chat`` takes the same switch the text commands do, wired the same way.
+
+    A decode step with no vision payload replays the same graph a text model
+    does, so the flag is real now — it used to be a switch the command would
+    have had to refuse.
+    """
+
+    def options_for(self, argv: list[str], model_dir):
+        args = build_parser().parse_args([*argv, "--model-dir", str(model_dir), "--image", "cat.png"])
+        return BaseOptions.from_args(args)
+
+    def test_a_repl_defaults_to_eager(self, model_dir):
+        assert self.options_for(["vl-chat"], model_dir).use_cuda_graph is False
+
+    def test_both_spellings_reach_the_generator(self, model_dir, monkeypatch):
+        seen: dict = {}
+
+        def fake_generator(checkpoints_dir, **kwargs):
+            seen.update(kwargs)
+            return object()
+
+        monkeypatch.setattr(cli, "VisionGenerator", fake_generator)
+        for extra, expected in (([], False), (["--cuda-graph"], True), (["--no-cuda-graph"], False)):
+            seen.clear()
+            self.options_for(["vl-chat", *extra], model_dir).build_vision_generator()
+            assert seen["use_cuda_graph"] is expected
 
 
 class TestEngineConstruction:
@@ -116,7 +145,7 @@ class TestEngineConstruction:
         """One turn is in flight at a time; 32 slots would only shrink each one's cache."""
         seen: dict = {}
         monkeypatch.setattr(
-            EngineOptions,
+            TextEngineOptions,
             "build_engine",
             lambda self, **kwargs: seen.update(kwargs) or FakeEngine(),
         )
