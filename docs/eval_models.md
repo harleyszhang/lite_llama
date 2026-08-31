@@ -34,7 +34,7 @@ kernels 目录重组为 ops/dispatcher/backend 三层后，在 torch 2.11.0+cu12
 
 - **Qwen2.5-1.5B-Instruct / 200 题：61.50%，无效率 0，通过**（阈值 0.63±0.05）；同一环境在重构前的 main 分支上复测得到**完全相同的 61.50%**——重构对生成结果零影响。与上表 63.00% 的 1.5 点差来自环境（历史数字测于 torch 2.13/triton 3.7/Python 3.13），在 200 题子集 ±3.4 点的统计噪声内。
 - 同一分支上 **Qwen3-0.6B（bf16）与 Qwen3-0.6B-FP8 的 golden token parity 全部通过**：eager 与 CUDA graph 重放、与各自入库基线字节级一致（4 种 batch 布局 × repetition penalty 全组合），这是比分数更强的逐 token 证据。
-- e2e 性能复测（10 个 checkpoint × eager/CUDA graph，覆盖 llama/qwen2/qwen3/qwen3_moe 四种架构与 FP8/AWQ/fused-MoE 优化路径）见 `docs/benchmark_models.md` 末节：graph 加速从 0.5B 的 5.4x 收敛到 14B 的 1.06x，launch-bound 到 compute-bound 的过渡与规模相符。
+- e2e 性能复测（10 个 checkpoint × eager/CUDA graph，覆盖 llama/qwen2/qwen3/qwen3_moe 四种架构与 FP8/AWQ/fused-MoE 优化路径）见 `docs/benchmark_models.md` 末节：graph 加速从 0.5B 的 5.3x 收敛到 14B 的 1.01x，launch-bound 到 compute-bound 的过渡与规模相符。
 
 ## 复现
 
