@@ -1,0 +1,21 @@
+{
+  "config": {
+    "model": "my_weight/Meta-Llama-3.1-8B-Instruct",
+    "batch_size": 8,
+    "gen_len": 128,
+    "iters": 2,
+    "gpu": "NVIDIA A10",
+    "timestamp": "2026-08-31T20:09:03"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "batch_size": 8,
+    "prompt_tokens": 118,
+    "output_tokens": 1024,
+    "ttft_s": 0.05810399539768696,
+    "tpot_ms": 35.30464959367523,
+    "tgs": 225.4615441978088,
+    "latency_s": 4.541794493794441
+  },
+  "transformers": null
+}

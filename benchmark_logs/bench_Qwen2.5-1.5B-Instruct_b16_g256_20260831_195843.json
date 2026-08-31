@@ -1,0 +1,30 @@
+{
+  "config": {
+    "model": "my_weight/Qwen2.5-1.5B-Instruct",
+    "batch_size": 16,
+    "gen_len": 256,
+    "iters": 2,
+    "gpu": "NVIDIA A10",
+    "timestamp": "2026-08-31T19:58:43"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "batch_size": 16,
+    "prompt_tokens": 213,
+    "output_tokens": 4096,
+    "ttft_s": 0.02245756797492504,
+    "tpot_ms": 8.510120768173069,
+    "tgs": 1868.1543126071851,
+    "latency_s": 2.1925383638590574
+  },
+  "transformers": {
+    "engine": "transformers",
+    "batch_size": 16,
+    "prompt_tokens": 213,
+    "output_tokens": 4096,
+    "ttft_s": 0.027796119451522827,
+    "tpot_ms": 23.616133440358965,
+    "tgs": 677.0348485597034,
+    "latency_s": 6.049910146743059
+  }
+}

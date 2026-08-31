@@ -1,0 +1,21 @@
+{
+  "config": {
+    "model": "my_weight/Qwen3-8B",
+    "batch_size": 8,
+    "gen_len": 128,
+    "iters": 2,
+    "gpu": "NVIDIA A10",
+    "timestamp": "2026-08-31T20:08:29"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "batch_size": 8,
+    "prompt_tokens": 118,
+    "output_tokens": 1024,
+    "ttft_s": 0.05611296929419041,
+    "tpot_ms": 36.78884927740717,
+    "tgs": 216.568467960593,
+    "latency_s": 4.7282968275249
+  },
+  "transformers": null
+}

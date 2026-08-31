@@ -1,0 +1,30 @@
+{
+  "config": {
+    "model": "my_weight/Llama-3.2-3B-Instruct",
+    "batch_size": 16,
+    "gen_len": 256,
+    "iters": 2,
+    "gpu": "NVIDIA A10",
+    "timestamp": "2026-08-31T20:01:47"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "batch_size": 16,
+    "prompt_tokens": 213,
+    "output_tokens": 4096,
+    "ttft_s": 0.051442794501781464,
+    "tpot_ms": 15.956900108094308,
+    "tgs": 994.065621889402,
+    "latency_s": 4.12045232206583
+  },
+  "transformers": {
+    "engine": "transformers",
+    "batch_size": 16,
+    "prompt_tokens": 213,
+    "output_tokens": 4096,
+    "ttft_s": 0.05566251464188099,
+    "tpot_ms": 27.736943405048518,
+    "tgs": 574.5882389739764,
+    "latency_s": 7.128583082929254
+  }
+}
