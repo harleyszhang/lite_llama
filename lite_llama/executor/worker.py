@@ -33,6 +33,7 @@ import torch
 
 from ..distributed.parallel_state import broadcast_tp, get_tp_world_size
 from ..engine.sampler import BatchedSamplingParams, GeneratedSpan, SamplingParams
+from .overlap import OverlapPolicy, StreamPool, Timeline
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
     from ..engine.llm_engine import LLMEngine
@@ -131,6 +132,37 @@ def _sync_tp(tokens: torch.Tensor) -> torch.Tensor:
     return tokens
 
 
+@dataclass
+class _PreparedPass:
+    """One pass's device-bound inputs, built on the host and uploaded.
+
+    With the overlap policy on, the upload rides the pool's copy stream and
+    ``event`` marks its completion: the consumer stream waits the event instead
+    of the host waiting the copy. With the policy off the upload was the legacy
+    blocking one and ``event`` is ``None``, which the pool treats as a no-op —
+    the forward paths below read the same either way. Either way the tensors the
+    model is fed are identical, which is the equivalence the tests pin.
+
+    Attributes:
+        input_ids: The pass's token grid — ``[n, width]`` for a prefill,
+            ``[padded, 1]`` for extend/decode, filler rows included.
+        positions: Absolute positions, prefill only; extend and decode derive
+            theirs from the slot metadata instead (no upload at all).
+        logits_positions: Per-row gather index of the next-token logits,
+            prefill only.
+        event: Completion of this pass's copies on the copy stream; the copies
+            are stream-ordered, so the last event covers them all.
+        padded: Rows actually submitted, extend/decode only — the caller
+            discards the trailing filler rows' logits.
+    """
+
+    input_ids: torch.Tensor
+    event: torch.cuda.Event | None
+    positions: torch.Tensor | None = None
+    logits_positions: torch.Tensor | None = None
+    padded: int = 0
+
+
 class ModelWorker:
     """Executes plans against this rank's model shard and KV cache.
 
@@ -171,6 +203,19 @@ class ModelWorker:
         self._sampling_key: tuple[SamplingParams, ...] | None = None
         self._sampling: BatchedSamplingParams | None = None
 
+        # L1 cross-stream overlap: input uploads ride a copy stream so the host
+        # never stalls on a pageable H2D between kernel launches, and — the engine
+        # deferring its readback to the end of the step — a later pass's copies
+        # overlap an earlier pass's forward on the device. On a non-CUDA device
+        # the pool is built with the policy off, which collapses every site back
+        # to the inline blocking upload.
+        on_cuda = torch.device(self._device).type == "cuda"
+        self._policy = OverlapPolicy.from_env() if on_cuda else OverlapPolicy(enabled=False)
+        self.timeline = (
+            Timeline.from_env(str(self._device)) if on_cuda else Timeline(enabled=False)
+        )
+        self._pool = StreamPool(str(self._device), self._policy, self.timeline)
+
     @torch.inference_mode()
     def execute(self, model_input: ModelInput) -> torch.Tensor:
         """Run one pass and return its sampled tokens.
@@ -181,73 +226,142 @@ class ModelWorker:
             still owe tokens (a prompt chunk that did not finish) runs the model —
             its K/V has to land — and returns an empty tensor.
         """
+        prepared = self.prepare(model_input)
         # Before the forward, so extend rows resuming on a reused prefix find it
         # in their own slot. Same stream, so the ordering needs no synchronisation.
+        # After the prepare: the pass's own copies cannot overlap its prefix
+        # copies, but the next pass's will overlap this pass's forward.
         self._slot_batch.copy_prefix(model_input.prefix_copies)
-        logits = self._forward(model_input)
+        logits = self._forward(model_input, prepared)
         if logits is None:
             return self._no_tokens
         return self._sample(model_input, logits)
 
-    # ---------------------------------------------------------------- forwards #
-    def _forward(self, plan: ModelInput) -> torch.Tensor | None:
+    # -------------------------------------------------------------- preparing #
+    def prepare(self, plan: ModelInput) -> _PreparedPass:
+        """Build one pass's inputs on the host and start their upload.
+
+        Everything the model is fed follows from ``(slots, seq_starts,
+        seq_lens)``, so the layout arithmetic runs on the host — row expansion
+        and graph padding through the slot view's plan helpers — and the upload
+        leaves on the pool's copy stream. The returned pass carries the event
+        the forward must consume before launching kernels; with the policy off
+        the upload already happened inline and the event is ``None``.
+        """
         match plan.kind:
             case PassKind.PREFILL:
-                return self._forward_grid(plan)
+                return self._prepare_grid(plan)
             case PassKind.EXTEND:
-                return self._forward_extend(plan)
+                return self._prepare_rows(plan, PassKind.EXTEND)
             case PassKind.DECODE:
-                return self._forward_decode(plan)
+                return self._prepare_rows(plan, PassKind.DECODE)
 
-    def _forward_grid(self, plan: ModelInput) -> torch.Tensor | None:
-        """A padded token grid through the prefill kernel."""
+    def _prepare_grid(self, plan: ModelInput) -> _PreparedPass:
+        """Pad the prompt chunks into a grid and upload it with its positions."""
         chunk_lens = plan.chunk_lens
         width = max(chunk_lens)
         grid, offset = [], 0
         for chunk in chunk_lens:
             grid.append(plan.tokens[offset : offset + chunk] + (self._pad_id,) * (width - chunk))
             offset += chunk
+        # Padded columns run past a row's real position, but attention never
+        # reads past that row's b_seq_len, so the junk positions are inert.
+        positions = [list(range(start, start + width)) for start in plan.seq_starts]
 
-        input_ids = torch.tensor(grid, dtype=torch.long, device=self._device)
-        # Padded columns run past a row's real position, but attention never reads
-        # past that row's b_seq_len, so the junk positions are inert.
-        positions = self._to_device(plan.seq_starts).unsqueeze(1) + torch.arange(
-            width, device=self._device
+        input_ids, _ = self._pool.upload_async(grid, dtype=torch.long, label="upload.prefill.tokens")
+        positions_t, _ = self._pool.upload_async(
+            positions, dtype=torch.long, label="upload.prefill.positions"
+        )
+        # A row's next-token logits sit at its own last real *column*.
+        logits_pos, event = self._pool.upload_async(
+            [chunk - 1 for chunk in chunk_lens], dtype=torch.long, label="upload.prefill.logits"
+        )
+        return _PreparedPass(
+            input_ids=input_ids,
+            event=event,
+            positions=positions_t,
+            logits_positions=logits_pos,
         )
 
+    def _prepare_rows(self, plan: ModelInput, kind: PassKind) -> _PreparedPass:
+        """Upload one-token rows padded onto the captured graph width.
+
+        Extend and decode share the shape — one row per token, filler rows up to
+        the graph width carrying the pad id — and differ only in whose helper
+        plans the rows: extend flattens chunks, decode pads the running set.
+        Filler rows exist only to reach a captured graph batch size; whatever id
+        they carry is thrown away with their logits.
+        """
+        if kind is PassKind.EXTEND:
+            rows_slot, _ = self._slot_batch.plan_extend_rows(
+                plan.slots, plan.seq_starts, plan.seq_lens
+            )
+            padded = len(rows_slot)
+        else:
+            padded_slots, _ = self._slot_batch.pad_decode_rows(plan.slots, plan.seq_lens)
+            padded = len(padded_slots)
+
+        rows = plan.tokens + (self._pad_id,) * (padded - len(plan.tokens))
+        input_ids, event = self._pool.upload_async(
+            rows, dtype=torch.long, label=f"upload.{kind}.tokens"
+        )
+        return _PreparedPass(input_ids=input_ids.view(padded, 1), event=event, padded=padded)
+
+    # ---------------------------------------------------------------- forwards #
+    def _forward(self, plan: ModelInput, prepared: _PreparedPass) -> torch.Tensor | None:
+        match plan.kind:
+            case PassKind.PREFILL:
+                return self._forward_grid(plan, prepared)
+            case PassKind.EXTEND:
+                return self._forward_extend(plan, prepared)
+            case PassKind.DECODE:
+                return self._forward_decode(plan, prepared)
+
+    def _forward_grid(self, plan: ModelInput, prepared: _PreparedPass) -> torch.Tensor | None:
+        """A padded token grid through the prefill kernel."""
         self._slot_batch.begin_prefill(plan.slots, plan.seq_starts, plan.seq_lens)
-        # A row's next-token logits sit at its own last real *column* rather than
-        # at the end of the padded row. The model gathers one column per row, so
-        # the whole grid is gathered here and the sampled subset selected after.
-        logits = self._runner.forward(
-            input_ids, positions, None, logits_positions=self._to_device(chunk_lens) - 1
+        # The grid, its positions and the gather index all left on the copy
+        # stream; one stream-ordered wait covers them, then the kernels launch.
+        self._pool.consume(
+            prepared.event, prepared.input_ids, prepared.positions, prepared.logits_positions
         )
+        with self.timeline.region("forward.prefill", "compute"):
+            # The model gathers one column per row, so the whole grid is gathered
+            # here and the sampled subset selected after.
+            logits = self._runner.forward(
+                prepared.input_ids,
+                prepared.positions,
+                None,
+                logits_positions=prepared.logits_positions,
+            )
         return self._pick(logits, plan.sampled, len(plan.slots))
 
-    def _forward_extend(self, plan: ModelInput) -> torch.Tensor | None:
+    def _forward_extend(self, plan: ModelInput, prepared: _PreparedPass) -> torch.Tensor | None:
         """Chunks resuming on a cached prefix: one decode-style row per token."""
         padded = self._slot_batch.begin_extend(plan.slots, plan.seq_starts, plan.seq_lens)
-        input_ids = self._rows(plan.tokens, padded)
+        self._pool.consume(prepared.event, prepared.input_ids)
         # begin_extend set b_seq_len to each row's absolute position plus one, so
         # the position of the token it feeds is exactly that minus one.
         positions = (self._slot_batch.seq_lens - 1).view(-1, 1)
 
-        logits = self._runner.forward(input_ids, positions, None)
+        with self.timeline.region("forward.extend", "compute"):
+            logits = self._runner.forward(prepared.input_ids, positions, None)
         # One row per token: a sequence's next-token logits are on the last row of
         # its own stretch of the flattened batch.
         ends = list(itertools.accumulate(plan.chunk_lens))
         rows = tuple(ends[index] - 1 for index in plan.sampled)
         return self._pick(logits[:, -1, :], rows, padded)
 
-    def _forward_decode(self, plan: ModelInput) -> torch.Tensor | None:
+    def _forward_decode(self, plan: ModelInput, prepared: _PreparedPass) -> torch.Tensor | None:
         """One token for every sequence in the plan."""
         rows = len(plan.slots)
         padded = self._slot_batch.begin_decode(plan.slots, plan.seq_lens)
-        input_ids = self._rows(plan.tokens, padded)
+        self._pool.consume(prepared.event, prepared.input_ids)
         # The token being fed sits at its own cache row, i.e. length minus one.
         positions = self._slot_batch.seq_lens.view(-1, 1) - 1
 
-        logits = self._runner.forward(input_ids, positions, None)
+        with self.timeline.region("forward.decode", "compute"):
+            logits = self._runner.forward(prepared.input_ids, positions, None)
         return self._pick(logits[:rows, -1, :], plan.sampled, rows)
 
     # ---------------------------------------------------------------- sampling #
@@ -287,17 +401,6 @@ class ModelWorker:
         return self._sampling  # type: ignore[return-value]
 
     # --------------------------------------------------------------- internals #
-    def _rows(self, tokens: tuple[int, ...], padded: int) -> torch.Tensor:
-        """Shape one-token rows into the ``[padded, 1]`` batch the model will see.
-
-        Filler rows exist only to reach a captured graph batch size; whatever id
-        they carry is thrown away with their logits, so they take the pad token.
-        The whole batch is uploaded in one copy — a few hundred bytes, against a
-        step that moves the model's weights.
-        """
-        padding = (self._pad_id,) * (padded - len(tokens))
-        return torch.tensor(tokens + padding, dtype=torch.long, device=self._device).view(padded, 1)
-
     def _pick(self, logits: torch.Tensor, rows: tuple[int, ...], total: int) -> torch.Tensor | None:
         """Narrow logits to the rows that will be sampled.
 
