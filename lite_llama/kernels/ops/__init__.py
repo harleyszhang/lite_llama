@@ -1,28 +1,31 @@
-"""Logical-operator layer: torch-free specs, registry and deterministic dispatch.
+"""Operator layer: kernels grouped by domain, each group owning its rows.
 
-Three questions, three places (ROADMAP foundation 2): the kernels themselves
-live in :mod:`lite_llama.kernels`, each backend declares what its kernels can
-do as data in :mod:`lite_llama.kernels.backends`, and :func:`dispatch` picks one
-row per call deterministically. Importing this package never imports torch;
-implementations are referenced as ``"module:attr"`` strings and loaded only
-when first dispatched.
+This package answers "what does lite_llama compute?" — one directory per
+operator domain (``gemm``, ``attention``, ``moe``, ``layernorm``, ``rope``,
+``activation``, ``sampling``, ``kvcache``, ``embeddings``), each group's
+``__init__.py`` holding every registration row for that op: native Triton
+implementations and external-library contenders side by side as data. The
+native implementations live beside their rows (``gemm/linear.py``,
+``attention/flashdecoding.py``, …); external adapters live in
+:mod:`lite_llama.kernels.backend` and are referenced by string.
+
+"Which row runs here?" is not this package's question —
+:mod:`lite_llama.kernels.dispatcher` answers it. Importing this package
+registers every row and never imports torch.
 
 Usage:
-    from lite_llama.kernels.ops import KernelSpec, register, dispatch
-
-    register(KernelSpec(name="native/linear_torch", op="linear", ...))
-    sel = dispatch("linear", dtype="bf16")
-    fn = sel.load()
+    from lite_llama.kernels.ops import LOGICAL_OPS  # the contract catalogue
+    from lite_llama.kernels.ops import gemm, moe  # noqa: F401  (register rows)
 """
 
-from .dispatch import (
-    DispatchKey,
-    Selected,
-    dispatch,
-    explain,
-    invalidate_cache,
-    op_backend_env,
-)
+from . import activation as activation
+from . import attention as attention
+from . import gemm as gemm
+from . import kvcache as kvcache
+from . import layernorm as layernorm
+from . import moe as moe
+from . import rope as rope
+from . import sampling as sampling
 from .interfaces import (
     LOGICAL_OPS,
     AttentionDecodeOp,
@@ -40,47 +43,29 @@ from .interfaces import (
     SampleOp,
     is_logical_op,
 )
-from .registry import REGISTRY, OpRegistry, register
-from .spec import (
-    CapabilityRequirement,
-    ConstraintKind,
-    GoldenRecord,
-    KernelSpec,
-    LayoutRequirement,
-    ShapeConstraint,
-    ShapeRequirement,
-)
 
 __all__ = [
     "LOGICAL_OPS",
-    "REGISTRY",
     "AttentionDecodeOp",
     "AttentionPrefillOp",
-    "CapabilityRequirement",
     "CombineOp",
-    "ConstraintKind",
-    "DispatchKey",
     "DispatchOp",
     "ElementwiseOp",
-    "GoldenRecord",
-    "KernelSpec",
     "KvWriteOp",
-    "LayoutRequirement",
     "LinearOp",
     "LogicalOp",
     "MlaDecodeOp",
     "MoeOp",
-    "OpRegistry",
     "RmsNormOp",
     "RopeOp",
     "SampleOp",
-    "Selected",
-    "ShapeConstraint",
-    "ShapeRequirement",
-    "dispatch",
-    "explain",
-    "invalidate_cache",
+    "activation",
+    "attention",
+    "gemm",
     "is_logical_op",
-    "op_backend_env",
-    "register",
+    "kvcache",
+    "layernorm",
+    "moe",
+    "rope",
+    "sampling",
 ]

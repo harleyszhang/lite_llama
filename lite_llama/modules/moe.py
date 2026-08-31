@@ -5,7 +5,7 @@ stacked expert weights (three tensors, not ``3*num_experts``), and its forward i
 ``route -> fused_moe``. Routing follows HF exactly — fp32 softmax over *all*
 experts, then top-k, then renormalise — an order that is not interchangeable.
 The expert FFN runs as two grouped GEMMs
-(:func:`lite_llama.kernels.fused_moe.fused_moe`), not a Python loop.
+(:func:`lite_llama.kernels.ops.moe.fused_moe.fused_moe`), not a Python loop.
 
 The experts are where an A3B checkpoint's weight actually is (~29 of its 30B
 parameters), so this is also where the two features that make it servable on

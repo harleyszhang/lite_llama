@@ -243,11 +243,10 @@ def run_quant_linear(
     need: the scheme string (a ``BASE_QUANTIZATION_METHODS`` key) becomes a
     dispatch-key dimension, dtype and shape come from the tensors, and the
     selected implementation arrives behind the common :class:`LinearOp`
-    signature — so native Triton, deepgemm or tileops rows are interchangeable
+    signature — so native Triton and deepgemm rows are interchangeable
     without touching any method class.
     """
-    from lite_llama.kernels.ops import dispatch
-    from lite_llama.kernels.ops.dispatch import dtype_label
+    from lite_llama.kernels.dispatcher import dispatch, dtype_label
 
     n, k = weight.shape[-2:]
     m = x.numel() // x.shape[-1]

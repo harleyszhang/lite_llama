@@ -1,7 +1,7 @@
 """Rotary positional embeddings (RoPE) with support for the LLaMA-3 / YaRN rescaling.
 
 The module produces the ``(cos, sin)`` tables consumed by
-:func:`lite_llama.kernels.rope_emb_forward`. Only the frequency computation differs
+:func:`lite_llama.kernels.ops.rope.rope_emb_forward`. Only the frequency computation differs
 between variants, so each variant is a plain function registered in
 :data:`ROPE_INIT_FUNCTIONS` and selected from the config's ``rope_type``.
 
@@ -195,7 +195,7 @@ class MRotaryEmbedding(RotaryEmbedding):
     contiguous blocks, which keeps neighbouring frequencies continuous.
 
     The output shape is identical to plain RoPE (``[batch, seq_len, rotary_dim]``),
-    so :func:`lite_llama.kernels.rope_emb_forward` is reused unchanged.
+    so :func:`lite_llama.kernels.ops.rope.rope_emb_forward` is reused unchanged.
     """
 
     def __init__(self, config: Mapping[str, Any], device: torch.device | None = None) -> None:

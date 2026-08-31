@@ -33,20 +33,22 @@ def _reference_w4a16(x, qweight, scales, zeros, group_size):
     for g in range(num_groups):
         g_start = g * group_size
         g_end = (g + 1) * group_size
-        s = scales[:, g:g+1]  # [N, 1]
-        z = zeros[:, g:g+1]   # [N, 1]
+        s = scales[:, g : g + 1]  # [N, 1]
+        z = zeros[:, g : g + 1]  # [N, 1]
         weight_fp[:, g_start:g_end] = (unpacked[:, g_start:g_end] - z) * s
 
     # matmul: x @ weight_fp.T
     return (x.float() @ weight_fp.T).to(x.dtype)
 
 
-@pytest.fixture(params=[
-    (1, 128, 1024, 128),
-    (4, 256, 512, 128),
-    (16, 1024, 2048, 128),
-    (64, 512, 1024, 128),
-])
+@pytest.fixture(
+    params=[
+        (1, 128, 1024, 128),
+        (4, 256, 512, 128),
+        (16, 1024, 2048, 128),
+        (64, 512, 1024, 128),
+    ]
+)
 def w4a16_problem(request):
     """(M, N, K, group_size) problem shape."""
     return request.param
@@ -60,7 +62,7 @@ def test_w4a16_matches_reference(w4a16_problem):
     torch.manual_seed(42)
     x = torch.randn(m, k, dtype=torch.float16, device=device)
     # Random int4 packed weights
-    qweight = torch.randint(-2**31, 2**31, (n, k // 8), dtype=torch.int32, device=device)
+    qweight = torch.randint(-(2**31), 2**31, (n, k // 8), dtype=torch.int32, device=device)
     num_groups = k // group_size
     scales = torch.randn(n, num_groups, dtype=torch.float32, device=device).abs() * 0.1
     zeros = torch.randint(0, 16, (n, num_groups), device=device).float()
@@ -69,7 +71,8 @@ def test_w4a16_matches_reference(w4a16_problem):
     ref = _reference_w4a16(x, qweight, scales, zeros, group_size)
 
     # Kernel under test
-    from lite_llama.kernels.quantization.w4a16 import w4a16_matmul
+    from lite_llama.kernels.ops.quantization.w4a16 import w4a16_matmul
+
     got = w4a16_matmul(x, qweight, scales, zeros, group_size=group_size)
 
     # Tolerance: fp16 has ~5e-4 relative error, int4 dequant adds noise
@@ -87,11 +90,12 @@ def test_w4a16_batch_dimensions():
 
     torch.manual_seed(0)
     x = torch.randn(2, 3, k, dtype=torch.float16, device=device)
-    qweight = torch.randint(-2**31, 2**31, (n, k // 8), dtype=torch.int32, device=device)
+    qweight = torch.randint(-(2**31), 2**31, (n, k // 8), dtype=torch.int32, device=device)
     scales = torch.randn(n, k // group_size, dtype=torch.float32, device=device).abs() * 0.1
     zeros = torch.zeros(n, k // group_size, dtype=torch.float32, device=device)
 
-    from lite_llama.kernels.quantization.w4a16 import w4a16_matmul
+    from lite_llama.kernels.ops.quantization.w4a16 import w4a16_matmul
+
     out = w4a16_matmul(x, qweight, scales, zeros, group_size=group_size)
     assert out.shape == (2, 3, n)
 
@@ -103,12 +107,13 @@ def test_w4a16_with_bias():
 
     torch.manual_seed(0)
     x = torch.randn(m, k, dtype=torch.float16, device=device)
-    qweight = torch.randint(-2**31, 2**31, (n, k // 8), dtype=torch.int32, device=device)
+    qweight = torch.randint(-(2**31), 2**31, (n, k // 8), dtype=torch.int32, device=device)
     scales = torch.randn(n, k // group_size, dtype=torch.float32, device=device).abs() * 0.1
     zeros = torch.zeros(n, k // group_size, dtype=torch.float32, device=device)
     bias = torch.ones(n, dtype=torch.float16, device=device)
 
-    from lite_llama.kernels.quantization.w4a16 import w4a16_matmul
+    from lite_llama.kernels.ops.quantization.w4a16 import w4a16_matmul
+
     out_no_bias = w4a16_matmul(x, qweight, scales, zeros, group_size=group_size)
     out_bias = w4a16_matmul(x, qweight, scales, zeros, group_size=group_size, bias=bias)
 

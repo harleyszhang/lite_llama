@@ -9,11 +9,14 @@ in :class:`~lite_llama.models.base.Attention`, so a model with a different
 composition (MLA) can reuse this half, and a different cache strategy can
 replace it without touching any projection.
 
-The kernels are called by name (``update_kv_buffer``, ``flash_attention2_no_pad``,
-``flash_decoding``): reading this file tells you exactly which kernel runs.
-Which *backend* provides them is declared as data in
-:mod:`lite_llama.kernels.backends` and resolved by
-:mod:`lite_llama.kernels.ops`.
+The three ops this module runs — ``kv_write``, ``attention.prefill``,
+``attention.decode`` — are dispatched once in ``__init__`` and loaded into
+plain attributes: the cache layout and the fp8-vs-plain distinction are fixed
+for this module's lifetime, so the hot path pays zero dispatch cost. Which
+*row* each op resolves to is declared as data in
+:mod:`lite_llama.kernels.ops` and answered by
+:mod:`lite_llama.kernels.dispatcher`; ``LITE_LLAMA_<OP>_BACKEND`` overrides at
+construction time.
 
 Usage:
     attn = PagedAttention(num_kv_heads, head_dim, kv_cache_dtype=torch.bfloat16)
@@ -27,7 +30,8 @@ import math
 import torch
 import torch.nn as nn
 
-from ..kernels import flash_attention2_no_pad, flash_decoding, update_kv_buffer
+from ..kernels import dispatch
+from ..kernels.dispatcher import PAGED_KV_TAGS
 from .quantization.kv_cache import get_kv_cache_method
 
 
@@ -48,6 +52,9 @@ class PagedAttention(nn.Module):
             The dequantisation scales come with the strategy object that
             :func:`~lite_llama.modules.quantization.kv_cache.get_kv_cache_method`
             returns, so write and read cannot disagree about them.
+        dtype: Activation dtype of q/k/v — the dispatch key for the prefill
+            and decode ops. bf16 in practice; the config dtype the caller
+            hands down.
     """
 
     def __init__(
@@ -55,6 +62,7 @@ class PagedAttention(nn.Module):
         num_kv_heads: int,
         head_dim: int,
         kv_cache_dtype: torch.dtype = torch.bfloat16,
+        dtype: torch.dtype = torch.bfloat16,
     ) -> None:
         super().__init__()
         self.num_kv_heads = num_kv_heads
@@ -71,6 +79,20 @@ class PagedAttention(nn.Module):
         self.k_scale = method.k_scale if method is not None else 1.0
         self.v_scale = method.v_scale if method is not None else 1.0
 
+        # One dispatch decision per op, held for this module's lifetime.
+        # kv_write carries no dtype window on purpose — K/V arrive already
+        # quantised when the cache is fp8, so uint8 rows are as legal there
+        # as bf16 ones. The decode op's scheme key encodes which cache this
+        # module writes; the layout key is the paged pool both rows require.
+        self._kv_write = dispatch("kv_write", dtype=kv_cache_dtype, layout=PAGED_KV_TAGS).load()
+        self._prefill = dispatch("attention.prefill", dtype=dtype).load()
+        self._decode = dispatch(
+            "attention.decode",
+            dtype=dtype,
+            scheme="fp8_kv" if kv_cache_dtype == torch.uint8 else "unquantized",
+            layout=PAGED_KV_TAGS,
+        ).load()
+
     def _write_cache(
         self,
         xk: torch.Tensor,
@@ -82,7 +104,7 @@ class PagedAttention(nn.Module):
         if self.kv_cache_method is not None:
             xk, xv = self.kv_cache_method.quantize_kv(xk, xv)
 
-        update_kv_buffer(xk, xv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
+        self._kv_write(xk, xv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
 
     def context_forward(
         self,
@@ -101,7 +123,7 @@ class PagedAttention(nn.Module):
             ``[tokens, num_heads, head_dim]``.
         """
         self._write_cache(xk, xv, atten_info, layer_index)
-        return flash_attention2_no_pad(
+        return self._prefill(
             xq,
             xk,
             xv,
@@ -126,7 +148,7 @@ class PagedAttention(nn.Module):
         """
         self._write_cache(xk, xv, atten_info, layer_index)
         kv_buffer = atten_info.kv_buffer[layer_index]
-        return flash_decoding(
+        return self._decode(
             xq,
             kv_buffer[:, : self.num_kv_heads, :],
             kv_buffer[:, self.num_kv_heads :, :],

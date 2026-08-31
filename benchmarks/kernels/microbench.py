@@ -63,7 +63,7 @@ _TENSOR_CORE_TFLOPS: dict[str, float] = {
 }
 
 #: Env vars that silently change which kernel runs, so a table without them is
-#: not reproducible (see ``lite_llama.kernels.ops.dispatch``).
+#: not reproducible (see ``lite_llama.kernels.dispatcher``).
 _RELEVANT_ENV = (
     "LITE_LLAMA_FORCE_BACKEND",
     "LITE_LLAMA_AUTOTUNE",
@@ -188,7 +188,7 @@ def bench(fn: Callable[[], object], *, warmup_ms: int = 25, rep_ms: int = 100) -
     labelled as such rather than reported as the kernel's speed.
 
     The untimed first call is deliberate: it forces the Triton JIT (and any
-    autotune search behind :func:`lite_llama.kernels.autotune.get_best_config`)
+    autotune search behind :func:`lite_llama.kernels.dispatcher.autotune.get_best_config`)
     to finish, so compilation does not land inside the measurement.
     """
     fn()
@@ -318,7 +318,7 @@ def verify(
 
     A fast wrong kernel is not a data point, so this runs before the timing
     loop and raises on mismatch. The returned figure is the same quantity
-    :class:`lite_llama.kernels.ops.spec.GoldenRecord` records as
+    :class:`lite_llama.kernels.dispatcher.spec.GoldenRecord` records as
     ``max_abs_diff``: a benchmark run is where that evidence comes from, and an
     implementation without it stays out of default dispatch.
     """

@@ -3,7 +3,7 @@
 Each logical operator (ROADMAP foundation 2) owns exactly one stable ``op_id``
 and one abstract call signature. KernelSpec rows declare *which* op they
 implement; these ABCs define *how it is called*, so every backend picked by
-:func:`~lite_llama.kernels.ops.dispatch` can be dropped in without touching the
+:func:`~lite_llama.kernels.dispatcher.dispatch` can be dropped in without touching the
 model code. The signatures follow the in-tree kernels, so the native rows point
 straight at those kernels instead of at wrappers.
 

@@ -3,7 +3,7 @@
 ``PlatformInfo`` is an immutable snapshot of the accelerator this process
 runs on and ``CapabilityRequirement`` is the declarative gate a kernel
 implementation states ("CUDA, SM >= 9.0"). Both are plain dataclasses with
-no torch import, so the kernel registry (``kernels/ops/spec.py``) can filter
+no torch import, so the kernel registry (``kernels/dispatcher/spec.py``) can filter
 implementations at import time on a CPU-only box and the cold-start path
 never initialises CUDA. The only method that touches torch is
 ``PlatformInfo.detect``, which imports it lazily inside the call.
