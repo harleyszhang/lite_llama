@@ -249,7 +249,7 @@ def main() -> None:
              "captured inside a CUDA graph. The transformers baseline then uses "
              "device_map=auto over the same GPUs",
     )
-    parser.add_argument("--log-dir", default="benchmark_logs")
+    parser.add_argument("--log-dir", default="docs/benchmark_logs")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
