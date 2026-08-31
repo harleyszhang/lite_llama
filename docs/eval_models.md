@@ -28,6 +28,13 @@
 
 **无效率全程为 0**：每条 completion 都能解析出数字。这一列是判断"模型答错了"还是 "评测根本没看到答案"的分界 —— 如果它显著大于 0，上面的准确率就不再是模型的性质，而是 `max_gen_len` 或提示词格式的问题。
 
+### 复测记录：v0.9 kernels 三层重构（2026-08）
+
+kernels 目录重组为 ops/dispatcher/backend 三层后，在 torch 2.11.0+cu129 / triton 3.6.0 / Python 3.12 环境下复测：
+
+- **Qwen2.5-1.5B-Instruct / 200 题：61.50%，无效率 0，通过**（阈值 0.63±0.05）；同一环境在重构前的 main 分支上复测得到**完全相同的 61.50%**——重构对生成结果零影响。与上表 63.00% 的 1.5 点差来自环境（历史数字测于 torch 2.13/triton 3.7/Python 3.13），在 200 题子集 ±3.4 点的统计噪声内。
+- 同一分支上 **Qwen3-0.6B（bf16）与 Qwen3-0.6B-FP8 的 golden token parity 全部通过**：eager 与 CUDA graph 重放、与各自入库基线字节级一致（4 种 batch 布局 × repetition penalty 全组合），这是比分数更强的逐 token 证据。
+
 ## 复现
 
 ```bash
