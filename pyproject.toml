@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lite-llama"
-version = "0.9.0.dev0"
+version = "0.9.0"
 description = "A lightweight, Triton-kernel based LLM inference framework for LLaMA / Qwen / LLaVA / Qwen3-VL"
 readme = "README.md"
 requires-python = ">=3.13"
