@@ -424,9 +424,18 @@ class ContinuousBatchingEngine:
         if scheduled.decode:
             work.append(_decode_work(scheduled.decode))
 
-        emitted: list[tuple[Request, int]] = []
+        # Execute every pass before reading any tokens back: a step's passes are
+        # slot-disjoint (a request prefilled this step decodes from the next),
+        # so the readback can be deferred to the end of the step. That keeps one
+        # host-device synchronisation per step — not per pass — and lets a later
+        # pass's input preparation ride the copy stream while an earlier pass's
+        # forward is still on the GPU (the L1 overlap site).
+        pending: list[tuple[list[Request], torch.Tensor]] = []
         for plan, requests in work:
-            tokens = self._executor.execute(plan)
+            pending.append((requests, self._executor.execute(plan)))
+
+        emitted: list[tuple[Request, int]] = []
+        for requests, tokens in pending:
             emitted += zip(requests, tokens.tolist(), strict=True)
         return self._harvest(emitted)
 
