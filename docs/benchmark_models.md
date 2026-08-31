@@ -495,3 +495,36 @@ Transformers throughput: 215.62 tokens/s
 lite_llama per token latency: 1.359186 ms/token
 Transformers per token latency: 4.637745 ms/token
 ```
+
+## v0.9 kernels 三层重构后 e2e 基线（2026-08）
+
+`benchmarks/bench_e2e.py`：batch 8、greedy、`max_gen_len=256`、A10 22 GiB、torch 2.11.0+cu129 / triton 3.6.0 / Python 3.12，`--mode both` 对照 eager 与 CUDA graph。一次覆盖全部四种受支持架构与三条优化路径：
+
+| 模型 | 架构 / 优化 | eager TPOT (ms) | graph TPOT (ms) | graph 加速 | graph TPS (tok/s) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Qwen1.5-0.5B | qwen2 / bf16 | 18.42 | 3.39 | 5.4x | 2323.6 |
+| Qwen2.5-1.5B | qwen2 / bf16 | 20.88 | 8.55 | 2.4x | 929.9 |
+| Qwen2.5-3B | qwen2 / bf16 | 27.42 | 16.64 | 1.6x | 479.7 |
+| Qwen3-0.6B | qwen3 / bf16 | 24.80 | 4.62 | 5.4x | 1702.7 |
+| Qwen3-0.6B-FP8 | qwen3 / fp8 | 25.66 | 4.50 | 5.7x | 1744.6 |
+| Qwen3-1.7B | qwen3 / bf16 | 24.27 | 9.64 | 2.5x | 824.9 |
+| Qwen3-8B | qwen3 / bf16 | 38.70 | 37.43 | 1.03x | 213.3 |
+| Qwen3-14B-AWQ | qwen3 / w4a16 | 46.19 | 43.62 | 1.06x | 181.6 |
+| Qwen3-MoE-Tiny | qwen3_moe / fused MoE | 3.47 | 1.19 | 2.9x | 6647.5 |
+| Llama-3.2-3B-Instruct | llama / bf16 | 21.69 | 15.77 | 1.4x | 506.0 |
+
+口径与观察：
+
+- TPOT 取首 token 之后所有步间隔的均值，TPS 为 batch 聚合吞吐（`gen_tokens / 总时间`）；每档先 warmup 两轮再计时。
+- graph 加速随规模衰减是结构性的：≤1.7B 的 decode 步只有几毫秒，kernel launch 开销占比高，重放拿到 2.4-5.7x；8B/14B 算术时间主导，加速收敛到 1.03-1.06x。Qwen3-8B 的 KV 池收缩到 16384 token 以进 22 GiB（`--max-gpu-num-blocks 16384`）。
+- FP8 与 bf16 的 0.6B TPOT 几乎相同（4.50 vs 4.62 ms）：小模型 decode 是 launch-bound，权重带宽减半的收益体现不出来，FP8 的收益要到大模型才显形。
+- Qwen3-MoE-Tiny 是 2 层 4 专家的玩具 checkpoint（fp32 存储，547 MB），该行只证明 qwen3_moe 架构与 fused_moe kernel 在三层 dispatch 下端到端可用，不代表 MoE 吞吐量级。
+- Qwen-1_8B 属第一代 `qwen` model_type，不在支持列表（llama / qwen2 / qwen3 / qwen3_moe / qwen3_vl / llava），加载即被 registry 拒绝。
+
+复现：
+
+```bash
+.venv/bin/python benchmarks/bench_e2e.py --model-dir my_weight/Qwen3-14B-AWQ \
+    --greedy --mode both --json out.json
+# 权重接近显存上限时收缩 KV 池：--max-gpu-num-blocks 16384
+```
