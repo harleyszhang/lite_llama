@@ -285,6 +285,14 @@ Recording is windowed, so the default path costs one `if`; windows nest, so a pe
 
 See [docs/tensor_parallel.md](docs/tensor_parallel.md) for the design, the sharding rules (including why QKV is split per segment under GQA), and what byte-exact parity between `tp=1` and `tp=2` can and cannot assert under fp16.
 
+### Cross-Stream Overlap (L1)
+
+A continuous-batching step can hold up to three passes — prefill, extend, decode — and each pass needs its input tensors on the GPU. With L1 overlap (on by default, `LITE_LLAMA_OVERLAP=0` to disable) the next pass's upload leaves on a dedicated copy stream while the current forward is still running, so the H2D transfer hides inside the compute instead of serialising behind it. The engine step harvests tokens once at the end rather than synchronising after every pass, which is what makes the overlap structurally possible at all.
+
+![L1 cross-stream overlap](./docs/images/overlap_l1.gif)
+
+The GIF is rendered from the engine's own CUDA-event timeline (`LITE_LLAMA_OVERLAP_TIMELINE=1`): the extend forward fills the window on the compute stream while the next pass's upload lands inside it on the copy stream — the intersection is the overlap, not a rendering trick. Measure both sides with `python benchmarks/bench_overlap_l1.py --timeline`; regenerate the picture with `python scripts/gen_overlap_l1_gif.py`.
+
 ### Quantization
 
 lite_llama supports multiple weight quantization schemes (architecture aligned with [sglang](https://github.com/sgl-project/sglang)). See [docs/quantization.md](docs/quantization.md) for the full design and API.
