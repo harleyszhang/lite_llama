@@ -1,0 +1,34 @@
+{
+  "config": {
+    "max_gen_len": 128,
+    "batch": 8,
+    "json": "docs/benchmark_logs/bench_e2e_Qwen2.5-1.5B_b8_g128_v09_release.json",
+    "greedy": true,
+    "mode": "both",
+    "model_dir": "my_weight/Qwen2.5-1.5B",
+    "max_gpu_num_blocks": 40960,
+    "image": "examples/assets/vision_bench.jpg"
+  },
+  "results": {
+    "eager": {
+      "ttft_ms": 20.28227597475052,
+      "tpot_ms": 20.302167323630623,
+      "total_s": 2.599111393094063,
+      "steps": 128,
+      "batch": 8,
+      "gen_tokens": 1024,
+      "tpot_p50_ms": 20.25023102760315,
+      "tps": 393.98080540942055
+    },
+    "graph": {
+      "ttft_ms": 20.353998988866806,
+      "tpot_ms": 8.395258601256243,
+      "total_s": 1.0870488435029984,
+      "steps": 128,
+      "batch": 8,
+      "gen_tokens": 1024,
+      "tpot_p50_ms": 8.374609053134918,
+      "tps": 941.9999902673882
+    }
+  }
+}
