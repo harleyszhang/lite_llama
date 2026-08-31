@@ -25,6 +25,33 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checke
     from .model_runner import ModelRunner
 
 
+def flatten_extend_rows(
+    slots: Sequence[int],
+    starts: Sequence[int],
+    chunk_lens: Sequence[int],
+) -> tuple[list[int], list[int]]:
+    """Expand ``(slot, start, chunk_len)`` triples into one row per token, on the host.
+
+    This is the host twin of :meth:`SlotBatch._flatten_rows`: same expansion, same
+    values, but plain lists, so the prepared upload path can lay a pass out before
+    any device work is queued. Row ``r`` of request ``i``'s stretch has
+    ``rows_slot[r] == slots[i]`` and ``rows_len[r]`` equal to its absolute position
+    plus one — the cache length once its own K/V lands, which is both what the
+    decode kernel reads and, minus one, the row it writes.
+
+    Raises:
+        ValueError: The three sequences do not describe the same chunks.
+    """
+    if not len(slots) == len(starts) == len(chunk_lens):
+        raise ValueError("slots, starts and chunk_lens must describe the same chunks")
+    rows_slot: list[int] = []
+    rows_len: list[int] = []
+    for slot, start, length in zip(slots, starts, chunk_lens, strict=True):
+        rows_slot += [slot] * length
+        rows_len += list(range(start + 1, start + length + 1))
+    return rows_slot, rows_len
+
+
 class SlotBatch:
     """Continuous-batching view of the KV cache: fixed slot regions, stable metadata.
 
@@ -297,6 +324,62 @@ class SlotBatch:
         self._atten.b_start_loc = None
         return len(padded_slots)
 
+    def plan_extend_rows(
+        self,
+        slots: Sequence[int],
+        seq_starts: Sequence[int],
+        seq_lens: Sequence[int],
+    ) -> tuple[list[int], list[int]]:
+        """Lay out the rows :meth:`begin_extend` would submit, without touching the device.
+
+        The prepared upload path builds its ``input_ids`` before the metadata
+        setter runs, so it needs the row plan — flattening and graph padding
+        included — on the host. The values returned here are exactly what a
+        :meth:`begin_extend` with the same arguments installs on the attention
+        metadata; the equivalence is pinned by the tests.
+
+        Args:
+            slots: Slot id per chunk, as handed out by the scheduler.
+            seq_starts: First cache row each chunk writes.
+            seq_lens: Total cached length per sequence once the chunk lands.
+
+        Returns:
+            ``(rows_slot, rows_len)`` host lists, filler rows included.
+        """
+        starts, ends = list(seq_starts), list(seq_lens)
+        chunk_lens = [end - start for start, end in zip(starts, ends, strict=True)]
+        rows_slot, rows_len = flatten_extend_rows(slots, starts, chunk_lens)
+        if self._filler_slot is not None:
+            pad = self._runner.graph_batch_size(len(rows_slot)) - len(rows_slot)
+            if pad > 0:
+                filler_len = min(max(ends), self.max_seq_len)
+                rows_slot += [self._filler_slot] * pad
+                rows_len += [filler_len] * pad
+        return rows_slot, rows_len
+
+    def pad_decode_rows(
+        self, slots: Sequence[int], seq_lens: Sequence[int]
+    ) -> tuple[list[int], list[int]]:
+        """The host view of :meth:`begin_decode`'s graph padding.
+
+        Grows the batch to the next captured CUDA-graph size by appending rows
+        that point at the reserved filler slot and carry the batch's own maximum
+        length, so the prepared upload path knows the padded width before the
+        metadata is touched. With a single slot there is nothing to spare, so
+        the batch passes through unpadded.
+        """
+        slots, seq_lens = list(slots), list(seq_lens)
+        if self._filler_slot is None:
+            return slots, seq_lens
+
+        target = self._runner.graph_batch_size(len(slots))
+        pad = target - len(slots)
+        if pad <= 0:
+            return slots, seq_lens
+
+        filler_len = min(max(seq_lens), self.max_seq_len)
+        return slots + [self._filler_slot] * pad, seq_lens + [filler_len] * pad
+
     def reset(self) -> None:
         """Forget the running set so the next decode rebuilds its metadata."""
         self._host_slots, self._host_lens = [], []
@@ -351,19 +434,11 @@ class SlotBatch:
         7 would fall back to eager decode and give up most of the graph's win.
         Filler rows point at the reserved slot and carry the batch's own maximum
         length, which keeps every row advancing by exactly one token per step and
-        so keeps the in-place fast path in :meth:`begin_decode` alive.
+        so keeps the in-place fast path in :meth:`begin_decode` alive. The logic
+        lives in :meth:`pad_decode_rows`, which the prepared upload path also
+        calls; this alias stays for the decode path's readability.
         """
-        slots, seq_lens = list(slots), list(seq_lens)
-        if self._filler_slot is None:
-            return slots, seq_lens
-
-        target = self._runner.graph_batch_size(len(slots))
-        pad = target - len(slots)
-        if pad <= 0:
-            return slots, seq_lens
-
-        filler_len = min(max(seq_lens), self.max_seq_len)
-        return slots + [self._filler_slot] * pad, seq_lens + [filler_len] * pad
+        return self.pad_decode_rows(slots, seq_lens)
 
     def _to_device(self, values: Sequence[int]) -> torch.Tensor:
         """Upload a host list as a fresh int64 tensor.
