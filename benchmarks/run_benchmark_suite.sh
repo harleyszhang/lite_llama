@@ -44,6 +44,23 @@ run() {
     done
 }
 
+# run_vision <name>:多模态走 benchmark_vision.py(单图 8 prompt 串行循环)。
+run_vision() {
+    local name=$1
+    if [ ! -d "my_weight/$name" ]; then
+        echo "[$(date +%H:%M:%S)] SKIP  $name (my_weight/ 下无此 checkpoint)"
+        return
+    fi
+    echo "[$(date +%H:%M:%S)] START vision $name"
+    if PYTHONPATH=. timeout 1500 "$PY" examples/benchmark_vision.py \
+            --model "my_weight/$name" --num-requests 8 --gen-len 128 --iters 2 \
+            >> "$OUT/$name.vision.log" 2>&1; then
+        echo "[$(date +%H:%M:%S)]   OK  vision $name"
+    else
+        echo "[$(date +%H:%M:%S)] FAIL vision $name (see $OUT/$name.vision.log)"
+    fi
+}
+
 # 常规模型:双引擎,两档 batch × gen_len。
 run Qwen1.5-0.5B "8:128 16:256"
 run Qwen3-MoE-Tiny "8:128 16:256"
@@ -62,4 +79,8 @@ run Qwen3-8B "8:128" --engine lite_llama --max-gpu-num-blocks 16384
 run Meta-Llama-3.1-8B-Instruct "8:128" --engine lite_llama --max-gpu-num-blocks 16384
 # AWQ:transformers 反量化需要 gptqmodel/autoawq(本机未装),只测 lite_llama 单侧。
 run Qwen3-14B-AWQ "8:128 16:256" --engine lite_llama
+
+# 多模态(llava / qwen3_vl):逐请求串行口径,benchmark_vision.py 一个 gen_len 档。
+run_vision llava-1.5-7b-hf
+run_vision Qwen3-VL-4B-Instruct
 echo "[$(date +%H:%M:%S)] ALL DONE -> $OUT"
