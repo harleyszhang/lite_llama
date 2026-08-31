@@ -1,4 +1,182 @@
-## 性能优化历史
+## 一 量化 benchmark 性能测试
+
+### 量化内核性能（W8A16 / W4A16 / SmoothQuant）
+
+以下为量化 Triton 内核在 A10 (24 GB, SM86) 上的 `triton.testing.do_bench` 实测结果。基准为 cuBLAS fp16 `F.linear`；加速来自减半（或减至 1/4）的 HBM 权重读取量。
+
+#### W8A16 (fp8-e4m3, 128×128 block scales)
+
+| Shape (M×N×K) | fp16 (ms) | w8a16 (ms) | 加速比 | 场景 |
+|---------------|-----------|------------|--------|------|
+| 1×4096×4096 | 0.086 | 0.053 | **1.62×** | decode |
+| 1×11008×4096 | 0.199 | 0.116 | **1.71×** | decode (MLP up) |
+| 8×4096×4096 | 0.084 | 0.051 | **1.65×** | decode batch |
+| 64×4096×4096 | 0.091 | 0.055 | **1.64×** | small prefill |
+| 512×4096×4096 | 0.191 | 0.280 | 0.68× | prefill (compute-bound) |
+
+结论：decode 阶段（M≤64）稳定 **1.6–1.7× 加速**；prefill 阶段（M≥512）内核为 compute-bound，fp8 路径无优势（此时应回退到 cuBLAS fp16）。
+
+#### W4A16 (int4, group_size=128)
+
+| Shape (M×N×K) | fp16 (ms) | w4a16 (ms) | 加速比 | 备注 |
+|---------------|-----------|------------|--------|------|
+| 1×4096×4096 | 0.086 | 0.176 | 0.49× | 未优化 |
+| 8×4096×4096 | 0.084 | 0.311 | 0.27× | 未优化 |
+| 64×4096×4096 | 0.091 | 0.832 | 0.11× | 未优化 |
+
+> ⚠️ W4A16 内核当前为功能实现，尚未做 tile 级优化（逐元素 unpack + outer product）。
+> 后续计划：向量化 unpack、`tl.dot` 替代 outer product、autotuning。
+> 内存节省仍然有效：30B 模型 int4 权重仅占 ~15 GB（fp16 需 ~61 GB）。
+
+#### SmoothQuant W8A8 (dynamic per-token)
+
+| Shape (M×N×K) | fp16 (ms) | smoothquant (ms) | 加速比 | 备注 |
+|---------------|-----------|------------------|--------|------|
+| 8×256×512 | — | ✓ | — | 精度验证通过 |
+| 64×2048×2048 | — | ✓ | — | 精度验证通过 |
+
+精度：相对 fp32 参考的相对误差 < 2%（含激活 + 权重量化双重噪声）。
+
+#### 量化算子精度汇总
+
+| 量化方案 | 相对误差 (vs fp32) | 权重内存节省 |
+|----------|-------------------|-------------|
+| fp8 blockwise (128×128) | < 0.04% | 2× |
+| int8 per-channel | < 0.03% | 2× |
+| int4 group-wise (AWQ/GPTQ) | < 5% | 4× |
+| smoothquant W8A8 | < 2% | 2× |
+
+复现：
+
+```bash
+# 内核精度测试
+python -m pytest tests/kernels/test_quantization.py -v
+
+# 性能基准
+python -c "
+import torch, triton
+from lite_llama.kernels.quantization import w8a16_matmul
+M, N, K = 1, 4096, 4096
+x = torch.randn(M, K, device='cuda', dtype=torch.float16)
+qw = torch.randn(N, K, device='cuda').to(torch.float8_e4m3fn).view(torch.uint8)
+sc = torch.ones(32, 32, device='cuda')
+print(triton.testing.do_bench(lambda: w8a16_matmul(x, qw, sc, group_n=128, group_k=128)))
+"
+```
+
+## 二 模型 e2e benchmark 汇总
+
+同一批 checkpoint 的端到端性能，从两个互补视角测：一节拿 lite_llama 与 HF transformers 同口径对照，回答"比裸 transformers 快多少"；另一节拿 lite_llama 自己关/开 CUDA graph 对照，回答"graph 优化本身值多少"。前者 lite_llama 侧默认就跑在 graph 模式（`TextGenerator` 默认 `use_cuda_graph=True`），所以两表的 lite_llama 数字同源——只是 gen_len 与 TPOT 统计方式不同（整体摊销中位数 vs 逐步间隔均值），数字接近而不相等，各按原口径保留。
+
+两节的测试矩阵相同：A10 22 GiB 上放得下的全部纯文本 checkpoint。未包含：**Qwen2.5-0.5B**（本机无权重，历史数字见 git 历史）、**Qwen-1_8B**（第一代 `qwen` model_type，不在支持列表，加载即被 registry 拒绝）、**llava / Qwen3-VL**（多模态，需另走 `VisionGenerator` 路径）、**Qwen3-30B-A3B 系 / Qwen3-Next-80B**（单卡放不下，30B-FP8 需 `--tensor-parallel-size 2` 双卡）、**Qwen3-MoE-Tiny**（2 层 4 专家的玩具 checkpoint，fp32 存储 547 MB，数字仅证明 qwen3_moe 架构与 fused_moe kernel 在三层 dispatch 下端到端可用，不代表 MoE 吞吐量级）。
+
+### lite_llama vs HF transformers（examples/benchmark.py）
+
+下表是用重构后的 `examples/benchmark.py` **实测**得到的结果（贪心解码、两端同一 tokenizer 统计输出 token、两端自然 EOS 停止、`torch.cuda.synchronize` 计时、取中位数）。指标口径对齐 vLLM/SGLang serving benchmark：
+
+- **TTFT**（首 token 时延，s）= 预填充延迟；
+- **TPOT**（每输出 token 时延，ms）= `(latency - ttft) / (output_len - 1)`；
+- **TGS**（token 生成速度，tokens/s）= `总输出 token / latency`（聚合吞吐）。
+
+| 模型 | GPU | batch | gen_len | 引擎 | TTFT (s) | TPOT (ms) | TGS (tok/s) |
+| --- | --- | ---: | ---: | --- | ---: | ---: | ---: |
+| Qwen1.5-0.5B | A10 | 8 | 128 | lite_llama | 0.0180 | 3.04 | 2535.3 |
+| Qwen1.5-0.5B | A10 | 8 | 128 | transformers | 0.0215 | 19.65 | 406.8 |
+| Qwen1.5-0.5B | A10 | 16 | 256 | lite_llama | 0.0192 | 3.55 | 4424.8 |
+| Qwen1.5-0.5B | A10 | 16 | 256 | transformers | 0.0238 | 20.02 | 798.4 |
+| Qwen2.5-1.5B | A10 | 8 | 128 | lite_llama | 0.0219 | 9.36 | 844.5 |
+| Qwen2.5-1.5B | A10 | 8 | 128 | transformers | 0.0271 | 23.67 | 337.6 |
+| Qwen2.5-1.5B | A10 | 16 | 256 | lite_llama | 0.0228 | 8.69 | 1830.1 |
+| Qwen2.5-1.5B | A10 | 16 | 256 | transformers | 0.0289 | 24.21 | 660.4 |
+| Qwen2.5-1.5B-Instruct | A10 | 8 | 128 | lite_llama | 0.0216 | 8.24 | 958.8 |
+| Qwen2.5-1.5B-Instruct | A10 | 8 | 128 | transformers | 0.0277 | 24.14 | 331.1 |
+| Qwen2.5-1.5B-Instruct | A10 | 16 | 256 | lite_llama | 0.0225 | 8.51 | 1868.2 |
+| Qwen2.5-1.5B-Instruct | A10 | 16 | 256 | transformers | 0.0278 | 23.62 | 677.0 |
+| Qwen2.5-3B | A10 | 8 | 128 | lite_llama | 0.0279 | 18.67 | 426.6 |
+| Qwen2.5-3B | A10 | 8 | 128 | transformers | 0.0361 | 35.82 | 223.3 |
+| Qwen2.5-3B | A10 | 16 | 256 | lite_llama | 0.0364 | 19.23 | 828.9 |
+| Qwen2.5-3B | A10 | 16 | 256 | transformers | 0.0468 | 35.18 | 454.1 |
+| Qwen3-0.6B | A10 | 8 | 128 | lite_llama | 0.0253 | 4.23 | 1820.3 |
+| Qwen3-0.6B | A10 | 8 | 128 | transformers | 0.0317 | 28.94 | 276.2 |
+| Qwen3-0.6B | A10 | 16 | 256 | lite_llama | 0.0256 | 4.70 | 3346.7 |
+| Qwen3-0.6B | A10 | 16 | 256 | transformers | 0.0329 | 28.65 | 558.2 |
+| Qwen3-0.6B-FP8 | A10 | 8 | 128 | lite_llama | 0.0293 | 4.09 | 1864.5 |
+| Qwen3-0.6B-FP8 | A10 | 8 | 128 | transformers | 0.0311 | 29.08 | 274.9 |
+| Qwen3-0.6B-FP8 | A10 | 16 | 256 | lite_llama | 0.0291 | 4.53 | 3460.5 |
+| Qwen3-0.6B-FP8 | A10 | 16 | 256 | transformers | 0.0308 | 27.92 | 572.8 |
+| Qwen3-1.7B | A10 | 8 | 128 | lite_llama | 0.0264 | 9.28 | 850.0 |
+| Qwen3-1.7B | A10 | 8 | 128 | transformers | 0.0315 | 29.07 | 275.0 |
+| Qwen3-1.7B | A10 | 16 | 256 | lite_llama | 0.0270 | 9.77 | 1626.2 |
+| Qwen3-1.7B | A10 | 16 | 256 | transformers | 0.0342 | 29.68 | 538.8 |
+| Qwen3-MoE-Tiny | A10 | 8 | 128 | lite_llama | 0.0059 | 0.93 | 8281.3 |
+| Qwen3-MoE-Tiny | A10 | 8 | 128 | transformers | 0.0063 | 3.90 | 2043.3 |
+| Qwen3-MoE-Tiny | A10 | 16 | 256 | lite_llama | 0.0068 | 0.98 | 15934.9 |
+| Qwen3-MoE-Tiny | A10 | 16 | 256 | transformers | 0.0071 | 4.51 | 3540.1 |
+| Llama-3.2-3B-Instruct | A10 | 8 | 128 | lite_llama | 0.0254 | 15.41 | 516.4 |
+| Llama-3.2-3B-Instruct | A10 | 8 | 128 | transformers | 0.0309 | 25.33 | 315.3 |
+| Llama-3.2-3B-Instruct | A10 | 16 | 256 | lite_llama | 0.0514 | 15.96 | 994.1 |
+| Llama-3.2-3B-Instruct | A10 | 16 | 256 | transformers | 0.0557 | 27.74 | 574.6 |
+| Qwen3-8B | A10 | 8 | 128 | lite_llama | 0.0561 | 36.79 | 216.6 |
+| Meta-Llama-3.1-8B-Instruct | A10 | 8 | 128 | lite_llama | 0.0581 | 35.30 | 225.5 |
+| Qwen3-14B-AWQ | A10 | 8 | 128 | lite_llama | 0.1499 | 43.49 | 180.5 |
+| Qwen3-14B-AWQ | A10 | 16 | 256 | lite_llama | 0.2808 | 45.01 | 348.4 |
+
+结论（2026-08-31 重测，torch 2.11.0+cu129 / transformers 5.8.0 / Python 3.12，覆盖受支持的全部纯文本架构）：lite_llama 的 **decode 全面更快** —— TPOT 比值（transformers / lite_llama）在 **1.6×～7.1×** 之间，模型越大比值越低（0.6B 档 ~6-7×，3B 档收敛到 ~1.6-1.9×：模型越大 decode 越偏 compute-bound，两端都吃满算力）；聚合吞吐 TGS 同步放大。每组配置两端输出 token 数一致，工作量对等。**TTFT** 绝对值小（6～50 ms），lite_llama 普遍略优但 run-to-run 抖动明显，不逐行解读。原始日志见 `benchmark_logs/bench_*.json`（22 份，每份含完整 config）。
+
+> 本节表中未出现的组合：**8B 级 b16 档**的 KV 预算（16×2048 token ≈ 4.8 GiB + 16 GiB 权重）超出 22 GiB，只测 b8；**8B 级与 14B-AWQ 的 transformers 侧**分别因 transformers 5.8 的 `caching_allocator_warmup` 需要约双倍模型显存、AWQ 反量化需要 gptqmodel/autoawq（未安装）而无法在本机完成，标为 lite_llama 单侧。
+
+复现：
+
+```bash
+# 全量复现（上表 12 个模型 × 两档配置，含各量化路径的差异化参数）：
+PYTHON=/home/honggao/projects/.venv/bin/python ./benchmarks/run_benchmark_suite.sh
+# 单模型：
+python examples/benchmark.py --model my_weight/Qwen2.5-1.5B-Instruct \
+    --batch-size 8 --gen-len 128 --iters 2      # 结果打印并存入 benchmark_logs/*.json
+# FP8 checkpoint 的 transformers 基线：--hf-dtype auto（无原生 fp8 的卡上自动 dequant 为 bf16）
+# transformers 无法加载的量化（AWQ 需 gptqmodel/autoawq）：--engine lite_llama 单侧
+# 8B 级：--max-gpu-num-blocks 16384 收缩 KV 池（profile 默认值留给 graph 捕获的空间不足）
+```
+
+lite_llama 流式输出实录（Qwen2.5-3B，仅演示效果，非并排对比录制）：
+
+![lite_llama 流式输出](images/qwen2.5-3b-output.gif)
+
+### eager vs CUDA graph（benchmarks/bench_e2e.py）
+
+batch 8、greedy、`max_gen_len=256`、A10 22 GiB、torch 2.11.0+cu129 / triton 3.6.0 / Python 3.12，`--mode both` 同时测 eager 与 CUDA graph。一次覆盖全部四种受支持架构与三条优化路径：
+
+| 模型 | 架构 / 优化 | TTFT (ms) | TPOT eager (ms) | TPOT graph (ms) | graph 加速 | TPS (tok/s) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Qwen1.5-0.5B | qwen2 / bf16 | 17.6 | 18.07 | 3.39 | 5.3x | 2319.9 |
+| Qwen2.5-1.5B | qwen2 / bf16 | 20.9 | 20.47 | 8.54 | 2.4x | 931.7 |
+| Qwen2.5-3B | qwen2 / bf16 | 26.4 | 25.85 | 16.68 | 1.55x | 478.4 |
+| Qwen3-0.6B | qwen3 / bf16 | 23.0 | 24.00 | 4.61 | 5.2x | 1706.7 |
+| Qwen3-0.6B-FP8 | qwen3 / fp8 | 26.2 | 25.94 | 4.49 | 5.8x | 1746.9 |
+| Qwen3-1.7B | qwen3 / bf16 | 25.1 | 25.00 | 9.63 | 2.6x | 825.3 |
+| Qwen3-8B | qwen3 / bf16 | 57.2 | 38.66 | 37.33 | 1.04x | 213.9 |
+| Qwen3-14B-AWQ | qwen3 / w4a16 | 154.7 | 44.49 | 43.90 | 1.01x | 180.4 |
+| Qwen3-MoE-Tiny | qwen3_moe / fused MoE | 4.7 | 3.42 | 1.19 | 2.9x | 6620.0 |
+| Llama-3.2-3B-Instruct | llama / bf16 | 24.7 | 20.99 | 15.80 | 1.33x | 505.1 |
+
+统计口径与观察：
+
+- 三项指标：TTFT 取 graph 档从提交到首 token 可见的墙钟（prefill 主导），TPOT 取首 token 之后所有步间隔的均值，TPS 为 batch 聚合吞吐（`gen_tokens / 总时间`）；每档先 warmup 两轮再计时。
+- graph 加速随规模衰减是结构性的：≤1.7B 的 decode 步只有几毫秒，kernel launch 开销占比高，重放拿到 2.4-5.8x；8B/14B 算术时间主导，加速收敛到 1.01-1.04x。Qwen3-8B 的 KV 池收缩到 16384 token 以进 22 GiB（`--max-gpu-num-blocks 16384`）。
+- FP8 与 bf16 的 0.6B TPOT 几乎相同（4.49 vs 4.61 ms）：小模型 decode 是 launch-bound，权重带宽减半的收益体现不出来，FP8 的收益要到大模型才显形。
+
+复现（套件脚本一次跑全矩阵，产出同口径 JSON；解释器要有能跑 CUDA 的 torch 构建——项目 `.venv` 若装了比驱动新的 cu 版本，脚本预检会拦下并提示换 `PYTHON=`）：
+
+```bash
+./benchmarks/run_e2e_suite.sh /tmp/e2e                        # 全部模型
+PYTHON=/home/honggao/projects/.venv/bin/python ./benchmarks/run_e2e_suite.sh
+.venv/bin/python benchmarks/bench_e2e.py --model-dir my_weight/Qwen3-14B-AWQ \
+    --greedy --mode both --json out.json                     # 单模型
+```
+
+## 三 性能优化历史记录
+
+### 迭代式优化记录
 
 输入提示词：
 
@@ -155,144 +333,6 @@ python scripts/golden_tokens.py --check /tmp/golden.json         # 优化后比�
 python scripts/golden_tokens.py --check /tmp/golden.json --cuda-graph
 ```
 
-## benchmark 性能测试
-
-### 量化内核性能（W8A16 / W4A16 / SmoothQuant）
-
-以下为量化 Triton 内核在 A10 (24 GB, SM86) 上的 `triton.testing.do_bench` 实测结果。基准为 cuBLAS fp16 `F.linear`；加速来自减半（或减至 1/4）的 HBM 权重读取量。
-
-#### W8A16 (fp8-e4m3, 128×128 block scales)
-
-| Shape (M×N×K) | fp16 (ms) | w8a16 (ms) | 加速比 | 场景 |
-|---------------|-----------|------------|--------|------|
-| 1×4096×4096 | 0.086 | 0.053 | **1.62×** | decode |
-| 1×11008×4096 | 0.199 | 0.116 | **1.71×** | decode (MLP up) |
-| 8×4096×4096 | 0.084 | 0.051 | **1.65×** | decode batch |
-| 64×4096×4096 | 0.091 | 0.055 | **1.64×** | small prefill |
-| 512×4096×4096 | 0.191 | 0.280 | 0.68× | prefill (compute-bound) |
-
-结论：decode 阶段（M≤64）稳定 **1.6–1.7× 加速**；prefill 阶段（M≥512）内核为 compute-bound，fp8 路径无优势（此时应回退到 cuBLAS fp16）。
-
-#### W4A16 (int4, group_size=128)
-
-| Shape (M×N×K) | fp16 (ms) | w4a16 (ms) | 加速比 | 备注 |
-|---------------|-----------|------------|--------|------|
-| 1×4096×4096 | 0.086 | 0.176 | 0.49× | 未优化 |
-| 8×4096×4096 | 0.084 | 0.311 | 0.27× | 未优化 |
-| 64×4096×4096 | 0.091 | 0.832 | 0.11× | 未优化 |
-
-> ⚠️ W4A16 内核当前为功能实现，尚未做 tile 级优化（逐元素 unpack + outer product）。
-> 后续计划：向量化 unpack、`tl.dot` 替代 outer product、autotuning。
-> 内存节省仍然有效：30B 模型 int4 权重仅占 ~15 GB（fp16 需 ~61 GB）。
-
-#### SmoothQuant W8A8 (dynamic per-token)
-
-| Shape (M×N×K) | fp16 (ms) | smoothquant (ms) | 加速比 | 备注 |
-|---------------|-----------|------------------|--------|------|
-| 8×256×512 | — | ✓ | — | 精度验证通过 |
-| 64×2048×2048 | — | ✓ | — | 精度验证通过 |
-
-精度：相对 fp32 参考的相对误差 < 2%（含激活 + 权重量化双重噪声）。
-
-#### 精度汇总
-
-| 量化方案 | 相对误差 (vs fp32) | 权重内存节省 |
-|----------|-------------------|-------------|
-| fp8 blockwise (128×128) | < 0.04% | 2× |
-| int8 per-channel | < 0.03% | 2× |
-| int4 group-wise (AWQ/GPTQ) | < 5% | 4× |
-| smoothquant W8A8 | < 2% | 2× |
-
-复现：
-
-```bash
-# 内核精度测试
-python -m pytest tests/kernels/test_quantization.py -v
-
-# 性能基准
-python -c "
-import torch, triton
-from lite_llama.kernels.quantization import w8a16_matmul
-M, N, K = 1, 4096, 4096
-x = torch.randn(M, K, device='cuda', dtype=torch.float16)
-qw = torch.randn(N, K, device='cuda').to(torch.float8_e4m3fn).view(torch.uint8)
-sc = torch.ones(32, 32, device='cuda')
-print(triton.testing.do_bench(lambda: w8a16_matmul(x, qw, sc, group_n=128, group_k=128)))
-"
-```
-
-### 模型Benchmarks 汇总
-
-下表是用重构后的 `examples/benchmark.py` **实测**得到的结果（贪心解码、两端同一 tokenizer 统计输出 token、两端自然 EOS 停止、`torch.cuda.synchronize` 计时、取中位数）。指标口径对齐 vLLM/SGLang serving benchmark：
-
-- **TTFT**（首 token 时延，s）= 预填充延迟；
-- **TPOT**（每输出 token 时延，ms）= `(latency - ttft) / (output_len - 1)`；
-- **TGS**（token 生成速度，tokens/s）= `总输出 token / latency`（聚合吞吐）。
-
-| 模型 | GPU | batch | gen_len | 引擎 | TTFT (s) | TPOT (ms) | TGS (tok/s) |
-| --- | --- | ---: | ---: | --- | ---: | ---: | ---: |
-| Qwen1.5-0.5B | A10 | 8 | 128 | lite_llama | 0.0180 | 3.04 | 2535.3 |
-| Qwen1.5-0.5B | A10 | 8 | 128 | transformers | 0.0215 | 19.65 | 406.8 |
-| Qwen1.5-0.5B | A10 | 16 | 256 | lite_llama | 0.0192 | 3.55 | 4424.8 |
-| Qwen1.5-0.5B | A10 | 16 | 256 | transformers | 0.0238 | 20.02 | 798.4 |
-| Qwen2.5-1.5B | A10 | 8 | 128 | lite_llama | 0.0219 | 9.36 | 844.5 |
-| Qwen2.5-1.5B | A10 | 8 | 128 | transformers | 0.0271 | 23.67 | 337.6 |
-| Qwen2.5-1.5B | A10 | 16 | 256 | lite_llama | 0.0228 | 8.69 | 1830.1 |
-| Qwen2.5-1.5B | A10 | 16 | 256 | transformers | 0.0289 | 24.21 | 660.4 |
-| Qwen2.5-1.5B-Instruct | A10 | 8 | 128 | lite_llama | 0.0216 | 8.24 | 958.8 |
-| Qwen2.5-1.5B-Instruct | A10 | 8 | 128 | transformers | 0.0277 | 24.14 | 331.1 |
-| Qwen2.5-1.5B-Instruct | A10 | 16 | 256 | lite_llama | 0.0225 | 8.51 | 1868.2 |
-| Qwen2.5-1.5B-Instruct | A10 | 16 | 256 | transformers | 0.0278 | 23.62 | 677.0 |
-| Qwen2.5-3B | A10 | 8 | 128 | lite_llama | 0.0279 | 18.67 | 426.6 |
-| Qwen2.5-3B | A10 | 8 | 128 | transformers | 0.0361 | 35.82 | 223.3 |
-| Qwen2.5-3B | A10 | 16 | 256 | lite_llama | 0.0364 | 19.23 | 828.9 |
-| Qwen2.5-3B | A10 | 16 | 256 | transformers | 0.0468 | 35.18 | 454.1 |
-| Qwen3-0.6B | A10 | 8 | 128 | lite_llama | 0.0253 | 4.23 | 1820.3 |
-| Qwen3-0.6B | A10 | 8 | 128 | transformers | 0.0317 | 28.94 | 276.2 |
-| Qwen3-0.6B | A10 | 16 | 256 | lite_llama | 0.0256 | 4.70 | 3346.7 |
-| Qwen3-0.6B | A10 | 16 | 256 | transformers | 0.0329 | 28.65 | 558.2 |
-| Qwen3-0.6B-FP8 | A10 | 8 | 128 | lite_llama | 0.0293 | 4.09 | 1864.5 |
-| Qwen3-0.6B-FP8 | A10 | 8 | 128 | transformers | 0.0311 | 29.08 | 274.9 |
-| Qwen3-0.6B-FP8 | A10 | 16 | 256 | lite_llama | 0.0291 | 4.53 | 3460.5 |
-| Qwen3-0.6B-FP8 | A10 | 16 | 256 | transformers | 0.0308 | 27.92 | 572.8 |
-| Qwen3-1.7B | A10 | 8 | 128 | lite_llama | 0.0264 | 9.28 | 850.0 |
-| Qwen3-1.7B | A10 | 8 | 128 | transformers | 0.0315 | 29.07 | 275.0 |
-| Qwen3-1.7B | A10 | 16 | 256 | lite_llama | 0.0270 | 9.77 | 1626.2 |
-| Qwen3-1.7B | A10 | 16 | 256 | transformers | 0.0342 | 29.68 | 538.8 |
-| Qwen3-MoE-Tiny | A10 | 8 | 128 | lite_llama | 0.0059 | 0.93 | 8281.3 |
-| Qwen3-MoE-Tiny | A10 | 8 | 128 | transformers | 0.0063 | 3.90 | 2043.3 |
-| Qwen3-MoE-Tiny | A10 | 16 | 256 | lite_llama | 0.0068 | 0.98 | 15934.9 |
-| Qwen3-MoE-Tiny | A10 | 16 | 256 | transformers | 0.0071 | 4.51 | 3540.1 |
-| Llama-3.2-3B-Instruct | A10 | 8 | 128 | lite_llama | 0.0254 | 15.41 | 516.4 |
-| Llama-3.2-3B-Instruct | A10 | 8 | 128 | transformers | 0.0309 | 25.33 | 315.3 |
-| Llama-3.2-3B-Instruct | A10 | 16 | 256 | lite_llama | 0.0514 | 15.96 | 994.1 |
-| Llama-3.2-3B-Instruct | A10 | 16 | 256 | transformers | 0.0557 | 27.74 | 574.6 |
-| Qwen3-8B | A10 | 8 | 128 | lite_llama | 0.0561 | 36.79 | 216.6 |
-| Meta-Llama-3.1-8B-Instruct | A10 | 8 | 128 | lite_llama | 0.0581 | 35.30 | 225.5 |
-| Qwen3-14B-AWQ | A10 | 8 | 128 | lite_llama | 0.1499 | 43.49 | 180.5 |
-| Qwen3-14B-AWQ | A10 | 16 | 256 | lite_llama | 0.2808 | 45.01 | 348.4 |
-
-结论（2026-08-31 重测，torch 2.11.0+cu129 / transformers 5.8.0 / Python 3.12，覆盖受支持的全部纯文本架构）：lite_llama 的 **decode 全面更快** —— TPOT 比值（transformers / lite_llama）在 **1.6×～7.1×** 之间，模型越大比值越低（0.6B 档 ~6-7×，3B 档收敛到 ~1.6-1.9×：模型越大 decode 越偏 compute-bound，两端都吃满算力）；聚合吞吐 TGS 同步放大。每组配置两端输出 token 数一致，工作量对等。**TTFT** 绝对值小（6～50 ms），lite_llama 普遍略优但 run-to-run 抖动明显，不逐行解读。原始日志见 `benchmark_logs/bench_*.json`（22 份，每份含完整 config）。
-
-> 表中未出现的组合及原因：**Qwen2.5-0.5B** 本机无权重（历史数字见 git 历史）；**Qwen-1_8B** 是第一代 `qwen` model_type，不在支持列表；**llava / Qwen3-VL** 是多模态，本脚本纯文本，需另走 `VisionGenerator` 路径；**Qwen3-30B-A3B 系 / Qwen3-Next-80B** 单卡 22 GiB 放不下（30B-FP8 需 `--tensor-parallel-size 2` 双卡）；**8B 级 b16 档**的 KV 预算（16×2048 token ≈ 4.8 GiB + 16 GiB 权重）超出 22 GiB，只测 b8；**8B 级与 14B-AWQ 的 transformers 侧**分别因 transformers 5.8 的 `caching_allocator_warmup` 需要约双倍模型显存、AWQ 反量化需要 gptqmodel/autoawq（未安装）而无法在本机完成，标为 lite_llama 单侧；**Qwen3-MoE-Tiny** 是 2 层 4 专家的玩具 checkpoint，数字仅证明 qwen3_moe 架构端到端可用，不代表 MoE 吞吐量级。
-
-复现：
-
-```bash
-# 全量复现（上表 12 个模型 × 两档配置，含各量化路径的差异化参数）：
-PYTHON=/home/honggao/projects/.venv/bin/python ./benchmarks/run_benchmark_suite.sh
-# 单模型：
-python examples/benchmark.py --model my_weight/Qwen2.5-1.5B-Instruct \
-    --batch-size 8 --gen-len 128 --iters 2      # 结果打印并存入 benchmark_logs/*.json
-# FP8 checkpoint 的 transformers 基线：--hf-dtype auto（无原生 fp8 的卡上自动 dequant 为 bf16）
-# transformers 无法加载的量化（AWQ 需 gptqmodel/autoawq）：--engine lite_llama 单侧
-# 8B 级：--max-gpu-num-blocks 16384 收缩 KV 池（profile 默认值留给 graph 捕获的空间不足）
-```
-
-lite_llama 流式输出实录（Qwen2.5-3B，仅演示效果，非并排对比录制）：
-
-![lite_llama 流式输出](images/qwen2.5-3b-output.gif)
-
 ### 历史吞吐对比总表（旧脚本，仅供参考）
 
 > ⚠️ 数据来源：本表数字来自本文档下方各模型章节的**历史记录**（由仓库作者早前用
@@ -315,7 +355,7 @@ lite_llama 流式输出实录（Qwen2.5-3B，仅演示效果，非并排对比�
 > ¹ 这些基准使用的是「多条不同长度提示词」组成的 batch，未固定或记录单一 prompt 长度，
 > 故 seq_len 记为「变长」；Qwen2.5-3B 章节未标注 GPU 型号。
 
-### Llama-3.2-1B-Instruct 性能测试
+#### Llama-3.2-1B-Instruct 性能测试
 
 趋动云 `B1.small` 等同于 `3090` 的 `1/4` 之一卡的硬件测试环境。运行性能测试对比 `python benchmark.py`，lite_llama 的运行速度最高是 transformers 的 `4x` 倍。
 
@@ -353,7 +393,7 @@ lite_llama per token latency: 2.432831 ms/token
 Transformers per token latency: 9.551007 ms/token
 ```
 
-### Llama-3.2-3B-Instruct 性能测试
+#### Llama-3.2-3B-Instruct 性能测试
 
 /gemini/code/lite_llama/my_weight/Llama-3.2-1B-Instruct
 
@@ -415,7 +455,7 @@ lite_llama per token latency: 1.369015 ms/token
 Transformers per token latency: 5.436221 ms/token
 ```
 
-### Qwen2.5-3B-Instruct 性能测试
+#### Qwen2.5-3B-Instruct 性能测试
 
 `batch_size = 2` 时的提示词
 
@@ -532,38 +572,4 @@ lite_llama throughput: 735.73 tokens/s
 Transformers throughput: 215.62 tokens/s
 lite_llama per token latency: 1.359186 ms/token
 Transformers per token latency: 4.637745 ms/token
-```
-
-## v0.9 kernels 三层重构后 e2e 基线（2026-08）
-
-`benchmarks/bench_e2e.py`：batch 8、greedy、`max_gen_len=256`、A10 22 GiB、torch 2.11.0+cu129 / triton 3.6.0 / Python 3.12，`--mode both` 对照 eager 与 CUDA graph。一次覆盖全部四种受支持架构与三条优化路径：
-
-| 模型 | 架构 / 优化 | TTFT (ms) | TPOT eager (ms) | TPOT graph (ms) | graph 加速 | TPS (tok/s) |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Qwen1.5-0.5B | qwen2 / bf16 | 17.6 | 18.07 | 3.39 | 5.3x | 2319.9 |
-| Qwen2.5-1.5B | qwen2 / bf16 | 20.9 | 20.47 | 8.54 | 2.4x | 931.7 |
-| Qwen2.5-3B | qwen2 / bf16 | 26.4 | 25.85 | 16.68 | 1.55x | 478.4 |
-| Qwen3-0.6B | qwen3 / bf16 | 23.0 | 24.00 | 4.61 | 5.2x | 1706.7 |
-| Qwen3-0.6B-FP8 | qwen3 / fp8 | 26.2 | 25.94 | 4.49 | 5.8x | 1746.9 |
-| Qwen3-1.7B | qwen3 / bf16 | 25.1 | 25.00 | 9.63 | 2.6x | 825.3 |
-| Qwen3-8B | qwen3 / bf16 | 57.2 | 38.66 | 37.33 | 1.04x | 213.9 |
-| Qwen3-14B-AWQ | qwen3 / w4a16 | 154.7 | 44.49 | 43.90 | 1.01x | 180.4 |
-| Qwen3-MoE-Tiny | qwen3_moe / fused MoE | 4.7 | 3.42 | 1.19 | 2.9x | 6620.0 |
-| Llama-3.2-3B-Instruct | llama / bf16 | 24.7 | 20.99 | 15.80 | 1.33x | 505.1 |
-
-口径与观察：
-
-- 三项指标：TTFT 取 graph 档从提交到首 token 可见的墙钟（prefill 主导），TPOT 取首 token 之后所有步间隔的均值，TPS 为 batch 聚合吞吐（`gen_tokens / 总时间`）；每档先 warmup 两轮再计时。
-- graph 加速随规模衰减是结构性的：≤1.7B 的 decode 步只有几毫秒，kernel launch 开销占比高，重放拿到 2.4-5.8x；8B/14B 算术时间主导，加速收敛到 1.01-1.04x。Qwen3-8B 的 KV 池收缩到 16384 token 以进 22 GiB（`--max-gpu-num-blocks 16384`）。
-- FP8 与 bf16 的 0.6B TPOT 几乎相同（4.49 vs 4.61 ms）：小模型 decode 是 launch-bound，权重带宽减半的收益体现不出来，FP8 的收益要到大模型才显形。
-- Qwen3-MoE-Tiny 是 2 层 4 专家的玩具 checkpoint（fp32 存储，547 MB），该行只证明 qwen3_moe 架构与 fused_moe kernel 在三层 dispatch 下端到端可用，不代表 MoE 吞吐量级。
-- Qwen-1_8B 属第一代 `qwen` model_type，不在支持列表（llama / qwen2 / qwen3 / qwen3_moe / qwen3_vl / llava），加载即被 registry 拒绝。
-
-复现（套件脚本一次跑全矩阵，产出同口径 JSON；解释器要有能跑 CUDA 的 torch 构建——项目 `.venv` 若装了比驱动新的 cu 版本，脚本预检会拦下并提示换 `PYTHON=`）：
-
-```bash
-./benchmarks/run_e2e_suite.sh /tmp/e2e                        # 全部模型
-PYTHON=/home/honggao/projects/.venv/bin/python ./benchmarks/run_e2e_suite.sh
-.venv/bin/python benchmarks/bench_e2e.py --model-dir my_weight/Qwen3-14B-AWQ \
-    --greedy --mode both --json out.json                     # 单模型
 ```
