@@ -31,6 +31,7 @@ Run from the repository root:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import statistics
 import time
@@ -108,28 +109,60 @@ def _timed(fn) -> tuple[object, float]:
     return out, time.perf_counter() - start
 
 
-def bench_lite_llama(model_dir, prompts, gen_len, iters, device, max_gpu_num_blocks=None) -> Metrics:
-    gen = TextGenerator(
-        checkpoints_dir=model_dir, max_seq_len=2048, device=device,
-        max_gpu_num_blocks=max_gpu_num_blocks,
-    )
+def bench_lite_llama(
+    model_dir, prompts, gen_len, iters, device, max_gpu_num_blocks=None, tensor_parallel_size=1
+) -> Metrics:
+    """Measure lite_llama on one (batch_size, gen_len) configuration.
+
+    ``tensor_parallel_size`` above 1 routes through the continuous-batching
+    engine: it is the only path whose executor broadcasts each step's plan to
+    follower ranks, which is what a sharded forward needs. Decode then runs
+    eager (NCCL collectives cannot live inside a captured graph).
+    """
     greedy = dict(temperature=0.0, top_p=1.0, repetition_penalty=1.0, stop_on_repeat=False)
 
-    gen.generate(["Hello world"] * len(prompts), SamplingParams(max_gen_len=8, **greedy))  # warmup
+    if tensor_parallel_size > 1:
+        from lite_llama.engine import ContinuousBatchingEngine
+
+        engine = ContinuousBatchingEngine.from_pretrained(
+            model_dir,
+            max_seq_len=2048,
+            max_gpu_num_blocks=max_gpu_num_blocks,
+            tensor_parallel_size=tensor_parallel_size,
+        )
+
+        def generate(params):
+            return [output.text for output in engine.generate(prompts, params)]
+
+        tokenizer = engine.tokenizer
+    else:
+        gen = TextGenerator(
+            checkpoints_dir=model_dir, max_seq_len=2048, device=device,
+            max_gpu_num_blocks=max_gpu_num_blocks,
+        )
+
+        def generate(params):
+            return gen.generate(prompts, params)
+
+        tokenizer = gen.tokenizer
+
+    generate(SamplingParams(max_gen_len=8, **greedy))  # warmup
 
     ttfts, latencies, out_tokens = [], [], []
     texts: list[str] = []
     for _ in range(iters):
-        _, ttft = _timed(lambda: gen.generate(prompts, SamplingParams(max_gen_len=1, **greedy)))
-        texts, latency = _timed(
-            lambda: gen.generate(prompts, SamplingParams(max_gen_len=gen_len, **greedy))
-        )
+        _, ttft = _timed(lambda: generate(SamplingParams(max_gen_len=1, **greedy)))
+        texts, latency = _timed(lambda: generate(SamplingParams(max_gen_len=gen_len, **greedy)))
         ttfts.append(ttft)
         latencies.append(latency)
-        out_tokens.append(count_tokens(texts, gen.tokenizer))
+        out_tokens.append(count_tokens(texts, tokenizer))
 
-    prompt_tokens = count_tokens(prompts, gen.tokenizer)
-    del gen
+    prompt_tokens = count_tokens(prompts, tokenizer)
+    if tensor_parallel_size > 1:
+        engine.shutdown()
+    else:
+        del gen
+    gc.collect()
     torch.cuda.empty_cache()
     return Metrics.from_runs("lite_llama", len(prompts), prompt_tokens, ttfts, latencies, out_tokens)
 
@@ -208,6 +241,14 @@ def main() -> None:
              "Shrink for checkpoints near the device budget (e.g. 16384 for 8B bf16 "
              "on a 22 GiB card, where profiling leaves the pool too small for graph capture)",
     )
+    parser.add_argument(
+        "--tensor-parallel-size", type=int, default=1,
+        help="GPUs to split the lite_llama replica's weights over (e.g. 2 to fit "
+             "an 8B bf16 checkpoint's b16 budget on two 22 GiB cards). Decode "
+             "runs eager under TP: the sharded layers' NCCL all-reduce cannot be "
+             "captured inside a CUDA graph. The transformers baseline then uses "
+             "device_map=auto over the same GPUs",
+    )
     parser.add_argument("--log-dir", default="benchmark_logs")
     args = parser.parse_args()
 
@@ -218,19 +259,26 @@ def main() -> None:
     lite = hf = None
     if args.engine in ("both", "lite_llama"):
         lite = bench_lite_llama(
-            args.model, prompts, args.gen_len, args.iters, device, args.max_gpu_num_blocks
+            args.model, prompts, args.gen_len, args.iters, device,
+            args.max_gpu_num_blocks, args.tensor_parallel_size,
         )
     if args.engine in ("both", "transformers"):
-        hf = bench_transformers(args.model, prompts, args.gen_len, args.iters, device, args.hf_dtype)
+        # TP runs spread the baseline's layers across the same GPUs (model
+        # parallelism, transformers' device_map=auto), keeping both sides on
+        # identical hardware.
+        hf_device = "auto" if args.tensor_parallel_size > 1 else device
+        hf = bench_transformers(args.model, prompts, args.gen_len, args.iters, hf_device, args.hf_dtype)
 
     cfg = dict(model=args.model, batch_size=args.batch_size, gen_len=args.gen_len,
-               iters=args.iters, gpu=gpu, timestamp=datetime.now().isoformat(timespec="seconds"))
+               iters=args.iters, tensor_parallel_size=args.tensor_parallel_size,
+               gpu=gpu, timestamp=datetime.now().isoformat(timespec="seconds"))
     _print_report(cfg, lite, hf)
 
     log_dir = Path(args.log_dir)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     tag = Path(args.model).name
-    log_path = log_dir / f"bench_{tag}_b{args.batch_size}_g{args.gen_len}_{stamp}.json"
+    tp_tag = f"_tp{args.tensor_parallel_size}" if args.tensor_parallel_size > 1 else ""
+    log_path = log_dir / f"bench_{tag}_b{args.batch_size}_g{args.gen_len}{tp_tag}_{stamp}.json"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(
         json.dumps({"config": cfg, "lite_llama": asdict(lite) if lite else None,

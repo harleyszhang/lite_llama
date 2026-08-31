@@ -1,0 +1,31 @@
+{
+  "config": {
+    "model": "my_weight/Meta-Llama-3.1-8B-Instruct",
+    "batch_size": 16,
+    "gen_len": 128,
+    "iters": 2,
+    "tensor_parallel_size": 2,
+    "gpu": "NVIDIA A10",
+    "timestamp": "2026-08-31T21:21:48"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "batch_size": 16,
+    "prompt_tokens": 213,
+    "output_tokens": 2048,
+    "ttft_s": 0.0683913454413414,
+    "tpot_ms": 31.9930411523252,
+    "tgs": 495.7028310889326,
+    "latency_s": 4.131507571786642
+  },
+  "transformers": {
+    "engine": "transformers",
+    "batch_size": 16,
+    "prompt_tokens": 213,
+    "output_tokens": 2048,
+    "ttft_s": 0.13271362520754337,
+    "tpot_ms": 46.82225163468695,
+    "tgs": 336.8897805522013,
+    "latency_s": 6.079139582812786
+  }
+}

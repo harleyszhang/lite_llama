@@ -159,6 +159,19 @@ python -m lite_llama.cli vl-chat \
     --image docs/images/llava_test/extreme_ironing.jpg
 ```
 
+Multimodal decode can also replay a captured CUDA graph — the vision tokens
+sit in the KV cache by then, so the decode step is the same graph a text
+model replays. Like `chat`, the REPL defaults to eager (one turn in flight
+never amortises capture latency); pass `--cuda-graph` for long replies:
+
+```bash
+python -m lite_llama.cli vl-chat \
+    --model-dir my_weight/Qwen3-VL-4B-Instruct \
+    --image docs/images/llava_test/dog.jpeg \
+    --prompt "What animal is in this picture? Answer in one sentence." \
+    --temperature 0.0 --max-gen-len 48 --cuda-graph
+```
+
 ### Evaluation
 
 After `cli.py` runs successfully, the terminal displays the interface as shown below, and you can enter your question in the terminal.
