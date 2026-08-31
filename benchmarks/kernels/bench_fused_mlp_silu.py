@@ -1,13 +1,14 @@
-import torch
+import os
+import sys
 
+import torch
 import torch.nn as nn
 import triton
 import triton.language as tl
-import os, sys
-
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
-from lite_llama.kernels.swiglu import swiglu_forward
+from lite_llama.kernels.ops.activation.swiglu import swiglu_forward
+
 
 @triton.jit
 def matmul_silu_kernel(
@@ -193,7 +194,7 @@ def mlp_silu(x, w1, w2, w3):
     out = torch.empty((M, N), device=x.device, dtype=x.dtype)
     # 这里的 grid 针对 (M,K) 输出维度进行网格划分
     BLOCK_SIZE_M = 64
-    BLOCK_SIZE_N = 64   # 用于中间N和最终K的分块大小
+    BLOCK_SIZE_N = 64  # 用于中间N和最终K的分块大小
     BLOCK_SIZE_K = 128  # 用于中间K维的分块大小
     # 1D launch kernel where each block gets its own program.
     grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)
@@ -272,7 +273,7 @@ def triton_torch_mlp_silu(x, w1, w2, w3):
     out = torch.empty((M, N), device=x.device, dtype=x.dtype)
     # 这里的 grid 针对 (M,K) 输出维度进行网格划分
     BLOCK_SIZE_M = 64
-    BLOCK_SIZE_N = 64   # 用于中间N和最终K的分块大小
+    BLOCK_SIZE_N = 64  # 用于中间N和最终K的分块大小
     BLOCK_SIZE_K = 128  # 用于中间K维的分块大小
     # 1D launch kernel where each block gets its own program.
     grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)

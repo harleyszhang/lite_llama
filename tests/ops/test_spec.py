@@ -10,15 +10,15 @@ from __future__ import annotations
 
 import pytest
 
-import lite_llama.kernels.ops as lite_llama_kernels_ops
-from lite_llama.kernels.ops import (
-    CapabilityRequirement,
+import lite_llama.kernels.dispatcher as lite_llama_kernels_dispatcher
+from lite_llama.kernels.dispatcher import (
     GoldenRecord,
     KernelSpec,
     LayoutRequirement,
     ShapeConstraint,
     ShapeRequirement,
 )
+from lite_llama.platform.spec import CapabilityRequirement
 
 
 def spec(**overrides) -> KernelSpec:
@@ -145,7 +145,7 @@ class TestTorchFreeRegistration:
         import ast
         from pathlib import Path
 
-        spec_py = Path(lite_llama_kernels_ops.__file__).parent / "spec.py"
+        spec_py = Path(lite_llama_kernels_dispatcher.__file__).parent / "spec.py"
         tree = ast.parse(spec_py.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -155,7 +155,7 @@ class TestTorchFreeRegistration:
             else:
                 continue
             assert not any(n.split(".")[0] in {"torch", "triton"} for n in names), (
-                f"ops/spec.py must stay torch-free, found import of {names}"
+                f"dispatcher/spec.py must stay torch-free, found import of {names}"
             )
 
     def test_capability_composes_with_platform(self) -> None:

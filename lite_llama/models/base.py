@@ -109,6 +109,7 @@ class Attention(nn.Module):
             self.num_kv_heads,
             self.head_dim,
             kv_cache_dtype=config.kv_cache_torch_dtype,
+            dtype=config.dtype,
         )
 
     def _project_qkv(

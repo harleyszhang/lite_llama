@@ -54,10 +54,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 from kv_pool import PagedPool, paged_pool
 from microbench import Row, Work, bench, metadata, report, verify
 
-# Import registers the native KernelSpec rows, so dispatch() below finds them.
-from lite_llama.kernels.backends import native as _native
-from lite_llama.kernels.flashdecoding import flash_decoding
-from lite_llama.kernels.ops import dispatch
+# Importing the facade registers every spec row, so dispatch() below finds them.
+import lite_llama.kernels
+from lite_llama.kernels.dispatcher import dispatch
+from lite_llama.kernels.ops.attention.flashdecoding import flash_decoding
 from tests.reference import paged_decode_attention
 
 #: ``(batch, seq_len, num_q_heads, num_kv_heads, head_dim)``. GQA 4x with 128-dim

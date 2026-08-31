@@ -13,8 +13,7 @@ import re
 
 import pytest
 
-from lite_llama.kernels.ops import (
-    CapabilityRequirement,
+from lite_llama.kernels.dispatcher import (
     GoldenRecord,
     KernelSpec,
     LayoutRequirement,
@@ -22,14 +21,12 @@ from lite_llama.kernels.ops import (
     ShapeConstraint,
     ShapeRequirement,
     dispatch,
-)
-from lite_llama.kernels.ops.dispatch import (
     dtype_label,
     op_backend_env,
     resolve_target,
     set_perf_provider,
 )
-from lite_llama.platform.spec import PlatformInfo
+from lite_llama.platform.spec import CapabilityRequirement, PlatformInfo
 
 A10 = PlatformInfo("cuda", 8, 6, "NVIDIA A10")
 H100 = PlatformInfo("cuda", 9, 0, "NVIDIA H100")
