@@ -1,45 +1,65 @@
-"""Triton kernels used by the lite_llama model implementations.
+"""Kernel layer: implementations in ``ops/``, policy in ``dispatcher/``.
 
-The public surface is intentionally small: exactly the kernels the model and
-engine layers call, plus the standalone activation kernels that are useful on
-their own. ``flash_attention2_no_pad`` serves the prefill (context) phase on
-variable-length batches, while ``flash_decoding`` serves the single-token decode
-phase against the paged KV buffer. The ``linear_*`` entry points cover the
-projection GEMM, one per quantisation scheme.
+Three layers, one direction of knowledge:
 
-Which implementation actually runs is a separate question, answered by
-:mod:`lite_llama.kernels.ops` (logical-op contracts and deterministic dispatch)
-from the per-backend spec rows in :mod:`lite_llama.kernels.backends`.
+* :mod:`lite_llama.kernels.ops` — what lite_llama computes. One directory per
+  operator domain, each holding the native Triton implementations beside the
+  registration rows that put them (and the external-library contenders) into
+  the registry as data.
+* :mod:`lite_llama.kernels.dispatcher` — which row runs here. Torch-free
+  machinery (spec rows, registry, deterministic dispatch, autotune store).
+* :mod:`lite_llama.kernels.backend` — one package per external library:
+  install metadata, an availability probe, and the adapters that translate
+  the op contracts into each library's calling convention.
+
+This facade re-exports exactly what the model and engine layers call: the
+kernels they invoke directly (the ``linear_*`` entries, paged attention,
+MoE, …) and the dispatch entry point for the ops that have contenders.
+Importing it registers every spec row; nothing loads a kernel eagerly.
+
+Usage:
+    from lite_llama.kernels import dispatch, flash_decoding
+    sel = dispatch("attention.decode", dtype="bf16")
+    fn = sel.load()
 """
 
-from .activations import gelu, leaky_relu, relu, silu, tanh
+from . import backend as backend
+from . import dispatcher as dispatcher
+from . import ops as ops
 
-# Registers the native KernelSpec rows before anything can dispatch; the rows
-# are data pointing at the kernel modules below, so nothing loads eagerly.
-from .backends import native as _native_specs  # noqa: F401
-from .flashattention2_nopad import flash_attention2_no_pad
-from .flashdecoding import flash_decoding
-from .fused_moe import fused_moe, moe_align_block_size
-from .linear import (
+# Dispatch machinery: the ops with contenders go through these.
+from .dispatcher import Selected, dispatch, explain, invalidate_cache, op_backend_env
+
+# The kernels the model/engine layers call directly.
+from .ops.activation.activations import gelu, leaky_relu, relu, silu, tanh
+from .ops.activation.swiglu import swiglu_forward, swiglu_forward_fused
+from .ops.attention.flashattention2_nopad import flash_attention2_no_pad
+from .ops.attention.flashdecoding import flash_decoding
+from .ops.embeddings.vocab_embedding import vocab_parallel_embedding
+from .ops.gemm.linear import (
     linear_torch,
     linear_w4a16,
     linear_w8a8_fp8,
     linear_w8a8_int8,
     linear_w8a16,
 )
-from .quantization import smoothquant_matmul, w4a16_matmul, w8a16_matmul
-from .rope_emb import rope_emb_forward
-from .skip_rmsnorm import skip_rmsnorm
-from .swiglu import swiglu_forward, swiglu_forward_fused
-from .update_kv_buffer import update_kv_buffer
-from .update_kv_index import update_kv_index
-from .vocab_embedding import vocab_parallel_embedding
+from .ops.kvcache.update_kv_buffer import update_kv_buffer
+from .ops.kvcache.update_kv_index import update_kv_index
+from .ops.layernorm.skip_rmsnorm import skip_rmsnorm
+from .ops.moe.fused_moe import fused_moe, moe_align_block_size
+from .ops.quantization import smoothquant_matmul, w4a16_matmul, w8a16_matmul
+from .ops.rope.rope_emb import rope_emb_forward
 
 __all__ = [
+    "Selected",
+    "backend",
+    "dispatch",
+    "explain",
     "flash_attention2_no_pad",
     "flash_decoding",
     "fused_moe",
     "gelu",
+    "invalidate_cache",
     "leaky_relu",
     "linear_torch",
     "linear_w4a16",
@@ -47,6 +67,8 @@ __all__ = [
     "linear_w8a8_int8",
     "linear_w8a16",
     "moe_align_block_size",
+    "op_backend_env",
+    "ops",
     "relu",
     "rope_emb_forward",
     "silu",

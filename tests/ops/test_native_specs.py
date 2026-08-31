@@ -1,9 +1,10 @@
-"""Tests for the native spec rows: registration, routing and the floor impl.
+"""Tests for the registered spec rows: catalogue, routing and the floor impl.
 
-Importing :mod:`lite_llama.kernels` registers the native spec rows as a side
-effect; these tests pin that catalogue and the scheme→row routing on CPU —
-no kernel runs here, only dispatch and the ``F.linear`` floor (GPU numerics
-of the Triton rows live in ``tests/kernels/test_linear_dispatch.py``).
+Importing :mod:`lite_llama.kernels` registers every spec row as a side
+effect — native and external side by side in the nine ops groups. These tests
+pin that catalogue and the scheme→row routing on CPU — no kernel runs here,
+only dispatch and the ``F.linear`` floor (GPU numerics of the Triton rows
+live in ``tests/kernels/test_linear_dispatch.py``).
 """
 
 from __future__ import annotations
@@ -17,11 +18,12 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-import lite_llama.kernels  # noqa: F401 — import side effect: native spec registration
-from lite_llama.kernels.backends import native as native_specs
-from lite_llama.kernels.linear import linear_torch
-from lite_llama.kernels.ops import LOGICAL_OPS, REGISTRY, dispatch
-from lite_llama.kernels.ops.dispatch import resolve_target
+import lite_llama.kernels  # noqa: F401 — import side effect: spec registration
+import lite_llama.kernels.ops as ops_pkg
+from lite_llama.kernels.dispatcher import REGISTRY, dispatch
+from lite_llama.kernels.dispatcher.dispatch import resolve_target
+from lite_llama.kernels.ops import LOGICAL_OPS
+from lite_llama.kernels.ops.gemm.linear import linear_torch
 from lite_llama.modules.quantization.unquant import UnquantizedLinearMethod
 
 #: scheme key -> spec name, the routing every quant method relies on.
@@ -35,7 +37,10 @@ SCHEME_TO_ROW = {
     "w8a8_fp8": "native/linear_w8a8_fp8",
 }
 
-LINEAR_ROWS = {
+#: native rows only — the floor every op falls back to. External rows sit at
+#: priority ``UNMEASURED`` (below the native floor) until a golden run on the
+#: right hardware freezes a measured number, so routing tests land here too.
+LINEAR_NATIVE_ROWS = {
     "native/linear_torch",
     "native/linear_w8a16",
     "native/linear_w4a16",
@@ -43,21 +48,32 @@ LINEAR_ROWS = {
     "native/linear_w8a8_fp8",
 }
 
-#: ``op -> row``, the attention domain. One native row each, so the assertions
-#: are about the *gates* on those rows rather than about a choice.
-ATTENTION_ROWS = {
+#: the external linear contender, gated on sm90 and on a golden run.
+LINEAR_EXTERNAL_ROWS = {"deepgemm/fp8_gemm_nt"}
+
+#: ``op -> native row``, the attention domain.
+ATTENTION_NATIVE_ROWS = {
     "attention.prefill": "native/flash_attention2_no_pad",
     "attention.decode": "native/flash_decoding",
     "kv_write": "native/update_kv_buffer",
 }
 
+#: ``op -> external rows``: the attention contenders. ``attention.mla_decode``
+#: has no native row at all — MLA's latent cache is a different layout, not a
+#: different size, and the tree has no MLA model to host a Triton fallback.
+ATTENTION_EXTERNAL_ROWS = {
+    "attention.prefill": {"flashinfer/prefill"},
+    "attention.decode": {"flashinfer/decode"},
+    "attention.mla_decode": {"flashmla/mla_decode"},
+}
+
 #: Layout tags the paged KV buffer of this repo satisfies.
 PAGED = frozenset({"kv:paged"})
 
-#: ``op -> row`` for the per-layer glue: one native row each, no choice to make.
-#: ``elementwise.*`` is two rows because the two arities are two contracts:
-#: the fused projection hands over one packed tensor, the split path two halves.
-GLUE_ROWS = {
+#: ``op -> native row`` for the per-layer glue. ``elementwise.*`` is two rows
+#: because the two arities are two contracts: the fused projection hands over
+#: one packed tensor, the split path two halves.
+GLUE_NATIVE_ROWS = {
     "moe": "native/fused_moe",
     "rmsnorm": "native/skip_rmsnorm",
     "rope": "native/rope_emb_forward",
@@ -65,27 +81,69 @@ GLUE_ROWS = {
     "elementwise.swiglu_split": "native/swiglu_forward",
 }
 
-#: Ops whose contract is declared but has no native row, with the reason. Pinned
-#: so the gap stays a decision on record rather than something forgotten:
-#: sampling already lives in the engine over a TP vocab slice, and EP comms need
-#: an expert-parallel group this repo does not have yet (both land in M2).
-OPS_WITHOUT_NATIVE_ROW = {
-    "sample": "engine.Sampler owns it, over a tensor-parallel vocab slice",
+#: ``op -> external rows`` for the same domains.
+GLUE_EXTERNAL_ROWS = {
+    "moe": {"deepgemm/grouped_fp8_moe"},
+    "rmsnorm": {"flashinfer/rmsnorm"},
+    "rope": {"flashinfer/rope"},
+    "elementwise.swiglu": set(),
+    "elementwise.swiglu_split": set(),
+}
+
+#: Ops whose contract is declared but has no row at all, with the reason.
+#: Pinned so the gap stays a decision on record rather than something
+#: forgotten: EP comms need an expert-parallel group this repo does not have
+#: yet, and the elementwise root is the open namespace's parent, never a row.
+OPS_WITHOUT_ROWS = {
     "comm.dispatch": "no EP group; MoE here is tensor parallel",
     "comm.combine": "pairs with comm.dispatch",
-    "attention.mla_decode": "no MLA model in tree until v0.10",
     "elementwise": "open namespace root; only its members register rows",
 }
 
+#: Ops served by external rows only — no native implementation exists or is
+#: planned. The rows carry the availability/capability/golden gates; the op
+#: itself is legal to dispatch only where a backend survives them.
+EXTERNAL_ONLY_OPS = {
+    "sample": "flashinfer serves it; engine.Sampler stays the default path",
+    "attention.mla_decode": "flashmla serves it; no MLA model in tree until v0.10",
+}
 
-class TestNativeCatalogue:
-    def test_linear_has_exactly_the_five_native_rows(self) -> None:
-        assert {s.name for s in REGISTRY.implementations("linear")} == LINEAR_ROWS
+#: The nine operator-domain groups whose ``__init__.py`` files hold the rows.
+OPS_GROUPS = (
+    "activation",
+    "attention",
+    "embeddings",
+    "gemm",
+    "kvcache",
+    "layernorm",
+    "moe",
+    "rope",
+    "sampling",
+)
 
-    def test_rows_are_verified_native_floor(self) -> None:
+#: ``ops/quantization`` is a shared implementation helper of the gemm/moe
+#: groups — it re-exports the quantisation kernels, so it does import torch —
+#: not a registration group; the nine groups above are.
+NON_GROUP_DIRS = {"quantization"}
+
+
+class TestLinearCatalogue:
+    def test_linear_has_the_five_native_rows_plus_deepgemm(self) -> None:
+        names = {s.name for s in REGISTRY.implementations("linear")}
+        assert names == LINEAR_NATIVE_ROWS | LINEAR_EXTERNAL_ROWS
+
+    def test_native_rows_are_the_verified_floor(self) -> None:
         for spec in REGISTRY.implementations("linear"):
-            assert spec.backend == "native"
-            assert spec.golden.verified, f"{spec.name} must be golden-verified"
+            if spec.backend == "native":
+                assert spec.golden.verified, f"{spec.name} must be golden-verified"
+
+    def test_deepgemm_row_is_golden_gated(self) -> None:
+        # Untested on hardware (CI is sm86, DeepGEMM needs sm90+): the golden
+        # gate keeps the row out of default dispatch until a Hopper run
+        # produces a max-abs-diff, and UNMEASURED ranks it below the floor.
+        spec = next(s for s in REGISTRY.implementations("linear") if s.backend == "deepgemm")
+        assert not spec.golden.verified
+        assert spec.priority < 0
 
     @pytest.mark.parametrize("scheme,row", sorted(SCHEME_TO_ROW.items()))
     def test_scheme_routes_to_its_row(self, scheme: str, row: str) -> None:
@@ -106,10 +164,26 @@ class TestNativeCatalogue:
 
 
 class TestAttentionCatalogue:
-    @pytest.mark.parametrize("op,row", sorted(ATTENTION_ROWS.items()))
+    @pytest.mark.parametrize("op,row", sorted(ATTENTION_NATIVE_ROWS.items()))
     def test_each_phase_has_its_native_row(self, op: str, row: str) -> None:
-        assert {s.name for s in REGISTRY.implementations(op)} == {row}
+        native = {s.name for s in REGISTRY.implementations(op) if s.backend == "native"}
+        assert native == {row}
         assert REGISTRY.native_floor(op).name == row
+
+    @pytest.mark.parametrize("op,rows", sorted(ATTENTION_EXTERNAL_ROWS.items()))
+    def test_external_rows_are_registered(self, op: str, rows: set[str]) -> None:
+        external = {s.name for s in REGISTRY.implementations(op) if s.backend != "native"}
+        assert external == rows
+
+    def test_flashinfer_rows_are_verified_with_golden_diffs(self) -> None:
+        # The only externally-verified rows in the tree: golden records carry
+        # the max-abs-diff that earned the flag, and priority stays UNMEASURED
+        # until a perf number says otherwise.
+        for op in ("attention.prefill", "attention.decode"):
+            spec = next(s for s in REGISTRY.implementations(op) if s.backend == "flashinfer")
+            assert spec.golden.verified
+            assert spec.golden.max_abs_diff is not None
+            assert spec.priority < 0
 
     def test_paged_rows_need_the_layout_tag(self) -> None:
         # The cache-facing rows read this repo's paged buffer. Without the tag
@@ -118,36 +192,51 @@ class TestAttentionCatalogue:
         for op in ("attention.decode", "kv_write"):
             with pytest.raises(LookupError, match="layout"):
                 dispatch(op, dtype="bf16")
-            assert dispatch(op, dtype="bf16", layout=PAGED).spec.name == ATTENTION_ROWS[op]
+            assert dispatch(op, dtype="bf16", layout=PAGED).spec.name == ATTENTION_NATIVE_ROWS[op]
 
     def test_prefill_reads_no_cache_so_needs_no_layout(self) -> None:
         # Prefill attends the freshly projected tensors, not the cache.
         sel = dispatch("attention.prefill", dtype="bf16")
-        assert sel.spec.name == ATTENTION_ROWS["attention.prefill"]
+        assert sel.spec.name == ATTENTION_NATIVE_ROWS["attention.prefill"]
 
     def test_kv_write_accepts_quantised_rows(self) -> None:
         # An fp8 cache is written as uint8 bytes: quantisation happens before
         # the write, so the row must not gate on the activation dtype.
         assert dispatch("kv_write", dtype="u8", layout=PAGED).spec.name == "native/update_kv_buffer"
 
+    def test_mla_decode_never_dispatches_without_its_gates(self) -> None:
+        # The latent cache is not interchangeable with the per-head paged
+        # pool, so the row demands the ``kv:mla_latent`` tag — and then still
+        # has to survive the availability probe. Either gate refuses, and the
+        # failure names the row instead of silently routing somewhere wrong.
+        with pytest.raises(LookupError, match="no usable implementation"):
+            dispatch("attention.mla_decode", dtype="bf16")
+
 
 class TestGlueCatalogue:
     """moe / rmsnorm / rope / elementwise: the domains between the two GEMMs."""
 
-    @pytest.mark.parametrize("op,row", sorted(GLUE_ROWS.items()))
+    @pytest.mark.parametrize("op,row", sorted(GLUE_NATIVE_ROWS.items()))
     def test_each_has_one_native_row(self, op: str, row: str) -> None:
-        assert {s.name for s in REGISTRY.implementations(op)} == {row}
+        native = {s.name for s in REGISTRY.implementations(op) if s.backend == "native"}
+        assert native == {row}
         assert REGISTRY.native_floor(op).name == row
 
-    @pytest.mark.parametrize("op,row", sorted(GLUE_ROWS.items()))
+    @pytest.mark.parametrize("op,rows", sorted(GLUE_EXTERNAL_ROWS.items()))
+    def test_external_rows_are_registered(self, op: str, rows: set[str]) -> None:
+        external = {s.name for s in REGISTRY.implementations(op) if s.backend != "native"}
+        assert external == rows
+
+    @pytest.mark.parametrize("op,row", sorted(GLUE_NATIVE_ROWS.items()))
     def test_dispatches_at_the_default_precision(self, op: str, row: str) -> None:
         assert dispatch(op, dtype="bf16").spec.name == row
 
-    @pytest.mark.parametrize("op", sorted(GLUE_ROWS))
+    @pytest.mark.parametrize("op", sorted(GLUE_NATIVE_ROWS))
     def test_rows_declare_only_measured_dtypes(self, op: str) -> None:
-        # bf16 (the default) and fp16 (what the kernel tests cover). fp32 is not
-        # claimed: no path in the repo runs these kernels at fp32, so declaring
-        # it would be an unbacked promise dispatch would happily act on.
+        # bf16 (the default) and fp16 (what the kernel tests cover), native
+        # and external rows alike. fp32 is not claimed: no path in the repo
+        # runs these kernels at fp32, so declaring it would be an unbacked
+        # promise dispatch would happily act on.
         for spec in REGISTRY.implementations(op):
             assert set(spec.dtypes) == {"bf16", "fp16"}, spec.name
         with pytest.raises(LookupError, match="dtype"):
@@ -172,7 +261,14 @@ class TestContractCoverage:
     def test_contracts_without_rows_are_the_documented_ones(self) -> None:
         """A contract with no implementation is fine — silently is not."""
         registered = set(REGISTRY.ops())
-        assert set(LOGICAL_OPS) - registered == set(OPS_WITHOUT_NATIVE_ROW)
+        assert set(LOGICAL_OPS) - registered == set(OPS_WITHOUT_ROWS)
+
+    def test_external_only_ops_have_no_native_row(self) -> None:
+        """Rows without a native floor stay a decision on record."""
+        for op in EXTERNAL_ONLY_OPS:
+            rows = list(REGISTRY.implementations(op))
+            assert rows, f"{op} must have its external row"
+            assert all(s.backend != "native" for s in rows), f"{op} gained a native row"
 
 
 class TestLinearTorchFloor:
@@ -200,26 +296,40 @@ class TestUnquantMethodRoutesThroughDispatch:
 
 
 class TestRegistryStaysTorchFree:
-    def test_registry_module_declares_no_torch_import(self) -> None:
+    def test_group_inits_declare_no_torch_import(self) -> None:
         """Registration must not pay the torch import — targets are strings."""
-        tree = ast.parse(Path(native_specs.__file__).read_text(encoding="utf-8"))
-        names: list[str] = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                names += [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                names.append(node.module or "")
-        offenders = [n for n in names if n.split(".")[0] in {"torch", "triton"}]
-        assert not offenders, f"native.py must stay torch-free, found {offenders}"
+        ops_root = Path(ops_pkg.__file__).parent
+        group_inits = sorted(
+            p.parent.name
+            for p in ops_root.glob("*/__init__.py")
+            if p.parent.name not in NON_GROUP_DIRS
+        )
+        assert group_inits == list(OPS_GROUPS)
+        for path in ops_root.glob("*/__init__.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            names: list[str] = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names += [a.name for a in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    names.append(node.module or "")
+            offenders = [n for n in names if n.split(".")[0] in {"torch", "triton"}]
+            assert not offenders, f"{path} must stay torch-free, found {offenders}"
 
-    def test_rows_point_at_real_kernel_modules(self) -> None:
-        """No wrapper tier: every target names a module under ``lite_llama.kernels``."""
+    def test_rows_point_at_the_right_tier(self) -> None:
+        """Native rows live under ``ops/<group>/``, external under ``backend/<lib>/``.
+
+        No wrapper tier either way: every target names a module that holds the
+        callable itself.
+        """
         for op in REGISTRY.ops():
             for spec in REGISTRY.implementations(op):
                 module, attr = spec.target.split(":")
                 assert module.startswith("lite_llama.kernels."), spec.name
-                # ops/ is the contract layer; kernels never live there.
-                assert not module.startswith("lite_llama.kernels.ops"), spec.name
+                if spec.backend == "native":
+                    assert module.startswith("lite_llama.kernels.ops."), spec.name
+                else:
+                    assert module.startswith("lite_llama.kernels.backend."), spec.name
                 assert attr.isidentifier()
 
     def test_every_row_resolves_to_a_callable(self) -> None:
@@ -231,12 +341,13 @@ class TestRegistryStaysTorchFree:
 class TestTargetsMatchTheirContract:
     """Parameter *names* are the contract, because nothing adapts them.
 
-    Dispatch hands the caller the kernel function itself — there is no wrapper
-    tier translating argument names on the way through. So a kernel whose
-    parameters merely happen to sit in the right order silently satisfies the
-    ABC while breaking any caller that passes one by keyword, and breaking the
-    next backend that reads the ABC to know what it must accept. This test is
-    what caught ``update_kv_buffer(K_Values, ...)`` and ``skip_rmsnorm(X, ...)``.
+    Dispatch hands the caller the kernel function itself — the backend
+    adapters translate library calling conventions, never argument names.
+    So a kernel whose parameters merely happen to sit in the right order
+    silently satisfies the ABC while breaking any caller that passes one by
+    keyword, and breaking the next backend that reads the ABC to know what it
+    must accept. This test is what caught ``update_kv_buffer(K_Values, ...)``
+    and ``skip_rmsnorm(X, ...)``.
     """
 
     #: ``elementwise.*`` members declare their own arity under an ABC that is

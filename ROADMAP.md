@@ -180,22 +180,22 @@ DP:                    Frontend ── Router(P10) ── EngineCore 进程 × d
 
 参考 sglang `python/sglang/kernels`(spec/registry/selector/fused_op)的成熟设计,并补上它刻意留白的一环:**如何自动调到性能最佳的实现**。
 
-> **现状(v0.9.0)**:五根支柱的**机制**已在 `kernels/ops/` 落地——ABC 签名(`interfaces.py`)、声明式 KernelSpec 清单(`backends/<backend>.py`)、确定性 dispatch + 逐条拒绝理由的 `explain` + 调用 trace(`dispatch.py`)。v0.8 的雏形 `kernels/backends/registry.py`(只有 probe+priority 两根支柱)已降级为兼容 shim:`lite_llama` 内无调用方,仅 `scripts/gen_backend_registry_gif.py` 还在用,v0.10 与该脚本一并删除;它唯一未被 ops 吸收的能力(per-op 环境变量)已泛化为对每个注册 op 都生效的 `op_backend_env()`。
+> **现状(v0.9.0)**:五根支柱的**机制**已按三层落地——机制层 `kernels/dispatcher/`(ABC 签名 `interfaces.py`、声明式 KernelSpec、确定性 dispatch + 逐条拒绝理由的 `explain` + 调用 trace),注册行在九个算子域组 `kernels/ops/<group>/__init__.py`(native 行与外部后端的行同处一地),接入层 `kernels/backend/<lib>/` 一库一包(INSTALL 元数据 + available 探测 + adapter)。v0.8 的雏形 `kernels/backends/registry.py` 与整个平铺 `backends/` 目录已随本迁移删除;它唯一未被吸收的能力(per-op 环境变量)已泛化为对每个注册 op 都生效的 `op_backend_env()`。
 >
 > **仍缺的是数据而非机制**:`golden.verified` 与 `perf_key` 两个字段 dispatch 已在过滤/排序时读取,但对齐门禁工具与冻结的实测记录分别要到 M3.1 / M3.2 才产出;`layout` 目前只做"不满足即排除",尚不会自动插入转换。
 
 ### 五根支柱
 
-**① 一个逻辑算子**:收敛成固定清单,只定义"算什么",id 用 `<group>.<name>`。v0.9.0 共 12 个契约,其中 7 个已有 native 实现行:
-`attention.prefill / attention.decode / linear / moe / rmsnorm / rope / kv_write`。
-`elementwise` 是开放命名空间,它的两个成员 `elementwise.swiglu`(packed)与 `elementwise.swiglu_split`(两半分开)各占一行,差别只在 arity——所以注册表里共 9 个 op id。
+**① 一个逻辑算子**:收敛成固定清单,只定义"算什么",id 用 `<group>.<name>`。v0.9.0 共 12 个契约,其中 9 个 op 已有 native 实现行:
+`attention.prefill / attention.decode / linear / moe / rmsnorm / rope / kv_write / elementwise.swiglu / elementwise.swiglu_split`。
+`elementwise` 是开放命名空间,它的两个成员 `elementwise.swiglu`(packed)与 `elementwise.swiglu_split`(两半分开)各占一行,差别只在 arity——注册表共 11 个 op id、21 行(native 13 行 + 外部 8 行)。
 剩下 5 个契约**刻意只声明、不注册 native 行**——契约先定住,实现随对应里程碑到位:
 
 | 契约 | 为何没有 native 行 |
 |---|---|
 | `sample` | 采样归 `engine/sampler.py`,它跑在 TP 切分后的 vocab 分片上并带 repetition penalty;再写一份等于让采样有两处可分歧 |
 | `comm.dispatch` / `comm.combine` | 本仓 MoE 是 **TP**(每 rank 跑全部专家的一段 intermediate),没有 EP 组可 all-to-all;本地 permute 那半已由 `fused_moe` 的 `moe_align_block_size` 承担。EP 组与 deepep 行同在 M2.5 落地 |
-| `attention.mla_decode` | 树内尚无 MLA 模型,flashmla 行 + 单层 harness 在 M2.4 |
+| `attention.mla_decode` | 树内尚无 MLA 模型;flashmla 行 + 单层 harness(`models/mla_single_layer.py`)已入库,契约仅有外部行 |
 | `elementwise` | 开放命名空间的根本身,只有成员注册行 |
 
 这份清单由 `tests/ops/test_native_specs.py` 的 `OPS_WITHOUT_NATIVE_ROW` 精确断言——"某个契约没有实现"可以,但不能悄悄没有。
@@ -207,18 +207,18 @@ DP:                    Frontend ── Router(P10) ── EngineCore 进程 × d
 **③ N 份实现(不新增目录层,只多一张声明清单)**:三个正交的位置回答三个问题——
 ```
 kernels/
-  flashattention2_nopad.py  flashdecoding.py  linear.py      # 谁来算:算子实现本体,模型层按名字直调
-  update_kv_buffer.py  fused_moe.py  quantization/  ...
-  ops/            # 选谁算:逻辑算子签名(ABC) + 注册表 + 确定性 dispatch,torch-free
-    spec.py  registry.py  dispatch.py  interfaces.py
-  backends/       # 能算什么:一个后端一个模块,纯数据(KernelSpec 行)
-    native.py     # 保底行 + golden 基准,target 直指上面的 kernel 模块
-    flashinfer.py  deepgemm.py  tileops.py  flashmla.py  deepep.py   # v0.9 外部后端
-    probe.py      # 装没装 + 怎么装:available() 探测 + 安装配方(BackendInstall)
+  ops/            # 谁来算 + 注册行:九个算子域组,模型层按名字直调组内 native 实现
+    attention/  gemm/  moe/  layernorm/  rope/  kvcache/  activation/  sampling/  embeddings/
+    # 每组 __init__.py 持该算子的全部注册行: native 行与外部后端的行同处一地
+  dispatcher/     # 怎么选: spec.py + registry.py + dispatch.py + interfaces.py,torch-free
+    autotune/     # 实测记录的冻结与复用(地基 3)
+  backend/        # 能算什么: 一库一包,INSTALL 元数据 + available() 探测 + adapter
+    flashinfer/  deepgemm/  flashmla/  deepep/   # adapter 按 ABC 契约签名写
+    probe.py      # 真 import 探测 + 安装配方(BackendInstall),survey() 打印
 ```
 **刻意不做的事**:不建 `impls/` 这类中间目录,也不写转发适配器。KernelSpec 的 `target` 是 `"module:attr"` 字符串,直接指向真实 kernel 函数,所以 `modules/attention.py` 里读到的仍是 `flash_attention2_no_pad` / `flash_decoding` 这种一眼可辨的算子名,而不是某个包装层。代价是 kernel 的公开签名必须干净——例如 `flash_attention2_no_pad` 原先要求调用方自己乘 `log2(e)`,这个 kernel 私有约定已下沉到 wrapper 内部,契约统一成 plain `1/sqrt(d)`。
 
-迁移=就地补 `backends/native.py` 的行 + 删 `benchmarks/kernels/` 下两个 legacy attention 文件。
+迁移已落地:实现本体随算子域进 `ops/<group>/`,native 行与外部后端的行同写在各组 `__init__.py`,`benchmarks/kernels/` 下两个 legacy attention 文件已删。
 
 **④ 一份元数据清单(声明式,集中一处,torch-free)**:借 sglang `KernelSpec`——注册时只存 `target="module:attr"` 字符串,**惰性 import**,注册全程不加载 torch/kernel(保证冷启动秒级、CPU 机器可 `import`)。每份实现声明:
 
@@ -251,8 +251,8 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
 
 - **强制后端开关**:对标 sglang `SGLANG_FORCE_FUSED_OP_BACKEND`,二分数值 bug 时把整模型钉到 native。两级粒度,越窄越优先——`backend=` 参数 > per-op `LITE_LLAMA_<OP>_BACKEND`(如 `LITE_LLAMA_ATTENTION_DECODE_BACKEND`) > 全局 `LITE_LLAMA_FORCE_BACKEND`。per-op 才是实际需要的粒度:一台机器可能想让 attention 走 flashinfer 而 linear 留在 native Triton GEMM。
 - **调用 trace**(对标 sglang `enable_fused_op_trace`):记录每次调用的 (op, backend, shape/dtype),**直接产出 ops-collector(地基 3 的 collect 阶段)要的真实 shape 清单**。
-- 外部后端各自占一个 `kernels/backends/<backend>.py`(只有 KernelSpec 行,没有实现代码),永不进核心依赖。**探测用真 import 而非 `find_spec`**:这些库是编译扩展或 JIT,"目录在"与"这张卡上能加载"是两个问题,dispatch 只关心后者(`backends/probe.py`)。
-- **安装方式不是一句话**:五个后端里只有 flashinfer 是 wheel(`lite-llama[flashinfer]`),TileOPs 的 extra 只装得动前置 TileLang,DeepGEMM / FlashMLA / DeepEP 是带 submodule 的源码编译(DeepEP 还要先装 NVSHMEM)。所以后三者**不给 extra**——给一个装不了东西的 extra 比不给更误导——安装配方作为数据写在各自模块的 `INSTALL` 里,由 `survey()` 打出来。
+- 外部后端各自占一个 `kernels/backend/<backend>/` 包(注册行在 `ops/<group>/__init__.py`,包内是 adapter + INSTALL 元数据),永不进核心依赖。**探测用真 import 而非 `find_spec`**:这些库是编译扩展或 JIT,"目录在"与"这张卡上能加载"是两个问题,dispatch 只关心后者(`backend/probe.py`)。
+- **安装方式不是一句话**:四个后端里只有 flashinfer 是 wheel(`lite-llama[flashinfer]`),DeepGEMM / FlashMLA / DeepEP 是带 submodule 的源码编译(DeepEP 还要先装 NVSHMEM)。所以后三者**不给 extra**——给一个装不了东西的 extra 比不给更误导——安装配方作为数据写在各自包的 `INSTALL` 里,由 `survey()` 打出来。
 
 ### 落地顺序
 
@@ -516,7 +516,7 @@ class AttentionOp(ABC):
     @abstractmethod
     def forward(self, q, k, v, metadata: AttentionMetadata, layer_idx: int) -> Tensor: ...
 
-# kernels/ 下的实现本体,由 backends/native.py 的行指名
+# kernels/ops/attention/ 下的实现本体,由该组 __init__.py 的注册行指名
 class FlashAttn2Prefill(AttentionOp): ...    # 现 flash_attention2_nopad
 class FlashDecoding(AttentionOp): ...        # 现 flash_decoding
 class MLADecode(AttentionOp): ...            # MLA decode 路径

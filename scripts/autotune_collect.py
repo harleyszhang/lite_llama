@@ -32,13 +32,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 import triton
 
-from lite_llama.kernels.autotune import ConfigStore
-from lite_llama.kernels.autotune.config_key import normalize_gpu_name
-from lite_llama.kernels.autotune.searcher import AutotuneSearcher
+from lite_llama.kernels.dispatcher.autotune import ConfigStore
+from lite_llama.kernels.dispatcher.autotune.config_key import normalize_gpu_name
+from lite_llama.kernels.dispatcher.autotune.searcher import AutotuneSearcher
 
 # --------------------------------------------------------------------------- #
 # Shape derivation from model config
 # --------------------------------------------------------------------------- #
+
 
 def _load_model_config(model_dir: str) -> dict:
     """Load config.json from a HuggingFace checkpoint."""
@@ -63,7 +64,6 @@ def derive_shapes(model_dir: str) -> dict[str, list[tuple[int, int, int, str]]]:
     hidden = cfg.get("hidden_size", 4096)
     intermediate = cfg.get("intermediate_size", 11008)
     num_heads = cfg.get("num_attention_heads", 32)
-    num_kv_heads = cfg.get("num_key_value_heads", num_heads)
     head_dim = cfg.get("head_dim", hidden // num_heads)
     num_experts = cfg.get("num_experts", 0) or cfg.get("num_local_experts", 0)
     moe_intermediate = cfg.get("moe_intermediate_size", intermediate)
@@ -140,13 +140,14 @@ W4A16_CONFIGS = [
 # Benchmark runners (build tensors, call kernel with config)
 # --------------------------------------------------------------------------- #
 
+
 def _make_fused_moe_runner(m: int, n: int, k: int):
     """Create a runner function for fused_moe GEMM benchmarking."""
-    from lite_llama.kernels.fused_moe import (
-        _fused_moe_kernel, _invoke_moe_gemm, moe_align_block_size,
+    from lite_llama.kernels.ops.moe.fused_moe import (
         _QUANT_NONE,
+        _invoke_moe_gemm,
+        moe_align_block_size,
     )
-    from lite_llama.kernels.utils import torch_to_triton_dtype
 
     device = "cuda"
     # Simulate: 1 expert, top_k=1
@@ -159,12 +160,25 @@ def _make_fused_moe_runner(m: int, n: int, k: int):
     topk_weights = torch.ones(m * top_k, dtype=torch.float16, device=device)
 
     def run_fn(config: dict):
-        sorted_ids, expert_ids, num_post = moe_align_block_size(topk_ids, config["BLOCK_M"], num_experts)
+        sorted_ids, expert_ids, num_post = moe_align_block_size(
+            topk_ids, config["BLOCK_M"], num_experts
+        )
         _invoke_moe_gemm(
-            a, b, c, None, None, topk_weights,
-            sorted_ids, expert_ids, num_post, top_k,
-            mul_routed_weight=False, quant_mode=_QUANT_NONE,
-            group_n=0, group_k=0, config=config,
+            a,
+            b,
+            c,
+            None,
+            None,
+            topk_weights,
+            sorted_ids,
+            expert_ids,
+            num_post,
+            top_k,
+            mul_routed_weight=False,
+            quant_mode=_QUANT_NONE,
+            group_n=0,
+            group_k=0,
+            config=config,
         )
 
     return run_fn
@@ -172,7 +186,7 @@ def _make_fused_moe_runner(m: int, n: int, k: int):
 
 def _make_flash_attn_runner(seq_len: int, head_dim: int):
     """Create a runner for flash attention benchmarking."""
-    from lite_llama.kernels.flashattention2_nopad import flash_attention2_nopad_kernel
+    from lite_llama.kernels.ops.attention.flashattention2_nopad import flash_attention2_nopad_kernel
 
     device = "cuda"
     n_heads = 32
@@ -184,18 +198,33 @@ def _make_flash_attn_runner(seq_len: int, head_dim: int):
     output = torch.empty_like(q)
     b_start_loc = torch.tensor([0], dtype=torch.int32, device=device)
     b_seq_len = torch.tensor([seq_len], dtype=torch.int32, device=device)
-    sm_scale = 1.0 / (head_dim ** 0.5)
+    sm_scale = 1.0 / (head_dim**0.5)
 
     def run_fn(config: dict):
         block_m = config.get("BLOCK_M_SIZE", 64)
         grid = (triton.cdiv(seq_len, block_m), n_heads, 1)
         flash_attention2_nopad_kernel[grid](
-            q, k, v, output, b_start_loc, b_seq_len, sm_scale,
-            n_heads, num_kv_groups,
-            q.stride(0), q.stride(1), q.stride(2),
-            k.stride(0), k.stride(1), k.stride(2),
-            v.stride(0), v.stride(1), v.stride(2),
-            output.stride(0), output.stride(1), output.stride(2),
+            q,
+            k,
+            v,
+            output,
+            b_start_loc,
+            b_seq_len,
+            sm_scale,
+            n_heads,
+            num_kv_groups,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            output.stride(0),
+            output.stride(1),
+            output.stride(2),
             HEAD_DIM=head_dim,
             BLOCK_M_SIZE=config.get("BLOCK_M_SIZE", 64),
             BLOCK_N_SIZE=config.get("BLOCK_N_SIZE", 64),
@@ -210,11 +239,18 @@ def _make_flash_attn_runner(seq_len: int, head_dim: int):
 # Main
 # --------------------------------------------------------------------------- #
 
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--model-dir", action="append", required=True, help="Model checkpoint dir(s)")
-    ap.add_argument("--ops", nargs="+", default=["fused_moe", "flash_attn_nopad", "w4a16_matmul"],
-                    help="Ops to tune")
+    ap.add_argument(
+        "--ops",
+        nargs="+",
+        default=["fused_moe", "flash_attn_nopad", "w4a16_matmul"],
+        help="Ops to tune",
+    )
     ap.add_argument("--warmup", type=int, default=3, help="Warmup iterations")
     ap.add_argument("--repeat", type=int, default=10, help="Timed iterations")
     ap.add_argument("--cache-dir", default=None, help="Override autotune cache directory")
@@ -236,9 +272,9 @@ def main() -> int:
     total_searched = 0
     for model_dir in args.model_dir:
         model_name = Path(model_dir).name
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         print(f"Model: {model_name}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         shapes = derive_shapes(model_dir)
 
@@ -251,21 +287,26 @@ def main() -> int:
             # Select config space and runner factory
             if op == "fused_moe":
                 configs = FUSED_MOE_CONFIGS
-                make_runner = lambda m, n, k: _make_fused_moe_runner(m, n, k)
+                make_runner = _make_fused_moe_runner
             elif op == "flash_attn_nopad":
                 configs = FLASH_ATTN_CONFIGS
-                make_runner = lambda m, n, k: _make_flash_attn_runner(m, n)
+
+                def make_runner(m, n, k):
+                    return _make_flash_attn_runner(m, n)
+
             elif op == "w4a16_matmul":
                 configs = W4A16_CONFIGS
                 make_runner = None  # TODO: implement after w4a16 rewrite
             else:
                 continue
 
-            print(f"\n  [{op}] {len(op_shapes)} shapes × {len(configs)} configs")
+            print(f"\n  [{op}] {len(op_shapes)} shapes x {len(configs)} configs")
 
             for m, n, k, dtype in op_shapes:
                 if make_runner is None:
-                    print(f"    M={m:>4} N={n:>5} K={k:>5} ({dtype}) — SKIPPED (runner not implemented)")
+                    print(
+                        f"    M={m:>4} N={n:>5} K={k:>5} ({dtype}) — SKIPPED (runner not implemented)"
+                    )
                     continue
 
                 try:
@@ -273,9 +314,11 @@ def main() -> int:
                     t0 = time.time()
                     best = searcher.search(op, (m, n, k), dtype, configs, run_fn)
                     elapsed = time.time() - t0
-                    print(f"    M={m:>4} N={n:>5} K={k:>5} ({dtype}) → "
-                          f"BLOCK_M={best.get('BLOCK_M', best.get('BLOCK_M_SIZE', '?'))}"
-                          f" [{elapsed:.1f}s]")
+                    print(
+                        f"    M={m:>4} N={n:>5} K={k:>5} ({dtype}) → "
+                        f"BLOCK_M={best.get('BLOCK_M', best.get('BLOCK_M_SIZE', '?'))}"
+                        f" [{elapsed:.1f}s]"
+                    )
                     total_searched += 1
                 except Exception as e:
                     print(f"    M={m:>4} N={n:>5} K={k:>5} ({dtype}) — ERROR: {e}")

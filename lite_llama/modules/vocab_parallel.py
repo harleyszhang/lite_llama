@@ -58,7 +58,7 @@ class VocabParallelEmbedding(nn.Module):
     the whole subtlety.
 
     The mapping, the gather and the zeroing are one fused Triton kernel
-    (:func:`~lite_llama.kernels.vocab_embedding.vocab_parallel_embedding`):
+    (:func:`~lite_llama.kernels.ops.embeddings.vocab_embedding.vocab_parallel_embedding`):
     the id->row arithmetic that used to run as an eager chain of seven kernels
     per lookup is two scalar register ops inside it. That matters here more
     than anywhere else in the model because TP disables CUDA graphs, so there

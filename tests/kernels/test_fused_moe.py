@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from lite_llama.kernels.fused_moe import fused_moe, moe_align_block_size
+from lite_llama.kernels.ops.moe.fused_moe import fused_moe, moe_align_block_size
 
 # Redundant with the automatic `gpu` mark applied to tests/kernels/ by
 # tests/conftest.py, but harmless and keeps the file self-describing.

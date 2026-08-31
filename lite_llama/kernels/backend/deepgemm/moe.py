@@ -1,0 +1,129 @@
+"""DeepGEMM grouped fp8 MoE — the ``deepgemm/grouped_fp8_moe`` row's wrapper.
+
+The contract is :class:`~lite_llama.kernels.ops.interfaces.MoeOp`. The native
+``fused_moe`` permutes tokens with Triton and runs both expert GEMMs in one
+kernel family; here the same computation is expressed as two
+``m_grouped_fp8_gemm_nt_contiguous`` calls over a 128-aligned grouped layout:
+
+1. tokens are grouped per expert (stable sort over the flattened
+   ``topk_ids``), each expert's segment padded to a multiple of
+   ``ALIGNMENT`` because the contiguous grouped kernel requires aligned
+   segment starts (``m_indices`` marks which expert owns each padded row);
+2. gate/up GEMM on the grouped activations, SwiGLU, down GEMM —
+   per-token-group-128 activations, cached NT fp8 experts;
+3. the padded rows quantify to zero and are dropped by the gather-back, so
+   padding never leaks into the weighted reduce.
+
+The ``_masked`` grouped variant (variable-length segments for decode) is the
+upstream alternative; the contiguous path is used for both phases because its
+alignment padding is small next to the expert GEMMs and one code path is
+easier to keep golden-comparable.
+
+The row is ``verified=False``: written against the upstream API, never run on
+Hopper (CI is sm86), so the golden gate keeps it out of default dispatch.
+"""
+
+from __future__ import annotations
+
+import torch
+import torch.nn.functional as F
+
+from .quant import nt_block_fp8_from_checkpoint, per_token_group_quant_fp8
+
+#: The contiguous grouped kernel wants each expert segment aligned to this.
+ALIGNMENT = 128
+
+# data_ptr -> (w_fp8, w_scales, shape) — one entry per expert weight tensor,
+# built once on first call and reused for the lifetime of the weights.
+_EXPERT_CACHE: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Size]] = {}
+
+
+def _nt_experts(
+    w: torch.Tensor,
+    w_scale: torch.Tensor | None,
+    group_n: int,
+    group_k: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Cached stacked NT fp8 experts for ``w`` ``[E, n, k]``."""
+    key = w.data_ptr()
+    hit = _EXPERT_CACHE.get(key)
+    if hit is not None and hit[2] == w.shape:
+        return hit[0], hit[1]
+    w_fp8, w_scales = nt_block_fp8_from_checkpoint(w, w_scale, group_n, group_k)
+    _EXPERT_CACHE[key] = (w_fp8, w_scales, w.shape)
+    return w_fp8, w_scales
+
+
+def grouped_moe(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    *,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    w1_zeros: torch.Tensor | None = None,
+    w2_zeros: torch.Tensor | None = None,
+    group_n: int = 0,
+    group_k: int = 0,
+) -> torch.Tensor:
+    """Run all dispatched experts via DeepGEMM's grouped fp8 GEMMs.
+
+    Args:
+        hidden_states: ``[tokens, hidden]`` activations.
+        w1: ``[E, 2 * intermediate, hidden]`` fused gate/up projections.
+        w2: ``[E, hidden, intermediate]`` down projections.
+        topk_weights: ``[tokens, topk]`` router weights.
+        topk_ids: ``[tokens, topk]`` expert id per (token, slot).
+        w1_scale / w2_scale: Native block scales for the expert weights.
+        w1_zeros / w2_zeros: Ignored — fp8 is symmetric.
+        group_n / group_k: Native scale-block geometry of ``w1``/``w2``.
+
+    Returns:
+        ``[tokens, hidden]`` in ``hidden_states.dtype``.
+    """
+    import deep_gemm  # the JIT kernels live with the library; import at call time
+
+    tokens, hidden = hidden_states.shape
+    topk = topk_ids.shape[1]
+    num_experts = w1.shape[0]
+    device = hidden_states.device
+
+    # --- group tokens per expert, segments aligned to ALIGNMENT ------------ #
+    flat_ids = topk_ids.reshape(-1).to(torch.int64)
+    order = torch.argsort(flat_ids, stable=True)  # flat (token, slot) indices
+    sorted_ids = flat_ids[order]
+    counts = torch.bincount(flat_ids, minlength=num_experts)
+    padded_counts = ((counts + ALIGNMENT - 1) // ALIGNMENT) * ALIGNMENT
+    group_starts = torch.cumsum(padded_counts, 0) - padded_counts
+    m_padded = int(padded_counts.sum())
+
+    # Scatter real rows to their aligned slot; padding rows stay zero.
+    ranks = torch.arange(flat_ids.numel(), device=device) - group_starts[sorted_ids]
+    dest = group_starts[sorted_ids] + ranks
+    a = torch.zeros(m_padded, hidden, dtype=hidden_states.dtype, device=device)
+    a[dest] = hidden_states[order // topk]
+    m_indices = torch.repeat_interleave(torch.arange(num_experts, device=device), padded_counts).to(
+        torch.int32
+    )
+
+    # --- gate/up grouped GEMM, SwiGLU, down grouped GEMM ------------------- #
+    w1_fp8, w1_scales = _nt_experts(w1, w1_scale, group_n, group_k)
+    qa, qa_scales = per_token_group_quant_fp8(a)
+    h = deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
+        qa, qa_scales, w1_fp8, w1_scales, m_indices
+    )  # [m_padded, 2 * intermediate]
+    gate, up = h.chunk(2, dim=-1)
+    h = F.silu(gate) * up
+
+    w2_fp8, w2_scales = _nt_experts(w2, w2_scale, group_n, group_k)
+    qh, qh_scales = per_token_group_quant_fp8(h)
+    y = deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
+        qh, qh_scales, w2_fp8, w2_scales, m_indices
+    )  # [m_padded, hidden]
+
+    # --- gather real rows back and reduce with the router weights ---------- #
+    y_tok = y[dest].view(tokens, topk, hidden)
+    final = (y_tok * topk_weights.to(y.dtype).unsqueeze(-1)).sum(dim=1)
+    return final.to(hidden_states.dtype)

@@ -1,7 +1,7 @@
 """GPU tests: the ``linear`` scheme entry points forward to the right Triton kernel.
 
 The kernels themselves are covered in ``test_quantization.py``; these tests
-pin :mod:`lite_llama.kernels.linear` — the per-scheme entry points behind the
+pin :mod:`lite_llama.kernels.ops.gemm.linear` — the per-scheme entry points behind the
 LinearOp signature must reproduce the direct kernel calls bit for bit (they are
 pure argument rewrites), and ``run_quant_linear`` must select and run the same
 path the quant methods use.
@@ -12,13 +12,13 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.kernels.linear import (
+from lite_llama.kernels.ops.gemm.linear import (
     linear_w4a16,
     linear_w8a8_fp8,
     linear_w8a8_int8,
     linear_w8a16,
 )
-from lite_llama.kernels.quantization import (
+from lite_llama.kernels.ops.quantization import (
     fp8_matmul,
     smoothquant_matmul,
     w4a16_matmul,

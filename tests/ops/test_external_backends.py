@@ -28,10 +28,9 @@ from pathlib import Path
 import pytest
 
 import lite_llama.kernels  # noqa: F401 — import side effect: native row registration
-from lite_llama.kernels.backends import probe
-from lite_llama.kernels.backends.probe import EXTERNAL_BACKENDS, BackendInstall, library_present
-from lite_llama.kernels.ops import REGISTRY
-from lite_llama.kernels.ops.dispatch import resolve_target
+from lite_llama.kernels.backend import probe
+from lite_llama.kernels.backend.probe import EXTERNAL_BACKENDS, BackendInstall, library_present
+from lite_llama.kernels.dispatcher import REGISTRY, resolve_target
 
 #: Import name each backend module must probe, verified against the upstream
 #: install docs. The distribution name and the import name differ for three of
@@ -39,7 +38,6 @@ from lite_llama.kernels.ops.dispatch import resolve_target
 IMPORT_NAMES = {
     "flashinfer": "flashinfer",  # distribution: flashinfer-python
     "deepgemm": "deep_gemm",  # distribution: deepgemm (renamed from deep-gemm)
-    "tileops": "tileops",  # source install, no distribution yet
     "flashmla": "flash_mla",  # source install
     "deepep": "deep_ep",  # source install
 }
@@ -104,7 +102,7 @@ class TestLibraryPresent:
 class TestBackendModules:
     @pytest.mark.parametrize("backend", EXTERNAL_BACKENDS)
     def test_module_declares_the_metadata_dispatch_needs(self, backend: str) -> None:
-        module = importlib.import_module(f"lite_llama.kernels.backends.{backend}")
+        module = importlib.import_module(f"lite_llama.kernels.backend.{backend}")
         assert isinstance(module.INSTALL, BackendInstall)
         assert module.INSTALL.backend == backend, "INSTALL must name its own module"
         assert callable(module.available)
@@ -112,25 +110,25 @@ class TestBackendModules:
     @pytest.mark.parametrize("backend", EXTERNAL_BACKENDS)
     def test_probe_answers_a_bool_without_raising(self, backend: str) -> None:
         # Called during dispatch filtering on machines that have none of these.
-        module = importlib.import_module(f"lite_llama.kernels.backends.{backend}")
+        module = importlib.import_module(f"lite_llama.kernels.backend.{backend}")
         assert isinstance(module.available(), bool)
 
     @pytest.mark.parametrize("backend", EXTERNAL_BACKENDS)
     def test_import_name_matches_upstream(self, backend: str) -> None:
-        module = importlib.import_module(f"lite_llama.kernels.backends.{backend}")
+        module = importlib.import_module(f"lite_llama.kernels.backend.{backend}")
         assert module.INSTALL.module == IMPORT_NAMES[backend]
 
     def test_importing_the_package_costs_no_third_party_import(self) -> None:
         """Backend modules are data; none of them may pull their library in.
 
-        This is what lets ``backends/__init__`` import all five eagerly, which
+        This is what lets ``backend/__init__`` import all four eagerly, which
         in turn is what makes an installed backend show up in dispatch without
         any registration step at the call site. Checked in a fresh interpreter
         because a probe running earlier in this session may legitimately have
         imported a library that *is* installed.
         """
         code = (
-            "import sys, lite_llama.kernels.backends as b; "
+            "import sys, lite_llama.kernels.backend as b; "
             f"print([m for m in {sorted(IMPORT_NAMES.values())} if m in sys.modules])"
         )
         done = subprocess.run(
@@ -143,14 +141,14 @@ class TestInstallMetadata:
     @pytest.mark.parametrize("backend", EXTERNAL_BACKENDS)
     def test_a_named_extra_exists_in_pyproject(self, backend: str, extras) -> None:
         """An extra in the metadata is a promise `pip install` must be able to keep."""
-        install = importlib.import_module(f"lite_llama.kernels.backends.{backend}").INSTALL
+        install = importlib.import_module(f"lite_llama.kernels.backend.{backend}").INSTALL
         if install.extra is not None:
             assert install.extra in extras, f"{backend}: extra {install.extra!r} not in pyproject"
             assert extras[install.extra], f"{backend}: extra {install.extra!r} installs nothing"
 
     @pytest.mark.parametrize("backend", EXTERNAL_BACKENDS)
     def test_a_backend_without_an_extra_documents_a_source_build(self, backend: str) -> None:
-        install = importlib.import_module(f"lite_llama.kernels.backends.{backend}").INSTALL
+        install = importlib.import_module(f"lite_llama.kernels.backend.{backend}").INSTALL
         assert install.extra or install.source_recipe
         assert install.homepage.startswith("https://")
         assert install.requires, "state the hardware/toolchain window in prose too"
@@ -176,7 +174,7 @@ class TestInstallMetadata:
         with PYPROJECT.open("rb") as fh:
             project = tomllib.load(fh)["project"]
         core = " ".join(project["dependencies"])
-        for extra in ("flashinfer", "tileops"):
+        for extra in ("flashinfer",):
             for requirement in project["optional-dependencies"][extra]:
                 assert requirement.split(">")[0] not in core
 
