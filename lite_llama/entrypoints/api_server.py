@@ -22,10 +22,13 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..engine.async_engine import AsyncLLMEngine
 from ..engine.sampler import SamplingParams
+
+if TYPE_CHECKING:
+    from ..engine.async_engine import StreamedOutput
 from ..utils.logger import get_logger
 from ..utils.prompt_templates import get_prompter
 from .protocol import (

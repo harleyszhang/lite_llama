@@ -15,9 +15,9 @@ import importlib
 from collections.abc import Callable
 
 import torch
-import triton
-import triton.language as tl
 from packaging.version import Version
+
+from ._compat import tl, triton
 
 MAX_FUSED_SIZE = 65536
 

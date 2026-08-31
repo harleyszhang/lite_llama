@@ -13,12 +13,11 @@ Usage:
 from __future__ import annotations
 
 import torch
-import triton
-import triton.language as tl
 
+from ._compat import tl, triton
 from .activations import silu
-from .utils import torch_to_triton_dtype
 from .quantization.w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
+from .utils import torch_to_triton_dtype
 
 #: ``QUANT_MODE`` values shared by the kernel and its launcher.
 _QUANT_NONE = 0
@@ -172,13 +171,17 @@ def _fused_moe_kernel(
         # For each k-tile of BLOCK_K logical elements, we load BLOCK_K//8 int32 words.
         offs_k_words = tl.arange(0, BLOCK_K // 8)
         b_ptrs = (
-            b_ptr + off_experts * stride_be
+            b_ptr
+            + off_experts * stride_be
             + offs_bn[None, :] * stride_bn
             + offs_k_words[:, None] * stride_bk
         )
     else:
         b_ptrs = (
-            b_ptr + off_experts * stride_be + offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn
+            b_ptr
+            + off_experts * stride_be
+            + offs_k[:, None] * stride_bk
+            + offs_bn[None, :] * stride_bn
         )
     if QUANT_MODE != 0:
         # Scale row is fixed for this tile; only the k-block index advances.
@@ -209,7 +212,8 @@ def _fused_moe_kernel(
             b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
             if HAS_ZEROS:
                 b_zero = tl.load(
-                    b_zeros_ptr + off_experts * stride_bse
+                    b_zeros_ptr
+                    + off_experts * stride_bse
                     + (offs_bn // GROUP_N) * stride_bsn
                     + ((k * BLOCK_K) // GROUP_K) * stride_bsk
                 )
@@ -442,7 +446,13 @@ def fused_moe(
 
     # Autotune lookup: use persisted best config if available, else heuristic.
     from .autotune import get_best_config
-    dtype_label = {_QUANT_NONE: "fp16", _QUANT_FP8: "fp8", _QUANT_INT8: "int8", _QUANT_INT4: "int4"}.get(quant_mode, "fp16")
+
+    dtype_label = {
+        _QUANT_NONE: "fp16",
+        _QUANT_FP8: "fp8",
+        _QUANT_INT8: "int8",
+        _QUANT_INT4: "int4",
+    }.get(quant_mode, "fp16")
     config = get_best_config("fused_moe", m=num_tokens, n=two_inter, k=hidden, dtype=dtype_label)
     if config is None:
         config = _launch_config(num_tokens, quant_mode)
@@ -453,10 +463,21 @@ def fused_moe(
     # GEMM1: [M, hidden] x [E, 2I, hidden] -> [M * top_k, 2I]
     gate_up = torch.empty((num_tokens * top_k, two_inter), device=device, dtype=dtype)
     _invoke_moe_gemm(
-        hidden_states, w1, gate_up, w1_scale, w1_zeros, flat_weights,
-        sorted_ids, expert_ids, num_post, top_k,
-        mul_routed_weight=False, quant_mode=quant_mode,
-        group_n=group_n, group_k=group_k, config=config,
+        hidden_states,
+        w1,
+        gate_up,
+        w1_scale,
+        w1_zeros,
+        flat_weights,
+        sorted_ids,
+        expert_ids,
+        num_post,
+        top_k,
+        mul_routed_weight=False,
+        quant_mode=quant_mode,
+        group_n=group_n,
+        group_k=group_k,
+        config=config,
     )
 
     # silu(gate) * up -> [M * top_k, I]
@@ -472,10 +493,21 @@ def fused_moe(
     # ``offs_token // top_k`` into the identity on slot indices.
     expanded = torch.empty((num_tokens * top_k, hidden), device=device, dtype=dtype)
     _invoke_moe_gemm(
-        act, w2, expanded, w2_scale, w2_zeros, flat_weights,
-        sorted_ids, expert_ids, num_post, 1,
-        mul_routed_weight=True, quant_mode=quant_mode,
-        group_n=group_n, group_k=group_k, config=config,
+        act,
+        w2,
+        expanded,
+        w2_scale,
+        w2_zeros,
+        flat_weights,
+        sorted_ids,
+        expert_ids,
+        num_post,
+        1,
+        mul_routed_weight=True,
+        quant_mode=quant_mode,
+        group_n=group_n,
+        group_k=group_k,
+        config=config,
     )
 
     # Reduce over the top_k slot dim -> [M, hidden]

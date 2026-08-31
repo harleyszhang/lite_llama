@@ -10,9 +10,8 @@ Usage:
 """
 
 import torch
-import triton
-import triton.language as tl
 
+from ._compat import tl, triton
 from .quantization.w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
 
 

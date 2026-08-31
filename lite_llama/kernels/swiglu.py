@@ -12,9 +12,8 @@ Usage:
 """
 
 import torch
-import triton
-import triton.language as tl
 
+from ._compat import tl, triton
 from .activations import silu
 from .utils import calculate_settings
 

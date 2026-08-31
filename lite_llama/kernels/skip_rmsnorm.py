@@ -8,9 +8,8 @@ Usage:
 """
 
 import torch
-import triton
-import triton.language as tl
 
+from ._compat import tl, triton
 from .utils import calculate_settings
 
 

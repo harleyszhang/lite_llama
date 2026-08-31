@@ -78,7 +78,12 @@ class TuneKey:
 
     def to_dict(self) -> dict[str, str]:
         """Serialise to a plain dict (JSON-friendly)."""
-        return {"gpu": self.gpu, "op": self.op, "shape_bucket": self.shape_bucket, "dtype": self.dtype}
+        return {
+            "gpu": self.gpu,
+            "op": self.op,
+            "shape_bucket": self.shape_bucket,
+            "dtype": self.dtype,
+        }
 
     @classmethod
     def from_dict(cls, d: dict[str, str]) -> TuneKey:
@@ -99,5 +104,10 @@ class TuneKey:
         """
         if gpu is None:
             import torch
-            gpu = normalize_gpu_name(torch.cuda.get_device_name(0)) if torch.cuda.is_available() else "unknown"
+
+            gpu = (
+                normalize_gpu_name(torch.cuda.get_device_name(0))
+                if torch.cuda.is_available()
+                else "unknown"
+            )
         return cls(gpu=gpu, op=op, shape_bucket=make_shape_bucket(m, n, k), dtype=dtype)

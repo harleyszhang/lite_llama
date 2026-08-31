@@ -36,6 +36,7 @@ def _get_gpu() -> str:
     if _gpu_name is None:
         try:
             import torch
+
             if torch.cuda.is_available():
                 _gpu_name = normalize_gpu_name(torch.cuda.get_device_name(0))
             else:

@@ -32,18 +32,22 @@ from __future__ import annotations
 import itertools
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 
 import torch
 
 from ..distributed.parallel_state import broadcast_tp, get_tp_world_size
 from ..models.config import read_model_type
 from ..models.registry import ModelRegistry
+from ..utils.logger import get_logger
 from .detokenizer import IncrementalDetokenizer
 from .llm_engine import LLMEngine
 from .outputs import CompletionOutput, RequestOutput
 from .sampler import BatchedSamplingParams, GeneratedSpan, SamplingParams
 from .scheduler import Request, Scheduler, SchedulerConfig
 from .stop_criteria import POLL_INTERVAL, detect_repetition
+
+logger = get_logger(__name__)
 
 
 class _BatchTensors:
@@ -153,6 +157,37 @@ class ContinuousBatchingEngine:
                 f"scheduler max_seq_len {config.max_seq_len} exceeds the engine's "
                 f"{engine.max_seq_len}"
             )
+        if config.max_chunk_size > 0:
+            # Chunked prefill is not wired up at this layer, and cannot be until
+            # the prefill attention kernel learns to read a previous chunk's KV
+            # (flash_attention2_no_pad attends only within the fresh tokens it is
+            # handed, so a chunk boundary would silently become an attention
+            # boundary). The scheduler-side contract was also never honoured
+            # here: nothing called advance_chunks(), so a prompt longer than
+            # max_chunk_size stayed in the scheduler's _chunking list forever —
+            # re-prefilled in full every step and re-sampling the same
+            # last-position logits each time. Prefill every prompt whole instead.
+            logger.warning(
+                "max_chunk_size=%d is not supported by this engine yet; "
+                "disabling chunked prefill (prompts are prefilled whole)",
+                config.max_chunk_size,
+            )
+            config = replace(config, max_chunk_size=0)
+        if config.enable_preemption:
+            # Preemption is unwired at both ends of the contract. The scheduler
+            # evicts by clearing the victim's output_token_ids, but nothing here
+            # resets Request.text or the incremental detokeniser, so the
+            # recomputed request would append fresh text to its stale partial
+            # output. And the livelock guard does not hold: a recomputed request
+            # already has one token (produced by its re-prefill), which makes it
+            # eligible for eviction again on the very next step, so two
+            # oversubscribed requests evict each other forever and neither
+            # reaches a second decode token. Queue instead of evicting.
+            logger.warning(
+                "enable_preemption is not supported by this engine yet; "
+                "disabling it (excess requests queue instead of evicting)"
+            )
+            config = replace(config, enable_preemption=False)
         self.config = config
 
         self._slot_batch = engine.model_runner.enable_slot_kv_cache()
@@ -252,6 +287,11 @@ class ContinuousBatchingEngine:
                 max_seq_len=engine.max_seq_len,
                 max_num_seqs=max_num_seqs,
                 max_num_batched_tokens=max_num_batched_tokens,
+                # The engine cannot consume chunks yet (see the clamp in
+                # __init__); ask for whole-prompt prefill directly instead of
+                # taking the scheduler default and being warned back to 0 on
+                # every construction.
+                max_chunk_size=0,
             ),
         )
 
@@ -373,9 +413,7 @@ class ContinuousBatchingEngine:
         # its own last real position rather than at the end of the padded row;
         # the model gathers exactly those rows before the lm_head GEMM.
         last = torch.tensor(prompt_lens, dtype=torch.long, device=self.device) - 1
-        logits = self.engine.model_runner.forward(
-            input_ids, positions, None, logits_positions=last
-        )
+        logits = self.engine.model_runner.forward(input_ids, positions, None, logits_positions=last)
 
         # A fresh batch has generated nothing, so there is no repetition window
         # yet and the penalty is a no-op regardless of configuration.

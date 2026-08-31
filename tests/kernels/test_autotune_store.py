@@ -8,6 +8,7 @@ perf_key will depend on.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,11 @@ from lite_llama.kernels.autotune import (
     normalize_gpu_name,
     reset,
 )
+
+# The file lives under tests/kernels/ (it pins the kernels.autotune store
+# contract) but never touches Triton or a GPU, so it opts out of the
+# directory-level gpu mark and runs on CPU-only machines.
+pytestmark = pytest.mark.cpu
 
 
 # --------------------------------------------------------------------------- #
@@ -65,14 +71,22 @@ class TestBucketM:
 class TestTuneKey:
     def test_key_structure_deterministic(self):
         """Same inputs must produce the exact same key (hashable, eq-comparable)."""
-        k1 = TuneKey(gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16")
-        k2 = TuneKey(gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16")
+        k1 = TuneKey(
+            gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16"
+        )
+        k2 = TuneKey(
+            gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16"
+        )
         assert k1 == k2
         assert hash(k1) == hash(k2)
 
     def test_different_gpu_not_equal(self):
-        k1 = TuneKey(gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16")
-        k2 = TuneKey(gpu="NVIDIA_H100", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16")
+        k1 = TuneKey(
+            gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16"
+        )
+        k2 = TuneKey(
+            gpu="NVIDIA_H100", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16"
+        )
         assert k1 != k2
 
     def test_build_applies_bucketing(self):
@@ -80,7 +94,9 @@ class TestTuneKey:
         assert key.shape_bucket == "M16_N4096_K11008"
 
     def test_to_dict_roundtrip(self):
-        k = TuneKey(gpu="NVIDIA_A10", op="w4a16_matmul", shape_bucket="M32_N3584_K18944", dtype="int4")
+        k = TuneKey(
+            gpu="NVIDIA_A10", op="w4a16_matmul", shape_bucket="M32_N3584_K18944", dtype="int4"
+        )
         assert TuneKey.from_dict(k.to_dict()) == k
 
     def test_make_shape_bucket_format(self):
@@ -101,26 +117,43 @@ class TestConfigStore:
         return ConfigStore(cache_dir=tmp_path)
 
     def test_put_get_roundtrip(self, store: ConfigStore):
-        key = TuneKey(gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16")
-        config = {"BLOCK_M": 16, "BLOCK_N": 64, "BLOCK_K": 128, "GROUP_M": 8, "num_warps": 4, "num_stages": 3}
+        key = TuneKey(
+            gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16"
+        )
+        config = {
+            "BLOCK_M": 16,
+            "BLOCK_N": 64,
+            "BLOCK_K": 128,
+            "GROUP_M": 8,
+            "num_warps": 4,
+            "num_stages": 3,
+        }
         store.put(key, config, latency_us=42.5)
 
         got = store.get(key)
         assert got == config
 
     def test_miss_returns_none(self, store: ConfigStore):
-        key = TuneKey(gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16")
+        key = TuneKey(
+            gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16"
+        )
         assert store.get(key) is None
 
     def test_overwrite_keeps_latest(self, store: ConfigStore):
-        key = TuneKey(gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16")
+        key = TuneKey(
+            gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16"
+        )
         store.put(key, {"BLOCK_M": 16}, latency_us=50.0)
         store.put(key, {"BLOCK_M": 32}, latency_us=40.0)
         assert store.get(key) == {"BLOCK_M": 32}
 
     def test_load_all(self, store: ConfigStore):
-        k1 = TuneKey(gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16")
-        k2 = TuneKey(gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M32_N4096_K11008", dtype="fp16")
+        k1 = TuneKey(
+            gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16"
+        )
+        k2 = TuneKey(
+            gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M32_N4096_K11008", dtype="fp16"
+        )
         store.put(k1, {"BLOCK_M": 16}, latency_us=42.0)
         store.put(k2, {"BLOCK_M": 32}, latency_us=38.0)
 
@@ -130,8 +163,12 @@ class TestConfigStore:
         assert k2 in all_entries
 
     def test_different_ops_separate_files(self, store: ConfigStore):
-        k1 = TuneKey(gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16")
-        k2 = TuneKey(gpu="NVIDIA_A10", op="flash_attn_nopad", shape_bucket="M64_N128_K64", dtype="fp16")
+        k1 = TuneKey(
+            gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16"
+        )
+        k2 = TuneKey(
+            gpu="NVIDIA_A10", op="flash_attn_nopad", shape_bucket="M64_N128_K64", dtype="fp16"
+        )
         store.put(k1, {"BLOCK_M": 16}, latency_us=42.0)
         store.put(k2, {"BLOCK_M_SIZE": 64}, latency_us=20.0)
 
@@ -140,7 +177,9 @@ class TestConfigStore:
 
     def test_json_format_stable(self, store: ConfigStore):
         """The JSON must be parseable by external tools (schema contract)."""
-        key = TuneKey(gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16")
+        key = TuneKey(
+            gpu="NVIDIA_A10", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16"
+        )
         config = {"BLOCK_M": 16, "BLOCK_N": 64, "BLOCK_K": 128, "num_warps": 4, "num_stages": 3}
         store.put(key, config, latency_us=42.5)
 
@@ -168,6 +207,39 @@ class TestConfigStore:
 
 
 # --------------------------------------------------------------------------- #
+# _flush failure handling
+# --------------------------------------------------------------------------- #
+class TestFlushFailure:
+    """A failed atomic rename must propagate the original error, clean up the
+    temp file, and close the descriptor (a masked error or a leaked fd leaves
+    the store in a state the next put() cannot reason about)."""
+
+    def test_replace_failure_propagates_unmasked(self, tmp_path: Path, monkeypatch):
+        store = ConfigStore(cache_dir=tmp_path)
+        key = TuneKey(gpu="g", op="op", shape_bucket="M16_N1_K1", dtype="fp16")
+
+        closes = 0
+        real_close = os.close
+
+        def spy_close(fd):
+            nonlocal closes
+            closes += 1
+            real_close(fd)
+
+        def boom(src, dst):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(os, "replace", boom)
+        monkeypatch.setattr(os, "close", spy_close)
+
+        with pytest.raises(OSError, match="disk full"):
+            store.put(key, {"BLOCK_M": 16}, latency_us=1.0)
+
+        assert closes == 1  # the mkstemp descriptor was closed, not leaked
+        assert list(tmp_path.iterdir()) == []  # neither target nor .tmp remain
+
+
+# --------------------------------------------------------------------------- #
 # get_best_config (lookup module)
 # --------------------------------------------------------------------------- #
 class TestLookup:
@@ -183,6 +255,7 @@ class TestLookup:
         store.put(key, {"BLOCK_M": 16, "BLOCK_N": 128}, latency_us=35.0)
         # Patch GPU detection so lookup uses "test_gpu"
         import lite_llama.kernels.autotune.lookup as lk
+
         monkeypatch.setattr(lk, "_gpu_name", "test_gpu")
         monkeypatch.setattr(lk, "_store", ConfigStore(cache_dir=tmp_path))
         yield

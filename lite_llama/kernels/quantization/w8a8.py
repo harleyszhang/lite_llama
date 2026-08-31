@@ -24,8 +24,8 @@ Usage:
 from __future__ import annotations
 
 import torch
-import triton
-import triton.language as tl
+
+from .._compat import tl, triton
 
 
 # --------------------------------------------------------------------------- #
@@ -33,10 +33,15 @@ import triton.language as tl
 # --------------------------------------------------------------------------- #
 @triton.jit
 def _quantize_activations_kernel(
-    x_ptr, q_ptr, scale_ptr,
-    M, K,
-    stride_xm, stride_xk,
-    stride_qm, stride_qk,
+    x_ptr,
+    q_ptr,
+    scale_ptr,
+    M,
+    K,
+    stride_xm,
+    stride_xk,
+    stride_qm,
+    stride_qk,
     BLOCK_K: tl.constexpr,
 ):
     """Quantise ``[M, K]`` fp16 activations to int8 with per-token scales.
@@ -73,13 +78,24 @@ def _quantize_activations_kernel(
 # --------------------------------------------------------------------------- #
 @triton.jit
 def _smoothquant_matmul_kernel(
-    a_ptr, b_ptr, c_ptr,
-    a_scale_ptr, b_scale_ptr, bias_ptr,
-    M, N, K,
-    stride_am, stride_ak,
-    stride_bn, stride_bk,
-    stride_cm, stride_cn,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    a_scale_ptr,
+    b_scale_ptr,
+    bias_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bn,
+    stride_bk,
+    stride_cm,
+    stride_cn,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
@@ -136,13 +152,31 @@ def _smoothquant_matmul_kernel(
 def _launch_config(num_tokens: int) -> dict:
     """Tile shape for ``num_tokens`` rows of activations."""
     if num_tokens <= 32:
-        return {"BLOCK_M": 16, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 1,
-                "num_warps": 8, "num_stages": 3}
+        return {
+            "BLOCK_M": 16,
+            "BLOCK_N": 128,
+            "BLOCK_K": 128,
+            "GROUP_M": 1,
+            "num_warps": 8,
+            "num_stages": 3,
+        }
     if num_tokens <= 128:
-        return {"BLOCK_M": 32, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 8,
-                "num_warps": 4, "num_stages": 3}
-    return {"BLOCK_M": 64, "BLOCK_N": 256, "BLOCK_K": 128, "GROUP_M": 8,
-            "num_warps": 8, "num_stages": 3}
+        return {
+            "BLOCK_M": 32,
+            "BLOCK_N": 128,
+            "BLOCK_K": 128,
+            "GROUP_M": 8,
+            "num_warps": 4,
+            "num_stages": 3,
+        }
+    return {
+        "BLOCK_M": 64,
+        "BLOCK_N": 256,
+        "BLOCK_K": 128,
+        "GROUP_M": 8,
+        "num_warps": 8,
+        "num_stages": 3,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -187,10 +221,15 @@ def smoothquant_matmul(
 
     block_k = min(triton.next_power_of_2(k), 1024)
     _quantize_activations_kernel[(m,)](
-        a, qactivations, activation_scales,
-        m, k,
-        a.stride(0), a.stride(1),
-        qactivations.stride(0), qactivations.stride(1),
+        a,
+        qactivations,
+        activation_scales,
+        m,
+        k,
+        a.stride(0),
+        a.stride(1),
+        qactivations.stride(0),
+        qactivations.stride(1),
         BLOCK_K=block_k,
         num_warps=4,
     )
@@ -205,12 +244,21 @@ def smoothquant_matmul(
     grid = (triton.cdiv(m, cfg["BLOCK_M"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
 
     _smoothquant_matmul_kernel[grid](
-        qactivations, qweight, out,
-        activation_scales, weight_scales, bias,
-        m, n, k,
-        qactivations.stride(0), qactivations.stride(1),
-        qweight.stride(0), qweight.stride(1),
-        out.stride(0), out.stride(1),
+        qactivations,
+        qweight,
+        out,
+        activation_scales,
+        weight_scales,
+        bias,
+        m,
+        n,
+        k,
+        qactivations.stride(0),
+        qactivations.stride(1),
+        qweight.stride(0),
+        qweight.stride(1),
+        out.stride(0),
+        out.stride(1),
         HAS_BIAS=bias is not None,
         **cfg,
     )

@@ -23,69 +23,71 @@ def _format_params(module: nn.Module) -> str:
     return f" [{total:,} params, {'/'.join(sorted(dtypes))}]"
 
 
-def _tree_lines(module: nn.Module, prefix: str = "", name: str = "model") -> list[str]:
-    """Recursively build tree lines."""
-    lines: list[str] = []
-    type_name = type(module).__name__
-    param_info = _format_params(module)
-    lines.append(f"{prefix}{name}: {type_name}{param_info}")
-
-    children = list(module.named_children())
-    for i, (child_name, child) in enumerate(children):
-        is_last = i == len(children) - 1
-        connector = "└── " if is_last else "├── "
-        extension = "    " if is_last else "│   "
-        child_lines = _tree_lines(child, prefix=prefix + extension, name=child_name)
-        # Replace first line's prefix with the connector
-        first = f"{prefix}{connector}{child_name}: {type(child).__name__}{_format_params(child)}"
-        lines.append(first)
-        lines.extend(child_lines[1:])  # skip the redundant first line from recursion
-
-    return lines
-
-
 def export_structure_tree(model: nn.Module, max_depth: int = 4) -> str:
     """Export the model structure as an indented text tree.
 
     Args:
         model: The PyTorch model.
-        max_depth: Maximum nesting depth to display.
+        max_depth: Maximum nesting depth to display below the root.
 
     Returns:
         Multi-line string of the tree.
     """
     lines: list[str] = []
-    _build_tree(model, lines, prefix="", depth=0, max_depth=max_depth, name="model")
+    _build_tree(
+        model,
+        lines,
+        prefix="",
+        depth=0,
+        max_depth=max_depth,
+        name="model",
+        is_root=True,
+        is_last=True,
+    )
     return "\n".join(lines)
 
 
-def _build_tree(module: nn.Module, lines: list[str], prefix: str,
-                depth: int, max_depth: int, name: str) -> None:
-    """Recursively build the tree into lines list."""
-    type_name = type(module).__name__
-    param_info = _format_params(module)
-    lines.append(f"{prefix}{name}: {type_name}{param_info}")
+def _build_tree(
+    module: nn.Module,
+    lines: list[str],
+    prefix: str,
+    depth: int,
+    max_depth: int,
+    name: str,
+    is_root: bool,
+    is_last: bool,
+) -> None:
+    """Recursively build the tree into lines list.
 
-    if depth >= max_depth:
-        children = list(module.named_children())
-        if children:
-            lines.append(f"{prefix}    ... ({len(children)} children)")
-        return
+    A node's connector (``├── ``/``└── ``) sits on its own line; children
+    inherit ``prefix`` extended by a continuation vertical (or blank, for a
+    last child). ``depth`` counts levels below the root, so ``max_depth=1``
+    renders the root and its direct children only.
+    """
+    if not is_root:
+        connector = "└── " if is_last else "├── "
+        lines.append(f"{prefix}{connector}{name}: {type(module).__name__}{_format_params(module)}")
+        prefix += "    " if is_last else "│   "
+    else:
+        lines.append(f"{name}: {type(module).__name__}{_format_params(module)}")
 
     children = list(module.named_children())
+    if not children:
+        return
+    if depth >= max_depth:
+        lines.append(f"{prefix}    ... ({len(children)} children)")
+        return
     for i, (child_name, child) in enumerate(children):
-        is_last = i == len(children) - 1
-        connector = "└── " if is_last else "├── "
-        extension = "    " if is_last else "│   "
-        lines.append(f"{prefix}{connector}{child_name}: {type(child).__name__}{_format_params(child)}")
-        # Recurse into grandchildren
-        grandchildren = list(child.named_children())
-        for j, (gc_name, gc) in enumerate(grandchildren):
-            gc_is_last = j == len(grandchildren) - 1
-            gc_connector = "└── " if gc_is_last else "├── "
-            gc_extension = "    " if gc_is_last else "│   "
-            _build_tree(gc, lines, prefix + extension + gc_extension,
-                       depth + 2, max_depth, gc_name)
+        _build_tree(
+            child,
+            lines,
+            prefix,
+            depth + 1,
+            max_depth,
+            child_name,
+            is_root=False,
+            is_last=i == len(children) - 1,
+        )
 
 
 def print_structure_tree(model: nn.Module, max_depth: int = 4) -> None:

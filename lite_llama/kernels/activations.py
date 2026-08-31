@@ -9,8 +9,7 @@ Usage:
 
 import math
 
-import triton
-import triton.language as tl
+from ._compat import tl, triton
 
 sqrt2 = math.sqrt(2.0)
 

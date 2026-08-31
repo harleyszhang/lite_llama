@@ -136,6 +136,7 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers --strict-config"
 markers = [
   "gpu: requires a CUDA device (auto-skipped on CPU-only machines; applied automatically to tests/kernels/)",
+  "cpu: pure-CPU test living under a gpu-marked directory; exempts the file from the directory-level gpu mark",
   "weights: requires a converted checkpoint (auto-skipped when none is found; override the location with LITE_LLAMA_TEST_MODEL_DIR)",
   "slow: takes seconds rather than milliseconds (golden regression); excluded by `make test-fast`",
   "eval: benchmark accuracy run driven by tests/evals/configs (minutes, needs the dataset); run it with `make test-eval`",

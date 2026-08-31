@@ -12,11 +12,25 @@ v0.7.0 升级调度器（参考 vLLM Scheduler v1），引入三项能力：
 2. **Prefix caching**：基于 block-hash 复用共享 prompt 前缀的 KV（对标 vLLM），共享 system prompt 的请求只 prefill 自己的 tail。
 3. **抢占**（recompute 策略）：KV 压力超水位线时 evict 最新请求并重新排队。
 
+## 0. 引擎接线状态（先读这一节）
+
+本文所有 GIF 与实测数据都由脚本**直接驱动 `Scheduler`** 录制，它们如实描述 scheduler 层的行为与测试覆盖（`tests/engine/test_scheduler.py`、`test_prefix_cache.py`）。但三项能力在 **引擎层（`ContinuousBatchingEngine`）当前均未端到端生效**：
+
+| 能力 | scheduler 层 | 引擎层现状 |
+|------|-------------|-----------|
+| Chunked prefill | 已实现并有测试 | 钳制为 `max_chunk_size=0`（启动 warning）：prefill kernel 不读前一 chunk 的 KV，且引擎从不调 `advance_chunks()`，长 prompt 曾永远卡在重 prefill |
+| Prefix caching | 已实现并有测试 | 引擎忽略 `num_cached_tokens`：结果**正确**（全量重算），但没有 KV 复用收益——「800 → 32 token」在引擎路径不发生 |
+| Preemption | 已实现并有测试 | 钳制为关闭（启动 warning）：驱逐不重置 `Request.text`/detokenizer（recompute 后文本叠加），且防活锁承诺不成立——recompute 的首个 token 立即恢复被驱逐资格，两个超订请求会互相驱逐、永远到不了第二个 decode token |
+
+另：scheduler 的 `SchedulerOutput` 允许 prefill 与 decode 同 step 并存，但引擎每步仍二选一（prefill 优先，decode 让位一步）。
+
+端到端接通依赖：prefill kernel 读取缓存前缀（chunked prefill）、引擎消费 `preempted`/`num_cached_tokens`、调度 policy 化（见 `ROADMAP.md` 地基 1 / A3）。
+
 ## 1. Feature: Chunked Prefill
 
 **v0.6 行为：** 一个 2000-token prompt 的 prefill 在**单个 step 内一次做完**。同 step 里的 decode 请求必须等这 2000 token 的 attention/GEMM 全部算完才能拿到自己的下一个 token，TPOT 出现 spike。
 
-**v0.7 行为：** prefill 按 `max_chunk_size=512` 分片，单 step 承载的 prefill 工作量被封顶，decode 的等待时间由 chunk 大小决定，而不再由 prompt 长度决定。
+**v0.7 行为（scheduler 层）：** prefill 按 `max_chunk_size=512` 分片，单 step 承载的 prefill 工作量被封顶，decode 的等待时间由 chunk 大小决定，而不再由 prompt 长度决定。引擎层见 [§0](#0-引擎接线状态先读这一节)。
 
 ### 可视化：同一份 scheduler 代码，只改 `max_chunk_size`
 
@@ -74,8 +88,8 @@ sched = Scheduler(config, num_slots=64)
 | req-3 (shared) | 768 | **32** | 72.0% |
 
 **关键结论：** 第一个请求 cold，prefill 全部 800 token 并填充缓存；之后每个共享前缀的
-请求跳过 768 token，实际 prefill 工作量从 800 → 32 token，**降低 25x**。命中率随共享
-请求增多持续爬升到 72%。
+请求在 scheduler 层的记账上跳过 768 token，实际 prefill 工作量从 800 → 32 token，**降低 25x**。
+命中率随共享请求增多持续爬升到 72%。（引擎层当前忽略该记账，见 [§0](#0-引擎接线状态先读这一节)。）
 
 > 复现：`python scripts/gen_prefix_cache_gif.py`
 > benchmark 日志：[`docs/benchmark_logs/bench_prefix_cache_v07.json`](benchmark_logs/bench_prefix_cache_v07.json)
@@ -170,9 +184,9 @@ print(f"total preemptions: {sched.num_preemptions}")
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `max_chunk_size` | 512 | 每步最大 prefill token 数。0=不分片 |
-| `enable_prefix_cache` | False | 开启 block-hash 前缀复用（v0.7 已实现）|
-| `enable_preemption` | False | 允许 `max_num_seqs` 超订 slot，用 recompute 时分复用（v0.7 已实现）|
+| `max_chunk_size` | 512 | 每步最大 prefill token 数。0=不分片。**引擎层暂钳制为 0（见 §0）** |
+| `enable_prefix_cache` | False | 开启 block-hash 前缀复用（scheduler 层已实现；引擎层尚无收益，见 §0）|
+| `enable_preemption` | False | 允许 `max_num_seqs` 超订 slot，用 recompute 时分复用（scheduler 层已实现；引擎层暂钳制为关闭，见 §0）|
 
 ## 6. 测试结果
 
@@ -199,9 +213,9 @@ print(f"total preemptions: {sched.num_preemptions}")
 ```bash
 git checkout prefix_caching && uv pip install -e .
 
-# 启用 chunked prefill (默认 512 tokens/chunk)
-lite-llama serve --port 8000  # scheduler 自动使用 chunked prefill
+lite-llama serve --port 8000
 
-# 启用 prefix caching + 自定义 chunk 大小
-# SchedulerConfig(max_chunk_size=256, enable_prefix_cache=True)
+# 注：ContinuousBatchingEngine 当前对 max_chunk_size / enable_preemption 做诚实钳制
+#（各打一条 warning 后按关闭处理），prefix cache 命中在引擎层暂不减少 prefill 工作量。
+# 三项能力均可在 scheduler 层直接体验与测试，见 §0。
 ```

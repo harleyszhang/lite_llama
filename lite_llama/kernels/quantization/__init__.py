@@ -15,7 +15,7 @@ Naming follows the *weight-activation* bit-width convention:
 
 from .fp8 import fp8_matmul
 from .w4a16 import w4a16_matmul
-from .w8a16 import w8a16_matmul
 from .w8a8 import smoothquant_matmul
+from .w8a16 import w8a16_matmul
 
 __all__ = ["fp8_matmul", "smoothquant_matmul", "w4a16_matmul", "w8a16_matmul"]

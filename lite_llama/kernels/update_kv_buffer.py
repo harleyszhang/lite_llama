@@ -11,8 +11,8 @@ Usage:
 """
 
 import torch
-import triton
-import triton.language as tl
+
+from ._compat import tl, triton
 
 
 @triton.jit
@@ -92,7 +92,7 @@ def update_kv_buffer(K_Values, V_Values, Select_Index, KV_Buffer):
         KV_Buffer 张量被填, KV_Buffer[Select_Index[i], :num_kv_heads, :] = K[i, :, :] 且
         KV_Buffer[Select_Index[i], num_kv_heads:, :] = V[i, :, :]。
     """
-    seq_len = Select_Index.shape[0]     # number_tokens
+    seq_len = Select_Index.shape[0]  # number_tokens
     head_num = KV_Buffer.shape[1] // 2  # one side of the fused K/V rows
     head_dim = KV_Buffer.shape[2]
     assert K_Values.shape == (seq_len, head_num, head_dim) and V_Values.shape == (

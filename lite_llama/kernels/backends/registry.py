@@ -15,8 +15,9 @@ Usage:
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import torch
 
@@ -51,6 +52,7 @@ def _probe_triton() -> bool:
     """Triton available (Linux + CUDA)."""
     try:
         import triton  # noqa: F401
+
         return torch.cuda.is_available()
     except ImportError:
         return False
@@ -99,7 +101,8 @@ class BackendRegistry:
 
         candidates = sorted(
             [b for b in self._backends if b.op == op],
-            key=lambda b: b.priority, reverse=True,
+            key=lambda b: b.priority,
+            reverse=True,
         )
 
         selected: Backend | None = None
@@ -123,7 +126,8 @@ class BackendRegistry:
 
         self._cache[op] = selected
         self._explanations[op] = (
-            f"Backend '{op}' selection:\n" + "\n".join(lines)
+            f"Backend '{op}' selection:\n"
+            + "\n".join(lines)
             + f"\n  -> {selected.name if selected else 'NONE'}"
         )
         if selected:
@@ -158,24 +162,51 @@ def get_registry() -> BackendRegistry:
 def _register_defaults(r: BackendRegistry) -> None:
     """Register built-in backends (mirrors vLLM kernel candidates)."""
     # Linear
-    r.register(Backend("triton_quant", "linear", 100, _probe_triton,
-                       "Triton w8a16/w4a16/w8a8/fp8 quantised GEMM"))
-    r.register(Backend("triton_fp16", "linear", 90, _probe_triton,
-                       "Triton fp16 GEMM (for unquantised)"))
-    r.register(Backend("torch_linear", "linear", 10, _probe_torch,
-                       "F.linear fallback (always available)"))
-    r.register(Backend("fp8_native", "linear", 110, _probe_fp8_native,
-                       "Native fp8 tensor cores (sm89+)"))
+    r.register(
+        Backend(
+            "triton_quant",
+            "linear",
+            100,
+            _probe_triton,
+            "Triton w8a16/w4a16/w8a8/fp8 quantised GEMM",
+        )
+    )
+    r.register(
+        Backend("triton_fp16", "linear", 90, _probe_triton, "Triton fp16 GEMM (for unquantised)")
+    )
+    r.register(
+        Backend("torch_linear", "linear", 10, _probe_torch, "F.linear fallback (always available)")
+    )
+    r.register(
+        Backend("fp8_native", "linear", 110, _probe_fp8_native, "Native fp8 tensor cores (sm89+)")
+    )
 
     # Attention
-    r.register(Backend("triton_flash_v2", "attention", 100, _probe_triton,
-                       "Triton FlashAttention-2 varlen + FlashDecoding"))
-    r.register(Backend("torch_sdpa", "attention", 30, _probe_torch,
-                       "torch.nn.functional.scaled_dot_product_attention"))
+    r.register(
+        Backend(
+            "triton_flash_v2",
+            "attention",
+            100,
+            _probe_triton,
+            "Triton FlashAttention-2 varlen + FlashDecoding",
+        )
+    )
+    r.register(
+        Backend(
+            "torch_sdpa",
+            "attention",
+            30,
+            _probe_torch,
+            "torch.nn.functional.scaled_dot_product_attention",
+        )
+    )
 
     # Overlap
-    r.register(Backend("cuda_stream", "overlap", 100, _probe_cuda_graph,
-                       "Multi-stream compute/comm overlap"))
+    r.register(
+        Backend(
+            "cuda_stream", "overlap", 100, _probe_cuda_graph, "Multi-stream compute/comm overlap"
+        )
+    )
 
 
 # --------------------------------------------------------------------------- #

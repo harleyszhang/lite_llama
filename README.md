@@ -37,6 +37,8 @@
 - **Chunked Prefill** (v0.7): long prompts split into 512-token chunks so per-step prefill work is bounded (2000 → 512 tokens, 3.9× lower peak) — decode requests interleave instead of waiting behind a whole prompt.
 - **Prefix Caching** (v0.7): block-hash chained prefix reuse — shared system prompts are prefilled once and reused by later requests; LRU-evicted under capacity pressure (aligned with vLLM's `BlockPool`).
 - **Preemption** (v0.7): opt-in recompute-based eviction (`enable_preemption`) when the running set exceeds slot capacity; evicted requests re-queue with a progress quantum that prevents livelock.
+
+> The three v0.7 capabilities above are implemented and tested in the **scheduler layer**. The continuous engine does not consume them end-to-end yet: it clamps `max_chunk_size` to 0 and `enable_preemption` off (each with a startup warning), and prefix-cache hits are ignored (outputs stay correct, just without KV reuse). See `docs/release-v0.7.0.md` §0 for the wiring status.
 - **Backend Registry** (v0.8): declarative kernel-backend selection with probe + `explain_selection()`; environment-variable override and graceful degradation when a backend's dependency is missing.
 
 ## Setup and Installation

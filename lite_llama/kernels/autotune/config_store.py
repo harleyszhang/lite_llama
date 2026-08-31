@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .config_key import TuneKey
@@ -27,10 +27,12 @@ from .config_key import TuneKey
 _SCHEMA_VERSION = 1
 
 #: Default cache directory (XDG-compatible fallback).
-_DEFAULT_CACHE_DIR = Path(os.environ.get(
-    "LITE_LLAMA_AUTOTUNE_DIR",
-    Path.home() / ".cache" / "lite_llama" / "autotune",
-))
+_DEFAULT_CACHE_DIR = Path(
+    os.environ.get(
+        "LITE_LLAMA_AUTOTUNE_DIR",
+        Path.home() / ".cache" / "lite_llama" / "autotune",
+    )
+)
 
 
 class ConfigStore:
@@ -70,7 +72,7 @@ class ConfigStore:
             "dtype": key.dtype,
             "config": config,
             "latency_us": latency_us,
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
         }
         self._flush(key.op)
 
@@ -117,10 +119,13 @@ class ConfigStore:
         fd, tmp = tempfile.mkstemp(dir=self._cache_dir, suffix=".tmp")
         try:
             os.write(fd, json.dumps(data, indent=2, ensure_ascii=False).encode())
+        finally:
+            # Close before renaming (Windows forbids replacing an open file);
+            # a close here can no longer mask a failed rename with EBADF.
             os.close(fd)
+        try:
             os.replace(tmp, target)
         except BaseException:
-            os.close(fd) if not os.get_inheritable(fd) else None
             if os.path.exists(tmp):
                 os.unlink(tmp)
             raise

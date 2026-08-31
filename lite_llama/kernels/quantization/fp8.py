@@ -12,9 +12,8 @@ Usage:
 from __future__ import annotations
 
 import torch
-import triton
-import triton.language as tl
 
+from .._compat import tl, triton
 from .w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
 
 #: Exponent correction when *both* operands went through the e4m3 -> fp16 bit
@@ -27,17 +26,31 @@ _FP8_BIT_TRICK_SCALE_SQ = FP8_E4M3_BIT_TRICK_SCALE * FP8_E4M3_BIT_TRICK_SCALE
 # --------------------------------------------------------------------------- #
 @triton.jit
 def _fp8_matmul_kernel(
-    a_ptr, b_ptr, c_ptr,
-    a_scale_ptr, b_scale_ptr, bias_ptr,
-    M, N, K,
-    stride_am, stride_ak,
-    stride_bn, stride_bk,
-    stride_cm, stride_cn,
-    stride_bsn, stride_bsk,
-    GROUP_N: tl.constexpr, GROUP_K: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    a_scale_ptr,
+    b_scale_ptr,
+    bias_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bn,
+    stride_bk,
+    stride_cm,
+    stride_cn,
+    stride_bsn,
+    stride_bsk,
+    GROUP_N: tl.constexpr,
+    GROUP_K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
-    NATIVE_FP8: tl.constexpr, HAS_BIAS: tl.constexpr,
+    NATIVE_FP8: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
     DEQUANT_SCALE: tl.constexpr,
 ):
     """One ``[BLOCK_M, BLOCK_N]`` tile of ``C = (A @ B.T) * a_scale * b_scale``.
@@ -110,13 +123,31 @@ def _launch_config(num_tokens: int) -> dict:
     128-wide k-tile is exactly one memory transaction per output channel.
     """
     if num_tokens <= 32:
-        return {"BLOCK_M": 16, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 1,
-                "num_warps": 8, "num_stages": 3}
+        return {
+            "BLOCK_M": 16,
+            "BLOCK_N": 128,
+            "BLOCK_K": 128,
+            "GROUP_M": 1,
+            "num_warps": 8,
+            "num_stages": 3,
+        }
     if num_tokens <= 128:
-        return {"BLOCK_M": 32, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 8,
-                "num_warps": 4, "num_stages": 3}
-    return {"BLOCK_M": 64, "BLOCK_N": 256, "BLOCK_K": 128, "GROUP_M": 8,
-            "num_warps": 8, "num_stages": 3}
+        return {
+            "BLOCK_M": 32,
+            "BLOCK_N": 128,
+            "BLOCK_K": 128,
+            "GROUP_M": 8,
+            "num_warps": 4,
+            "num_stages": 3,
+        }
+    return {
+        "BLOCK_M": 64,
+        "BLOCK_N": 256,
+        "BLOCK_K": 128,
+        "GROUP_M": 8,
+        "num_warps": 8,
+        "num_stages": 3,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -177,13 +208,23 @@ def fp8_matmul(
     cfg = _launch_config(m)
     grid = (triton.cdiv(m, cfg["BLOCK_M"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
     _fp8_matmul_kernel[grid](
-        a, qweight, out,
-        a_scale, weight_scale_inv, bias,
-        m, n, k,
-        a.stride(0), a.stride(1),
-        qweight.stride(0), qweight.stride(1),
-        out.stride(0), out.stride(1),
-        weight_scale_inv.stride(0), weight_scale_inv.stride(1),
+        a,
+        qweight,
+        out,
+        a_scale,
+        weight_scale_inv,
+        bias,
+        m,
+        n,
+        k,
+        a.stride(0),
+        a.stride(1),
+        qweight.stride(0),
+        qweight.stride(1),
+        out.stride(0),
+        out.stride(1),
+        weight_scale_inv.stride(0),
+        weight_scale_inv.stride(1),
         GROUP_N=group_n,
         GROUP_K=min(group_k, k),
         NATIVE_FP8=native,

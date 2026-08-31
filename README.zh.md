@@ -37,6 +37,8 @@
 - **Chunked Prefill** (v0.7)：长 prompt 按 512 token 分片，单 step prefill 工作量被封顶（2000 → 512 token，峰值降 3.9×）——decode 与 prefill 交织，而不再等一个完整 prompt。
 - **Prefix Caching** (v0.7)：block-hash 链式前缀复用——共享 system prompt 只 prefill 一次，后续请求直接复用；容量不足时 LRU 驱逐（对标 vLLM `BlockPool`）。
 - **抢占机制** (v0.7)：opt-in 超订驱逐（`enable_preemption`），running set 超过 slot 容量时 evict 最年轻请求（recompute 策略）；进度配额防活锁，被驱逐请求自动重新排队。
+
+> 以上三项 v0.7 能力已在 **scheduler 层**实现并有测试。ContinuousBatchingEngine 尚未端到端消费它们：`max_chunk_size` 被钳制为 0、`enable_preemption` 被钳制为关闭（各带一条启动 warning），prefix cache 命中被忽略（输出仍正确，仅无 KV 复用收益）。接线状态详见 `docs/release-v0.7.0.md` §0。
 - **Backend 注册表** (v0.8)：声明式 kernel 后端选择 + `explain_selection()` 解释原因；环境变量强制切换，缺库自动降级。
 
 ## 安装和快速使用

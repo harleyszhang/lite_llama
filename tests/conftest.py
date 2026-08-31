@@ -93,9 +93,15 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
     for item in items:
         # Triton kernels cannot run on CPU; mark by location so new kernel
-        # tests inherit the requirement automatically.
-        if any(
-            f"tests/{d}/" in item.nodeid or f"tests\\{d}\\" in item.nodeid for d in _GPU_ONLY_DIRS
+        # tests inherit the requirement automatically. A file under such a
+        # directory that is pure CPU (e.g. the autotune config store, which
+        # never touches Triton) opts out with ``pytestmark = pytest.mark.cpu``.
+        if (
+            any(
+                f"tests/{d}/" in item.nodeid or f"tests\\{d}\\" in item.nodeid
+                for d in _GPU_ONLY_DIRS
+            )
+            and item.get_closest_marker("cpu") is None
         ):
             item.add_marker(pytest.mark.gpu)
 
@@ -105,9 +111,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             if is_golden_test:
                 # Golden tests must NOT silently skip — mark as UNVERIFIED.
                 if _GOLDEN_STRICT:
-                    item.add_marker(
-                        pytest.mark.skip(reason="GOLDEN GATE FAIL: no CUDA device")
-                    )
+                    item.add_marker(pytest.mark.skip(reason="GOLDEN GATE FAIL: no CUDA device"))
                     # Override with a custom fixture that calls pytest.fail
                     item.add_marker(
                         pytest.mark.xfail(

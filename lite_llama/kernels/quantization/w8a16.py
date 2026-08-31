@@ -12,8 +12,8 @@ Usage:
 from __future__ import annotations
 
 import torch
-import triton
-import triton.language as tl
+
+from .._compat import tl, triton
 
 #: Exponent correction of the e4m3 -> fp16 bit trick, see :func:`dequant_fp8e4m3`.
 FP8_E4M3_BIT_TRICK_SCALE = 256.0
@@ -47,14 +47,30 @@ def dequant_fp8e4m3(q):
 # --------------------------------------------------------------------------- #
 @triton.jit
 def _w8a16_matmul_kernel(
-    a_ptr, b_ptr, c_ptr, scale_ptr, bias_ptr,
-    M, N, K,
-    stride_am, stride_ak, stride_bn, stride_bk,
-    stride_cm, stride_cn, stride_sn, stride_sk,
-    GROUP_N: tl.constexpr, GROUP_K: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    scale_ptr,
+    bias_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bn,
+    stride_bk,
+    stride_cm,
+    stride_cn,
+    stride_sn,
+    stride_sk,
+    GROUP_N: tl.constexpr,
+    GROUP_K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
-    IS_FP8: tl.constexpr, HAS_BIAS: tl.constexpr,
+    IS_FP8: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
     DEQUANT_SCALE: tl.constexpr,
 ):
     """One ``[BLOCK_M, BLOCK_N]`` tile of ``C = A @ dequant(B).T``.
@@ -120,13 +136,31 @@ def _launch_config(num_tokens: int) -> dict:
     grows it towards a compute-shaped block.
     """
     if num_tokens <= 32:
-        return {"BLOCK_M": 16, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 1,
-                "num_warps": 8, "num_stages": 3}
+        return {
+            "BLOCK_M": 16,
+            "BLOCK_N": 128,
+            "BLOCK_K": 128,
+            "GROUP_M": 1,
+            "num_warps": 8,
+            "num_stages": 3,
+        }
     if num_tokens <= 128:
-        return {"BLOCK_M": 32, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 8,
-                "num_warps": 4, "num_stages": 3}
-    return {"BLOCK_M": 64, "BLOCK_N": 256, "BLOCK_K": 128, "GROUP_M": 8,
-            "num_warps": 8, "num_stages": 3}
+        return {
+            "BLOCK_M": 32,
+            "BLOCK_N": 128,
+            "BLOCK_K": 128,
+            "GROUP_M": 8,
+            "num_warps": 4,
+            "num_stages": 3,
+        }
+    return {
+        "BLOCK_M": 64,
+        "BLOCK_N": 256,
+        "BLOCK_K": 128,
+        "GROUP_M": 8,
+        "num_warps": 8,
+        "num_stages": 3,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -180,12 +214,22 @@ def w8a16_matmul(
     cfg = _launch_config(m)
     grid = (triton.cdiv(m, cfg["BLOCK_M"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
     _w8a16_matmul_kernel[grid](
-        a, qweight, out, scales, bias,
-        m, n, k,
-        a.stride(0), a.stride(1),
-        qweight.stride(0), qweight.stride(1),
-        out.stride(0), out.stride(1),
-        scales.stride(0), scales.stride(1),
+        a,
+        qweight,
+        out,
+        scales,
+        bias,
+        m,
+        n,
+        k,
+        a.stride(0),
+        a.stride(1),
+        qweight.stride(0),
+        qweight.stride(1),
+        out.stride(0),
+        out.stride(1),
+        scales.stride(0),
+        scales.stride(1),
         GROUP_N=group_n,
         GROUP_K=min(group_k, k),
         IS_FP8=is_fp8,

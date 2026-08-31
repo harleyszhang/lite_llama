@@ -23,7 +23,7 @@ Usage::
 from __future__ import annotations
 
 import statistics
-from typing import Callable
+from collections.abc import Callable
 
 import torch
 
@@ -89,6 +89,14 @@ class AutotuneSearcher:
             if latency < best_latency:
                 best_latency = latency
                 best_config = cfg
+
+        if best_latency == float("inf"):
+            # Every config raised; persisting configs[0] with an infinite
+            # latency would hand later lookups a config that never ran.
+            raise RuntimeError(
+                f"autotune found no working config for {op} at shape {shape}: "
+                f"all {len(configs)} candidates failed"
+            )
 
         # Persist the winner
         m, n, k = shape

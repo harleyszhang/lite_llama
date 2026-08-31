@@ -25,8 +25,8 @@ Usage:
 from __future__ import annotations
 
 import torch
-import triton
-import triton.language as tl
+
+from .._compat import tl, triton
 
 _PACK_FACTOR = 8
 
@@ -36,14 +36,26 @@ _PACK_FACTOR = 8
 # --------------------------------------------------------------------------- #
 @triton.jit
 def _w4a16_matmul_kernel(
-    a_ptr, b_ptr, c_ptr, scale_ptr, zero_ptr, bias_ptr,
-    M, N, K,
-    stride_am, stride_ak,
-    stride_bn, stride_bk,
-    stride_cm, stride_cn,
-    stride_sn, stride_sk,
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    scale_ptr,
+    zero_ptr,
+    bias_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bn,
+    stride_bk,
+    stride_cm,
+    stride_cn,
+    stride_sn,
+    stride_sk,
     GROUP_SIZE: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
     GROUP_M: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
@@ -106,11 +118,13 @@ def _w4a16_matmul_kernel(
         # Load scale and zero for this group: [BLOCK_N]
         scale = tl.load(
             scale_ptr + offs_n * stride_sn + g_idx * stride_sk,
-            mask=offs_n < N, other=1.0,
+            mask=offs_n < N,
+            other=1.0,
         )
         zero = tl.load(
             zero_ptr + offs_n * stride_sn + g_idx * stride_sk,
-            mask=offs_n < N, other=0.0,
+            mask=offs_n < N,
+            other=0.0,
         )
 
         # Dequant: [BLOCK_N, GROUP_SIZE]
@@ -182,29 +196,38 @@ def w4a16_matmul(
 
     # Autotune lookup or heuristic fallback
     from lite_llama.kernels.autotune import get_best_config
+
     config = get_best_config("w4a16_matmul", m=m, n=n, k=k, dtype="int4")
     if config is None:
         if m <= 32:
-            config = {"BLOCK_M": 16, "BLOCK_N": 64, "GROUP_M": 1,
-                      "num_warps": 4, "num_stages": 2}
+            config = {"BLOCK_M": 16, "BLOCK_N": 64, "GROUP_M": 1, "num_warps": 4, "num_stages": 2}
         elif m <= 128:
-            config = {"BLOCK_M": 32, "BLOCK_N": 64, "GROUP_M": 8,
-                      "num_warps": 4, "num_stages": 2}
+            config = {"BLOCK_M": 32, "BLOCK_N": 64, "GROUP_M": 8, "num_warps": 4, "num_stages": 2}
         else:
-            config = {"BLOCK_M": 64, "BLOCK_N": 64, "GROUP_M": 8,
-                      "num_warps": 4, "num_stages": 2}
+            config = {"BLOCK_M": 64, "BLOCK_N": 64, "GROUP_M": 8, "num_warps": 4, "num_stages": 2}
 
     block_m = config["BLOCK_M"]
     block_n = config["BLOCK_N"]
     grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
 
     _w4a16_matmul_kernel[grid](
-        a, qweight, out, scales, zeros, bias,
-        m, n, k,
-        a.stride(0), a.stride(1),
-        qweight.stride(0), qweight.stride(1),
-        out.stride(0), out.stride(1),
-        scales.stride(0), scales.stride(1),
+        a,
+        qweight,
+        out,
+        scales,
+        zeros,
+        bias,
+        m,
+        n,
+        k,
+        a.stride(0),
+        a.stride(1),
+        qweight.stride(0),
+        qweight.stride(1),
+        out.stride(0),
+        out.stride(1),
+        scales.stride(0),
+        scales.stride(1),
         GROUP_SIZE=group_size,
         BLOCK_M=block_m,
         BLOCK_N=block_n,

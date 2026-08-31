@@ -8,9 +8,9 @@ Usage:
 """
 
 import torch
-import triton
-import triton.language as tl
 from torch.amp import custom_fwd
+
+from ._compat import tl, triton
 
 configs_tma = [
     triton.Config({"BLOCK_M_SIZE": BM, "BLOCK_N_SIZE": BN}, num_stages=stages, num_warps=warps)
@@ -189,6 +189,7 @@ def flash_attention2_no_pad(
 
     # Autotune lookup: use persisted best config if available, else heuristic.
     from .autotune import get_best_config
+
     tuned = get_best_config("flash_attn_nopad", m=max_seq_len, n=HEAD_DIM, k=HEAD_DIM, dtype="fp16")
     if tuned is not None:
         BLOCK_M = tuned.get("BLOCK_M_SIZE", 64)

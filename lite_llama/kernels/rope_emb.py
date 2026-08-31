@@ -7,8 +7,7 @@ Usage:
     q, k = rope_emb_forward(q, k, cos, sin, batch_size, seq_len)
 """
 
-import triton
-import triton.language as tl
+from ._compat import tl, triton
 
 
 @triton.jit

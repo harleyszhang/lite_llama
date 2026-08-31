@@ -8,16 +8,16 @@ Usage:
 """
 
 import torch
-import triton
-import triton.language as tl
+
+from ._compat import tl, triton
 
 
 @triton.jit
 def _fwd_kernel_update_kv_index(
     req_to_token_indexs,  # 输出张量的指针，形状为 (num_requests, max_seq_len)
-    b_req_idx,            # decode_batch 批次中每个请求的 ID，形状为 (num_tokens,)
-    b_seq_len,            # decode_batch 中每个请求的序列长度，形状为 (num_tokens,)
-    select_index,         # decode_batch 中每个 tokens的 KV 索引，形状为 (num_tokens,)
+    b_req_idx,  # decode_batch 批次中每个请求的 ID，形状为 (num_tokens,)
+    b_seq_len,  # decode_batch 中每个请求的序列长度，形状为 (num_tokens,)
+    select_index,  # decode_batch 中每个 tokens的 KV 索引，形状为 (num_tokens,)
     stride_req_to_token_b,  # req_to_token_indexs 在第一个维度（请求）的步幅
     stride_req_to_token_s,  # req_to_token_indexs 在第二个维度（序列长度）的步幅
 ):
@@ -50,7 +50,7 @@ def _fwd_kernel_update_kv_index(
 @torch.no_grad()
 def update_kv_index(req_to_token_indexs, b_req_idx, b_seq_len, select_index):
     """
-    根据每个 token 的请求索引 ID 和当前序列长度, 把这个 token 在 KV 缓存里的索 (select_index) 
+    根据每个 token 的请求索引 ID 和当前序列长度, 把这个 token 在 KV 缓存里的索 (select_index)
     存进输出张量 req_to_token_indexs 的正确位置
     参数：
         req_to_token_indexs (torch.Tensor): 输出张量，用于存储 KV 索引。形状为 (num_requests, max_seq_len)。
