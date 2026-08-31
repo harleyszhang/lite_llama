@@ -80,7 +80,13 @@ def mapping(checkpoint: Path) -> tuple[list[str], dict[str, str | None], set[str
         json.loads((checkpoint / "model.safetensors.index.json").read_text())["weight_map"]
     )
     config = ModelConfig.from_pretrained(checkpoint, max_seq_len=1024)
-    model_cls = ModelRegistry.resolve(config.model_type).load_class()
+    try:
+        model_cls = ModelRegistry.resolve(config.model_type).load_class()
+    except ValueError:
+        # A checkpoint whose architecture the registry does not carry (a Qwen1
+        # checkout, say) has no mapping to validate: skip with the reason rather
+        # than error four tests at setup.
+        pytest.skip(f"model_type {config.model_type!r} is not registered")
     with init_empty_parameters():
         model = model_cls(config)
 

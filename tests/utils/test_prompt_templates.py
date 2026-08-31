@@ -73,6 +73,21 @@ def test_cli_build_returns_none_for_the_base_style():
 
 
 def test_cli_build_uses_a_chat_prompter_for_an_instruct_style():
+    """An instruct checkpoint — by name hint — gets its prompts templated."""
     from lite_llama.cli import PrompterResolver
 
-    assert isinstance(PrompterResolver.build("qwen2", _FakeTokenizer()), ChatPrompter)
+    prompter = PrompterResolver.build("Qwen2.5-1.5B-Instruct", _FakeTokenizer())
+    assert isinstance(prompter, ChatPrompter)
+
+
+def test_cli_build_returns_none_without_a_hint_or_a_readable_config():
+    """A bare name with no instruct hint and no config to consult is sent verbatim.
+
+    This is the conservative direction the resolver documents: a template a base
+    model never saw is worse than a bare prompt. (The old per-family name maps
+    that used to answer "qwen2" -> chat are gone; the tokenizer's own template
+    made them vestigial.)
+    """
+    from lite_llama.cli import PrompterResolver
+
+    assert PrompterResolver.build("qwen2", _FakeTokenizer()) is None
