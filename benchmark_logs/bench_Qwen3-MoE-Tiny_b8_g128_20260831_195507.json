@@ -1,0 +1,30 @@
+{
+  "config": {
+    "model": "my_weight/Qwen3-MoE-Tiny",
+    "batch_size": 8,
+    "gen_len": 128,
+    "iters": 2,
+    "gpu": "NVIDIA A10",
+    "timestamp": "2026-08-31T19:55:07"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "batch_size": 8,
+    "prompt_tokens": 118,
+    "output_tokens": 1028,
+    "ttft_s": 0.005864335224032402,
+    "tpot_ms": 0.927611601118948,
+    "tgs": 8281.31902596845,
+    "latency_s": 0.12413481436669827
+  },
+  "transformers": {
+    "engine": "transformers",
+    "batch_size": 8,
+    "prompt_tokens": 118,
+    "output_tokens": 1032,
+    "ttft_s": 0.006336718797683716,
+    "tpot_ms": 3.8963312399573624,
+    "tgs": 2043.2927906359266,
+    "latency_s": 0.5050671175122261
+  }
+}

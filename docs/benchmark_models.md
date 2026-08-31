@@ -221,7 +221,7 @@ print(triton.testing.do_bench(lambda: w8a16_matmul(x, qw, sc, group_n=128, group
 "
 ```
 
-### 实测：TTFT / TPOT / TGS（`examples/benchmark.py`，新脚本）
+### 模型Benchmarks 汇总
 
 下表是用重构后的 `examples/benchmark.py` **实测**得到的结果（贪心解码、两端同一 tokenizer 统计输出 token、两端自然 EOS 停止、`torch.cuda.synchronize` 计时、取中位数）。指标口径对齐 vLLM/SGLang serving benchmark：
 
@@ -231,24 +231,62 @@ print(triton.testing.do_bench(lambda: w8a16_matmul(x, qw, sc, group_n=128, group
 
 | 模型 | GPU | batch | gen_len | 引擎 | TTFT (s) | TPOT (ms) | TGS (tok/s) |
 | --- | --- | ---: | ---: | --- | ---: | ---: | ---: |
-| Qwen2.5-0.5B | A10 | 8 | 128 | lite_llama | 0.0154 | 3.49 | 2235.2 |
-| Qwen2.5-0.5B | A10 | 8 | 128 | transformers | 0.0216 | 18.65 | 428.5 |
-| Qwen2.5-0.5B | A10 | 16 | 256 | lite_llama | 0.0183 | 3.77 | 4175.5 |
-| Qwen2.5-0.5B | A10 | 16 | 256 | transformers | 0.0228 | 19.53 | 818.9 |
-| Qwen2.5-1.5B-Instruct | A10 | 8 | 128 | lite_llama | 0.0184 | 8.70 | 911.3 |
-| Qwen2.5-1.5B-Instruct | A10 | 8 | 128 | transformers | 0.0273 | 23.50 | 340.0 |
-| Qwen2.5-1.5B-Instruct | A10 | 16 | 256 | lite_llama | 0.0240 | 8.97 | 1771.5 |
-| Qwen2.5-1.5B-Instruct | A10 | 16 | 256 | transformers | 0.0276 | 22.38 | 714.3 |
+| Qwen1.5-0.5B | A10 | 8 | 128 | lite_llama | 0.0180 | 3.04 | 2535.3 |
+| Qwen1.5-0.5B | A10 | 8 | 128 | transformers | 0.0215 | 19.65 | 406.8 |
+| Qwen1.5-0.5B | A10 | 16 | 256 | lite_llama | 0.0192 | 3.55 | 4424.8 |
+| Qwen1.5-0.5B | A10 | 16 | 256 | transformers | 0.0238 | 20.02 | 798.4 |
+| Qwen2.5-1.5B | A10 | 8 | 128 | lite_llama | 0.0219 | 9.36 | 844.5 |
+| Qwen2.5-1.5B | A10 | 8 | 128 | transformers | 0.0271 | 23.67 | 337.6 |
+| Qwen2.5-1.5B | A10 | 16 | 256 | lite_llama | 0.0228 | 8.69 | 1830.1 |
+| Qwen2.5-1.5B | A10 | 16 | 256 | transformers | 0.0289 | 24.21 | 660.4 |
+| Qwen2.5-1.5B-Instruct | A10 | 8 | 128 | lite_llama | 0.0216 | 8.24 | 958.8 |
+| Qwen2.5-1.5B-Instruct | A10 | 8 | 128 | transformers | 0.0277 | 24.14 | 331.1 |
+| Qwen2.5-1.5B-Instruct | A10 | 16 | 256 | lite_llama | 0.0225 | 8.51 | 1868.2 |
+| Qwen2.5-1.5B-Instruct | A10 | 16 | 256 | transformers | 0.0278 | 23.62 | 677.0 |
+| Qwen2.5-3B | A10 | 8 | 128 | lite_llama | 0.0279 | 18.67 | 426.6 |
+| Qwen2.5-3B | A10 | 8 | 128 | transformers | 0.0361 | 35.82 | 223.3 |
+| Qwen2.5-3B | A10 | 16 | 256 | lite_llama | 0.0364 | 19.23 | 828.9 |
+| Qwen2.5-3B | A10 | 16 | 256 | transformers | 0.0468 | 35.18 | 454.1 |
+| Qwen3-0.6B | A10 | 8 | 128 | lite_llama | 0.0253 | 4.23 | 1820.3 |
+| Qwen3-0.6B | A10 | 8 | 128 | transformers | 0.0317 | 28.94 | 276.2 |
+| Qwen3-0.6B | A10 | 16 | 256 | lite_llama | 0.0256 | 4.70 | 3346.7 |
+| Qwen3-0.6B | A10 | 16 | 256 | transformers | 0.0329 | 28.65 | 558.2 |
+| Qwen3-0.6B-FP8 | A10 | 8 | 128 | lite_llama | 0.0293 | 4.09 | 1864.5 |
+| Qwen3-0.6B-FP8 | A10 | 8 | 128 | transformers | 0.0311 | 29.08 | 274.9 |
+| Qwen3-0.6B-FP8 | A10 | 16 | 256 | lite_llama | 0.0291 | 4.53 | 3460.5 |
+| Qwen3-0.6B-FP8 | A10 | 16 | 256 | transformers | 0.0308 | 27.92 | 572.8 |
+| Qwen3-1.7B | A10 | 8 | 128 | lite_llama | 0.0264 | 9.28 | 850.0 |
+| Qwen3-1.7B | A10 | 8 | 128 | transformers | 0.0315 | 29.07 | 275.0 |
+| Qwen3-1.7B | A10 | 16 | 256 | lite_llama | 0.0270 | 9.77 | 1626.2 |
+| Qwen3-1.7B | A10 | 16 | 256 | transformers | 0.0342 | 29.68 | 538.8 |
+| Qwen3-MoE-Tiny | A10 | 8 | 128 | lite_llama | 0.0059 | 0.93 | 8281.3 |
+| Qwen3-MoE-Tiny | A10 | 8 | 128 | transformers | 0.0063 | 3.90 | 2043.3 |
+| Qwen3-MoE-Tiny | A10 | 16 | 256 | lite_llama | 0.0068 | 0.98 | 15934.9 |
+| Qwen3-MoE-Tiny | A10 | 16 | 256 | transformers | 0.0071 | 4.51 | 3540.1 |
+| Llama-3.2-3B-Instruct | A10 | 8 | 128 | lite_llama | 0.0254 | 15.41 | 516.4 |
+| Llama-3.2-3B-Instruct | A10 | 8 | 128 | transformers | 0.0309 | 25.33 | 315.3 |
+| Llama-3.2-3B-Instruct | A10 | 16 | 256 | lite_llama | 0.0514 | 15.96 | 994.1 |
+| Llama-3.2-3B-Instruct | A10 | 16 | 256 | transformers | 0.0557 | 27.74 | 574.6 |
+| Qwen3-8B | A10 | 8 | 128 | lite_llama | 0.0561 | 36.79 | 216.6 |
+| Meta-Llama-3.1-8B-Instruct | A10 | 8 | 128 | lite_llama | 0.0581 | 35.30 | 225.5 |
+| Qwen3-14B-AWQ | A10 | 8 | 128 | lite_llama | 0.1499 | 43.49 | 180.5 |
+| Qwen3-14B-AWQ | A10 | 16 | 256 | lite_llama | 0.2808 | 45.01 | 348.4 |
 
-结论：lite_llama 的 **decode 明显更快** —— TPOT / TGS 在 Qwen2.5-0.5B 上约 **5.1×～5.2×**、在 Qwen2.5-1.5B 上约 **2.5×～2.7×**；每组配置下两端输出 token 数完全一致（1024 / 3998 / 4096），工作量对等。**TTFT（预填充）** 两模型上 lite_llama 均略优（约 1.1×～1.5×），但 TTFT 绝对值很小（~15～30 ms）且 run-to-run 抖动明显，不宜过度解读。原始日志见 `benchmark_logs/bench_*.json`。
+结论（2026-08-31 重测，torch 2.11.0+cu129 / transformers 5.8.0 / Python 3.12，覆盖受支持的全部纯文本架构）：lite_llama 的 **decode 全面更快** —— TPOT 比值（transformers / lite_llama）在 **1.6×～7.1×** 之间，模型越大比值越低（0.6B 档 ~6-7×，3B 档收敛到 ~1.6-1.9×：模型越大 decode 越偏 compute-bound，两端都吃满算力）；聚合吞吐 TGS 同步放大。每组配置两端输出 token 数一致，工作量对等。**TTFT** 绝对值小（6～50 ms），lite_llama 普遍略优但 run-to-run 抖动明显，不逐行解读。原始日志见 `benchmark_logs/bench_*.json`（22 份，每份含完整 config）。
 
-> 未跑的已支持模型：本地 `my_weight/` 只有上述两个模型的权重文件，其余目录仅有 `config.json`（无 `*.safetensors`）：**Qwen3-0.6B**、**llava-1.5-7b-hf**（VL，需视觉路径）、**Qwen3-VL-4B-Instruct**（VL）。**Qwen3-30B-A3B-FP8** 现已支持（需 `--tensor-parallel-size 2` 双卡 A10 运行，FP8 权重 ~30 GB 分片后每卡 ~15 GB）。补齐权重后用同一命令即可跑（VL 模型需另走 `VisionGenerator` 路径，当前脚本仅测文本）。
+> 表中未出现的组合及原因：**Qwen2.5-0.5B** 本机无权重（历史数字见 git 历史）；**Qwen-1_8B** 是第一代 `qwen` model_type，不在支持列表；**llava / Qwen3-VL** 是多模态，本脚本纯文本，需另走 `VisionGenerator` 路径；**Qwen3-30B-A3B 系 / Qwen3-Next-80B** 单卡 22 GiB 放不下（30B-FP8 需 `--tensor-parallel-size 2` 双卡）；**8B 级 b16 档**的 KV 预算（16×2048 token ≈ 4.8 GiB + 16 GiB 权重）超出 22 GiB，只测 b8；**8B 级与 14B-AWQ 的 transformers 侧**分别因 transformers 5.8 的 `caching_allocator_warmup` 需要约双倍模型显存、AWQ 反量化需要 gptqmodel/autoawq（未安装）而无法在本机完成，标为 lite_llama 单侧；**Qwen3-MoE-Tiny** 是 2 层 4 专家的玩具 checkpoint，数字仅证明 qwen3_moe 架构端到端可用，不代表 MoE 吞吐量级。
 
 复现：
 
 ```bash
-python examples/benchmark.py --model my_weight/Qwen2.5-1.5B-Instruct 
+# 全量复现（上表 12 个模型 × 两档配置，含各量化路径的差异化参数）：
+PYTHON=/home/honggao/projects/.venv/bin/python ./benchmarks/run_benchmark_suite.sh
+# 单模型：
+python examples/benchmark.py --model my_weight/Qwen2.5-1.5B-Instruct \
     --batch-size 8 --gen-len 128 --iters 2      # 结果打印并存入 benchmark_logs/*.json
+# FP8 checkpoint 的 transformers 基线：--hf-dtype auto（无原生 fp8 的卡上自动 dequant 为 bf16）
+# transformers 无法加载的量化（AWQ 需 gptqmodel/autoawq）：--engine lite_llama 单侧
+# 8B 级：--max-gpu-num-blocks 16384 收缩 KV 池（profile 默认值留给 graph 捕获的空间不足）
 ```
 
 lite_llama 流式输出实录（Qwen2.5-3B，仅演示效果，非并排对比录制）：

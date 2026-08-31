@@ -1,0 +1,21 @@
+{
+  "config": {
+    "model": "my_weight/Qwen3-14B-AWQ",
+    "batch_size": 16,
+    "gen_len": 256,
+    "iters": 2,
+    "gpu": "NVIDIA A10",
+    "timestamp": "2026-08-31T20:04:33"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "batch_size": 16,
+    "prompt_tokens": 213,
+    "output_tokens": 4096,
+    "ttft_s": 0.28077521175146103,
+    "tpot_ms": 45.00972010633525,
+    "tgs": 348.3510439671457,
+    "latency_s": 11.758253838866949
+  },
+  "transformers": null
+}
