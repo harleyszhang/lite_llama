@@ -1,0 +1,31 @@
+{
+  "config": {
+    "model": "my_weight/llava-1.5-7b-hf",
+    "num_requests": 8,
+    "gen_len": 128,
+    "iters": 2,
+    "image_size": 672,
+    "gpu": "NVIDIA A10",
+    "timestamp": "2026-08-31T21:45:21"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "num_requests": 8,
+    "prompt_tokens": 164,
+    "output_tokens": 432,
+    "ttft_s": 0.15992123633623123,
+    "tpot_ms": 31.723445659187043,
+    "tgs": 29.327681535714294,
+    "latency_s": 1.8412638562731445
+  },
+  "transformers": {
+    "engine": "transformers",
+    "num_requests": 8,
+    "prompt_tokens": 164,
+    "output_tokens": 432,
+    "ttft_s": 0.19503712421283126,
+    "tpot_ms": 36.42554577650889,
+    "tgs": 25.404698608726306,
+    "latency_s": 2.1255910503678024
+  }
+}

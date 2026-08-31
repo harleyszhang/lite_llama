@@ -46,8 +46,9 @@ class LLM(LLMEngine):
         max_gpu_num_blocks: Manual KV-cache size in tokens; profiled when ``None``.
         device: Torch device string.
         use_cuda_graph: Capture decode CUDA graphs. ``None`` (default) enables
-            them for text-only models and disables them for multimodal ones,
-            whose vision tower changes control flow per prefill.
+            them — the graph only replays decode steps, which are multimodal-free
+            (vision tokens already live in the KV cache), so vision towers and
+            DeepStack hooks never appear inside a capture.
         quantization: Runtime weight quantisation (``"int8"``); ``None`` keeps
             the checkpoint's native format (fp16 or auto-detected fp8).
         tensor_parallel_size: Number of GPUs this replica's weights are split over.
@@ -82,7 +83,7 @@ class LLM(LLMEngine):
 
         spec = _resolve_spec(model)
         if use_cuda_graph is None:
-            use_cuda_graph = not spec.is_multimodal
+            use_cuda_graph = True
         # CUDA graphs are incompatible with TP (NCCL collectives inside the graph)
         if tensor_parallel_size > 1:
             use_cuda_graph = False

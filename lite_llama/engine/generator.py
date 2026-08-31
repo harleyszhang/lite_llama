@@ -70,8 +70,9 @@ class TextGenerator:
 class VisionGenerator:
     """Image-conditioned generation for LLaVA and Qwen3-VL. Prefer :class:`LLM`.
 
-    CUDA graphs stay disabled for these models: the vision tower and the
-    DeepStack hook change control flow per prefill.
+    ``use_cuda_graph`` defaults to ``True`` as with text models: only the decode
+    step is captured, and by then the vision tokens are ordinary KV-cache rows,
+    so the vision tower and the DeepStack hooks never run inside a capture.
     """
 
     def __init__(
@@ -80,6 +81,7 @@ class VisionGenerator:
         max_seq_len: int = 2048,
         max_gpu_num_blocks: int | None = None,
         device: str = "cuda",
+        use_cuda_graph: bool = True,
         quantization: str | None = None,
         tensor_parallel_size: int = 1,
         kv_cache_dtype: str = "auto",
@@ -89,7 +91,7 @@ class VisionGenerator:
             max_seq_len=max_seq_len,
             max_gpu_num_blocks=max_gpu_num_blocks,
             device=device,
-            use_cuda_graph=False,
+            use_cuda_graph=use_cuda_graph,
             quantization=quantization,
             tensor_parallel_size=tensor_parallel_size,
             kv_cache_dtype=kv_cache_dtype,

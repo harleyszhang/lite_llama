@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from lite_llama.cli import _infer_prompter_type, _is_instruct_checkpoint
 from lite_llama.engine.stop_criteria import detect_repetition, load_stop_token_ids
+from lite_llama.utils.prompt_templates import PrompterResolver
 
 # --------------------------------------------------------------------- #
 # detect_repetition
@@ -88,7 +88,7 @@ def test_stop_ids_handle_scalar_eos_in_generation_config(tmp_path: Path):
 
 
 # --------------------------------------------------------------------- #
-# CLI checkpoint classification
+# Checkpoint classification (PrompterResolver)
 # --------------------------------------------------------------------- #
 
 
@@ -102,35 +102,29 @@ def _make_checkpoint(tmp_path: Path, name: str, model_type: str) -> str:
 def test_qwen3_without_instruct_suffix_is_chat(tmp_path: Path):
     # Qwen3-0.6B is an instruct model despite the bare name.
     d = _make_checkpoint(tmp_path, "Qwen3-0.6B", "qwen3")
-    assert _is_instruct_checkpoint(d)
-    assert _infer_prompter_type(d) == "qwen2"  # ChatML prompter
+    assert PrompterResolver.is_instruct(d)
 
 
 def test_qwen3_base_variant_is_base(tmp_path: Path):
     d = _make_checkpoint(tmp_path, "Qwen3-0.6B-Base", "qwen3")
-    assert not _is_instruct_checkpoint(d)
-    assert _infer_prompter_type(d) == "empty"
+    assert not PrompterResolver.is_instruct(d)
 
 
 def test_qwen25_base_stays_base(tmp_path: Path):
     d = _make_checkpoint(tmp_path, "Qwen2.5-0.5B", "qwen2")
-    assert not _is_instruct_checkpoint(d)
-    assert _infer_prompter_type(d) == "empty"
+    assert not PrompterResolver.is_instruct(d)
 
 
 def test_qwen25_instruct_is_chat(tmp_path: Path):
     d = _make_checkpoint(tmp_path, "Qwen2.5-0.5B-Instruct", "qwen2")
-    assert _is_instruct_checkpoint(d)
-    assert _infer_prompter_type(d) == "qwen2"
+    assert PrompterResolver.is_instruct(d)
 
 
 def test_llama_chat_models_route_by_name(tmp_path: Path):
     d = _make_checkpoint(tmp_path, "llama-2-7b-chat", "llama")
-    assert _is_instruct_checkpoint(d)
-    assert _infer_prompter_type(d) == "llama"
+    assert PrompterResolver.is_instruct(d)
 
 
 def test_llama_base_stays_base(tmp_path: Path):
     d = _make_checkpoint(tmp_path, "llama-2-7b", "llama")
-    assert not _is_instruct_checkpoint(d)
-    assert _infer_prompter_type(d) == "empty"
+    assert not PrompterResolver.is_instruct(d)

@@ -72,11 +72,7 @@ class ModelRunner:
         if max_gpu_num_blocks is None:
             # When decode graphs will be captured later, withhold their workspace
             # from the KV budget — capture OOMs once the cache fills the card.
-            reserved = (
-                estimate_capture_workspace(self.max_seq_len)
-                if use_cuda_graph and not spec.is_multimodal
-                else 0
-            )
+            reserved = estimate_capture_workspace(self.max_seq_len) if use_cuda_graph else 0
             profiler = MemoryProfiler(
                 num_layers=self.num_layers,
                 num_kv_heads=self.num_kv_heads,
@@ -271,13 +267,10 @@ class ModelRunner:
     ) -> None:
         """Capture decode graphs for the given ``(batch, seq_len_bucket)`` grid.
 
-        Only the multi-modal-free text models are supported: the vision tower and
-        DeepStack hook mutate control flow at every prefill step, and prefill is
-        not graph-captured anyway.
+        Multimodal models are supported: a capture only ever replays a decode
+        step, and by then the vision tokens are ordinary KV-cache rows — the
+        vision tower and DeepStack hooks run during prefill, which stays eager.
         """
-        if self.spec.is_multimodal:
-            logger.warning("CUDA Graph is not supported for multi-modal models; running eager.")
-            return
         if get_tp_world_size() > 1:
             # A captured graph would have to replay the block's NCCL all-reduce,
             # which only works if every rank captures the identical sequence and
@@ -352,14 +345,17 @@ class ModelRunner:
                 for a long prompt that skips seq_len-1 of the vocabulary
                 projections. ``None`` (decode, graph replay) returns full logits.
         """
+        if self._graph_manager is not None and multi_modal_inputs is None:
+            # A decode step (``seq_len == 1``) with no vision payload: eligible
+            # for graph replay on text and multimodal models alike — the vision
+            # tokens of the latter already sit in the KV cache.
+            replayed = self._graph_manager.try_replay(input_ids, position_ids, self.atten_info)
+            if replayed is not None:
+                return replayed
+
         if self.spec.is_multimodal:
             return self.model(
                 input_ids, position_ids, self.atten_info, multi_modal_inputs, logits_positions
             )
-
-        if self._graph_manager is not None:
-            replayed = self._graph_manager.try_replay(input_ids, position_ids, self.atten_info)
-            if replayed is not None:
-                return replayed
 
         return self.model(input_ids, position_ids, self.atten_info, logits_positions=logits_positions)
