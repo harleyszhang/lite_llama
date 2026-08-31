@@ -47,7 +47,7 @@ from .engine import (
     sample_top_p,
 )
 
-__version__ = "0.9.0.dev0"
+__version__ = "0.9.0"
 
 __all__ = [
     "LLM",

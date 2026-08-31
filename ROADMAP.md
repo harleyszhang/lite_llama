@@ -576,7 +576,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
 
 执行路径是工具而非人工:采集入口统一挂到 Makefile 的 `bench-*` 目标(`benchmarks/bench_*.py` + `examples/benchmark.py`),`perf.watchdog` 与上一版最优比对并标出劣化项,`acc.golden` 出精度门禁、`acc.bisect` 定位精度断层,最后由一个 release-bench agent 按固定模板汇总成发版文档。人只审两处:被标红的劣化项,和结论段的因果解释。工具链自身在 v0.4(watchdog 入库)与 v0.5(autotune collect)成型,所以 v0.4 那份报告的作用是立零点,没有上一版可比。
 
-当前状态:v0.4 - v0.8.0 已发版(发版文档与原始数据如上所述);v0.9 进行中,节内按"已完成 / 剩余"标注;v0.10 起未动。
+当前状态:v0.4 - v0.9.0 已发版(发版文档与原始数据如上所述);v0.10 进行中;v0.11 起未动。
 
 ## v0.4 可信基线(已发版)
 
@@ -667,7 +667,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - 引擎:TP=2 下 continuous golden 全绿;在线服务 × TP=2 可跑;单卡默认仍走单进程(pdb 能断点);mock 进程网格断言各 rank 收到的 SchedulerOutput 一致
   - module:TP=2 的采样 logprob 与 TP=1 逐元素一致;embed + lm_head 显存减半
 
-## v0.9 多后端 + overlap 骨架(进行中)
+## v0.9 多后端 + overlap 骨架(已发版)
 
 - **feat(已完成)**
   - 地基 2:实际落地形态超出本版"雏形"目标,直接按三层建满
@@ -678,23 +678,22 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
     - 默认全 native:外部行 priority=UNMEASURED(-1) 排在 native(0) 之下,翻盘等 v0.10 冻结实测数据接线
   - A9 Platform 抽象:设备探测 + 能力声明(CapabilityRequirement),dispatch 按 capability 过滤(deepgemm / flashmla 的 sm90+ 窗口在 A10 上被拒),可 mock 测试
   - prefix caching 支持 DP:负载均衡按前缀亲和路由,各副本的 cache 合成一个池
+  - overlap 调度器抽象 + L1 跨 stream 重叠(本版收尾时完成 ModelWorker 集成 + deferred harvest,timeline 相交证据见 release 文档)
 - **refactor(已完成)**
   - attention 接口拆薄:`PagedAttention` 下沉到 modules/(KV 写入 + prefill/decode 分派),`models/base.py` 的 Attention 只管投影与 RoPE;dispatch 在构造期一次决策,热路径是普通属性调用,MLA 才接得进来
-- **feat(剩余)**
-  - overlap 调度器抽象 + L1 跨 stream 重叠
 - **顺带提前入库**(归属后继版本,在此记账)
   - v0.11 的 MLA 算子侧:`MinimalMlaLayer` 单层 harness + flashmla 后端行(golden 未验证,默认不 dispatch)
   - v0.13 的 FlashInfer attention 后端行(prefill + decode 两行,golden 已验证)
 - **benchmark**
   - (已完成)同 shape 下 native 与 flashinfer 逐一对照(`bench_flashinfer` 等已入库);静态 priority 顺序与实测顺序的出入,即是 v0.10 换成实测排序的依据
-  - L1 跨 stream 重叠 on/off 的端到端差值,附 timeline 佐证
+  - (已完成)L1 跨 stream 重叠 on/off 的端到端差值,附 timeline 佐证
 - **验收**
   - (已达成)一条命令切后端,并能解释为何选它
   - (已达成)缺库时自动回退到 native
-  - L1 重叠有 timeline 作佐证
+  - (已达成)L1 重叠有 timeline 作佐证
   - (已达成)Platform 可 mock 测试
 
-## v0.10 可观测性 + 算子分发
+## v0.10 可观测性 + 算子分发(进行中)
 
 - **feat**
   - 地基 2 收尾:原计划"从雏形升级",但声明式 KernelSpec 清单、确定性 dispatch、registry 雏形与 `gen_backend_registry_gif.py` 的退场已随 v0.9 提前完成,本版只补两件
