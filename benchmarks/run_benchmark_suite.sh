@@ -1,7 +1,7 @@
 #!/bin/bash
 # 双引擎对照套件:对受支持的全部纯文本 checkpoint 跑 examples/benchmark.py
 # (lite_llama vs HF transformers,TTFT/TPOT/TGS 口径),每档两个 batch 配置,
-# 结果由 benchmark.py 落入仓库 benchmark_logs/*.json。
+# 结果由 benchmark.py 落入仓库 docs/benchmark_logs/*.json。
 #
 # 用法:
 #   ./benchmarks/run_benchmark_suite.sh              # 日志在 /tmp/models_bench

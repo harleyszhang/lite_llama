@@ -224,7 +224,7 @@ def main() -> None:
     parser.add_argument("--iters", type=int, default=2, help="Timed repeats (median reported)")
     parser.add_argument("--hf-dtype", choices=["fp16", "bf16", "auto"], default="fp16")
     parser.add_argument("--engine", choices=["both", "lite_llama", "transformers"], default="both")
-    parser.add_argument("--log-dir", default="benchmark_logs")
+    parser.add_argument("--log-dir", default="docs/benchmark_logs")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
