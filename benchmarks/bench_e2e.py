@@ -26,6 +26,12 @@ def main() -> int:
     ap.add_argument("--greedy", action="store_true", help="temperature=0, deterministic")
     ap.add_argument("--mode", choices=["eager", "graph", "both"], default="both")
     ap.add_argument("--model-dir", type=str, default=CKPT)
+    ap.add_argument(
+        "--max-gpu-num-blocks",
+        type=int,
+        default=40960,
+        help="KV pool size in tokens; shrink for checkpoints near the device budget",
+    )
     args = ap.parse_args()
 
     modes = [("eager", False), ("graph", True)]
@@ -39,7 +45,7 @@ def main() -> int:
             args.model_dir,
             use_cuda_graph=graph,
             max_seq_len=2048,
-            max_gpu_num_blocks=40960,
+            max_gpu_num_blocks=args.max_gpu_num_blocks,
         )
         results[label] = backend.measure(prompts, args.max_gen_len, args.greedy)
         backend.close()
