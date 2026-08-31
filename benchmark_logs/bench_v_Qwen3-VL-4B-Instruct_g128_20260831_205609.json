@@ -1,0 +1,31 @@
+{
+  "config": {
+    "model": "my_weight/Qwen3-VL-4B-Instruct",
+    "num_requests": 8,
+    "gen_len": 128,
+    "iters": 2,
+    "image_size": 672,
+    "gpu": "NVIDIA A10",
+    "timestamp": "2026-08-31T20:56:09"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "num_requests": 8,
+    "prompt_tokens": 65,
+    "output_tokens": 815,
+    "ttft_s": 0.128965116571635,
+    "tpot_ms": 29.364619623348023,
+    "tgs": 32.957298018949636,
+    "latency_s": 3.091121121076867
+  },
+  "transformers": {
+    "engine": "transformers",
+    "num_requests": 8,
+    "prompt_tokens": 153,
+    "output_tokens": 860,
+    "ttft_s": 0.14430911699309945,
+    "tpot_ms": 33.46798580550882,
+    "tgs": 28.98629189637072,
+    "latency_s": 3.7086496052797884
+  }
+}
