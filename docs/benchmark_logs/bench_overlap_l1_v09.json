@@ -1,0 +1,16 @@
+{
+  "config": {
+    "model_dir": "my_weight/Qwen2.5-1.5B-Instruct",
+    "batch": 16,
+    "max_gen_len": 64,
+    "max_num_batched_tokens": 512,
+    "repeat": 3,
+    "timeline": true,
+    "json": "docs/benchmark_logs/bench_overlap_l1_v09.json"
+  },
+  "wall_s": {
+    "overlap_off": 1.1898034326732159,
+    "overlap_on": 1.2025810554623604
+  },
+  "timeline": "    copy  upload.prefill.tokens    [    0.015,     0.080] ms\n    copy  upload.prefill.positions [    0.195,     0.231] ms\n    copy  upload.prefill.logits    [    0.291,     0.322] ms\n compute  forward.prefill          [    0.639,    21.882] ms\n    copy  upload.prefill.tokens    [   22.389,    22.438] ms\n    copy  upload.prefill.positions [   22.539,    22.573] ms\n    copy  upload.prefill.logits    [   22.629,    22.669] ms\n compute  forward.prefill          [   22.899,    45.526] ms\n    copy  upload.decode.tokens     [   45.747,    45.794] ms\n compute  forward.decode           [   45.958,    54.355] ms\n    copy  upload.prefill.tokens    [   55.025,    55.067] ms\n    copy  upload.prefill.positions [   55.148,    55.179] ms\n    copy  upload.prefill.logits    [   55.235,    55.262] ms\n compute  forward.prefill          [   55.478,    77.779] ms\n    copy  upload.decode.tokens     [   77.980,    78.024] ms\n compute  forward.decode           [   78.184,    87.150] ms\n    copy  upload.prefill.tokens    [   87.927,    87.969] ms\n    copy  upload.prefill.positions [   88.059,    88.090] ms\n    copy  upload.prefill.logits    [   88.144,    88.172] ms\n compute  forward.prefill          [   88.389,   114.426] ms\n    copy  upload.decode.tokens     [  106.742,   106.785] ms\n compute  forward.decode           [  114.582,   123.560] ms\n    copy  upload.extend.tokens     [  124.238,   124.282] ms\n compute  forward.extend           [  124.770,   136.338] ms\n    copy  upload.decode.tokens     [  136.660,   136.701] ms\n compute  forward.decode           [  136.854,   145.419] ms\n    copy  upload.decode.tokens     [  146.067,   146.106] ms\n compute  forward.decode           [  146.258,   155.001] ms\n    copy  upload.decode.tokens     [  155.628,   155.682] ms\n compute  forward.decode           [  155.806,   164.200] ms\n    copy  upload.decode.tokens     [  164.752,   164.793] ms\n compute  forward.decode           [  164.911,   173.212] ms\n    copy  upload.decode.tokens     [  173.761,   173.800] ms\n compute  forward.decode           [  173.949,   182.175] ms\n    copy  upload.decode.tokens     [  182.780,   182.819] ms\n compute  forward.decode           [  182.965,   191.383] ms\n    copy  upload.decode.tokens     [  191.971,   192.010] ms\n compute  forward.decode           [  192.157,   200.158] ms\n    copy  upload.decode.tokens     [  200.750,   200.791] ms\n compute  forward.decode           [  200.908,   208.876] ms"
+}
