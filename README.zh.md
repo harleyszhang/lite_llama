@@ -152,6 +152,94 @@ lite-llama batch --model-dir my_weight/Qwen2.5-1.5B-Instruct --show-stats
 更多用法（异步接口、SSE、CLI 参数、线程模型）见
 [docs/online_serving.md](docs/online_serving.md)。
 
+单向分层 —— 用户代码只与 Facade 层交互；计划向下传递，token 向上返回：
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  User Layer        lite-llama CLI (chat / vl-chat / serve / batch) · examples · tests           │
+├─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  Facade            LLM · TextGenerator · VisionGenerator · AsyncLLMEngine · DataParallelEngine  │
+├─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  Engine            ContinuousBatchingEngine · Scheduler · Sampler · PrefixCache · Multimodal    │
+├─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  Executor          Executor + ModelWorker (picklable ModelInput plan) · ModelRunner             │
+│                    KVCacheManager / SlotBatch · CudaGraphManager · OverlapCopyEngine            │
+├─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  Models            CausalLM backbone: Llama / Qwen2 / Qwen3 / Qwen3-MoE / LLaVA / Qwen3-VL      │
+├─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  Modules           shared blocks: parallel Linear · PagedAttention · RoPE · MLP / MoE · Quant   │
+├─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  Kernels           LogicalOp + KernelSpec dispatch → Triton FA2 / flashinfer / deepgemm / ...   │
+├─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  Hardware          PlatformInfo · probe · device_utils — the device the layers assume           │
+└─────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  Cross-cutting support:
+  ┌─────────────────────────┐  ┌───────────────────────────┐  ┌──────────────────────────┐
+  │ Platform                │  │ Distributed               │  │ Tools                    │
+  │ PlatformInfo / probe /  │  │ dp×tp grid · NCCL + gloo  │  │ logger · profiling ·     │
+  │ device_utils            │  │ parallel_state · stats    │  │ prompt · image utils     │
+  └─────────────────────────┘  └───────────────────────────┘  └──────────────────────────┘
+```
+
+下方目录与上游布局逐文件对应 —— 阅读任一代码库时，都能直接找到对应的文件。
+
+```text
+lite_llama/
+├── engine/
+│   ├── llm.py               # LLM entry point
+│   ├── llm_engine.py        # one-shot batch: a single prefill/decode loop
+│   ├── continuous_engine.py # continuous batching: one step at a time
+│   ├── scheduler.py         # who prefills, who decodes, who holds which slot
+│   ├── async_engine.py      # asyncio front end over a worker thread
+│   ├── generator.py         # TextGenerator / VisionGenerator facades
+│   ├── sampler.py           # temperature / top-p / repetition penalty, per request
+│   ├── detokenizer.py       # incremental text output
+│   ├── stop_criteria.py     # EOS, repetition and length stopping
+│   ├── multimodal.py        # processor call + mrope position ids
+│   └── outputs.py           # RequestOutput / CompletionOutput
+├── executor/
+│   ├── executor.py          # Executor seam: UniProc (1 GPU) / Multiproc (TP)
+│   ├── worker.py            # ModelInput: one model pass described as data
+│   ├── model_runner.py      # owns the model, KV cache and per-step forward
+│   ├── loader.py            # HF checkpoint -> fp16/8-bit parameters
+│   ├── weight_utils.py      # safetensors reading, FP8 passthrough
+│   ├── kv_cache_manager.py  # paged KV pool + memory profiler
+│   ├── attention_metadata.py # per-step KV bookkeeping handed to the kernels
+│   ├── slot_batch.py        # fixed-slot KV layout for continuous batching
+│   └── cuda_graph.py        # decode graph capture, replay and batch padding
+├── entrypoints/
+│   ├── api_server.py        # OpenAI-compatible FastAPI app
+│   └── protocol.py          # request/response schemas
+├── kernels/                 # Triton kernels used by the models
+│   ├── quantization/        # w8a16 / w4a16 / w8a8 / fp8 GEMMs
+│   ├── backends/            # probe + priority registry, per op
+│   ├── autotune/            # config search, keying and persistence
+│   ├── flashattention2_nopad.py / flashdecoding.py
+│   └── fused_moe.py         # MoE grouped GEMM (fp16/fp8/int8)
+├── modules/                 # layers, reusable across architectures
+│   ├── linear.py            # Column / Row / QKVParallelLinear
+│   ├── vocab_parallel.py    # VocabParallelEmbedding / ParallelLMHead
+│   ├── attention.py         # PagedAttention over the KV pool
+│   ├── mlp.py / moe.py      # FusedMLP, sparse MoE block
+│   ├── rotary_embedding.py  # RoPE / mrope tables
+│   └── quantization/        # QuantConfig registry + per-scheme methods
+├── models/
+│   ├── config.py            # ModelConfig over the HF AutoConfig
+│   ├── registry.py          # model_type -> implementation class
+│   ├── weights.py           # HF checkpoint keys -> parameters (+ TP shard)
+│   ├── interfaces.py        # MultiModalCausalLM, the multimodal capability
+│   ├── base.py              # DecoderLayer, CausalLM, shared forward
+│   └── llama.py / qwen2.py / qwen3.py / qwen3_moe.py / llava.py / qwen3_vl.py
+├── distributed/
+│   └── parallel_state.py    # dp x tp grid, NCCL data plane + gloo control plane
+└── utils/                   # chat templates, logger, image and path helpers
+```
+
+文件与类名沿用 vLLM 的命名，两者可以对照着读：`model_runner.py` 对应 `v1/worker/gpu_model_runner.py`，`kv_cache_manager.py` 对应 `v1/core/kv_cache_manager.py`，`continuous_engine.py` 加 `scheduler.py` 对应 `v1/engine/` 加 `v1/core/sched/`，`async_engine.py` 对应 `AsyncLLMEngine`，`entrypoints/` 对应 `entrypoints/openai/`，`models/interfaces.py` 与 `models/registry.py` 对应 `model_executor/models/`；权重加载的拆分方式（键映射在 `models/weights.py`、文件读取在 `executor/weight_utils.py`）则对应 vLLM 的 `model_executor/models/utils.py` 与 `model_loader/weight_utils.py`。
+
+每个模型文件只声明自己的差异 —— bias 开关、按头的 qk-norm、mrope，或 DeepStack 层注入 —— 所有共享行为都在 `models/base.py` 中。新增一种架构通常只需一个类体加一条 `ModelRegistry` 注册；其配置直接用 `AutoConfig` 返回的结果即可。
+
 ## Acknowledgement
 
 - [meta-llama/llama-models](https://github.com/meta-llama/llama-models/tree/main)
