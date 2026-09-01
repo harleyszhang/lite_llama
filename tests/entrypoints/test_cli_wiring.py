@@ -36,19 +36,22 @@ class FakeEngine:
     ``step``) plus ``shutdown``, so a test can watch the release happen.
     """
 
-    def __init__(self, finish_reason: str = "length", reject: bool = False) -> None:
+    def __init__(self, finish_reason: str = "length", reject: int = 0) -> None:
         self.tokenizer = None
         self.released = False
         self.prompts: list[str] = []
         self._finish_reason = finish_reason
-        self._reject = reject
+        self._rejections_left = reject
         self._request = None
 
     def add_request(self, prompt, params=None):
-        if self._reject:
+        if self._rejections_left:
+            self._rejections_left -= 1
             raise ValueError("prompt is longer than the context window")
         self.prompts.append(prompt)
-        self._request = SimpleNamespace(delta=f"reply to {prompt}", finish_reason=None)
+        self._request = SimpleNamespace(
+            delta=f"reply to {prompt}", text=f"reply to {prompt}", finish_reason=None
+        )
         return self._request
 
     def has_unfinished_requests(self) -> bool:
@@ -96,7 +99,9 @@ class TestVlChatCudaGraph:
     """
 
     def options_for(self, argv: list[str], model_dir):
-        args = build_parser().parse_args([*argv, "--model-dir", str(model_dir), "--image", "cat.png"])
+        args = build_parser().parse_args(
+            [*argv, "--model-dir", str(model_dir), "--image", "cat.png"]
+        )
         return BaseOptions.from_args(args)
 
     def test_a_repl_defaults_to_eager(self, model_dir):
@@ -110,7 +115,11 @@ class TestVlChatCudaGraph:
             return object()
 
         monkeypatch.setattr(cli, "VisionGenerator", fake_generator)
-        for extra, expected in (([], False), (["--cuda-graph"], True), (["--no-cuda-graph"], False)):
+        for extra, expected in (
+            ([], False),
+            (["--cuda-graph"], True),
+            (["--no-cuda-graph"], False),
+        ):
             seen.clear()
             self.options_for(["vl-chat", *extra], model_dir).build_vision_generator()
             assert seen["use_cuda_graph"] is expected
@@ -150,6 +159,20 @@ class TestEngineConstruction:
         assert seen["max_num_seqs"] == 1
 
 
+class TemplateTokenizer:
+    """Renders messages as ``role:content`` joined by ``|``.
+
+    Readable in a failure diff, and a stand-in for a HF tokenizer whose
+    ``chat_template`` is set, so the REPL's templated path can be driven
+    without a checkpoint.
+    """
+
+    chat_template = "<jinja>"
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+        return "|".join(f"{m['role']}:{m['content']}" for m in messages)
+
+
 class TestChatRepl:
     """The REPL streams the engine's deltas and always hands the engine back."""
 
@@ -168,9 +191,59 @@ class TestChatRepl:
 
         assert engine.released
 
+    def test_the_history_grows_across_turns(self, monkeypatch, model_dir):
+        """A REPL is a conversation: turn two carries turn one inside it.
+
+        Base checkpoints have no template, so the turns are concatenated
+        verbatim — the same policy the /v1/chat/completions path applies. The
+        assistant reply must be in there too, or "继续" still lands on an
+        amnesiac model.
+        """
+        engine = FakeEngine()
+
+        run_chat(monkeypatch, model_dir, engine, ["hello", "again", "exit"])
+
+        assert engine.prompts == ["hello", "hello\nreply to hello\nagain"]
+
+    def test_a_templated_session_replays_every_turn(self, monkeypatch, tmp_path):
+        """Instruct checkpoints re-render the whole history each turn.
+
+        A directory named *Instruct* plus a tokenizer with a chat template is
+        what ``PrompterResolver`` needs to hand the REPL a prompter.
+        """
+        model_dir = tmp_path / "Qwen3-Instruct"
+        model_dir.mkdir()
+        engine = FakeEngine()
+        engine.tokenizer = TemplateTokenizer()
+
+        run_chat(monkeypatch, model_dir, engine, ["hello", "again", "exit"])
+
+        assert engine.prompts == [
+            "user:hello",
+            "user:hello|assistant:reply to user:hello|user:again",
+        ]
+
+    def test_slash_clear_starts_a_new_conversation(self, monkeypatch, model_dir, capsys):
+        """The one escape hatch a long session needs, without reloading weights."""
+        engine = FakeEngine()
+
+        run_chat(monkeypatch, model_dir, engine, ["hello", "/clear", "again", "exit"])
+
+        assert engine.prompts == ["hello", "again"]
+        assert "conversation cleared" in capsys.readouterr().out
+
+    def test_a_rejected_turn_leaves_the_history_unchanged(self, monkeypatch, model_dir, capsys):
+        """The turn that never ran must not linger in what the next turn renders."""
+        engine = FakeEngine(reject=1)
+
+        run_chat(monkeypatch, model_dir, engine, ["war and peace", "hi", "exit"])
+
+        assert engine.prompts == ["hi"]
+        assert "context window" in capsys.readouterr().err
+
     def test_a_rejected_prompt_does_not_end_the_session(self, monkeypatch, model_dir, capsys):
         """An over-long prompt is the user's problem, not a reason to drop the REPL."""
-        engine = FakeEngine(reject=True)
+        engine = FakeEngine(reject=1)
 
         assert run_chat(monkeypatch, model_dir, engine, ["war and peace", "exit"]) == 0
         assert "context window" in capsys.readouterr().err

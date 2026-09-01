@@ -263,13 +263,16 @@ class CliCommand(ABC):
 
 
 class ChatCommand(CliCommand):
-    """``chat``:交互式文本对话(REPL 循环,逐 token 流式输出)。
+    """``chat``:交互式多轮文本对话(REPL 循环,逐 token 流式输出)。
+
+    每轮重渲染全部历史(instruct 走 tokenizer 的 chat template,base 原文
+    拼接),回复结束后写回历史;``/clear`` 清空会话但不重载权重。
 
     单卡多卡走同一条路径:引擎自己决定 rank,本类只管一次对话一个请求。
     """
 
     name = "chat"
-    help = "Interactive text chat"
+    help = "Interactive multi-turn text chat"
 
     def add_arguments(self, sub: argparse.ArgumentParser) -> None:
         # A REPL pays capture latency up front for a single stream of turns, so
@@ -283,6 +286,10 @@ class ChatCommand(CliCommand):
         engine = opts.build_engine(max_num_seqs=1)
         prompter = PrompterResolver.build(opts.model_dir, engine.tokenizer)
         params = self.build_sampling_params(args)
+        # The conversation across turns: user and assistant messages in order.
+        # Every turn re-renders it whole, so a REPL session is one growing
+        # context the model stays inside of.
+        history: list[dict[str, str]] = []
 
         self._print_banner(opts.model_dir, prompter, params)
         try:
@@ -296,7 +303,11 @@ class ChatCommand(CliCommand):
                     continue
                 if user_input.lower() == "exit":
                     return 0
-                self._stream_reply(engine, prompter, params, user_input)
+                if user_input == "/clear":
+                    history.clear()
+                    print("(conversation cleared)\n")
+                    continue
+                self._stream_reply(engine, prompter, params, user_input, history)
         finally:
             # Under tensor parallelism the follower ranks are waiting for the
             # next plan; without this they would outlive the session.
@@ -306,7 +317,7 @@ class ChatCommand(CliCommand):
     def _print_banner(
         model_dir: str, prompter: ChatPrompter | None, params: SamplingParams
     ) -> None:
-        print(f"Loaded {Path(model_dir).name}. Type 'exit' to quit.")
+        print(f"Loaded {Path(model_dir).name}. Type 'exit' to quit, '/clear' to start over.")
         if prompter is None:
             print("(no chat template: prompts are sent verbatim)")
         if params.is_greedy and params.repetition_penalty == 1.0:
@@ -324,17 +335,33 @@ class ChatCommand(CliCommand):
         prompter: ChatPrompter | None,
         params: SamplingParams,
         user_input: str,
+        history: list[dict[str, str]],
     ) -> None:
-        """单轮对话:套模板(若有)→ 流式打印 → 检查重复早停原因。"""
-        prompt_style_input = user_input
-        if prompter is not None:
-            prompter.insert_prompt(user_input)
-            prompt_style_input = prompter.model_input
+        """一轮对话:渲染全部历史 → 流式打印 → 回写助手消息。
+
+        多轮的关键在"渲染全部历史":instruct 模型走 :meth:`ChatPrompter.apply`
+        (与 ``/v1/chat/completions`` 同一条模板路径),base 模型原文拼接各轮
+        ——和服务端 ``_render_chat`` 一个策略,两个入口不会漂移。只发当前
+        这一句,模型每轮都是失忆的,这正是"继续"换来一段全新开场白的根因。
+        """
+        history.append({"role": "user", "content": user_input})
+        prompt = (
+            prompter.apply(history)
+            if prompter is not None
+            else "\n".join(turn["content"] for turn in history)
+        )
 
         try:
-            request = engine.add_request(prompt_style_input, params)
+            request = engine.add_request(prompt, params)
         except ValueError as exc:  # empty, or longer than the context window
-            print(f"[{exc}]\n", file=sys.stderr)
+            # The turn never ran; leaving it in the history would poison every
+            # later prompt with a message the model never answered.
+            history.pop()
+            print(f"[{exc}]", file=sys.stderr)
+            print(
+                "[conversation no longer fits the context window; /clear starts a fresh one]\n",
+                file=sys.stderr,
+            )
             return
 
         # One request is in flight, so whoever a step advanced is this one; the
@@ -343,6 +370,9 @@ class ChatCommand(CliCommand):
         while engine.has_unfinished_requests():
             for advanced in engine.step():
                 print(advanced.delta, end="", flush=True)
+        # A reply cut short by "repeat" or "length" is still what the model
+        # said; it enters the history either way so the next turn stays coherent.
+        history.append({"role": "assistant", "content": request.text})
         if request.finish_reason == "repeat":
             print(
                 "\n[stopped early: degenerate repetition detected; try a higher "

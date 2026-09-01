@@ -121,7 +121,7 @@ llava-1.5-7b-modelscope default inference:
 
 ```bash
 export LITE_LLAMA_MODEL_DIR=my_weight/Qwen2.5-0.5B
-lite-llama chat                              # interactive text chat
+lite-llama chat                              # interactive multi-turn chat (/clear resets)
 lite-llama serve --port 8000                 # OpenAI-compatible API server
 lite-llama batch --show-stats                # a prompt set through the scheduler
 lite-llama vl-chat --model-dir my_weight/llava-1.5-7b-modelscope \
