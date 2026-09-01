@@ -1,0 +1,833 @@
+### lite_llama/engine/__init__.py | total=49 | doc=16L/828c | usage=False
+DOC| Generation engine: two batching strategies over one shared executor.
+DOC| 
+DOC| :class:`LLM` / :class:`LLMEngine` run a *one-shot* batch — every prompt starts on
+DOC| the same step and the batch keeps its width until the longest sequence ends. That
+DOC| is the right shape for offline generation, where all the prompts are known up
+DOC| front.
+DOC| 
+DOC| :class:`ContinuousBatchingEngine` decides the batch per step instead, so requests
+DOC| join and leave mid-flight; :class:`AsyncLLMEngine` puts an asyncio face on it for
+DOC| online serving.
+DOC| 
+DOC| :class:`DataParallelEngine` is orthogonal to both: it runs several whole-model
+DOC| replicas in separate processes and routes requests between them, for throughput once
+DOC| one GPU is saturated. :class:`AsyncDataParallelEngine` puts an asyncio face on that
+DOC| for online serving, the way :class:`AsyncLLMEngine` does for a single replica.
+VAR __all__
+
+### lite_llama/engine/async_data_parallel.py | total=311 | doc=29L/1579c | usage=True
+DOC| Asyncio front end for the data-parallel coordinator.
+DOC| 
+DOC| :meth:`DataParallelEngine.generate <lite_llama.engine.data_parallel.DataParallelEngine.generate>`
+DOC| is synchronous and batch-shaped: it dispatches a whole prompt list, blocks until
+DOC| every replica answers, and returns complete texts. An HTTP server needs the
+DOC| opposite on all three counts — requests arrive one at a time, a response must
+DOC| start streaming long before the answer exists, and blocking the event loop
+DOC| stalls every other connection. This class is therefore to
+DOC| :class:`~lite_llama.engine.data_parallel.DataParallelEngine` what
+DOC| :class:`~lite_llama.engine.async_engine.AsyncLLMEngine` is to a single
+DOC| :class:`~lite_llama.engine.continuous_engine.ContinuousBatchingEngine`, and
+DOC| exposes the same ``generate`` / ``generate_text`` surface so the OpenAI layer
+DOC| serves from either without knowing which.
+DOC| 
+DOC| The coordinator process stays free of CUDA and of the replicas' engines — the
+DOC| workers own those, as before. What is added is one *pump* thread: it drains the
+DOC| ...(+12L)
+VAR logger
+VAR _PUMP_STOP
+VAR _PUMP_JOIN_TIMEOUT_S
+CLASS AsyncDataParallelEngine(DataParallelEngine) :: Serves many concurrent coroutines from ``data_parallel_size`` replicas.
+  - __init__(model, data_parallel_size, tensor_parallel_size, load_balancer, max_num_seqs, max_num_batched_tokens, enable_prefix_cache)
+  - from_pretrained(cls, model)
+  - start()
+  - shutdown()
+  - __aenter__()
+  - __aexit__()
+  - __del__()
+  - generate(prompt, sampling_params, request_id)
+  - generate_text(prompt, sampling_params, request_id)
+  - _pump_results()
+  - _deliver(message)
+
+### lite_llama/engine/async_engine.py | total=336 | doc=18L/887c | usage=True
+DOC| Asyncio front end for the continuous-batching engine.
+DOC| 
+DOC| :class:`~lite_llama.engine.continuous_engine.ContinuousBatchingEngine` is
+DOC| synchronous and blocking by design: ``step()`` runs a model pass and returns. An
+DOC| HTTP server cannot call that from its event loop — one step would stall every
+DOC| other connection — so the engine runs on a dedicated worker thread and talks to
+DOC| the loop through queues.
+DOC| 
+DOC| The split is deliberate. The worker thread owns the engine outright and is the
+DOC| only thing that ever touches the scheduler or the GPU, which is what keeps both
+DOC| free of locks. Coroutines never call into the engine; they post commands to it
+DOC| and await deltas back. Nothing here knows about HTTP.
+DOC| 
+DOC| Usage:
+DOC|     async with AsyncLLMEngine.from_pretrained("my_weight/Qwen2.5-0.5B") as engine:
+DOC|         async for chunk in engine.generate("Hello", SamplingParams()):
+DOC| ...(+1L)
+VAR logger
+CLASS StreamedOutput() :: One increment of a request's completion.
+  - is_finished()
+CLASS _RequestStream() :: Delivery queue for one request, written by the worker, read by a coroutine.
+  - __init__(request_id, loop)
+  - push(item)
+  - get()
+CLASS AsyncLLMEngine() :: Serves many concurrent coroutines from one continuously batched engine.
+  - __init__(engine)
+  - from_pretrained(cls, model)
+  - tokenizer()
+  - metrics()
+  - start()
+  - shutdown()
+  - __aenter__()
+  - __aexit__()
+  - generate(prompt, sampling_params, request_id)
+  - generate_text(prompt, sampling_params, request_id)
+  - _run()
+  - _drain_commands()
+  - _apply(command)
+  - _publish(request)
+  - _fail(request_id, exc)
+  - _fail_all(exc)
+  - _drop_everything()
+
+### lite_llama/engine/continuous_engine.py | total=625 | doc=38L/2129c | usage=True
+DOC| Continuous batching: a step-driven engine where requests join and leave mid-flight.
+DOC| 
+DOC| :class:`~lite_llama.engine.llm_engine.LLMEngine` fixes its batch when
+DOC| ``generate()`` is called. Every sequence starts on the same step and the batch
+DOC| keeps running at full width until the *longest* one finishes, so a batch of eight
+DOC| where seven stop at 20 tokens and one runs to 500 spends most of its time
+DOC| computing 480 steps of padding. It also cannot accept a request that arrives one
+DOC| millisecond after the call started.
+DOC| 
+DOC| :class:`ContinuousBatchingEngine` replaces the fixed batch with a per-step
+DOC| decision, mirroring vLLM v1's split of the engine loop into "schedule → execute →
+DOC| harvest". The middle stage is deliberately thin: a step turns the scheduler's
+DOC| plan into :class:`~lite_llama.executor.worker.ModelInput` values — pure data, no
+DOC| tensors — and hands each to an :class:`~lite_llama.executor.executor.Executor`,
+DOC| which returns the tokens it sampled. A step produces up to three of them:
+DOC| 
+DOC| ...(+21L)
+CLASS _Work(NamedTuple) :: A plan, and the requests whose tokens it will produce, in that order.
+def _chunk_work(kind, chunks)
+def _prefill_work(group, chunk_lens)
+def _decode_work(running)
+CLASS ContinuousBatchingEngine() :: Serves independently arriving requests as one continuously reshaped batch.
+  - __init__(engine, config, executor)
+  - from_pretrained(cls, model)
+  - add_request(prompt, sampling_params, request_id, prompt_token_ids)
+  - abort(request_id)
+  - has_unfinished_requests()
+  - step()
+  - generate(prompts, sampling_params)
+  - shutdown()
+  - timeline_summary()
+  - _attribute_prompt_logprobs(work, prompt)
+  - _harvest(emitted)
+  - _finish(request, reason)
+  - _retire(request)
+
+### lite_llama/engine/data_parallel.py | total=762 | doc=36L/2263c | usage=True
+DOC| Data parallelism: N whole-model replicas, one process each, requests routed between them.
+DOC| 
+DOC| Where tensor parallelism splits a *weight matrix* and pays an all-reduce per block,
+DOC| data parallelism splits the *request stream* and pays nothing in the forward: a
+DOC| replica holds the entire model, so it needs no collective at all. The only machinery
+DOC| is therefore routing pick a replica per request, collect its answer  which is why
+DOC| the replicas here are OS processes talking over ``multiprocessing`` queues rather than
+DOC| NCCL ranks, and why each worker profiles and sizes its own KV cache against its card.
+DOC| 
+DOC| The structure mirrors how vLLM and SGLang lay this out, scaled down to lite_llama's
+DOC| synchronous batch API:
+DOC| 
+DOC| * a **worker** (:func:`_dp_worker`) is a rank-aware process that builds one
+DOC|   :class:`~lite_llama.engine.continuous_engine.ContinuousBatchingEngine` on its own
+DOC|   GPU and serves requests off a queue for as long as it lives — the role of vLLM's
+DOC|   ``DPEngineCoreProc`` and SGLang's scheduler process. The engine being *resident*
+DOC| ...(+19L)
+VAR _log
+VAR STARTUP_TIMEOUT_S
+VAR _LIVENESS_POLL_S
+VAR _SHUTDOWN
+CLASS _ReplicaLoop() :: A replica's resident engine loop: commands in, progress out.
+  - __init__(engine, requests, results)
+  - run()
+  - _take_arrivals(block)
+  - _handle(message)
+  - _admit_batch(batch_id, indices, prompts, params)
+  - _admit_one(request_id, prompt, params)
+  - _abort_one(request_id)
+  - _step()
+  - _fail(batch_id, detail)
+  - _fail_one(request_id, detail)
+  - _forget(request_id)
+def _dp_worker(global_rank, dp_rank, tp_rank, dp_size, tp_size, engine_kwargs, max_num_seqs)
+CLASS DataParallelEngine() :: Route generation across ``data_parallel_size`` model replicas.
+  - __init__(model, data_parallel_size, tensor_parallel_size, load_balancer, max_num_seqs, max_num_batched_tokens, enable_prefix_cache)
+  - _await_message(timeout_s)
+  - _await_ready()
+  - tokenizer()
+  - _tokenize_for_routing(prompts)
+  - _select(token_ids)
+  - _route(num_prompts, token_ids)
+  - generate(prompts, sampling_params)
+  - shutdown()
+  - __enter__()
+  - __exit__()
+  - __del__()
+
+### lite_llama/engine/detokenizer.py | total=100 | doc=13L/689c | usage=True
+DOC| Incremental detokenisation: per-step token ids to per-step text deltas.
+DOC| 
+DOC| Decoding the whole span each step and diffing is ``O(n^2)``. Instead, per sequence
+DOC| two offsets (``prefix_offset`` for context, ``read_offset`` for what was already
+DOC| emitted) bound each step to decoding a small window — ``O(1)`` amortised. A window
+DOC| rather than a lone token is required for correctness: SentencePiece strips a
+DOC| leading ``▁`` from a single token (gluing words together), and multi-byte UTF-8
+DOC| split across tokens must be held back until the character completes.
+DOC| 
+DOC| Usage:
+DOC|     det = IncrementalDetokenizer(tokenizer, batch_size)
+DOC|     delta = det.append(seq_index, token_id)   # "" until a character completes
+VAR _REPLACEMENT_CHAR
+CLASS Tokenizer(Protocol) :: The one tokenizer method incremental detokenisation depends on.
+  - decode(token_ids, skip_special_tokens)
+CLASS _SequenceState() :: Detokenisation state for a single sequence: token history and two offsets.
+CLASS IncrementalDetokenizer() :: Turns per-step token ids into per-step text deltas, one state per sequence.
+  - __init__(tokenizer, batch_size)
+  - tokens(index)
+  - append(index, token_id)
+  - text(index)
+  - _decode(token_ids)
+
+### lite_llama/engine/dp_load_balancer.py | total=359 | doc=31L/1646c | usage=True
+DOC| Load-balancing policies for the data-parallel router.
+DOC| 
+DOC| Deciding *which* replica a request goes to is the one interesting choice in data
+DOC| parallelism, so it lives here as a small strategy object rather than inline in the
+DOC| router — the same split SGLang draws between its ``DataParallelController`` and the
+DOC| ``LoadBalanceMethod`` it is configured with (``round_robin`` / ``total_requests`` /
+DOC| ``total_tokens`` / ``cache_aware``), and vLLM between ``DPLBAsyncMPClient`` and its
+DOC| balancing.
+DOC| 
+DOC| A balancer sees only what the router can cheaply tell it: how many replicas exist,
+DOC| how much work each is carrying, and — for ``cache_aware`` — the prompt's token ids.
+DOC| It never touches a queue, a process or a tensor, which is what keeps it pure and
+DOC| unit-testable without a GPU.
+DOC| 
+DOC| Each policy declares which of those it actually reads, through
+DOC| :attr:`LoadBalancer.needs_token_estimate` and :attr:`LoadBalancer.needs_token_ids`.
+DOC| ...(+14L)
+VAR LOAD_BALANCERS
+CLASS LoadBalancer(ABC) :: Chooses a replica per request, and is told when a request frees one.
+  - __init__(dp_size)
+  - select(estimated_tokens, token_ids)
+  - release(replica, estimated_tokens)
+CLASS RoundRobinBalancer(LoadBalancer) :: Hand replicas out in turn, ignoring how long each request runs.
+  - __init__(dp_size)
+  - select(estimated_tokens, token_ids)
+CLASS _CountingBalancer(LoadBalancer) :: Send each request to the replica with the smallest running total.
+  - __init__(dp_size)
+  - weigh(estimated_tokens)
+  - select(estimated_tokens, token_ids)
+  - release(replica, estimated_tokens)
+  - load()
+CLASS TotalRequestsBalancer(_CountingBalancer) :: Fewest in-flight *requests* wins — SGLang's ``total_requests``.
+  - weigh(estimated_tokens)
+CLASS TotalTokensBalancer(_CountingBalancer) :: Fewest in-flight *tokens* wins — SGLang's ``total_tokens``.
+  - weigh(estimated_tokens)
+CLASS CacheAwareBalancer(LoadBalancer) :: Fewest tokens *left to prefill* wins — SGLang's router's ``cache_aware``.
+  - __init__(dp_size)
+  - select(estimated_tokens, token_ids)
+  - release(replica, estimated_tokens)
+  - _uncached(prompt_tokens, cached_blocks)
+  - _cached_blocks(replica, hashes)
+  - _remember(replica, hashes)
+  - load()
+  - cached_tokens(token_ids, replica)
+  - resident_blocks(replica)
+def make_load_balancer(policy, dp_size)
+
+### lite_llama/engine/generator.py | total=120 | doc=11L/496c | usage=True
+DOC| Backward-compatible ``TextGenerator`` / ``VisionGenerator`` wrappers.
+DOC| 
+DOC| Thin delegating shells over :class:`~lite_llama.engine.llm.LLM` (which now
+DOC| subsumes both with one ``generate``/``stream`` API); kept so existing CLI,
+DOC| examples, benchmarks and tests keep working. New code should use ``LLM``
+DOC| directly — nothing is implemented here beyond argument/result adaptation.
+DOC| 
+DOC| Usage:
+DOC|     gen = TextGenerator(checkpoints_dir="my_weight/Qwen2.5-0.5B")
+DOC|     text = gen.generate(prompts, SamplingParams(...))
+CLASS TextGenerator() :: Text-only batch/stream generation. Prefer :class:`LLM` for new code.
+  - __init__(checkpoints_dir, tokenizer_path, max_seq_len, max_gpu_num_blocks, device, use_cuda_graph, quantization)
+  - generate(prompts, params)
+  - stream(prompts, params)
+CLASS VisionGenerator() :: Image-conditioned generation for LLaVA and Qwen3-VL. Prefer :class:`LLM`.
+  - __init__(checkpoints_dir, max_seq_len, max_gpu_num_blocks, device, use_cuda_graph, quantization, tensor_parallel_size)
+  - generate(prompt, images, params)
+  - stream(prompt, images, params)
+
+### lite_llama/engine/llm.py | total=220 | doc=13L/583c | usage=True
+DOC| User-facing ``LLM`` entry point — a vLLM-style facade over the engine.
+DOC| 
+DOC| ``LLM`` *is* an :class: it adds prompt normalisation, multimodal preparation and 
+DOC| ``RequestOutput`` packaging, while the engine owns the prefill/decode loop and 
+DOC| ``ModelRunner`` the single-device forward. One ``LLM`` == one engine; 
+DOC| request routing (DP) and tensor parallel (TP) grow in the respective layers 
+DOC| without touching this API.
+DOC| 
+DOC| Usage:
+DOC|     llm = LLM(model="my_weight/Qwen2.5-0.5B")
+DOC|     out = llm.generate(["The capital of France is"], SamplingParams(temperature=0.0))
+DOC|     print(out[0].outputs[0].text)
+def _resolve_spec(model)
+CLASS LLM(LLMEngine) :: Generate completions for text or vision-language prompts.
+  - __init__(model, tokenizer, max_seq_len, max_gpu_num_blocks, device, use_cuda_graph, quantization)
+  - is_qwen3_vl()
+  - generate(prompts, sampling_params, images)
+  - stream(prompts, sampling_params, images)
+  - _require_multimodal()
+  - _generate_multimodal(prompts, images, params)
+
+### lite_llama/engine/llm_engine.py | total=447 | doc=9L/479c | usage=False
+DOC| Unified generation engine.
+DOC| 
+DOC| Owns the prefill/decode loop (:class:`_DecodeSession` carries the per-call
+DOC| state) and the long-lived handles every session shares: executor, tokenizer,
+DOC| sampler and the stop-token set. Everything that can *end* a sequence — where
+DOC| the stop ids come from, the device-side matcher, the repetition breaker —
+DOC| lives in :mod:`~lite_llama.engine.stop_criteria`, the single source of truth
+DOC| (this mirrors vLLM's split between ``LLMEngine`` and ``StopChecker``).
+CLASS _DecodeSession() :: One ``generate()`` call: owns the token grid, KV reservations and stop state.
+  - __init__(engine, prompt_token_ids, params, position_ids, multi_modal_inputs)
+  - _mrope_position_deltas()
+  - run(stream)
+  - _collect_prompt_logprobs(logits)
+  - _flush(start, end, check_repeat)
+  - _is_running(index)
+  - _step_positions(input_ids, prev_pos, is_prefill)
+CLASS LLMEngine() :: Loads a model and generates text from tokenised prompts.
+  - __init__(checkpoints_dir, tokenizer_path, max_seq_len, max_gpu_num_blocks, device, use_cuda_graph, quantization)
+  - _load_tokenizer(path)
+  - pad_id()
+  - generate(prompt_token_ids, params, position_ids, multi_modal_inputs)
+  - generate_text(prompt_token_ids, params, position_ids, multi_modal_inputs)
+
+### lite_llama/engine/multimodal.py | total=104 | doc=11L/561c | usage=True
+DOC| Multimodal prompt preparation (Strategy seam for the LLM entry point).
+DOC| 
+DOC| :class:`MultimodalPreparer` turns ``(prompt, images)`` into engine-ready
+DOC| ``(token_ids, multi_modal_inputs, position_ids)``: it runs the HF ``AutoProcessor``
+DOC| (expanding image placeholders), applies the Qwen3-VL chat template, and builds
+DOC| mrope 3D position ids via the vetted HF reference. Extracted from the legacy
+DOC| ``VisionGenerator`` so both ``LLM`` and the wrappers share one implementation.
+DOC| 
+DOC| Usage:
+DOC|     token_ids, mm_inputs, position_ids = MultimodalPreparer(...).prepare(prompt, images)
+CLASS MultimodalPreparer() :: Prepares image-conditioned prompts for LLaVA-style and Qwen3-VL models.
+  - __init__(engine, model_dir)
+  - prepare(prompt, images)
+  - _wrap_qwen3_vl_prompt(prompt, num_images)
+  - _mrope_positions(input_ids, batch)
+
+### lite_llama/engine/outputs.py | total=59 | doc=10L/409c | usage=True
+DOC| Output containers for the user-facing :class:`~lite_llama.engine.llm.LLM` API.
+DOC| 
+DOC| Mirrors ``vllm/outputs.py``: one request yields one :class:`RequestOutput` carrying
+DOC| one or more :class:`CompletionOutput` instances (n-best is a future extension; today
+DOC| ``outputs`` always has one entry, ``index == 0``).
+DOC| 
+DOC| Usage:
+DOC|     out = llm.generate(prompts, params)[0]
+DOC|     text, reason = out.text, out.outputs[0].finish_reason
+CLASS CompletionOutput() :: One generated completion for a request.
+CLASS RequestOutput() :: Everything produced for one prompt.
+  - text()
+
+### lite_llama/engine/prefix_cache.py | total=381 | doc=23L/1234c | usage=True
+DOC| Prefix caching: reuse KV of shared prompt prefixes across requests.
+DOC| 
+DOC| Design mirrors vLLM v1's ``BlockPool`` + ``KVCacheBlock`` + free-block LRU queue:
+DOC| 
+DOC| * A prompt is split into fixed-size blocks. Each block's hash **chains** the
+DOC|   previous block's hash, so one hash identifies a *prefix* (this block plus all
+DOC|   before it), not just the block's own tokens -- the same trick as vLLM's
+DOC|   ``hash_block_tokens(parent_hash, block_tokens)``.
+DOC| * A cached block carries a **reference count**. ``ref_cnt == 0`` does NOT evict
+DOC|   it: like vLLM, a released block stays resident and remains hittable, moving to
+DOC|   the tail of an **LRU** order. It is only physically dropped when the pool is
+DOC|   over ``capacity`` and the block is the least-recently-used unreferenced one.
+DOC| 
+DOC| That LRU persistence is what makes a shared system prompt pay off: the first
+DOC| request populates the cache and *finishes*, yet the next request still hits the
+DOC| prefix instead of re-prefilling it.
+DOC| ...(+6L)
+VAR PREFIX_CACHE_BLOCK_SIZE
+def iter_block_hashes(token_ids, block_size, seed)
+CLASS PrefixCacheStats() :: Cumulative counters for prefix-cache effectiveness (mirrors vLLM's stats).
+  - hit_rate()
+CLASS PrefixMatch() :: What a prompt may reuse, and where the reusable K/V must be copied from.
+CLASS _CachedBlock() :: One resident prefix block: its chained hash, references, and live copy.
+CLASS PrefixCache() :: Ref-counted, LRU-evicted store of cached prefix blocks.
+  - __init__(block_size, capacity, hash_seed)
+  - query(token_ids)
+  - register(token_ids)
+  - admit(token_ids)
+  - invalidate_slot(slot)
+  - assign_owner(token_ids, slot, upto_tokens)
+  - _reference_blocks(token_ids)
+  - release(token_ids)
+  - _evict_to_capacity()
+  - reset()
+  - hit_rate()
+  - num_cached_blocks()
+  - num_referenced_blocks()
+  - num_evictable_blocks()
+
+### lite_llama/engine/sampler.py | total=722 | doc=35L/2161c | usage=True
+DOC| Token sampling: turns a step's logits into the next token id per sequence.
+DOC| 
+DOC| The single implementation of the temperature + top-p logic the legacy generators
+DOC| each used to inline: :class:`Sampler` does the work, :class:`SamplingParams` carries
+DOC| the knobs, and ``temperature == 0`` is greedy decoding.
+DOC| 
+DOC| A one-shot batch shares one :class:`SamplingParams` across every sequence, but an
+DOC| online batch does not: each request arrives with its own temperature, top-p and
+DOC| penalty. :class:`BatchedSamplingParams` holds those knobs as per-row tensors so
+DOC| :meth:`Sampler.sample_batched` still samples the whole batch in one pass instead
+DOC| of looping over requests.
+DOC| 
+DOC| Under tensor parallelism the logits arriving here are a *slice* of the vocabulary
+DOC| (:class:`~lite_llama.modules.vocab_parallel.ParallelLMHead` does not gather), and the
+DOC| sampler reconstructs the global distribution without ever assembling one:
+DOC| ``log_softmax(x)_i = x_i - logsumexp(x)``, so two **scalars per row** — the maximum and
+DOC| ...(+18L)
+def local_vocab_offset(local_width)
+CLASS SamplingParams() :: Decoding hyper-parameters for one generation request.
+  - __post_init__()
+  - is_greedy()
+CLASS GeneratedSpan() :: The tokens each sequence has generated so far, as one padded tensor.
+CLASS PositionLogprobs() :: One position's logprob record: the token there, and the best alternatives.
+def apply_repetition_penalty(logits, generated, penalty, vocab_offset)
+VAR _TOP_P_CANDIDATES
+def sample_top_p(probs, top_p, k)
+def _draw_from_nucleus(top_probs, top_idx, top_p)
+def global_argmax(local_logits, vocab_offset)
+def vocab_logsumexp(scaled)
+def sharded_top_p(local_logits, temperature, top_p, vocab_offset, k)
+def _distribution_records(scaled, ids, offset, k)
+def _to_records(ids, ks, chosen, top_values, top_ids)
+def rows_logprobs(logits, target_ids, k)
+CLASS BatchedSamplingParams() :: One row of sampling knobs per sequence, as device tensors.
+  - build(cls, params, device)
+CLASS Sampler() :: Applies :class:`SamplingParams` to per-step logits.
+  - sample(logits, params, generated)
+  - sample_with_logprobs(logits, params, generated)
+  - sample_batched(logits, params, generated)
+  - sample_batched_with_logprobs(logits, params, generated)
+  - _draw(logits, generated)
+
+### lite_llama/engine/scheduler.py | total=741 | doc=25L/1335c | usage=True
+DOC| Request scheduling with chunked prefill and prefix caching.
+DOC| 
+DOC| The scheduler decides per step: which requests prefill (in chunks), which decode,
+DOC| and which cache slot each holds. Chunked prefill splits long prompts so decode
+DOC| steps interleave with prefill chunks — preventing head-of-line blocking where a
+DOC| 4K-token prompt stalls all running decode requests for hundreds of ms.
+DOC| 
+DOC| Scheduling is *committing* (mirrors vLLM v1): :meth:`Scheduler.schedule` advances
+DOC| each prefilling request's ``num_computed_tokens`` the moment it schedules a chunk
+DOC| of it, so the engine never reports execution progress back to the scheduler. The
+DOC| scheduler may therefore assume a returned chunk ran; a caller who crashed mid-step
+DOC| re-derives everything from the request objects, which are the single source of
+DOC| truth for prefill state.
+DOC| 
+DOC| Key features:
+DOC|     - Chunked prefill: long prompts split into max_chunk_size token chunks;
+DOC| ...(+8L)
+CLASS RequestStatus(StrEnum) :: Where a request sits in its lifecycle.
+CLASS Request() :: One generation request, from arrival to completion.
+  - prompt_len()
+  - seq_len()
+  - is_finished()
+  - has_room()
+  - prefill_done()
+VAR DEFAULT_MAX_NUM_SEQS
+VAR DEFAULT_MAX_NUM_BATCHED_TOKENS
+CLASS SchedulerConfig() :: Limits the admission policy enforces.
+  - __post_init__()
+CLASS SchedulerOutput() :: What one engine step should run.
+  - is_empty()
+CLASS _NullPrefixCache() :: Null Object standing in for a disabled :class:`PrefixCache`.
+  - query(token_ids)
+  - register(token_ids)
+  - admit(token_ids)
+  - invalidate_slot(slot)
+  - assign_owner(token_ids, slot, upto_tokens)
+  - release(token_ids)
+  - hit_rate()
+def _discard(requests, request)
+CLASS Scheduler() :: FCFS admission with chunked prefill and preemption support.
+  - __init__(config, num_slots)
+  - _default_prefix_capacity(num_slots)
+  - add_request(request)
+  - abort(request_id)
+  - schedule()
+  - _admit(prefill, chunk_lens)
+  - _chunk_of(request)
+  - _first_chunk_of(request)
+  - _promote_pending_owners()
+  - _track_owner(request)
+  - _claim_prefix(request, slot, upto)
+  - _settle_pending_owner(request)
+  - _drop_pending_owner(request)
+  - _maybe_preempt(newcomer, prefill)
+  - _pick_preemption_victim(prefill)
+  - _preempt(request)
+  - finish(request, reason)
+  - _discard_running(request)
+  - prefix_cache_hit_rate()
+  - running()
+  - waiting()
+  - num_waiting()
+  - num_running()
+  - num_free_slots()
+  - has_unfinished_requests()
+
+### lite_llama/engine/stop_criteria.py | total=142 | doc=15L/800c | usage=True
+DOC| Device-resident stop bookkeeping for a decode batch (mirrors vLLM's StopChecker).
+DOC| 
+DOC| Asking "did sequence i emit a stop token?" on the host every step reads a GPU
+DOC| tensor and synchronises (nine syncs/step at batch 8), so the CPU can never run
+DOC| ahead of the GPU. :class:`StopCriteria` keeps every flag on-device and mutates it
+DOC| with tensor ops; the host only polls a stop-everything answer every
+DOC| ``POLL_INTERVAL`` steps, trading a few redundant steps for no per-step sync. Single
+DOC| source of truth for what ends a sequence: :func:`load_stop_token_ids` (EOS +
+DOC| ``generation_config.json``), :class:`StopCriteria` (device matcher) and
+DOC| :func:`detect_repetition` (host-side degeneration breaker).
+DOC| 
+DOC| Usage:
+DOC|     stop = StopCriteria(batch_size, stop_ids, vocab_size, device=dev)
+DOC|     stop.update(next_tokens, writable)
+VAR POLL_INTERVAL
+VAR _REASON_NAMES
+VAR _REASON_EOS
+VAR _REASON_REPEAT
+def load_stop_token_ids(model_path, tokenizer)
+VAR _DIGIT_RE
+def detect_repetition(text, window, min_reps)
+CLASS StopCriteria() :: Tracks which sequences finished, and why, without per-step syncs.
+  - __init__(batch_size, stop_token_ids, vocab_size, device)
+  - finished()
+  - update(next_token, writable)
+  - mark_repeat(index)
+  - all_finished()
+  - reasons()
+
+### lite_llama/executor/__init__.py | total=9 | doc=9L/407c | usage=True
+DOC| Execution layer: model building/loading, KV cache, CUDA graphs, forward steps.
+DOC| 
+DOC| Turns a resolved config into a running model and drives each forward pass:
+DOC| :class:`~lite_llama.executor.model_runner.ModelRunner` builds via the loader, sizes
+DOC| the paged KV cache, and dispatches prefill/decode (optionally CUDA-graphed).
+DOC| 
+DOC| Usage:
+DOC|     runner = ModelRunner.build(config, ...); logits = runner.forward(ids, pos, mm)
+
+### lite_llama/executor/attention_metadata.py | total=52 | doc=10L/491c | usage=True
+DOC| Runtime attention / KV-cache bookkeeping passed through the model forward pass.
+DOC| 
+DOC| One dataclass threaded into every layer's attention: the paged ``kv_buffer``, the
+DOC| cache rows written this step (``cur_select_index``), the request->token map and the
+DOC| per-sequence lengths. Carrying it as a single object keeps the attention kernels'
+DOC| signatures stable and lets CUDA-graph replay mutate its fields in place.
+DOC| 
+DOC| Usage:
+DOC|     attn = AttentionMetadata(kv_buffer=..., cur_select_index=..., b_seq_len=...)
+CLASS AttentionMetadata() :: Per-step KV-cache state shared by the model runner and the attention kernels.
+
+### lite_llama/executor/cuda_graph.py | total=251 | doc=12L/546c | usage=True
+DOC| CUDA Graph capture and replay for the decode phase.
+DOC| 
+DOC| A CUDA Graph bakes in *tensor pointers* at capture time, so the decode path must
+DOC| never reallocate the tensors the model reads. Three rules make that hold:
+DOC| persistent input buffers that each replay ``copy_()`` into in place; one graph per
+DOC| ``(batch_size, seq_len_bucket)`` because FlashDecoding sizes scratch by
+DOC| ``max_actual_seq_len``; and decode-only capture (``seq_len == 1``), with prefill
+DOC| always eager.
+DOC| 
+DOC| Usage:
+DOC|     mgr = CUDAGraphManager(...); logits = mgr.decode(input_ids, positions, ...)
+def estimate_capture_workspace(max_seq_len)
+CLASS _GraphKey() :: Identifies one captured graph by its persistent shape.
+CLASS CUDAGraphRunner() :: One captured decode step for a fixed ``(batch_size, seq_len_bucket)`` pair.
+  - __init__(model)
+  - capture()
+  - replay(input_ids, position_ids, cur_select_index, b_seq_len, b_req_idx)
+CLASS CUDAGraphManager() :: Holds one :class:`CUDAGraphRunner` per ``(batch_size, seq_len_bucket)``.
+  - __init__(model)
+  - capture_all()
+  - _pick_bucket(current_max_seq_len)
+  - pad_to(batch_size)
+  - try_replay(input_ids, position_ids, atten_info)
+
+### lite_llama/executor/executor.py | total=298 | doc=29L/1431c | usage=True
+DOC| Executor: the one interface an engine has for running a model pass.
+DOC| 
+DOC| Core design
+DOC| -----------
+DOC| An engine should not know whether the model it drives lives in this process or in
+DOC| eight of them. It hands a :class:`~lite_llama.executor.worker.ModelInput` to an
+DOC| :class:`Executor` and gets sampled tokens back — three methods, and no tensor in
+DOC| any signature except the result.
+DOC| 
+DOC| Two implementations, differing only in *who else runs the plan*:
+DOC| 
+DOC| * :class:`UniProcExecutor` calls the local :class:`~lite_llama.executor.worker.ModelWorker`
+DOC|   and stops there. One process, so a breakpoint in the engine loop is a breakpoint
+DOC|   in the kernel; this is the default for one GPU.
+DOC| * :class:`MultiprocExecutor` first broadcasts the plan to its follower ranks, then
+DOC|   runs *the same* worker method. Because the plan is pure data and every rank
+DOC| ...(+12L)
+VAR _log
+VAR SHUTDOWN_TIMEOUT_S
+CLASS Executor(ABC) :: Runs model passes on behalf of an engine.
+  - num_slots()
+  - execute(model_input)
+  - shutdown()
+  - timeline_summary()
+CLASS UniProcExecutor(Executor) :: One process, one model, no message passing.
+  - __init__(engine, max_num_seqs, max_seq_len)
+  - num_slots()
+  - execute(model_input)
+  - timeline_summary()
+  - shutdown()
+CLASS MultiprocExecutor(Executor) :: Tensor parallelism: this rank plans, every rank runs.
+  - __init__(engine, max_num_seqs, max_seq_len, followers)
+  - num_slots()
+  - execute(model_input)
+  - timeline_summary()
+  - shutdown()
+def ensure_followers_alive(followers)
+def free_port()
+def launch_tensor_parallel(tp_size, engine_kwargs, max_num_seqs, master_port)
+def serve_plans(engine, max_num_seqs)
+def run_follower(rank, tp_size, engine_kwargs, max_num_seqs, master_port)
+
+### lite_llama/executor/kv_cache_manager.py | total=395 | doc=9L/371c | usage=True
+DOC| Paged KV cache: block allocation with reference counting, plus sizing.
+DOC| 
+DOC| :class:`MemoryProfiler` measures free device memory to decide how many cache blocks
+DOC| fit; :class:`KVCacheManager` hands out and ref-counts block indices so prefill and
+DOC| decode reserve rows and release them when a sequence ends.
+DOC| 
+DOC| Usage:
+DOC|     idx = kv.alloc_kvcache_index(need_size); kv.release_ref(idx)
+VAR logger
+def get_dtype_size(dtype)
+CLASS MemoryProfiler() :: Estimates how many KV-cache tokens fit in the remaining GPU memory.
+  - __init__(num_layers, num_kv_heads, head_dim, gpu_memory_utilization, dtype, device, reserved_bytes)
+  - _kv_bytes_per_token()
+  - _run_dummy_forward(model, vocab_size, seq_len)
+  - available_kv_blocks(model, vocab_size)
+CLASS KVCacheManager() :: Owns the paged KV buffers and hands out cache rows by reference count.
+  - __init__(num_layers, num_kv_heads, head_dim, gpu_num_blocks, block_size, dtype, device)
+  - can_admit(need_blocks)
+  - utilization()
+  - init_kv_buffers(max_num_tokens, head_dim, num_kv_heads, num_layers, dtype, device)
+  - alloc_kvcache(need_size)
+  - alloc_contiguous_kvcache(need_size)
+  - alloc_kvcache_index(need_size)
+  - add_ref(token_index)
+  - release_ref(token_index)
+  - claim(num_rows)
+  - free(free_index)
+  - free_all()
+
+### lite_llama/executor/loader.py | total=196 | doc=12L/639c | usage=True
+DOC| Model loading: a HuggingFace checkpoint in, a ready-to-run ``nn.Module`` out.
+DOC| 
+DOC| Mirrors vLLM's executor/loader split so loading is unit-testable and open to new
+DOC| sources (TP shards, remote stores). It never holds a second copy of the model:
+DOC| build the tree on ``meta`` (no alloc, no init), swap in real fp16 storage on the
+DOC| target device, then stream the checkpoint through ``model.load_weights`` — a copy
+DOC| loop (not ``load_state_dict``) because tensors land in the *middle* of fused K/V
+DOC| and stacked-expert parameters. There is deliberately no trailing ``half()``.
+DOC| 
+DOC| Usage:
+DOC|     model = DefaultModelLoader().load_model(config, model_cls, device)
+VAR logger
+VAR PARAM_DTYPE
+def init_empty_parameters()
+def materialise_parameters(model, device, dtype)
+CLASS ModelLoader(Protocol) :: Strategy seam: anything that can turn a checkpoint dir into a model.
+  - load_model(config, model_cls, checkpoints_dir, device, quantization)
+CLASS DefaultModelLoader() :: Loads HuggingFace weights directly, with no offline conversion step.
+  - load_model(config, model_cls, checkpoints_dir, device, quantization)
+  - _quantize(model, quantization)
+  - _check_device(device)
+
+### lite_llama/executor/model_runner.py | total=361 | doc=12L/573c | usage=True
+DOC| Model runner: builds the model, sizes the KV cache, and runs each forward step.
+DOC| 
+DOC| :meth:`ModelRunner.build` parses the config, resolves the architecture via the
+DOC| :class:`~lite_llama.models.registry.ModelRegistry` and loads weights; the
+DOC| ``*_alloc_kv_cache`` methods reserve cache rows; :meth:`forward` dispatches to the
+DOC| model (CUDA-graphed on decode, eager otherwise) and passes multimodal inputs only
+DOC| when the resolved :class:`ModelSpec` wants them.
+DOC| 
+DOC| Usage:
+DOC|     runner = ModelRunner.build(config, ...)
+DOC|     logits = runner.forward(input_ids, position_ids, multi_modal_inputs)
+VAR logger
+CLASS ModelRunner() :: Owns the model, the KV-cache memory manager, and the per-step attention state.
+  - __init__(checkpoints_dir, config, spec, model, max_gpu_num_blocks, device, use_cuda_graph)
+  - build(cls, checkpoints_dir, max_seq_len, max_gpu_num_blocks, device, use_cuda_graph, loader)
+  - _init_req_tokens_table(b_req_idx, b_seq_len, alloc_index, max_prompt_len)
+  - prefill_alloc_kv_cache(max_prompt_len, actual_prompt_lens, b_req_idx)
+  - decode_alloc_kv_cache(batch_size)
+  - enable_slot_kv_cache()
+  - graph_batch_size(batch_size)
+  - enable_cuda_graph(batch_sizes, seq_len_buckets)
+  - forward(input_ids, position_ids, multi_modal_inputs, logits_positions)
+
+### lite_llama/executor/overlap.py | total=284 | doc=33L/1882c | usage=True
+DOC| Cross-stream overlap: the L1 scheduling abstraction, its stream pool and timeline.
+DOC| 
+DOC| The ROADMAP's sixth section splits overlap into three ping-pong axes; this module
+DOC| is the **L1** rung — operator-level overlap built from ``torch.cuda.Stream`` plus
+DOC| events, with zero kernel changes. What it overlaps in the continuous engine is
+DOC| host→device input preparation: a step can hold a prefill pass and a decode pass,
+DOC| and pass *i+1*'s token/position uploads have no dependency on pass *i*'s forward,
+DOC| so they sail up a copy stream while the compute stream is still busy. Without a
+DOC| side stream those uploads are pageable ``torch.tensor(..., device=...)`` calls —
+DOC| each one a host-side stall serialised between kernel launches.
+DOC| 
+DOC| Three pieces, each usable alone:
+DOC| 
+DOC| * :class:`OverlapPolicy` — the on/off switch (``LITE_LLAMA_OVERLAP``), so every
+DOC|   overlap site answers to one flag and the on/off A/B the ROADMAP asks for is an
+DOC|   env var away.
+DOC| ...(+16L)
+VAR _log
+VAR OVERLAP_ENV
+VAR TIMELINE_ENV
+CLASS OverlapPolicy() :: One flag answering for every cross-stream overlap site.
+  - from_env(cls)
+CLASS StreamPool() :: The copy stream and the pinned staging ring an overlap site uploads through.
+  - __init__(device, policy, timeline)
+  - copy_stream()
+  - upload_async(values)
+  - consume(event)
+  - _acquire(dtype, numel)
+  - pending()
+CLASS RegionRecord() :: One resolved timeline region: a named span of work on one stream.
+  - duration_ms()
+CLASS Timeline() :: CUDA-event recorder for overlap evidence; costs one flag check when off.
+  - from_env(cls, device)
+  - region(name, stream)
+  - collect()
+  - summary()
+
+### lite_llama/executor/slot_batch.py | total=452 | doc=15L/738c | usage=True
+DOC| Slot-based KV layout and per-step attention metadata for continuous batching.
+DOC| 
+DOC| The one-shot batch path (:class:`~lite_llama.engine.llm_engine._DecodeSession`)
+DOC| can bump-allocate cache rows because it owns the whole cache and only ever
+DOC| appends. Continuous batching cannot: requests join and leave mid-flight, so
+DOC| every step would hit :meth:`KVCacheManager.alloc_contiguous_kvcache`, whose
+DOC| ``nonzero`` scan plus two ``.item()`` reads costs three device synchronisations
+DOC| per decode step. This module removes the allocator from the decode path
+DOC| entirely.
+DOC| 
+DOC| Usage:
+DOC|     batch = SlotBatch(runner)
+DOC|     batch.begin_prefill([0, 1], [17, 23]); logits = runner.forward(...)
+DOC|     padded = batch.begin_decode([0, 1], [18, 24]); logits = runner.forward(...)
+def flatten_extend_rows(slots, starts, chunk_lens)
+CLASS SlotBatch() :: Continuous-batching view of the KV cache: fixed slot regions, stable metadata.
+  - __init__(runner)
+  - copy_prefix(segments)
+  - begin_prefill(slots, seq_starts, seq_lens)
+  - begin_extend(slots, seq_starts, seq_lens)
+  - begin_decode(slots, seq_lens)
+  - plan_extend_rows(slots, seq_starts, seq_lens)
+  - pad_decode_rows(slots, seq_lens)
+  - reset()
+  - seq_lens()
+  - _flatten_rows(slots, starts, chunk_lens)
+  - _pad(slots, seq_lens)
+  - _to_device(values)
+
+### lite_llama/executor/weight_utils.py | total=175 | doc=19L/890c | usage=True
+DOC| Reading HuggingFace checkpoint files into a stream of ``(key, tensor)`` pairs.
+DOC| 
+DOC| safetensors shards are opened once and read lazily, so a 30B checkpoint never
+DOC| exists in host RAM as a whole state dict.
+DOC| 
+DOC| Block-FP8 checkpoints (Qwen3-30B-A3B-FP8) can be read two ways, and which one the
+DOC| loader picks is the difference between a model that fits and one that does not:
+DOC| 
+DOC| * ``dequantize=True`` widens each e4m3 block to fp16 here, on the target device
+DOC|   where the GPU is ~30x faster than the CPU (~2 s vs ~56 s for 30B). The model
+DOC|   then holds plain fp16 weights, at twice the memory.
+DOC| * ``dequantize=False`` passes the raw bytes through as ``uint8`` and yields the
+DOC|   ``*.weight_scale_inv`` tables alongside them, for a model whose layers are
+DOC|   themselves 8-bit (:mod:`lite_llama.models.quantization`).
+DOC| 
+DOC| Usage:
+DOC| ...(+2L)
+VAR logger
+VAR _SCALE_SUFFIX
+def hf_weight_files(checkpoints_dir)
+def dequant_block_fp8(weight, scale_inv, dtype)
+def hf_weights_iterator(checkpoints_dir, device, dequantize_fp8, dequant_dtype, key_filter)
+def _iter_safetensors(path, device, dequantize_fp8, dequant_dtype, key_filter)
+def _iter_torch_bin(path, device, dequantize_fp8, dequant_dtype, key_filter)
+
+### lite_llama/executor/worker.py | total=560 | doc=22L/1201c | usage=True
+DOC| Model worker: runs one :class:`ModelInput` — forward *and* sampling — on this rank.
+DOC| 
+DOC| Core design
+DOC| -----------
+DOC| The seam between "decide what to run" and "run it" cannot sit between the forward
+DOC| pass and the sampler. With a vocabulary-parallel head the sampler is itself a
+DOC| collective (:mod:`lite_llama.engine.sampler` reduces and gathers to make the draw),
+DOC| so every tensor-parallel rank must execute it. The unit of work is therefore
+DOC| *forward + sample*, and what crosses the boundary is a :class:`ModelInput`: pure,
+DOC| picklable data describing the work, never a device tensor.
+DOC| 
+DOC| Layout is *derived* here rather than shipped. Positions, grid width, graph padding
+DOC| and the logits row of each sampled sequence all follow from
+DOC| ``(slots, seq_starts, seq_lens)``, identically on every rank — so the control plane
+DOC| stays a few hundred bytes, and exactly one place decides how a plan becomes tensors.
+DOC| That is what lets the single-process and multi-process executors share this class
+DOC| ...(+5L)
+CLASS PassKind(StrEnum) :: Which kernel path a plan takes through attention.
+CLASS ModelInput() :: One model pass, as data: what to run, not how to lay it out.
+  - __post_init__()
+  - chunk_lens()
+def _sync_tp(tokens)
+CLASS PassLogprobs() :: Logprob records one pass produced, beside the tokens it drew.
+CLASS _PreparedPass() :: One pass's device-bound inputs, built on the host and uploaded.
+CLASS ModelWorker() :: Executes plans against this rank's model shard and KV cache.
+  - __init__(engine, max_num_seqs, max_seq_len)
+  - execute(model_input)
+  - prepare(plan)
+  - _prepare_grid(plan)
+  - _prepare_rows(plan, kind)
+  - _forward(plan, prepared)
+  - _forward_grid(plan, prepared)
+  - _forward_extend(plan, prepared)
+  - _forward_decode(plan, prepared)
+  - _sample(plan, logits)
+  - _batched_sampling(params)
+  - _prompt_records(plan, logits)
+  - _pick(logits, rows, total)
+  - _to_device(values)
+

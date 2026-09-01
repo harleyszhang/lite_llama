@@ -1,0 +1,662 @@
+### lite_llama/__init__.py | total=70 | doc=29L/1145c | usage=False
+DOC| Public API: :class:`LLM` (vLLM-style entry), :class:`LLMEngine`, sampling.
+DOC| 
+DOC| Typical usage::
+DOC| 
+DOC|     from lite_llama import LLM, SamplingParams
+DOC| 
+DOC|     llm = LLM(model="my_weight/Qwen2.5-0.5B")
+DOC|     outputs = llm.generate(
+DOC|         ["What is the capital of France?"], SamplingParams(temperature=0.0)
+DOC|     )
+DOC|     print(outputs[0].outputs[0].text)
+DOC| 
+DOC| ``TextGenerator`` / ``VisionGenerator`` remain as backward-compatible wrappers.
+DOC| 
+DOC| For online serving, where requests arrive independently and should share a batch,
+DOC| use the continuous-batching engine instead::
+DOC| ...(+12L)
+VAR __version__
+VAR __all__
+
+### lite_llama/cli.py | total=625 | doc=21L/1059c | usage=True
+DOC| ``lite-llama`` command-line entry point.
+DOC| 
+DOC| Built bottom-up in four decoupled layers: a declarative option table
+DOC| (:class:`CliOption` + ``COMMON_OPTIONS``) shared by every subcommand; frozen
+DOC| option objects (:class:`BaseOptions` for what every engine build shares,
+DOC| :class:`TextEngineOptions` adding the text engine's own switches) that
+DOC| validate the parsed args; the
+DOC| :class:`~lite_llama.utils.prompt_templates.PrompterResolver` that picks
+DOC| base-vs-instruct prompting; and :class:`CliCommand` subclasses that wire it
+DOC| up. Adding a subcommand = one ``CliCommand`` subclass listed in ``COMMANDS``.
+DOC| 
+DOC| Every text command runs on the continuous-batching engine, which is what makes
+DOC| ``--tensor-parallel-size N`` uniform across them: the engine spawns the extra
+DOC| ranks and broadcasts each step's plan to them, so nothing in this file knows
+DOC| that more than one GPU is involved.
+DOC| 
+DOC| ...(+4L)
+CLASS CliOption() :: 一条 CLI 参数声明;``register`` 将其翻译成一次 ``add_argument`` 调用。
+  - register(sub)
+def _cuda_graph_option()
+CLASS BaseOptions() :: Construction options every engine build shares, text or vision.
+  - from_args(cls, args)
+  - _collect(args)
+  - build_vision_generator()
+CLASS TextEngineOptions(BaseOptions) :: Base options plus the switches only the text engine has.
+  - build_engine()
+CLASS CliCommand(ABC) :: CLI 子命令基类。
+  - register(subparsers)
+  - add_arguments(sub)
+  - build_sampling_params(args)
+  - run(args)
+CLASS ChatCommand(CliCommand) :: ``chat``:交互式文本对话(REPL 循环,逐 token 流式输出)。
+  - add_arguments(sub)
+  - run(args)
+  - _print_banner(model_dir, prompter, params)
+  - _stream_reply(engine, prompter, params, user_input)
+CLASS VlChatCommand(CliCommand) :: ``vl-chat``:单轮图像条件对话(LLaVA / Qwen3-VL)。
+  - add_arguments(sub)
+  - run(args)
+CLASS ServeCommand(CliCommand) :: ``serve``:启动 OpenAI 兼容的 HTTP 服务(连续批处理引擎)。
+  - add_arguments(sub)
+  - run(args)
+CLASS BatchCommand(CliCommand) :: ``batch``:把一批 prompt 交给连续批处理引擎离线跑完。
+  - add_arguments(sub)
+  - run(args)
+  - _load_prompts(path)
+  - _print_stats(requests, elapsed, started)
+def build_parser()
+def main(argv)
+
+### lite_llama/distributed/__init__.py | total=40 | doc=6L/263c | usage=False
+DOC| Parallelism state: the DP x TP rank grid and the collectives TP needs.
+DOC| 
+DOC| What those collectives cost is counted by
+DOC| :mod:`lite_llama.tools.observability.collective_stats`, which is where the reporting
+DOC| lives — this package runs the wire, it does not account for it.
+VAR __all__
+
+### lite_llama/distributed/parallel_state.py | total=360 | doc=28L/1683c | usage=True
+DOC| Parallel process groups: the rank grid that TP and DP agree on.
+DOC| 
+DOC| Ranks form a ``dp_size x tp_size`` grid laid out so that one replica's TP ranks are
+DOC| contiguous — ``global_rank = dp_rank * tp_size + tp_rank`` — which is what lets the two
+DOC| kinds of parallelism stay unaware of each other. **TP** splits every weight matrix
+DOC| across the ranks of one replica, so layers that split their input finish with an
+DOC| all-reduce (:func:`all_reduce_tp`) over *that replica's* group only. **DP** replicates
+DOC| the whole model per group and shards the *requests* instead, so it needs no collective
+DOC| in the forward at all; ``torch.distributed`` is therefore only initialised when
+DOC| ``tp_size > 1``, and pure DP runs on plain multiprocessing queues
+DOC| (:mod:`lite_llama.engine.data_parallel`).
+DOC| 
+DOC| Keeping the grid in one module means a layer can ask "how many ranks, which one am I"
+DOC| without the plumbing being threaded through its constructor, exactly as vLLM's
+DOC| ``parallel_state`` does. The default state is a world of one, where every collective is
+DOC| a no-op and every layer is full width — so single-GPU code paths never branch.
+DOC| ...(+11L)
+VAR _log
+def grid_coordinates(global_rank, tp_size, dp_size)
+def init_parallel(global_rank, tp_size, dp_size, master_port, backend)
+def init_tensor_parallel(rank, world_size, master_port, backend)
+def destroy_parallel()
+def destroy_tensor_parallel()
+def get_tp_rank()
+def get_tp_world_size()
+def get_dp_rank()
+def get_dp_world_size()
+def get_world_size()
+def divide(a, b, what)
+def _payload(tensor)
+def all_reduce_tp(tensor)
+def all_reduce_max_tp(tensor)
+def all_gather_tp(tensor, dim)
+def broadcast_tp(tensor, src)
+def broadcast_object_tp(obj, src)
+def all_reduce_min(value)
+
+### lite_llama/entrypoints/__init__.py | total=11 | doc=7L/305c | usage=False
+DOC| Server entrypoints: the OpenAI-compatible HTTP API.
+DOC| 
+DOC| Kept in its own package because serving is an optional extra. FastAPI and uvicorn
+DOC| are imported inside :mod:`lite_llama.entrypoints.api_server`, so importing
+DOC| ``lite_llama`` on a machine that only runs offline generation costs nothing and
+DOC| fails nowhere.
+VAR __all__
+
+### lite_llama/entrypoints/api_server.py | total=522 | doc=17L/862c | usage=True
+DOC| OpenAI-compatible HTTP server over :class:`AsyncLLMEngine`.
+DOC| 
+DOC| Endpoints: ``/v1/models``, ``/v1/completions``, ``/v1/chat/completions`` (both
+DOC| streaming and not) and ``/health``. Being wire-compatible means the official
+DOC| ``openai`` client, ``curl`` and anything built for vLLM's server work unchanged.
+DOC| 
+DOC| The layer is deliberately thin. It translates JSON to
+DOC| :class:`~lite_llama.engine.sampler.SamplingParams`, applies the chat template, and
+DOC| turns the engine's chunks into SSE frames — no batching, queuing or scheduling
+DOC| logic lives here, because all of that is the engine's job and duplicating any of
+DOC| it would mean two policies to keep in agreement.
+DOC| 
+DOC| Usage:
+DOC|     lite-llama serve --model-dir my_weight/Qwen2.5-0.5B --port 8000
+DOC|     curl localhost:8000/v1/completions -H 'Content-Type: application/json' \
+DOC|          -d '{"model":"qwen","prompt":"Hello","max_tokens":32}'
+VAR logger
+VAR _SSE_DONE
+def _require_fastapi()
+CLASS ServerConfig() :: How to build the engine a server run sits on.
+  - model_name()
+CLASS _LogprobsCollector() :: Accumulate streamed :class:`PositionLogprobs` into OpenAI-shaped blocks.
+  - __init__(tokenizer)
+  - _token_text(token_id)
+  - add(record)
+  - completion_block()
+  - chat_block()
+def _prompt_logprobs_block(tokenizer, records)
+CLASS OpenAIServer() :: Wire-protocol adapter: OpenAI JSON in, engine calls out.
+  - __init__(engine, model_name)
+  - list_models()
+  - metrics_text()
+  - completions(body)
+  - _full_completion(prompt, params)
+  - _stream_completion(prompt, params)
+  - chat_completions(body)
+  - _full_chat(prompt, params)
+  - _stream_chat(prompt, params)
+  - _render_chat(body)
+  - _usage(final)
+def build_app(config, engine)
+def run_server(config, host, port)
+def parse_sse(payload)
+
+### lite_llama/entrypoints/protocol.py | total=235 | doc=10L/426c | usage=True
+DOC| Request and response schemas for the OpenAI-compatible endpoints.
+DOC| 
+DOC| Only the fields lite_llama can actually honour are modelled. Accepting a knob and
+DOC| ignoring it is worse than rejecting it: a client that sets ``n=4`` and silently
+DOC| gets one completion has no way to notice, so unsupported values raise instead.
+DOC| 
+DOC| Usage:
+DOC|     body = CompletionRequest(model="qwen", prompt="hi", max_tokens=16)
+DOC|     params = body.to_sampling_params()
+VAR _DEFAULT_TEMPERATURE
+VAR _DEFAULT_TOP_P
+def _request_id(prefix)
+CLASS _GenerationOptions(BaseModel) :: Sampling fields shared by the completion and chat-completion bodies.
+  - _only_one_completion(cls, value)
+  - to_sampling_params()
+CLASS CompletionRequest(_GenerationOptions) :: Body of ``POST /v1/completions``.
+  - _non_empty(cls, value)
+  - to_sampling_params()
+CLASS ChatMessage(BaseModel) :: One turn of a chat conversation.
+CLASS ChatCompletionRequest(_GenerationOptions) :: Body of ``POST /v1/chat/completions``.
+  - _top_logprobs_need_logprobs(cls, value, info)
+  - to_sampling_params()
+CLASS UsageInfo(BaseModel) :: Token accounting for one response.
+CLASS CompletionLogprobs(BaseModel) :: OpenAI's per-token logprob block: four parallel arrays.
+CLASS CompletionChoice(BaseModel) :: 
+CLASS CompletionResponse(BaseModel) :: Body of a non-streaming ``/v1/completions`` reply.
+CLASS ChatCompletionMessage(BaseModel) :: 
+CLASS ChatTopLogprob(BaseModel) :: 
+CLASS ChatTokenLogprob(ChatTopLogprob) :: 
+CLASS ChatCompletionLogprobs(BaseModel) :: 
+CLASS ChatCompletionChoice(BaseModel) :: 
+CLASS ChatCompletionResponse(BaseModel) :: Body of a non-streaming ``/v1/chat/completions`` reply.
+CLASS ChatCompletionDelta(BaseModel) :: Incremental content of a streamed chat chunk.
+CLASS ChatCompletionChunkChoice(BaseModel) :: 
+CLASS ChatCompletionChunk(BaseModel) :: One ``data:`` frame of a streamed chat completion.
+CLASS CompletionChunk(BaseModel) :: One ``data:`` frame of a streamed text completion.
+CLASS ModelCard(BaseModel) :: 
+CLASS ModelList(BaseModel) :: Body of ``GET /v1/models``.
+
+### lite_llama/observe/__init__.py | total=20 | doc=10L/465c | usage=False
+DOC| Runtime observability: request metrics, and optional OTLP tracing.
+DOC| 
+DOC| * :mod:`~lite_llama.observe.metrics` — the per-request numbers (queue time,
+DOC|   TTFT, TPOT, token counts) rendered as Prometheus text for ``/metrics``.
+DOC| * :mod:`~lite_llama.observe.trace` — one OTLP span per request when a
+DOC|   collector is configured, a no-op otherwise.
+DOC| 
+DOC| Both default to cheap: metrics are a few float additions on the finish path,
+DOC| and tracing without an endpoint is a ``None`` check.
+VAR __all__
+
+### lite_llama/observe/metrics.py | total=308 | doc=18L/920c | usage=True
+DOC| Request-level metrics: a tiny in-process registry with a Prometheus rendering.
+DOC| 
+DOC| The engine already keeps every timestamp a latency breakdown needs
+DOC| (``arrival_time`` / ``scheduled_time`` / ``first_token_time`` / ``finish_time``
+DOC| on :class:`~lite_llama.engine.scheduler.Request`); this module is where those
+DOC| timestamps become numbers worth charting — queue time, TTFT, TPOT — plus the
+DOC| counters and gauges a ``/metrics`` scrape expects.
+DOC| 
+DOC| No dependencies: the Prometheus text format is a handful of lines per metric,
+DOC| and pulling in ``prometheus_client`` for that alone would cost every offline
+DOC| user an install. Export is opt-out (``LITE_LLAMA_METRICS=0``), because the
+DOC| collection itself is a few float additions on the finish path.
+DOC| 
+DOC| Usage:
+DOC|     metrics = EngineMetrics.from_env()
+DOC|     metrics.observe_finish(request)          # in the engine's finish path
+DOC| ...(+1L)
+VAR METRICS_ENV
+VAR _NAMESPACE
+VAR _LATENCY_BUCKETS
+VAR _TOKEN_BUCKETS
+CLASS Counter() :: A monotonically increasing value, labelled or not.
+  - __init__(name, documentation, label_names)
+  - inc(amount)
+  - render()
+CLASS Gauge() :: A value that goes up and down; set, never accumulated.
+  - __init__(name, documentation)
+  - set(value)
+  - render()
+CLASS Histogram() :: Count of observations per bucket, plus the sum Prometheus wants.
+  - __init__(name, documentation, buckets)
+  - observe(value)
+  - render()
+def _format_labels(names, values)
+def _format(value)
+CLASS _NullInstrument() :: Metric stand-in used when collection is disabled; every call is a no-op.
+  - inc(amount)
+  - set(value)
+  - observe(value)
+  - render()
+VAR _NULL
+CLASS EngineMetrics() :: The metric set one continuous-batching engine reports.
+  - from_env(cls)
+  - observe_load(running, waiting)
+  - observe_queue_time(request)
+  - observe_finish(request)
+  - render_prometheus()
+
+### lite_llama/observe/trace.py | total=108 | doc=19L/928c | usage=True
+DOC| Optional OTLP tracing: one span per request, exported over OTLP/HTTP.
+DOC| 
+DOC| A request's span opens when it enters the scheduler and closes when the engine
+DOC| retires it, carrying the numbers a trace backend is good at slicing by:
+DOC| prompt/output lengths, finish reason and the queue/prefill/decode breakdown.
+DOC| Step-level spans would multiply volume by the decode length for information the
+DOC| metrics already aggregate, so they are deliberately absent.
+DOC| 
+DOC| OpenTelemetry is an optional dependency: with it installed and
+DOC| ``LITE_LLAMA_OTLP_ENDPOINT`` set, spans export to that collector; without
+DOC| either, every call here is a no-op costing one ``None`` check. That mirrors
+DOC| how the serving extras work — tracing must never make offline generation
+DOC| heavier to install.
+DOC| 
+DOC| Usage:
+DOC|     tracer = Tracer.from_env()
+DOC| ...(+2L)
+VAR logger
+VAR OTLP_ENDPOINT_ENV
+CLASS _Span(Protocol) :: The slice of an OpenTelemetry span the engine uses.
+  - set_attribute(key, value)
+  - end()
+CLASS Tracer() :: Starts and ends request spans; a no-op unless configured.
+  - __init__(otel_tracer)
+  - enabled()
+  - from_env(cls, service_name)
+  - start_span(name)
+  - end_span(span)
+
+### lite_llama/platform/__init__.py | total=24 | doc=11L/477c | usage=True
+DOC| Accelerator platform layer (ROADMAP A9): detect once, filter kernels anywhere.
+DOC| 
+DOC| The package answers one question — *what hardware is this process running
+DOC| on?* — in a form the kernel registry can filter against without importing
+DOC| torch: ``spec.py`` holds the torch-free dataclasses, ``cuda.py`` the real
+DOC| detector, ``interface.py`` the ABC and the ``current_platform`` singleton.
+DOC| 
+DOC| Usage:
+DOC|     from lite_llama.platform import current_platform
+DOC|     info = current_platform().detect()
+VAR __all__
+
+### lite_llama/platform/cuda.py | total=33 | doc=6L/290c | usage=False
+DOC| The CUDA platform: device probe for NVIDIA GPUs (sm75 through sm100+).
+DOC| 
+DOC| Kept deliberately thin — the interesting policy (which kernel may run where)
+DOC| lives in ``CapabilityRequirement`` next to each kernel implementation, not in
+DOC| the platform. This module only answers "what am I running on".
+CLASS CudaPlatform(Platform) :: NVIDIA CUDA devices, detected through ``torch.cuda``.
+  - is_available()
+  - detect()
+
+### lite_llama/platform/interface.py | total=85 | doc=12L/553c | usage=True
+DOC| Platform ABC: one subclass per accelerator family, CUDA first.
+DOC| 
+DOC| Modelled on vLLM's ``Platform`` base class but trimmed to what lite_llama's
+DOC| kernel dispatch actually asks: a device-type identity, an availability probe,
+DOC| and the ``PlatformInfo`` snapshot the registry filters on. The subclass list
+DOC| in ``_PLATFORM_CLASSES`` is the registration point — ROCm slots in ahead of
+DOC| ``CpuPlatform`` when it lands (ROADMAP A9); nothing else changes.
+DOC| 
+DOC| Usage:
+DOC|     plat = current_platform()
+DOC|     info = plat.detect()          # PlatformInfo("cuda", 9, 0, "H100") or cpu
+CLASS Platform(ABC) :: Read-only view of the accelerator family this process runs on.
+  - is_available()
+  - detect()
+CLASS CpuPlatform(Platform) :: The always-present fallback so ``current_platform`` never fails.
+  - is_available()
+  - detect()
+def register_platform(cls)
+def current_platform()
+
+### lite_llama/platform/spec.py | total=89 | doc=15L/776c | usage=True
+DOC| Torch-free platform descriptors: what a device is, what a kernel needs.
+DOC| 
+DOC| ``PlatformInfo`` is an immutable snapshot of the accelerator this process
+DOC| runs on and ``CapabilityRequirement`` is the declarative gate a kernel
+DOC| implementation states ("CUDA, SM >= 9.0"). Both are plain dataclasses with
+DOC| no torch import, so the kernel registry (``kernels/dispatcher/spec.py``) can filter
+DOC| implementations at import time on a CPU-only box and the cold-start path
+DOC| never initialises CUDA. The only method that touches torch is
+DOC| ``PlatformInfo.detect``, which imports it lazily inside the call.
+DOC| 
+DOC| Usage:
+DOC|     info = PlatformInfo("cuda", 8, 6, "A10")
+DOC|     CapabilityRequirement("cuda", min_cc=(9, 0)).matches(info)   # False
+DOC|     capabilities_match([CapabilityRequirement("cuda")], info)    # True
+CLASS PlatformInfo() :: Immutable snapshot of the runtime accelerator platform.
+  - compute_capability()
+  - detect(cls)
+CLASS CapabilityRequirement() :: One AND-group of platform gates; a list of them carries OR semantics.
+  - matches(info)
+def capabilities_match(requirements, info)
+
+### lite_llama/tools/harness/__init__.py | total=43 | doc=14L/682c | usage=True
+DOC| Harness tools: run one layer of a model instead of all of it.
+DOC| 
+DOC| The debugging counterpart to :mod:`lite_llama.tools.profiling`. Profiling describes a
+DOC| model that already runs; a harness makes a layer runnable before the model is — which is
+DOC| how a new attention variant gets checked on one GPU while the checkpoint it belongs to
+DOC| needs sixteen.
+DOC| 
+DOC| Usage:
+DOC|     from lite_llama.tools.harness import HFLayerReference, SingleLayerHarness
+DOC| 
+DOC|     harness = SingleLayerHarness.from_pretrained("my_weight/Qwen3-0.6B", layer_index=0)
+DOC|     reference = HFLayerReference(harness.config, harness.layer_index, device=harness.device)
+DOC|     print(harness.run(batch=2, seq_len=64, reference=reference).render())
+VAR __all__
+
+### lite_llama/tools/harness/reference.py | total=174 | doc=19L/1112c | usage=True
+DOC| The same layer as HuggingFace builds it, for the harness to diff against.
+DOC| 
+DOC| A single-layer harness is only as useful as what it can be checked against, and the
+DOC| honest reference is the implementation the checkpoint was published for. This module
+DOC| builds *one* ``transformers`` decoder layer — resolved from the config, so llama, qwen2,
+DOC| qwen3 and qwen3_moe all work without a table here — and drives it through the same two
+DOC| shapes the harness runs: a causal prefill and one decode step continuing it.
+DOC| 
+DOC| Two choices keep the comparison about the layer and nothing else. The attention
+DOC| implementation is pinned to ``eager`` with an explicit additive causal mask, because
+DOC| sdpa and flash both round differently and would put a backend difference in a column
+DOC| labelled accuracy. And ``(cos, sin)`` arrives from the caller, so lite_llama's RoPE feeds
+DOC| both sides: a rotary discrepancy is a separate bug with its own test, and folding it in
+DOC| here would make every layer look wrong.
+DOC| 
+DOC| Usage:
+DOC| ...(+2L)
+def hf_decoder_layer_class(hf_config)
+CLASS HFLayerReference(LayerReference) :: One ``transformers`` decoder layer, run against the harness's two shapes.
+  - __init__(config, layer_index)
+  - state_dict()
+  - prefill(hidden_states, position_embeddings)
+  - decode(hidden_states, position_embeddings)
+  - _forward(hidden_states, position_embeddings, mask)
+  - _causal_mask(batch, seq_len)
+
+### lite_llama/tools/harness/single_layer.py | total=774 | doc=28L/1651c | usage=True
+DOC| One decoder layer, built and run on its own.
+DOC| 
+DOC| A whole-model bring-up answers "does it generate text". It cannot answer "is layer 3
+DOC| right", and it cannot be run at all until a checkpoint that may be 671 B parameters has
+DOC| been downloaded and made to fit. This harness inverts that: it builds the model skeleton
+DOC| on the meta device (no allocation, no initialisation), materialises exactly one layer,
+DOC| and drives that layer's ``forward`` with hand-built KV bookkeeping. One layer of a large
+DOC| MoE is a single-GPU object, so MLA, a Lightning Indexer or a new expert routing scheme
+DOC| can be checked for correctness and timed on hardware that could never hold the model.
+DOC| 
+DOC| Three things come out of a run, and they are the three questions a new layer raises:
+DOC| 
+DOC| * **Is it right** — max/mean absolute difference against a second implementation of the
+DOC|   same layer, for the prefill *and* the decode shape. Both sides get the same weights
+DOC|   and the same ``(cos, sin)``, so a difference is the layer's, not RoPE's.
+DOC| * **What does it cost** — wall time per phase, a per-module breakdown from CUDA events,
+DOC| ...(+11L)
+VAR logger
+VAR RANDOM_STD
+CLASS OpTiming() :: Device time one module of the layer accounted for across a measured run.
+CLASS Diff() :: How far this layer's output sits from a reference implementation's.
+  - between(cls, actual, reference)
+CLASS LayerReport() :: Everything one harness run measured, renderable as a text block.
+  - render()
+CLASS SingleLayerCache() :: The paged-KV bookkeeping a lone layer needs, built by hand.
+  - __init__(batch, seq_len, decode_steps)
+  - begin_prefill()
+  - step_decode()
+CLASS ModuleTimer() :: Per-module device time from forward hooks, one row per module.
+  - __init__(module, device, max_depth)
+  - __enter__()
+  - __exit__()
+  - _mark()
+  - _open(name)
+  - _close(name)
+  - results()
+  - _elapsed(start, end)
+CLASS LayerReference() :: A second implementation of the same layer, for the harness to diff against.
+  - state_dict()
+  - prefill(hidden_states, position_embeddings)
+  - decode(hidden_states, position_embeddings)
+CLASS SingleLayerHarness() :: One decoder layer of a registered model, built and driven in isolation.
+  - __init__(config, layer_index)
+  - from_pretrained(cls, checkpoints_dir, layer_index)
+  - weights()
+  - checkpoint_prefix()
+  - translate(key)
+  - load_weights(checkpoint, source)
+  - load_checkpoint(checkpoints_dir)
+  - load_state_dict(state, source)
+  - randomise(seed)
+  - param_bytes()
+  - new_cache(batch, seq_len, decode_steps)
+  - hidden_states(batch, seq_len, seed)
+  - rope(hidden_states, positions)
+  - forward(hidden_states, meta)
+  - run()
+  - _measure_once(batch, seq_len, decode_steps)
+  - _compare(reference, batch, seq_len)
+def dispatched_kernels()
+def layer_keys(checkpoints_dir, prefix)
+def _row_positions(start, end, batch, device)
+def _positions_for(meta, count, device)
+CLASS _Elapsed() :: Milliseconds the timed block took, filled in on exit.
+CLASS _wall_clock() :: Time a block of device work, synchronising once at each end.
+  - __init__(device)
+  - __enter__()
+  - __exit__()
+def _reset_peak_memory(device)
+def _peak_memory_gb(device)
+
+### lite_llama/tools/observability/__init__.py | total=29 | doc=13L/525c | usage=True
+DOC| Observability tools: measuring what the engine does, without changing what it does.
+DOC| 
+DOC| Instrumentation lives here rather than beside the code it measures, so a subsystem
+DOC| carries no reporting machinery of its own and the cost of not looking stays at zero.
+DOC| Today that is collective traffic; the shape generalises to anything a run wants to
+DOC| account for.
+DOC| 
+DOC| Usage:
+DOC|     from lite_llama.tools.observability import Collective, CollectiveStats
+DOC|     with CollectiveStats.collect() as stats:
+DOC|         engine.step()
+DOC|     print(stats.report())
+VAR __all__
+
+### lite_llama/tools/observability/collective_stats.py | total=213 | doc=33L/1942c | usage=True
+DOC| Collective accounting: what tensor parallelism actually puts on the wire.
+DOC| 
+DOC| A tensor-parallel step is fast or slow for one reason above all others — how many
+DOC| bytes it makes the ranks exchange — and that number is invisible in a profile of
+DOC| kernel names. This module counts it: every collective in
+DOC| :mod:`lite_llama.distributed.parallel_state` reports its op and its payload here, so
+DOC| a caller can ask "how much traffic did that step cost, on which plane" and get an
+DOC| answer in bytes rather than an intuition.
+DOC| 
+DOC| Core design. Recording is *windowed*, not global: nothing is counted until someone
+DOC| opens a window with :meth:`CollectiveStats.collect`, which keeps the disabled path a
+DOC| single falsy check and makes each measurement scoped to the code the caller cares
+DOC| about. The open windows live in a :class:`~contextvars.ContextVar`, so a window
+DOC| belongs to the thread and asyncio task that opened it — DP replicas step
+DOC| concurrently, and a per-step measurement that also counted a sibling replica's
+DOC| traffic would be worse than no measurement at all. Windows nest, and an event is
+DOC| ...(+16L)
+CLASS Plane(StrEnum) :: Which of the two wires a collective travels on.
+CLASS Collective(StrEnum) :: The collectives :mod:`lite_llama.distributed.parallel_state` can run.
+  - plane()
+CLASS Tally() :: How much one collective was used inside a window.
+  - bytes_per_call()
+  - plus(nbytes)
+CLASS CollectiveStats() :: Per-op call and byte counts for one recording window.
+  - __init__()
+  - collect(cls)
+  - record(cls, op, nbytes)
+  - collecting(cls)
+  - _credit(op, nbytes)
+  - tally(op)
+  - tallies()
+  - calls()
+  - nbytes()
+  - bytes_on(plane)
+  - report()
+def human_bytes(nbytes)
+
+### lite_llama/tools/profiling/__init__.py | total=29 | doc=10L/381c | usage=True
+DOC| Profiling tools: model structure tree and memory budget table.
+DOC| 
+DOC| Exports readable representations of model architecture and memory allocation
+DOC| for debugging, documentation, and capacity planning.
+DOC| 
+DOC| Usage:
+DOC|     from lite_llama.tools.profiling import print_structure_tree, print_memory_budget
+DOC|     print_structure_tree(model)
+DOC|     print_memory_budget(num_layers=28, hidden_size=1024, ...)
+VAR __all__
+
+### lite_llama/tools/profiling/memory.py | total=154 | doc=17L/879c | usage=True
+DOC| Static GPU memory budget from config numbers alone — no GPU, no model load.
+DOC| 
+DOC| Deciding a KV capacity or a max batch means knowing where the memory goes, and
+DOC| finding that out by launching the server and reading the OOM is a slow way to learn.
+DOC| Everything here is arithmetic over shape numbers, so it answers before the weights
+DOC| are downloaded.
+DOC| 
+DOC| The shape numbers live in one dataclass and are validated there, which is what keeps
+DOC| the compute and render entry points from restating a twelve-field signature apiece.
+DOC| Two of the four rows are exact (weights, KV cache) and two are deliberate
+DOC| over-estimates (activations, graph workspace) — labelled as such, because a budget
+DOC| that under-promises is the only useful kind.
+DOC| 
+DOC| Usage:
+DOC|     print(export_memory_budget(num_layers=28, hidden_size=1024, ..., num_kv_blocks=147875))
+DOC|     budget = compute_memory_budget(ModelShape(num_layers=28, ...))
+VAR DTYPE_BYTES
+VAR CUDA_GRAPH_BYTES
+CLASS ModelShape() :: Every number a budget needs. Named as the model config names them.
+CLASS MemoryBudget() :: Static memory breakdown in bytes, plus GB views for printing.
+  - total_bytes()
+  - model_weights_gb()
+  - kv_cache_gb()
+  - total_gb()
+def compute_memory_budget(shape)
+def export_memory_budget()
+def print_memory_budget()
+
+### lite_llama/tools/profiling/structure.py | total=80 | doc=15L/788c | usage=True
+DOC| Render a model as an indented text tree: layer types, parameter counts, dtypes.
+DOC| 
+DOC| A checkpoint's shape is the first thing you need when a load fails or a shard looks
+DOC| wrong, and `print(model)` buries it under repr noise. This walks `named_children()`
+DOC| once and renders box-drawing branches, so sibling boundaries stay readable at depth.
+DOC| Every node carries only the parameters it owns directly (`recurse=False`), which is
+DOC| what makes the numbers add up instead of counting a subtree once per ancestor.
+DOC| 
+DOC| Depth is budgeted rather than unlimited: past `max_depth` a node reports how many
+DOC| children it hid, so a 48-layer model stays one screen instead of ten thousand lines.
+DOC| 
+DOC| Usage:
+DOC|     print_structure_tree(model, max_depth=3)
+DOC|     tree = export_structure_tree(model)      # same text, as a string
+def _format_params(module)
+def _lines(module, name, prefix, connector, depth, max_depth)
+def export_structure_tree(model, max_depth)
+def print_structure_tree(model, max_depth)
+
+### lite_llama/utils/image_process.py | total=91 | doc=9L/333c | usage=True
+DOC| Image loading and preprocessing for the vision-language models.
+DOC| 
+DOC| Loads images from path or URL, optionally pads to a square (``expand2square``), and
+DOC| runs the HF image processor to produce pixel tensors for the vision tower. Adapted
+DOC| from LLaVA.
+DOC| 
+DOC| Usage:
+DOC|     images = load_images(paths); pixels = process_images(images, processor, cfg)
+def load_image(image_file)
+def load_images(image_files)
+def expand2square(pil_img, background_color)
+def process_images(images, image_processor, model_cfg)
+
+### lite_llama/utils/logger.py | total=70 | doc=8L/237c | usage=True
+DOC| Coloured console logging.
+DOC| 
+DOC| :func:`get_logger` returns a stdlib ``logging.Logger`` wired to a
+DOC| :class:`ColoredFormatter` that tints level names for readable terminal output.
+DOC| 
+DOC| Usage:
+DOC|     logger = get_logger(__name__); logger.info("loaded")
+CLASS ColoredFormatter(Formatter) :: Legacy-style formatter: ``04-24 09:30:45 [I] model_runner.py:145 msg``.
+  - format(record)
+def get_logger(name)
+
+### lite_llama/utils/path_utils.py | total=16 | doc=8L/244c | usage=True
+DOC| Derive a short model name from a checkpoint path.
+DOC| 
+DOC| Normalises trailing slashes and returns the final path component, used to select the
+DOC| matching prompter and stop-token set.
+DOC| 
+DOC| Usage:
+DOC|     name = get_model_name_from_path("my_weight/Qwen2.5-0.5B")
+def get_model_name_from_path(model_path)
+
+### lite_llama/utils/prompt_templates.py | total=158 | doc=17L/880c | usage=True
+DOC| Chat prompt formatting: wrap a user turn with the checkpoint's own chat template.
+DOC| 
+DOC| The vLLM approach, and the only one kept: an instruct checkpoint ships its chat
+DOC| template inside the tokenizer, so formatting a turn is just
+DOC| ``tokenizer.apply_chat_template(messages, add_generation_prompt=True)`` — always the
+DOC| model's official format, zero per-family maintenance, and identical to the
+DOC| multimodal path. Base (non-instruct) checkpoints carry no template and are sent
+DOC| verbatim by the caller, so they never reach this module.
+DOC| 
+DOC| Usage:
+DOC|     prompter = get_prompter(tokenizer)      # None when the checkpoint has no template
+DOC|     prompter.insert_prompt("hello")
+DOC|     text = prompter.model_input             # official-format prompt string
+DOC| 
+DOC|     # Or let :class:`PrompterResolver` make the base-vs-instruct call too:
+DOC|     prompter = PrompterResolver.build(model_dir, tokenizer)  # None for base
+CLASS ChatPrompter() :: Format one user turn with the tokenizer's own chat template.
+  - __init__(tokenizer, system_prompt)
+  - apply(messages)
+  - insert_prompt(prompt)
+def has_chat_template(tokenizer)
+def get_prompter(tokenizer, system_prompt)
+CLASS PrompterResolver() :: Decide whether a checkpoint's prompts go through a chat template.
+  - read_model_type(model_dir)
+  - is_instruct(cls, model_dir)
+  - build(cls, model_dir, tokenizer)
+
