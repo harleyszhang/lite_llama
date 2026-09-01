@@ -127,6 +127,35 @@ class TestRequestAdmission:
         with pytest.raises(ValueError):
             Scheduler(SchedulerConfig(max_seq_len=_MAX_SEQ_LEN), num_slots=0)
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("max_seq_len", 1),
+            ("max_num_seqs", 0),
+            ("max_num_batched_tokens", 0),
+            ("max_chunk_size", -1),
+            ("prefix_cache_blocks", 0),
+        ],
+    )
+    def test_invalid_scheduler_limits_are_rejected(self, field, value):
+        with pytest.raises(ValueError, match=field):
+            SchedulerConfig(**{field: value})
+
+    def test_duplicate_live_request_ids_are_rejected(self, scheduler):
+        scheduler.add_request(make_request("same"))
+        with pytest.raises(ValueError, match="already active"):
+            scheduler.add_request(make_request("same"))
+
+    def test_finished_request_id_can_be_reused(self, scheduler):
+        first = make_request("same")
+        scheduler.add_request(first)
+        scheduler.schedule()
+        scheduler.finish(first, "eos")
+
+        second = make_request("same")
+        scheduler.add_request(second)
+        assert scheduler.waiting == [second]
+
 
 # --------------------------------------------------------------------------- #
 # 2. Prefill scheduling
@@ -158,11 +187,13 @@ class TestPrefillScheduling:
         assert [r.request_id for r in scheduler.schedule().prefill] == ["long-a"]
         assert scheduler.num_waiting == 1
 
-    def test_a_prompt_bigger_than_the_budget_still_runs(self, scheduler):
-        """Otherwise it wedges the FCFS queue permanently."""
+    def test_a_prompt_bigger_than_the_budget_is_chunked_to_fit(self, scheduler):
+        """Chunked prefill makes forward progress without violating the budget."""
         scheduler.add_request(make_request("huge", prompt_len=100))
         scheduler.add_request(make_request("small", prompt_len=4))
-        assert [r.request_id for r in scheduler.schedule().prefill] == ["huge"]
+        output = scheduler.schedule()
+        assert [r.request_id for r in output.prefill] == ["huge"]
+        assert output.prefill_chunk_lens == [64]
         assert scheduler.num_waiting == 1
 
     def test_prefill_takes_priority_over_decode(self, scheduler):
@@ -572,6 +603,18 @@ class TestAbort:
 
     def test_aborting_an_unknown_id_is_a_no_op(self, scheduler):
         assert scheduler.abort("nope") is None
+
+    def test_aborting_a_queued_request_records_finish_time(self, scheduler):
+        scheduler.add_request(make_request("a"))
+        request = scheduler.abort("a")
+        assert request is not None and request.finish_time is not None
+
+    def test_finish_can_retire_a_waiting_request(self, scheduler):
+        request = make_request("a")
+        scheduler.add_request(request)
+        scheduler.finish(request, "abort")
+        assert not scheduler.has_unfinished_requests()
+        assert scheduler.abort("a") is None
 
 
 # --------------------------------------------------------------------------- #
