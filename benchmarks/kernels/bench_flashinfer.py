@@ -21,12 +21,12 @@ Usage:
 
 from __future__ import annotations
 
-import os
 import sys
+from pathlib import Path
 
 import torch
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from microbench import (
     Row,
@@ -243,10 +243,11 @@ def main() -> None:
     rows += bench_decode()
     report(rows)
     print(
-        "\nStatic priority keeps every flashinfer row below the native floor\n"
-        "(UNMEASURED until frozen). Diffs above are the golden records'\n"
-        "max-abs-diff; latency gaps here are the v0.10 measured-priority\n"
-        "evidence: feed them to set_perf_provider when priorities freeze."
+        "\nDiffs above are the golden records' max-abs-diff. The latency gaps\n"
+        "become dispatch's ranking once frozen:\n"
+        "  python benchmarks/kernels/freeze_dispatch_ranking.py\n"
+        "writes them into the autotune frozen/ store, and the provider wired\n"
+        "at lite_llama.kernels import ranks by them from then on."
     )
 
 

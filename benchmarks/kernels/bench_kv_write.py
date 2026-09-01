@@ -32,13 +32,13 @@ Usage:
 
 from __future__ import annotations
 
-import os
 import sys
 from collections.abc import Callable
+from pathlib import Path
 
 import torch
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from kv_pool import fresh_rows, paged_pool
 from microbench import Row, Work, bench, bench_host, metadata, report, verify

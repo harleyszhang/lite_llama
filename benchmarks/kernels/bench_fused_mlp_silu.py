@@ -1,130 +1,77 @@
-import os
+"""Fused SwiGLU MLP: silu(x @ w1) * (x @ w2) @ w3, three GEMMs and an epilogue.
+
+One Triton kernel serves both GEMM shapes via ``FUSE_SILU``: True folds the
+gate/up pair into a single launch with a silu-mul epilogue (two accumulators,
+two B operands per K step); False is the plain down-projection. The old file
+carried the two variants as near-duplicate kernels; only the accumulator and
+epilogue actually differ, and the constexpr branch compiles them apart with the
+pid mapping and K loop shared.
+
+The third GEMM chain the implementations disagree on is the down-projection:
+Triton launch versus ``torch.mm``. Running both quantifies what the fusion is
+worth against cuBLAS at these shapes.
+
+Timing follows ``microbench``: verify against ``torch_mlp`` first, then
+cold-L2 medians divided by the operation's theoretical work — ``6MNK`` FLOP
+(three GEMMs) and the read-each-input-once traffic — so implementations share a
+numerator and only the measured time differs.
+
+Usage:
+    python benchmarks/kernels/bench_fused_mlp_silu.py
+"""
+
+from __future__ import annotations
+
 import sys
+from collections.abc import Callable
+from pathlib import Path
 
 import torch
 import torch.nn as nn
 import triton
 import triton.language as tl
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from microbench import Row, Work, bench, metadata, report, verify
+
 from lite_llama.kernels.ops.activation.swiglu import swiglu_forward
+
+#: Grouped-pid tile sizes, shared by every launch below (bumping these is part
+#: of tuning the kernel, not of running the benchmark).
+BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, GROUP_SIZE_M = 64, 64, 128, 8
 
 
 @triton.jit
-def matmul_silu_kernel(
-    # Pointers to matrices
+def mlp_kernel(
     a_ptr,
     w1_ptr,
     w2_ptr,
     c_ptr,
-    # Matrix dimensions
     M,
     N,
     K,
-    # The stride variables represent how much to increase the ptr by when moving by 1
-    stride_am,
-    stride_ak,  # input
-    stride_w1k,
-    stride_w1n,  # weight 1
-    stride_w2k,
-    stride_w2n,  # weight 2
-    stride_cm,
-    stride_cn,  # output
-    # Meta-parameters
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,  #
-    GROUP_SIZE_M: tl.constexpr,  #
-):
-    """
-    Fused kernel for computing F.silu(w1(x)) * w2(x)
-    """
-    # -----------------------------------------------------------
-    # Map program ids `pid` to pid_m and pid_n
-    pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + (pid % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
-
-    # ----------------------------------------------------------
-    # Create pointers for the first blocks of A and B.
-    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    w1_ptrs = w1_ptr + (offs_k[:, None] * stride_w1k + offs_bn[None, :] * stride_w1n)
-    w2_ptrs = w2_ptr + (offs_k[:, None] * stride_w2k + offs_bn[None, :] * stride_w2n)
-
-    # -----------------------------------------------------------
-    # Iterate to compute a block of the C matrix.
-    acc1 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    acc2 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        w1 = tl.load(w1_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        acc1 += tl.dot(a, w1)
-        w2 = tl.load(w2_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        acc2 += tl.dot(a, w2)
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        w1_ptrs += BLOCK_SIZE_K * stride_w1k
-        w2_ptrs += BLOCK_SIZE_K * stride_w2k
-
-    # -----------------------------------------------------------
-    # Fuse silu activation function
-    # option 1: all in fp32
-    c = (acc1 * tl.sigmoid(acc1)) * acc2
-
-    # option 2: silu in fp32
-    # acc1 = (acc1 * tl.sigmoid(acc1)).to(tl.float16)
-    # acc2 = acc2.to(tl.float16)
-    # c = acc1 * acc2
-
-    # -----------------------------------------------------------
-    # Write back the block of the output matrix
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, c, mask=c_mask)
-
-
-@triton.jit
-def matmul_kernel(
-    # Pointers to matrices
-    a_ptr,
-    b_ptr,
-    c_ptr,
-    # Matrix dimensions
-    M,
-    N,
-    K,
-    # The stride variables represent how much to increase the ptr by when moving by 1
-    # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
-    # by to get the element one row down (A has M rows).
     stride_am,
     stride_ak,
-    stride_bk,
-    stride_bn,
+    stride_w1k,
+    stride_w1n,
+    stride_w2k,
+    stride_w2n,
     stride_cm,
     stride_cn,
-    # Meta-parameters
+    FUSE_SILU: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
 ):
-    """Kernel for computing the matmul C = A x B.
-    A has shape (M, K), B has shape (K, N) and C has shape (M, N)
+    """One grouped GEMM. FUSE_SILU folds silu(a@w1) * (a@w2) into the epilogue.
+
+    A has shape (M, K), the weights (K, N), C (M, N). With FUSE_SILU the kernel
+    walks w1 and w2 down K side by side and writes silu(acc1) * acc2; without it
+    w2 is unused and the fp32 accumulator is cast to fp16 for the store — the
+    down-projection in :func:`mlp_silu`.
     """
-    # -----------------------------------------------------------
-    # Map program ids `pid` to the block of C it should compute.
-    # This is done in a grouped ordering to promote L2 data reuse.
-    # See above `L2 Cache Optimizations` section for details.
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -135,39 +82,33 @@ def matmul_kernel(
     pid_m = first_pid_m + (pid % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    # ----------------------------------------------------------
-    # Create pointers for the first blocks of A and B.
-    # We will advance this pointer as we move in the K direction
-    # and accumulate
-    # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
-    # `b_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
-    # See above `Pointer Arithmetics` section for details
     offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    w1_ptrs = w1_ptr + (offs_k[:, None] * stride_w1k + offs_bn[None, :] * stride_w1n)
+    if FUSE_SILU:
+        w2_ptrs = w2_ptr + (offs_k[:, None] * stride_w2k + offs_bn[None, :] * stride_w2n)
 
-    # -----------------------------------------------------------
-    # Iterate to compute a block of the C matrix.
-    # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
-    # of fp32 values for higher accuracy.
-    # `accumulator` will be converted back to fp16 after the loop.
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    acc1 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    if FUSE_SILU:
+        acc2 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        # Load the next block of A and B, generate a mask by checking the K dimension.
-        # If it is out of bounds, set it to 0.
         a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        # We accumulate along the K dimension.
-        accumulator += tl.dot(a, b)
-        # Advance the ptrs to the next K block.
+        w1 = tl.load(w1_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        acc1 += tl.dot(a, w1)
+        if FUSE_SILU:
+            w2 = tl.load(w2_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+            acc2 += tl.dot(a, w2)
+            w2_ptrs += BLOCK_SIZE_K * stride_w2k
         a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
+        w1_ptrs += BLOCK_SIZE_K * stride_w1k
 
-    c = accumulator.to(tl.float16)
-    # -----------------------------------------------------------
-    # Write back the block of the output matrix C with masks.
+    if FUSE_SILU:
+        c = (acc1 * tl.sigmoid(acc1)) * acc2
+    else:
+        c = acc1.to(tl.float16)
+
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
@@ -175,207 +116,150 @@ def matmul_kernel(
     tl.store(c_ptrs, c, mask=c_mask)
 
 
-def mlp_silu(x, w1, w2, w3):
-    # Check constraints.
-    assert x.shape[-1] == w1.shape[0], "Incompatible dimensions"
-    assert x.shape[-1] == w2.shape[0], "Incompatible dimensions"
-    assert w1.shape[1] == w2.shape[1], "Incompatible dimensions"
-
-    assert x.is_contiguous(), "Matrix X must be contiguous"
-    assert w1.is_contiguous(), "Matrix W1 must be contiguous"
-    assert w2.is_contiguous(), "Matrix W2 must be contiguous"
-
-    batch, seq_len, dim = x.shape
-    M, K = batch * seq_len, dim
+def _launch(
+    a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, out: torch.Tensor, fuse_silu: bool
+) -> torch.Tensor:
+    """Launch :func:`mlp_kernel` on flat 2D operands; shapes must be contiguous."""
+    M, K = a.shape
     N = w1.shape[1]
-    x = x.view(M, K)
-
-    # Allocates output.
-    out = torch.empty((M, N), device=x.device, dtype=x.dtype)
-    # 这里的 grid 针对 (M,K) 输出维度进行网格划分
-    BLOCK_SIZE_M = 64
-    BLOCK_SIZE_N = 64  # 用于中间N和最终K的分块大小
-    BLOCK_SIZE_K = 128  # 用于中间K维的分块大小
-    # 1D launch kernel where each block gets its own program.
     grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)
-    matmul_silu_kernel[grid](
-        x,
+    mlp_kernel[grid](
+        a,
         w1,
         w2,
         out,
         M,
         N,
         K,
-        x.stride(0),
-        x.stride(1),
+        a.stride(0),
+        a.stride(1),
         w1.stride(0),
         w1.stride(1),
         w2.stride(0),
         w2.stride(1),
         out.stride(0),
         out.stride(1),
+        FUSE_SILU=fuse_silu,
         BLOCK_SIZE_M=BLOCK_SIZE_M,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
-        GROUP_SIZE_M=8,
+        GROUP_SIZE_M=GROUP_SIZE_M,
         num_stages=2,
         num_warps=4,
     )
-
-    M, K = out.shape
-    K, N = w3.shape
-
-    # Allocates output.
-    mlp_silu_out = torch.empty((M, N), device=x.device, dtype=x.dtype)
-    # 1D launch kernel where each block gets its own program.
-    grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)
-    matmul_kernel[grid](
-        out,
-        w3,
-        mlp_silu_out,
-        M,
-        N,
-        K,
-        out.stride(0),
-        out.stride(1),
-        w3.stride(0),
-        w3.stride(1),
-        mlp_silu_out.stride(0),
-        mlp_silu_out.stride(1),
-        BLOCK_SIZE_M=BLOCK_SIZE_M,
-        BLOCK_SIZE_N=BLOCK_SIZE_N,
-        BLOCK_SIZE_K=BLOCK_SIZE_K,
-        GROUP_SIZE_M=8,
-        num_stages=2,
-        num_warps=4,
-    )
-
-    mlp_silu_out = mlp_silu_out.view(batch, seq_len, -1)
-    return mlp_silu_out
+    return out
 
 
-def triton_torch_mlp_silu(x, w1, w2, w3):
-    # Check constraints.
-    assert x.shape[-1] == w1.shape[0], "Incompatible dimensions"
-    assert x.shape[-1] == w2.shape[0], "Incompatible dimensions"
-    assert w1.shape[1] == w2.shape[1], "Incompatible dimensions"
+def _fused_silu_up(x: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor) -> torch.Tensor:
+    """gate/up projections + silu-mul epilogue in one kernel: (M, K) -> (M, N)."""
+    M = x.shape[0]
+    return _launch(x, w1, w2, torch.empty((M, w1.shape[1]), device=x.device, dtype=x.dtype), True)
 
-    assert x.is_contiguous(), "Matrix X must be contiguous"
-    assert w1.is_contiguous(), "Matrix W1 must be contiguous"
-    assert w2.is_contiguous(), "Matrix W2 must be contiguous"
 
-    batch, seq_len, dim = x.shape
-    M, K = batch * seq_len, dim
-    N = w1.shape[1]
+def _check(x: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor) -> tuple[int, int, int]:
+    assert x.shape[-1] == w1.shape[0] == w2.shape[0], "Incompatible dimensions"
+    assert w1.shape == w2.shape, "Incompatible dimensions"
+    assert x.is_contiguous() and w1.is_contiguous() and w2.is_contiguous(), "Must be contiguous"
+    return x.numel() // x.shape[-1], w1.shape[0], w1.shape[1]  # M, K, N
+
+
+def mlp_silu(x: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, w3: torch.Tensor) -> torch.Tensor:
+    """All-Triton: fused gate/up GEMM, then the down projection as a plain GEMM."""
+    batch, seq_len, _ = x.shape
+    M, K, _ = _check(x, w1, w2)
     x = x.view(M, K)
-
-    # Allocates output
-    out = torch.empty((M, N), device=x.device, dtype=x.dtype)
-    # 这里的 grid 针对 (M,K) 输出维度进行网格划分
-    BLOCK_SIZE_M = 64
-    BLOCK_SIZE_N = 64  # 用于中间N和最终K的分块大小
-    BLOCK_SIZE_K = 128  # 用于中间K维的分块大小
-    # 1D launch kernel where each block gets its own program.
-    grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)
-    matmul_silu_kernel[grid](
-        x,
-        w1,
-        w2,
-        out,
-        M,
-        N,
-        K,
-        x.stride(0),
-        x.stride(1),
-        w1.stride(0),
-        w1.stride(1),
-        w2.stride(0),
-        w2.stride(1),
-        out.stride(0),
-        out.stride(1),
-        BLOCK_SIZE_M=BLOCK_SIZE_M,
-        BLOCK_SIZE_N=BLOCK_SIZE_N,
-        BLOCK_SIZE_K=BLOCK_SIZE_K,
-        GROUP_SIZE_M=8,
-        num_stages=2,
-        num_warps=4,
-    )
-
-    mlp_silu_out = torch.mm(out, w3)  # MxK
-    mlp_silu_out = mlp_silu_out.view(batch, seq_len, -1)
-    return mlp_silu_out
+    up = _fused_silu_up(x, w1, w2)
+    out = _launch(up, w3, w3, torch.empty((M, w3.shape[1]), device=x.device, dtype=x.dtype), False)
+    return out.view(batch, seq_len, -1)
 
 
-def torch_mlp_silu(x, w1, w2, w3):
+def triton_torch_mlp_silu(
+    x: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, w3: torch.Tensor
+) -> torch.Tensor:
+    """Triton for the fused gate/up GEMM, cuBLAS for the down projection."""
+    batch, seq_len, _ = x.shape
+    M, K, _ = _check(x, w1, w2)
+    up = _fused_silu_up(x.view(M, K), w1, w2)
+    return torch.mm(up, w3).view(batch, seq_len, -1)
+
+
+def torch_mlp(
+    x: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, w3: torch.Tensor
+) -> torch.Tensor:
+    """Eager reference: three ``torch.mm`` plus the package's fused swiglu."""
     batch, seq_len, dim = x.shape
-    M, K = batch * seq_len, dim
-    x = x.view(M, K)
-    y1 = torch.mm(x, w1)  # MxN
-    y2 = torch.mm(x, w2)  # MxN
-    out = swiglu_forward(y1, y2)
-    mlp_silu_out = torch.mm(out, w3)  # MxK
-    mlp_silu_out = mlp_silu_out.view(batch, seq_len, -1)
-    return mlp_silu_out
+    M = batch * seq_len
+    x = x.view(M, dim)
+    out = swiglu_forward(torch.mm(x, w1), torch.mm(x, w2))
+    return torch.mm(out, w3).view(batch, seq_len, -1)
 
 
 class FusedMLP(nn.Module):
-    def __init__(self, hidden_size, intermediate_size):
+    """The eager path dressed as a module — kept as a correctness reference only,
+    since its timing would be the same data point as ``torch_mlp``."""
+
+    def __init__(self, hidden_size: int, intermediate_size: int):
         super().__init__()
+        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False, dtype=torch.float16)
+        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False, dtype=torch.float16)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False, dtype=torch.float16)
 
-        self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
-
-        self.gate_proj = nn.Linear(
-            self.hidden_size, self.intermediate_size, bias=False, dtype=torch.float16
-        )
-        self.up_proj = nn.Linear(
-            self.hidden_size, self.intermediate_size, bias=False, dtype=torch.float16
-        )
-        self.down_proj = nn.Linear(
-            self.intermediate_size, self.hidden_size, bias=False, dtype=torch.float16
-        )
-
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.down_proj(swiglu_forward(self.gate_proj(x), self.up_proj(x)))
 
 
-if __name__ == "__main__":
+#: Implementations compared by the benchmark. Add a row to register a new one.
+PROVIDERS: dict[
+    str, Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
+] = {
+    "torch": torch_mlp,
+    "fused-triton": mlp_silu,
+    "hybrid": triton_torch_mlp_silu,
+}
+
+#: (label, batch, seq_len) — Qwen2.5-7B-sized MLP (hidden 3584, intermediate 18944).
+CASES = [
+    ("b4_s256", 4, 256),
+    ("b8_s1024", 8, 1024),
+]
+
+
+def main() -> None:
+    if not torch.cuda.is_available():
+        raise SystemExit("This benchmark requires a CUDA device.")
+    print(metadata())
+
+    hidden_size, intermediate_size = 3584, 18944
     torch.manual_seed(0)
-    B = 4
-    seq_len = 256
-    hidden_size = 3584
-    intermediate_size = 18944
-    x = torch.randn(B, seq_len, hidden_size, device="cuda", dtype=torch.float16)
-    w1 = torch.randn((intermediate_size, hidden_size), device="cuda", dtype=torch.float16) * 0.01
-    w2 = torch.randn((intermediate_size, hidden_size), device="cuda", dtype=torch.float16) * 0.01
-    w3 = torch.randn((hidden_size, intermediate_size), device="cuda", dtype=torch.float16) * 0.01
+    w1 = torch.randn(intermediate_size, hidden_size, device="cuda", dtype=torch.float16) * 0.01
+    w2 = torch.randn_like(w1) * 0.01
+    w3 = torch.randn(hidden_size, intermediate_size, device="cuda", dtype=torch.float16) * 0.01
+    # The Triton kernels index weights as (K, N); torch.mm wants (K, N) too.
+    w1, w2, w3 = w1.t().contiguous(), w2.t().contiguous(), w3.t().contiguous()
 
-    w1_t = w1.t().contiguous()
-    w2_t = w2.t().contiguous()
-    w3_t = w3.t().contiguous()
+    module = FusedMLP(hidden_size, intermediate_size).cuda()
+    rows: list[Row] = []
+    for label, batch, seq_len in CASES:
+        x = torch.randn(batch, seq_len, hidden_size, device="cuda", dtype=torch.float16)
+        reference = torch_mlp(x, w1, w2, w3)
 
-    triton_output = mlp_silu(x, w1_t, w2_t, w3_t)
-    triton_torch_output = triton_torch_mlp_silu(x, w1_t, w2_t, w3_t)
-    torch_output = torch_mlp_silu(x, w1_t, w2_t, w3_t)
-    torch_fused_mlp = FusedMLP(hidden_size, intermediate_size).cuda()
-    torch_fused_mlp_out = torch_fused_mlp(x)
+        print(f"\n{label}: verifying against torch_mlp before timing anything")
+        for name, fn in PROVIDERS.items():
+            verify(name, fn(x, w1, w2, w3), reference, rtol=1e-2, atol=1e-2)
+        module.load_state_dict(
+            {"gate_proj.weight": w1.t(), "up_proj.weight": w2.t(), "down_proj.weight": w3.t()}
+        )
+        verify("nn.module", module(x), reference, rtol=1e-2, atol=1e-2)
 
-    # assert torch.allclose(torch_output, triton_output, atol=1e-2)
-    # assert(torch.amax(torch_output - triton_output).item() <= 0.05)
-    print(
-        f"Max diff: {torch.max(torch.abs(torch_output - triton_output))}"
-    )  # assert(torch.amax(Y - Y2).item() <= 0.05)
-    print(
-        f"Max diff: {torch.max(torch.abs(torch_output - triton_torch_output))}"
-    )  # assert(torch.amax(Y - Y2).item() <= 0.05)
-    print(
-        f"Max diff: {torch.max(torch.abs(torch_output - torch_fused_mlp_out))}"
-    )  # assert(torch.amax(Y - Y2).item() <= 0.05)
+        M, K, N = batch * seq_len, hidden_size, intermediate_size
+        # Three GEMMs of 2*M*N*K FLOP each; every byte read once, output written once.
+        work = Work(flops=6 * M * N * K, moved=2 * (2 * M * K + 3 * N * K))
+        for name, fn in PROVIDERS.items():
+            rows.append(Row(name, label, bench(lambda fn=fn, x=x: fn(x, w1, w2, w3)), work))
 
-    print("torch:", triton.testing.do_bench(lambda: torch_mlp_silu(x, w1_t, w2_t, w3_t)))
-    print("triton:", triton.testing.do_bench(lambda: mlp_silu(x, w1_t, w2_t, w3_t)))
-    print(
-        "triton_torch:",
-        triton.testing.do_bench(lambda: triton_torch_mlp_silu(x, w1_t, w2_t, w3_t)),
-    )
-    print("torch_fused_mlp:", triton.testing.do_bench(lambda: torch_fused_mlp(x)))
+    print()
+    report(rows)
+
+
+if __name__ == "__main__":
+    main()

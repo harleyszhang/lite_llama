@@ -1,20 +1,14 @@
 """L1 跨 stream 重叠:copy-stream 输入上传的 on/off A/B 与 timeline 佐证。
 
-连续批处理的一步最多带三个 pass(prefill/extend/decode),同一步内的 pass 槽位不相交,
-pass i+1 的输入上传与 pass i 的 forward 没有数据依赖——所以引擎把读回推迟到步末
-(一步一次同步),后续 pass 的准备从 pinned staging 经 copy stream 起飞,与上一个 pass
-的计算并行。默认路径里这些上传是 compute stream 上的页式 ``torch.tensor(...,
-device=...)``,每个都是一次 host 停顿,而且被 per-pass 的读回串行化在两段计算之间。
+连续批处理一步可携带 prefill/decode 混合 pass;默认输入上传在 compute stream 上
+串行,``LITE_LLAMA_OVERLAP`` 开启后读回推迟到步末,上传从 pinned staging 经 copy
+stream 起飞,与上一个 pass 的计算重叠。脚本回答两个问题:
 
-这个脚本回答两个问题:
-
-1. 墙钟差多少?同一工作负载跑两遍,``LITE_LLAMA_OVERLAP`` 一开一关。负载刻意选
-   长 prompt + 小 token 预算,让 prefill 被切成多个 chunk、与 decode 交错出大量
-   混合 pass 的步——重叠的收益集中在这些步上。纯 decode 稳态步没有可重叠的对
-   象,差值落在噪声里是预期行为。
-2. 机制真的发生了吗?``--timeline`` 单独跑一小轮,打印 copy/compute 两条 stream
-   上的 region 表——混合步里 upload.decode.* 与 forward.prefill 的区间相交,
-   这才是"重叠"的证据,而不是"开关没报错"。
+1. 墙钟差多少:同一负载 overlap 开关各跑一遍。负载刻意选长 prompt + 小 token
+   预算,让 prefill 切成多个 chunk、与 decode 交错出混合步——重叠的收益集中在
+   混合步,纯 decode 稳态步差值落在噪声里是预期行为。
+2. 机制真的发生了吗:``--timeline`` 打印 copy/compute 两条 stream 的 region 表,
+   混合步里 upload.* 与 forward.* 区间相交才是"重叠"的证据。
 
 用法:
     python benchmarks/bench_overlap_l1.py --model-dir my_weight/Qwen2.5-1.5B-Instruct
@@ -24,26 +18,28 @@ device=...)``,每个都是一次 host 停顿,而且被 per-pass 的读回串行�
 from __future__ import annotations
 
 import argparse
-import gc
-import json
 import os
 import sys
 import time
+from pathlib import Path
 
 import torch
-from common import PROMPTS, expand_prompts
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from benchmarks.common import (
+    PROMPTS,
+    expand_prompts,
+    free_gpu,
+    sampling_params,
+    write_json_log,
+)
 
 CKPT = "my_weight/Qwen2.5-1.5B-Instruct"
 
 #: 重叠开关由 ModelWorker 在建引擎时从环境读取;两个 arm 唯一的差别就是它。
 OVERLAP_ENV = "LITE_LLAMA_OVERLAP"
 TIMELINE_ENV = "LITE_LLAMA_OVERLAP_TIMELINE"
-
-
-def free() -> None:
-    """两个引擎不能同时留在一张卡上。"""
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 def measure(
@@ -55,8 +51,8 @@ def measure(
 ) -> float:
     """跑完整个工作负载,返回墙钟秒数;两个 arm 只差 overlap 开关。"""
     os.environ[OVERLAP_ENV] = "1" if overlap else "0"
+    # 开关在建引擎时从环境读取,所以引擎必须在 os.environ 落定之后才导入。
     from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
-    from lite_llama.engine.sampler import SamplingParams
 
     engine = ContinuousBatchingEngine.from_pretrained(
         model_dir,
@@ -65,9 +61,9 @@ def measure(
         max_num_batched_tokens=max_num_batched_tokens,
         use_cuda_graph=True,
     )
-    params = SamplingParams(temperature=0.0, max_gen_len=max_gen_len, repetition_penalty=1.0)
+    params = sampling_params(max_gen_len)
     try:
-        engine.generate(prompts[:2], SamplingParams(temperature=0.0, max_gen_len=8))  # 预热
+        engine.generate(prompts[:2], sampling_params(8))  # 预热
         torch.cuda.synchronize()
         started = time.perf_counter()
         engine.generate(prompts, params)
@@ -76,7 +72,7 @@ def measure(
     finally:
         engine.shutdown()
         del engine
-        free()
+        free_gpu()
 
 
 def timeline_evidence(model_dir: str, prompts: list[str], max_num_batched_tokens: int) -> str:
@@ -84,7 +80,6 @@ def timeline_evidence(model_dir: str, prompts: list[str], max_num_batched_tokens
     os.environ[OVERLAP_ENV] = "1"
     os.environ[TIMELINE_ENV] = "1"
     from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
-    from lite_llama.engine.sampler import SamplingParams
 
     engine = ContinuousBatchingEngine.from_pretrained(
         model_dir,
@@ -94,14 +89,13 @@ def timeline_evidence(model_dir: str, prompts: list[str], max_num_batched_tokens
         use_cuda_graph=True,
     )
     try:
-        engine.generate(prompts[:4], SamplingParams(temperature=0.0, max_gen_len=8))
-        worker = engine._executor._worker
-        return worker.timeline.summary()
+        engine.generate(prompts[:4], sampling_params(8))
+        return engine.timeline_summary()
     finally:
         engine.shutdown()
         del engine
         os.environ.pop(TIMELINE_ENV, None)
-        free()
+        free_gpu()
 
 
 def long_prompts(batch: int) -> list[str]:
@@ -151,13 +145,7 @@ def main() -> int:
         print(evidence)
 
     if args.json:
-        with open(args.json, "w") as handle:
-            json.dump(
-                {"config": vars(args), "wall_s": results, "timeline": evidence},
-                handle,
-                indent=2,
-            )
-        print(f"-> {args.json}")
+        write_json_log(args.json, vars(args), {"wall_s": results, "timeline": evidence})
     return 0
 
 

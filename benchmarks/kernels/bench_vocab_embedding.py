@@ -22,9 +22,16 @@ Usage:
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import torch
 import torch.nn.functional as F
 import triton
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from microbench import bench, metadata
 
 from lite_llama.kernels import vocab_parallel_embedding
 
@@ -54,11 +61,6 @@ def verify(weight: torch.Tensor) -> None:
     print("  fused == eager chain, bit-exact")
 
 
-def timed(fn, *args) -> float:
-    """Microseconds per call. Arguments are bound eagerly, not captured by closure."""
-    return triton.testing.do_bench(lambda: fn(*args)) * 1e3
-
-
 def bench_regime(label: str, sizes: list[int], weight: torch.Tensor) -> None:
     print(f"\n{label}")
     print(f"  {'tokens':>6}  {'eager-7op':>10}  {'fused':>10}  {'plain-emb':>10}  {'speedup':>8}")
@@ -68,9 +70,11 @@ def bench_regime(label: str, sizes: list[int], weight: torch.Tensor) -> None:
         # index past the shard, and its point is the floor, not the mapping.
         local_ids = torch.randint(0, LOCAL_VOCAB, (n_tokens,), device="cuda", dtype=torch.int64)
 
-        eager_us = timed(eager_chain, ids, weight, SHARD_START, LOCAL_VOCAB)
-        fused_us = timed(vocab_parallel_embedding, ids, weight, SHARD_START, LOCAL_VOCAB)
-        plain_us = timed(F.embedding, local_ids, weight)
+        eager_us = bench(lambda ids=ids: eager_chain(ids, weight, SHARD_START, LOCAL_VOCAB))
+        fused_us = bench(
+            lambda ids=ids: vocab_parallel_embedding(ids, weight, SHARD_START, LOCAL_VOCAB)
+        )
+        plain_us = bench(lambda local_ids=local_ids: F.embedding(local_ids, weight))
 
         print(
             f"  {n_tokens:>6}  {eager_us:>8.1f}us  {fused_us:>8.1f}us  "
@@ -82,8 +86,9 @@ if __name__ == "__main__":
     if not torch.cuda.is_available():
         raise SystemExit("This benchmark requires a CUDA device.")
 
+    print(metadata())
     weight = torch.randn(LOCAL_VOCAB, HIDDEN, device="cuda", dtype=torch.float16)
-    print(f"shard [{SHARD_START}, {SHARD_START + LOCAL_VOCAB}) of vocab {VOCAB}, hidden {HIDDEN}")
+    print(f"\nshard [{SHARD_START}, {SHARD_START + LOCAL_VOCAB}) of vocab {VOCAB}, hidden {HIDDEN}")
 
     print("Verifying correctness:")
     verify(weight)

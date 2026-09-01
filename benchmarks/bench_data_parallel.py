@@ -1,61 +1,48 @@
 #!/usr/bin/env python
 """Benchmark data-parallel throughput scaling, and check the outputs stay sane.
 
-DP adds replicas, so it can only add *throughput* — a replica runs the same kernels on
-the same shapes a single GPU would, and no individual token gets faster. Whether that
-throughput materialises depends entirely on how loaded the one GPU already was, which
-is why this script measures two framings:
+DP adds replicas, so it can only add *throughput* — a replica runs the same kernels
+on the same shapes a single GPU would, and no individual token gets faster. Whether
+that materialises depends entirely on how loaded the one GPU already was. Two framings:
 
-* ``--scaling weak`` (default) keeps the **batch per replica fixed** and grows the
-  total with the replica count. This is the serving question — given more concurrent
-  requests than one card should hold, does aggregate throughput scale with cards? —
-  and where DP earns its near-linear gain.
-* ``--scaling strong`` splits a **fixed total batch** across replicas. This only pays
-  when decode step time depends on batch size, which for a small model it often does
-  not: the decode step is bound by streaming the weights, so halving the per-replica
-  batch barely moves the milliseconds. A flat result here is a real measurement of a
-  bandwidth-bound regime, not a bug.
+* ``--scaling weak`` (default): **batch per replica fixed**, total grows with the
+  replica count — the serving question, and where DP earns its near-linear gain.
+* ``--scaling strong``: a **fixed total batch** split across replicas. Only pays when
+  decode step time depends on batch size, which a bandwidth-bound small model often
+  does not — a flat result here is a real measurement, not a bug.
 
 Either way the call ends when the *slowest* replica finishes, so an uneven split shows
-up as lost speedup. The baseline is ``DataParallelEngine`` with
-``data_parallel_size=1``, so the only variable between rows is the replica count; a
-plain in-process ``LLM`` row is printed alongside to show the coordinator's IPC cost.
+up as lost speedup. Baseline is ``DataParallelEngine`` with ``data_parallel_size=1``;
+an in-process ``LLM`` row alongside shows the coordinator's IPC cost.
 
 Usage:
-    # does aggregate throughput scale with GPUs? (16 prompts *per* replica)
     python benchmarks/bench_data_parallel.py --dp 2 --batch-size 16 --scaling weak
-
-    # does splitting one batch over 2 GPUs help at this size?
     python benchmarks/bench_data_parallel.py --dp 2 --batch-size 256 --scaling strong
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import statistics
 import sys
-import time
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
 
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.common import PROMPTS, expand_prompts
-from lite_llama import LLM, DataParallelEngine, SamplingParams
+from benchmarks.common import (
+    PROMPTS,
+    expand_prompts,
+    free_gpu,
+    measure_generate,
+    report_agreement,
+    require_gpus,
+    timestamped_log_path,
+    write_json_log,
+)
+from lite_llama import LLM, DataParallelEngine
 from lite_llama.engine.dp_load_balancer import LOAD_BALANCERS
-
-#: Greedy, with the repetition guard and early-repeat exit off: a benchmark must not
-#: have its token count decided by a heuristic that fires on some rows and not others.
-_GREEDY = {
-    "temperature": 0.0,
-    "top_p": 1.0,
-    "repetition_penalty": 1.0,
-    "stop_on_repeat": False,
-}
 
 
 @dataclass
@@ -84,36 +71,16 @@ class DPResult:
         }
 
 
-def count_tokens(texts: list[str], tokenizer) -> int:
-    """Re-tokenise generated text to count output tokens (vLLM's own method)."""
-    return sum(len(tokenizer(t, add_special_tokens=False).input_ids) for t in texts)
-
-
-def _measure(generate, prompts: list[str], gen_len: int, iters: int, tokenizer) -> tuple:
-    """Time ``generate`` over the whole prompt list, ``iters`` times (median reported)."""
-    params = SamplingParams(max_gen_len=gen_len, **_GREEDY)
-    generate(prompts, SamplingParams(max_gen_len=8, **_GREEDY))  # warm up every replica
-
-    latencies, counts, texts = [], [], []
-    for _ in range(iters):
-        torch.cuda.synchronize()
-        start = time.perf_counter()
-        outputs = generate(prompts, params)
-        torch.cuda.synchronize()
-        latencies.append(time.perf_counter() - start)
-        texts = [out.text for out in outputs]
-        counts.append(count_tokens(texts, tokenizer))
-    return statistics.median(latencies), round(statistics.median(counts)), texts
-
-
 def bench_single_process(model, prompts, gen_len, iters, **kw) -> tuple[DPResult, list[str]]:
     """Reference row: one in-process ``LLM``, no coordinator, no IPC."""
     llm = LLM(model=model, **kw)
     try:
-        latency, tokens, texts = _measure(llm.generate, prompts, gen_len, iters, llm.tokenizer)
+        latency, tokens, texts = measure_generate(
+            llm.generate, prompts, gen_len=gen_len, iters=iters, tokenizer=llm.tokenizer
+        )
     finally:
         del llm
-        torch.cuda.empty_cache()
+        free_gpu()
     return DPResult("LLM (in-process)", 1, len(prompts), latency, tokens), texts
 
 
@@ -135,10 +102,10 @@ def bench_data_parallel(
         max_num_seqs=max_num_seqs,
         **kw,
     ) as engine:
-        latency, tokens, texts = _measure(
-            engine.generate, prompts, gen_len, iters, engine.tokenizer
+        latency, tokens, texts = measure_generate(
+            engine.generate, prompts, gen_len=gen_len, iters=iters, tokenizer=engine.tokenizer
         )
-    torch.cuda.empty_cache()
+    free_gpu()
     return DPResult(
         f"DataParallelEngine dp={replicas}", replicas, len(prompts), latency, tokens
     ), texts
@@ -182,15 +149,6 @@ def print_table(results: list[DPResult], baseline: DPResult, scaling: str) -> No
         )
 
 
-def report_agreement(reference: list[str], candidate: list[str], label: str) -> None:
-    """Report how many completions match the single-process run; a low rate is a bug flag."""
-    if not reference or len(reference) != len(candidate):
-        return
-    same = sum(a == b for a, b in zip(reference, candidate, strict=True))
-    empty = sum(not text for text in candidate)
-    print(f"{label}: {same}/{len(reference)} completions identical to 1-GPU, {empty} empty")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--model", default="my_weight/Qwen2.5-0.5B")
@@ -224,10 +182,7 @@ def main() -> None:
     parser.add_argument("--log-dir", default=None, help="Write a JSON log here")
     args = parser.parse_args()
 
-    visible = torch.cuda.device_count()
-    if visible < 1:
-        print("CUDA required", file=sys.stderr)
-        sys.exit(1)
+    visible = require_gpus(1)
     if args.dp > visible:
         print(
             f"--dp {args.dp} needs {args.dp} GPUs, only {visible} visible; capping at {visible}",
@@ -282,35 +237,27 @@ def main() -> None:
     baseline = next(r for r in results if r.label.endswith("dp=1"))
     print_table(results, baseline, args.scaling)
     print()
-    for label, texts in agreements:
-        report_agreement(reference_texts, texts, label)
+    report_agreement(reference_texts, agreements)
 
     if args.log_dir:
-        log_dir = Path(args.log_dir)
-        log_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = log_dir / f"bench_dp_{Path(args.model).name}_b{args.batch_size}_{stamp}.json"
-        path.write_text(
-            json.dumps(
-                {
-                    "config": {
-                        "model": args.model,
-                        "gpu": torch.cuda.get_device_name(0),
-                        "n_gpus": visible,
-                        "scaling": args.scaling,
-                        "batch_size": args.batch_size,
-                        "gen_len": args.gen_len,
-                        "iters": args.iters,
-                        "load_balancer": args.load_balancer,
-                        "quantization": args.quantization,
-                        "timestamp": datetime.now().isoformat(timespec="seconds"),
-                    },
-                    "results": [r.as_dict() for r in results],
-                },
-                indent=2,
-            )
+        path = timestamped_log_path(
+            args.log_dir, f"bench_dp_{Path(args.model).name}_b{args.batch_size}"
         )
-        print(f"\nsaved log -> {path}")
+        write_json_log(
+            path,
+            {
+                "model": args.model,
+                "gpu": torch.cuda.get_device_name(0),
+                "n_gpus": visible,
+                "scaling": args.scaling,
+                "batch_size": args.batch_size,
+                "gen_len": args.gen_len,
+                "iters": args.iters,
+                "load_balancer": args.load_balancer,
+                "quantization": args.quantization,
+            },
+            [r.as_dict() for r in results],
+        )
 
 
 if __name__ == "__main__":
