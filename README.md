@@ -490,6 +490,38 @@ python scripts/layer_harness.py --model-dir my_weight/Qwen3-0.6B \
 
 ## Architecture
 
+One-way layers — user code only ever talks to the Facade; plans flow down, tokens flow up:
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  User Layer        lite-llama CLI (chat / vl-chat / serve / batch) · examples · tests           │
+├─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  Facade            LLM · TextGenerator · VisionGenerator · AsyncLLMEngine · DataParallelEngine  │
+├─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  Engine            ContinuousBatchingEngine · Scheduler · Sampler · PrefixCache · Multimodal    │
+├─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  Executor          Executor + ModelWorker (picklable ModelInput plan) · ModelRunner             │
+│                    KVCacheManager / SlotBatch · CudaGraphManager · OverlapCopyEngine            │
+├─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  Models            CausalLM backbone: Llama / Qwen2 / Qwen3 / Qwen3-MoE / LLaVA / Qwen3-VL      │
+├─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  Modules           shared blocks: parallel Linear · PagedAttention · RoPE · MLP / MoE · Quant   │
+├─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  Kernels           LogicalOp + KernelSpec dispatch → Triton FA2 / flashinfer / deepgemm / ...   │
+├─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  Hardware          PlatformInfo · probe · device_utils — the device the layers assume           │
+└─────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  Cross-cutting support:
+  ┌─────────────────────────┐  ┌───────────────────────────┐  ┌──────────────────────────┐
+  │ Platform                │  │ Distributed               │  │ Tools                    │
+  │ PlatformInfo / probe /  │  │ dp×tp grid · NCCL + gloo  │  │ logger · profiling ·     │
+  │ device_utils            │  │ parallel_state · stats    │  │ prompt · image utils     │
+  └─────────────────────────┘  └───────────────────────────┘  └──────────────────────────┘
+```
+
+The directory below mirrors the upstream layout file-for-file — when reading either codebase, you can go straight to the matching file.
+
 ```text
 lite_llama/
 ├── engine/
