@@ -133,9 +133,9 @@ Single NVIDIA A10 (24 GB, sm86), decode batch size 4, max_gen_len=64, greedy; me
 > result contradicts the ordering here: on an H100 at 4B, **no quantisation scheme
 > beats bf16 on speed**, and quantisation buys KV capacity instead.
 
-### Qwen3-30B-A3B-Instruct-2507-FP8 (MoE, TP2)
+### Qwen3-30B-A3B-Instruct-2507-FP8 (MoE, 2×H100)
 
-30B 级 MoE checkpoint 的权重以 fp8-e4m3（uint8 存储）+ 128×128 block scales 直接驻留显存，kernel 在 `tl.dot` 前反量化（W8A16）。A10 (sm86) 无原生 fp8 tensor core，激活保持 16-bit——checkpoint 声明的 `activation_scheme: dynamic` 只在 sm89+ 的真 W8A8 路径上生效，这里不启用。checkpoint 的 `modules_to_not_convert`（`lm_head`、每层两个 norm、router `mlp.gate`，共 145 项）由 `Fp8Config.ignored` 接住，保持 bf16 不量化。
+30B 级 MoE checkpoint 的权重以 fp8-e4m3（uint8 存储）+ 128×128 block scales 直接驻留显存，kernel 在 `tl.dot` 前反量化（W8A16）。真 W8A8 路径（`--quantization fp8`，`w8a8_fp8` scheme）用 per-channel weight scale，与本 checkpoint 的 block-scale 布局不匹配——声明 `activation_scheme: dynamic` 的 A8 路径属于那条 runtime scheme，不在此 checkpoint 上启用。checkpoint 的 `modules_to_not_convert`（`lm_head`、每层两个 norm、router `mlp.gate`，共 145 项）由 `Fp8Config.ignored` 接住，保持 bf16 不量化。
 
 按层分发的量化算子（`Fp8Config.get_quant_method`）：
 
@@ -145,17 +145,39 @@ Single NVIDIA A10 (24 GB, sm86), decode batch size 4, max_gen_len=64, greedy; me
 | `mlp.experts`（128 专家的 gate_up / down） | `Fp8MoEMethod` | `fused_moe` `QUANT_MODE=1` | fp8-e4m3 + block scales（反量化因子 256 折进 `DEQUANT_SCALE` bit-trick） |
 | `mlp.gate`（router）/ `lm_head` | `UnquantizedLinearMethod` | cuBLAS 线性层 | bf16 |
 
-两条 kernel 路径都接受 fp16 或 bf16 激活（checkpoint 的 `torch_dtype: bfloat16` 走 bf16）：反量化后的操作数统一对齐激活 dtype 再进 tensor core。TP2 下每卡存半个副本（权重 + KV 各半），decode 走 eager（NCCL 集合通信不能进 CUDA graph）。
+两条 kernel 路径都接受 fp16 或 bf16 激活（checkpoint 的 `torch_dtype: bfloat16` 走 bf16）：反量化后的操作数统一对齐激活 dtype 再进 tensor core。TP2 下每卡存半个副本（权重 14.53 GB + KV 各半）；连续批处理引擎的 TP-safe graph 捕获让 TP2 的 decode 同样走 graph（设计见 [tensor_parallel.md](tensor_parallel.md)）——早期"NCCL 集合通信不能进 CUDA graph 捕获"的 eager 限制属于旧引擎路径，已被推翻。
 
-A10×2 (22 GiB each), TP2, batch 4, max_gen_len=64, greedy（与上文 Qwen3-0.6B 同口径；HF 侧无法对照——fp8 checkpoint 反量化为 bf16 需 ~60 GB，双卡放不下）：
+2×H100 80GB (sm90)，batch 4，max_gen_len=64，greedy，max_seq_len 1024。golden 基线为本 checkpoint 的 eager/TP1/KV-auto 配置（`scripts/golden_tokens.py` 录制，control row 复现 1.000）：
 
-| Config | Model Mem | KV Capacity | TTFT (ms) | TPOT (ms) | TPS |
-|--------|-----------|-------------|-----------|-----------|-----|
-| lite fp8 checkpoint (TP2) | 29.06 GB | 104,528 tok | 81.0 | 82.77 | 48.3 |
+| Config | Model Mem | KV Capacity | TTFT (ms) | TPOT (ms) | TPS | golden prefix |
+|--------|-----------|-------------|-----------|-----------|-----|---------------|
+| tp1+graph | 29.03 GB | 435,879 tok | 66.1 | 13.16 | 285.9 | 1.000 |
+| tp1+eager | 29.03 GB | 452,263 tok | 62.5 | 63.35 | 63.2 | 1.000 |
+| tp2+graph | 14.53 GB | 1,171,324 tok | 77.5 | 12.76 | 290.3 | 0.638 |
+| tp2+eager | 14.53 GB | 1,204,092 tok | 76.1 | 78.50 | 51.0 | 0.638 |
+| tp1+kv-fp8+graph | 29.03 GB | 871,790 tok | 67.3 | 14.05 | 268.7 | 0.697 |
+| tp1+kv-fp8+eager | 29.03 GB | 904,558 tok | 68.9 | 68.97 | 58.0 | 0.697 |
+| tp2+kv-fp8+graph | 14.53 GB | 2,342,680 tok | 82.8 | 13.64 | 271.6 | 0.751 |
+| tp2+kv-fp8+eager | 14.53 GB | 2,408,216 tok | 83.1 | 85.52 | 46.8 | 0.751 |
+| tp1+dp2+graph | 29.03 GB/卡 | 435,879 tok/卡 | — | — | 559.2 | 0.872 |
 
-> Model Mem 为全 replica 权重总量（rank 0 分片 ×2）；KV Capacity 是每卡容量（KV 按 TP 切分后每卡各存一半，同一数字即 replica 的 token 容量）。
-> 复现：`PYTHONPATH=. python benchmarks/bench_quant.py --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8 --schemes fp16 --tp 2 --skip-hf`
+读法：
+
+- **CUDA graph 是这个尺寸的主要杠杆**：TPOT 13.16 vs 63.35 ms（4.8×）。48 层 MoE 每 token 的 kernel 数在 eager 下 launch-bound，graph 把整步折叠成一次 replay；TP2 同理（12.76 vs 78.50 ms）。
+- **TP2 买容量不买速度**：290 vs 286 TPS 持平，KV 容量 ×2.7（1.17M token）——MoE 权重按专家维切分后每卡读取量减半，抵消了集合通信开销。
+- **KV fp8 买容量只付 ~7%**：容量翻倍（436K→872K，TP2 下到 2.34M token），TPOT 13.16→14.05 ms。
+- **DP2 近线性扩展**：559 TPS ≈ 2×285.9×0.98，每 replica 独立持有 graph。
+- **精度**：TP1 下 graph 与 eager 数值等价（golden 1.000，26/26 exact）。TP2 的 0.638 与 KV fp8 的 0.697 都是 greedy 混沌对首个分叉 token 的放大（prefix 计首差前的长度）：TP2 的分叉来自 all-reduce 顺序，KV fp8 的来自 KV 舍入——量级与 0.6B 档 [quant_matrix_20260901.md](benchmark_logs/quant_matrix_20260901.md) §4 的误差谱一致。
+- 同 checkpoint 在 A10×2（22 GiB、TP2 eager 旧口径）TPOT 82.77 ms / TPS 48.3——H100 单卡 graph 是它的 5.9×。
+
+> Model Mem 为全 replica 权重总量（rank 0 分片 × TP）；KV Capacity 为每卡容量（KV 按 TP 切分后同一数字即 replica 的 token 容量）。
+> 复现：`python benchmarks/bench_quant.py --model-dir <Qwen3-30B-A3B-Instruct-2507-FP8> --schemes fp16 --kv-cache-dtype auto fp8 --tp 1 2 --cuda-graph --no-cuda-graph --skip-hf --json docs/benchmark_logs/bench_quant_Qwen3-30B-A3B-FP8_20260901.json`；DP 行另跑 `--tp 1 --dp 2 --cuda-graph`；golden 基线：`python scripts/golden_tokens.py --save tests/golden/data/Qwen3-30B-A3B-Instruct-2507-FP8.json --model-dir <...>`。
 > e2e 指标见 [`benchmark_models.md`](benchmark_models.md)；量化 kernel 精度回归：`python -m pytest tests/kernels/test_fused_moe.py -k fp8`（fp16 与 bf16 激活各一例，对 fp32 反量化参考）
+
+### 未覆盖的 FP8 checkpoint
+
+- **Qwen3.8-27B-FP8**（`model_type: qwen3_5`，`Qwen3_5ForConditionalGeneration`）：64 层中 48 层是 linear attention（gated-delta-net：conv kernel 4、16 key heads × 128 dim、48 value heads × 128 dim）、每 4 层插一层 full attention，另带 vision tower。`lite_llama/models/` 支持到 qwen3_moe / qwen3_vl，尚无 qwen3_5——需要 linear attention 的 chunked-scan 内核与混合层调度，属新模型实现而非量化路径问题（其 fp8 格式与 30B-A3B 完全一致：e4m3 + 128×128 block scales + dynamic activation）。
+- **Qwen3-VL-235B-A22B-Instruct-FP8**：本地副本不完整——index 要求 24 个 shard 仅存在 3 个（22/23/24），且无 config.json（27 GB ≄ ~235 GB），物理上无法加载。
 
 ### Performance Notes
 

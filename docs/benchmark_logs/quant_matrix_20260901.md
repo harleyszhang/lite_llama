@@ -262,6 +262,20 @@ fp8+tp2 reaches 1.14M KV tokens — 2.7× the tp1 figure and 1.34× bf16+tp2. Th
 prefill gain measured at the kernel (18% at 512 tokens) needs a prefill-heavy
 workload to appear; this cell does not have one.
 
+### Companion run — the *native* FP8 checkpoint
+
+The rows above quantise the bf16 checkpoint at runtime. The released
+`Qwen3-30B-A3B-Instruct-2507-FP8` checkpoint (fp8-e4m3 + 128×128 block scales,
+`quant_method: fp8`) is served by the W8A16 path instead — block-scale weights do not
+match the per-channel layout `w8a8_fp8` expects — and was measured on 2026-09-01 over
+the full axis matrix (tp1/tp2 × graph/eager × kv auto/fp8, plus dp2, with a golden
+baseline recorded for it): tp1+graph lands at TPOT 13.16 ms / 285.9 TPS, tp2+graph at
+12.76 ms / 290.3 TPS with 2.7× the KV capacity, and CUDA graph is worth 4.8× at this
+size. Full table and accuracy columns in
+[`quantization.md` § Qwen3-30B-A3B-Instruct-2507-FP8](../quantization.md), raw JSON in
+[`bench_quant_Qwen3-30B-A3B-FP8_20260901.json`](bench_quant_Qwen3-30B-A3B-FP8_20260901.json)
+(+ `-dp` for the data-parallel row).
+
 ## 3. Online matrix — `M_MAIN`, `lite-llama serve`
 
 64 max tokens, `max_seq_len` 1024, concurrency 1/8/32 over `POST /v1/completions`,
