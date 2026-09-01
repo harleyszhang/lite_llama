@@ -1,33 +1,11 @@
 """Continuous batching: a step-driven engine where requests join and leave mid-flight.
 
-:class:`~lite_llama.engine.llm_engine.LLMEngine` fixes its batch when
-``generate()`` is called. Every sequence starts on the same step and the batch
-keeps running at full width until the *longest* one finishes, so a batch of eight
-where seven stop at 20 tokens and one runs to 500 spends most of its time
-computing 480 steps of padding. It also cannot accept a request that arrives one
-millisecond after the call started.
+LLMEngine uses a fixed batch at generate() time—all sequences run until the longest finishes, 
+wasting compute on padding and rejecting late arrivals.
 
-:class:`ContinuousBatchingEngine` replaces the fixed batch with a per-step
-decision, mirroring vLLM v1's split of the engine loop into "schedule → execute →
-harvest". The middle stage is deliberately thin: a step turns the scheduler's
-plan into :class:`~lite_llama.executor.worker.ModelInput` values — pure data, no
-tensors — and hands each to an :class:`~lite_llama.executor.executor.Executor`,
-which returns the tokens it sampled. A step produces up to three of them:
-
-* a **prefill** grid for chunks whose prompt is not in the cache yet;
-* an **extend** pass for chunks resuming on top of a cached prefix;
-* a **decode** pass for every fully prefilled request.
-
-All three can occur in the same step — chunked prefill interleaves with decode
-instead of stalling it. Planning rather than executing is what keeps this file
-free of device state: nothing here has to be invalidated when a request joins or
-leaves, because a plan names the slots it means. It is also what lets tensor
-parallelism drop in behind the same call, a plan being small enough to broadcast
-and complete enough for every rank to derive the identical layout from it.
-
-One host-device synchronisation per step is deliberate: sampled tokens are read
-back to detokenise and to decide who stops, which is what retires a finished
-request on the very next step.
+ContinuousBatchingEngine replans per step (schedule → execute → harvest), producing up to 
+three passes in one step: prefill, extend, and decode—chunked prefill interleaves with decode 
+instead of stalling it.
 
 Usage:
     engine = ContinuousBatchingEngine.from_pretrained("my_weight/Qwen2.5-0.5B")
@@ -43,7 +21,7 @@ import itertools
 import time
 from collections.abc import Sequence
 from multiprocessing.process import BaseProcess
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
@@ -59,7 +37,6 @@ from ..models.config import read_model_type
 from ..models.registry import ModelRegistry
 from ..observe import EngineMetrics, Tracer
 from .detokenizer import IncrementalDetokenizer
-from .llm_engine import LLMEngine
 from .outputs import CompletionOutput, RequestOutput
 from .sampler import PositionLogprobs, SamplingParams
 from .scheduler import (
@@ -70,6 +47,9 @@ from .scheduler import (
     SchedulerConfig,
 )
 from .stop_criteria import POLL_INTERVAL, detect_repetition
+
+if TYPE_CHECKING:
+    from .llm_engine import LLMEngine
 
 
 class _Work(NamedTuple):
@@ -331,6 +311,10 @@ class ContinuousBatchingEngine:
             ValueError: ``tensor_parallel_size`` contradicts a group this process
                 is already a member of.
         """
+        # Keep CPU-only planning and fake-executor tests importable without
+        # Triton. A real model is the only path that needs the GPU engine.
+        from .llm_engine import LLMEngine
+
         spec = ModelRegistry.resolve(read_model_type(model))
         if spec.is_multimodal:
             raise NotImplementedError(
@@ -400,8 +384,12 @@ class ContinuousBatchingEngine:
             request_id: Caller-supplied id; generated when omitted.
             prompt_token_ids: Pre-tokenised prompt, to skip re-encoding.
         """
+        if request_id is None:
+            request_id = f"req-{next(self._request_ids)}"
+            while request_id in self._detokenizers:
+                request_id = f"req-{next(self._request_ids)}"
         request = Request(
-            request_id=request_id or f"req-{next(self._request_ids)}",
+            request_id=request_id,
             prompt=prompt,
             prompt_token_ids=(
                 prompt_token_ids
@@ -493,8 +481,9 @@ class ContinuousBatchingEngine:
             ]
         # The gauges read the occupancy once the step's finishes have landed,
         # so a scrape never counts a request that this step already retired.
+        # Counter properties, not len(running): those copy the lists.
         advanced = self._harvest(emitted)
-        self.metrics.observe_load(len(self.scheduler.running), len(self.scheduler.waiting))
+        self.metrics.observe_load(self.scheduler.num_running, self.scheduler.num_waiting)
         return advanced
 
     def generate(
