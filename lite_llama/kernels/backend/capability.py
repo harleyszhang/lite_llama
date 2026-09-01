@@ -1,6 +1,6 @@
 """Can this machine run an external backend — and if not, how to install it?
 
-``survey()`` probes every registered backend once via ``library_present``
+``survey()`` checks every registered backend once via ``library_present``
 and reports :class:`BackendInstall` records — import name, present flag,
 pip hint — so callers can explain what is missing.
 
@@ -43,7 +43,7 @@ def library_present(module: str) -> bool:
     except Exception as exc:
         # Deliberately broad. A backend built against the wrong CUDA raises
         # OSError from the dynamic loader, a JIT backend can raise RuntimeError
-        # while probing the driver, and an interrupted source install leaves
+        # while checking the driver, and an interrupted source install leaves
         # partial modules raising AttributeError. All of them mean the same
         # thing to dispatch — this backend cannot serve a call here — and none
         # of them may propagate into a forward pass.
@@ -59,7 +59,7 @@ class BackendInstall:
     Attributes:
         backend: Backend family name, matching the ``backend`` field of its
             KernelSpec rows and this package's directory name.
-        module: Top-level import name :func:`library_present` probes.
+        module: Top-level import name :func:`library_present` checks.
         homepage: Upstream project, for the report line.
         requires: Hardware/toolchain window in one phrase (``"sm90+"``), for
             humans; the machine-checked version is each row's ``capability``.
@@ -94,7 +94,7 @@ class BackendInstall:
 
 
 def survey() -> tuple[tuple[BackendInstall, bool], ...]:
-    """Probe every external backend, in :data:`EXTERNAL_BACKENDS` order.
+    """Check every external backend, in :data:`EXTERNAL_BACKENDS` order.
 
     Each backend module is imported for its metadata — cheap, since those
     modules are pure data — and then asked its own ``available()``, which may

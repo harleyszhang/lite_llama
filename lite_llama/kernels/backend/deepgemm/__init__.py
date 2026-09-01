@@ -12,7 +12,7 @@ Usage:
 from __future__ import annotations
 
 from ....platform.spec import CapabilityRequirement
-from ..probe import BackendInstall, library_present
+from ..capability import BackendInstall, library_present
 
 #: Capability window shared by every DeepGEMM row: Hopper and newer.
 CUDA_SM90 = (CapabilityRequirement("cuda", min_cc=(9, 0)),)

@@ -148,9 +148,9 @@ class KernelSpec:
             one ``native`` row per op acts as the never-failing floor.
         target: ``"module.path:attribute"`` of the callable, imported lazily
             at first dispatch, never at registration.
-        available: ``"module.path:attribute"`` of a ``() -> bool`` probe
-            (library present, driver usable); ``None`` means always available
-            and is only legal for ``native`` rows.
+        available: ``"module.path:attribute"`` of a ``() -> bool``
+            availability check (library present, driver usable); ``None`` means
+            always available and is only legal for ``native`` rows.
         capability: Hardware windows, OR semantics, empty = anywhere
             (see :class:`~lite_llama.platform.spec.CapabilityRequirement`).
         dtypes: Activation dtype labels (``"bf16"``, ``"fp16"``); empty = any.
@@ -190,9 +190,11 @@ class KernelSpec:
             if ref is not None and not _TARGET_RE.match(ref):
                 raise ValueError(f"KernelSpec.{role} must be 'module:attr', got {ref!r}")
         if self.available is None and self.backend != "native":
-            # Every external backend must probe its library: "missing wheel can
+            # Every external backend must check its library: "missing wheel can
             # never hard-fail" only holds when absence is observable.
-            raise ValueError(f"{self.name!r}: non-native backend must declare an available probe")
+            raise ValueError(
+                f"{self.name!r}: non-native backend must declare an availability check"
+            )
 
     # ------------------------------------------------------------------ #
     # Dimension-wise membership predicates (composed by dispatch)

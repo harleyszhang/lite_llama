@@ -41,11 +41,11 @@ VERIFIED = GoldenRecord(verified=True, max_abs_diff=0.0, baseline="self")
 
 # Probes referenced by specs below; module-level so they resolve through this
 # test module's own import path.
-def _probe_yes() -> bool:
+def _available_yes() -> bool:
     return True
 
 
-def _probe_no() -> bool:
+def _available_no() -> bool:
     return False
 
 
@@ -74,7 +74,7 @@ def external(name: str, **over) -> KernelSpec:
         "op": "test.op",
         "backend": name.split("/")[0],
         "target": "math:cos",
-        "available": "tests.ops.test_dispatch:_probe_yes",
+        "available": "tests.ops.test_dispatch:_available_yes",
         "golden": VERIFIED,
     }
     return KernelSpec(**{**base, **over})
@@ -144,9 +144,9 @@ class TestFiltering:
         sel = dispatch("test.op", dtype="bf16", platform_info=H100, registry=reg)
         assert sel.spec.name == "d/hopper"  # registration order keeps it above the floor
 
-    def test_probe_false_excludes_with_reason(self) -> None:
+    def test_availability_false_excludes_with_reason(self) -> None:
         reg = make_reg(
-            native(), external("x/broken", available="tests.ops.test_dispatch:_probe_no")
+            native(), external("x/broken", available="tests.ops.test_dispatch:_available_no")
         )
         sel = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         assert sel.spec.name == "native/floor"

@@ -41,7 +41,7 @@ VERIFIED = GoldenRecord(verified=True, max_abs_diff=0.0, baseline="self")
 MEASURED = {"native/floor": 50.0, "x/slow": 40.0, "x/measured": 30.0}
 
 
-def _probe_yes() -> bool:
+def _available_yes() -> bool:
     return True
 
 
@@ -62,7 +62,7 @@ def external(name: str, **over) -> KernelSpec:
         "op": "test.op",
         "backend": name.split("/")[0],
         "target": "math:cos",
-        "available": "tests.ops.test_frozen_rank:_probe_yes",
+        "available": "tests.ops.test_frozen_rank:_available_yes",
         "golden": VERIFIED,
     }
     return KernelSpec(**{**base, **over})

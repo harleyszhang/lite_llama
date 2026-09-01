@@ -11,7 +11,7 @@ Usage:
 from __future__ import annotations
 
 from ....platform.spec import CapabilityRequirement
-from ..probe import BackendInstall, library_present
+from ..capability import BackendInstall, library_present
 
 #: Capability window shared by every FlashInfer row: Ampere and newer.
 CUDA_SM75 = (CapabilityRequirement("cuda", min_cc=(7, 5)),)

@@ -1,6 +1,6 @@
-"""Tests for the external-backend tier: probing, install metadata, optionality.
+"""Tests for the external-backend tier: availability, install metadata, optionality.
 
-``library_present`` semantics, every backend module's probe shape, the
+``library_present`` semantics, every backend module's availability shape, the
 install metadata against pyproject extras, and the rule that external
 rows never make an op unusable when absent.
 
@@ -20,11 +20,11 @@ from pathlib import Path
 import pytest
 
 import lite_llama.kernels  # noqa: F401 — import side effect: native row registration
-from lite_llama.kernels.backend import probe
-from lite_llama.kernels.backend.probe import EXTERNAL_BACKENDS, BackendInstall, library_present
+from lite_llama.kernels.backend import capability
+from lite_llama.kernels.backend.capability import EXTERNAL_BACKENDS, BackendInstall, library_present
 from lite_llama.kernels.dispatcher import REGISTRY, resolve_target
 
-#: Import name each backend module must probe, verified against the upstream
+#: Import name each backend module must check, verified against the upstream
 #: install docs. The distribution name and the import name differ for three of
 #: the five, which is exactly the mistake this pin exists to catch.
 IMPORT_NAMES = {
@@ -46,7 +46,7 @@ def extras() -> dict[str, list[str]]:
 
 class TestLibraryPresent:
     @pytest.fixture(autouse=True)
-    def _clear_probe_cache(self):
+    def _clear_capability_cache(self):
         # The cache is process-wide; leaving a fake answer behind would make an
         # unrelated test believe a backend is (un)available.
         yield
@@ -83,7 +83,7 @@ class TestLibraryPresent:
             raise ImportError(name)
 
         monkeypatch.setattr(
-            probe, "importlib", types.SimpleNamespace(import_module=counting_import)
+            capability, "importlib", types.SimpleNamespace(import_module=counting_import)
         )
         library_present.cache_clear()
         assert library_present("counted_backend") is False
@@ -100,7 +100,7 @@ class TestBackendModules:
         assert callable(module.available)
 
     @pytest.mark.parametrize("backend", EXTERNAL_BACKENDS)
-    def test_probe_answers_a_bool_without_raising(self, backend: str) -> None:
+    def test_available_answers_a_bool_without_raising(self, backend: str) -> None:
         # Called during dispatch filtering on machines that have none of these.
         module = importlib.import_module(f"lite_llama.kernels.backend.{backend}")
         assert isinstance(module.available(), bool)
@@ -116,7 +116,7 @@ class TestBackendModules:
         This is what lets ``backend/__init__`` import all four eagerly, which
         in turn is what makes an installed backend show up in dispatch without
         any registration step at the call site. Checked in a fresh interpreter
-        because a probe running earlier in this session may legitimately have
+        because a check running earlier in this session may legitimately have
         imported a library that *is* installed.
         """
         code = (
@@ -173,12 +173,12 @@ class TestInstallMetadata:
 
 class TestSurvey:
     def test_reports_one_line_per_backend_in_declaration_order(self) -> None:
-        results = probe.survey()
+        results = capability.survey()
         assert tuple(install.backend for install, _ in results) == EXTERNAL_BACKENDS
         assert all(isinstance(present, bool) for _, present in results)
 
     def test_every_absent_backend_still_says_how_to_get_it(self) -> None:
-        for install, present in probe.survey():
+        for install, present in capability.survey():
             if not present:
                 assert install.how_to_get_it()
 
@@ -196,9 +196,9 @@ class TestExternalRowsStayOptional:
         families = {spec.backend for spec in REGISTRY.specs()}
         assert families <= {"native", *EXTERNAL_BACKENDS}
 
-    def test_every_external_row_has_a_working_probe(self) -> None:
+    def test_every_external_row_has_a_working_availability_check(self) -> None:
         for spec in REGISTRY.specs():
             if spec.backend == "native":
                 continue
-            assert spec.available is not None, f"{spec.name}: non-native row needs a probe"
+            assert spec.available is not None, f"{spec.name}: non-native row needs an availability check"
             assert isinstance(resolve_target(spec.available)(), bool)

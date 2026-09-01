@@ -96,15 +96,15 @@ class TestKernelSpecValidate:
         with pytest.raises(ValueError, match="'<backend>/<impl>'"):
             spec(name="no-slash").validate()
 
-    def test_rejects_malformed_target_and_probe(self) -> None:
+    def test_rejects_malformed_target_and_availability(self) -> None:
         with pytest.raises(ValueError, match=r"KernelSpec\.target"):
             spec(target="no-colon-here").validate()
         with pytest.raises(ValueError, match=r"KernelSpec\.available"):
             spec(available="also:bad:name").validate()
 
-    def test_external_backend_must_declare_a_probe(self) -> None:
+    def test_external_backend_must_declare_an_availability_check(self) -> None:
         """A missing wheel must be observable, or the never-fail floor breaks."""
-        with pytest.raises(ValueError, match="available probe"):
+        with pytest.raises(ValueError, match="availability check"):
             spec(name="deepgemm/fp8_gemm", backend="deepgemm").validate()
         spec(
             name="deepgemm/fp8_gemm", backend="deepgemm", available="deepgemm:_is_available"
