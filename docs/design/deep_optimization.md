@@ -57,7 +57,7 @@ O5 / O6.2 / O7 的前置；O3.1 解锁 TP + CUDA graph（ROADMAP P8）；O8 / O1
 
 ## 3 引擎循环层
 
-### O2 zero-overhead 引擎循环
+### O2 zero-overhead 引擎循环（已落地，默认关）
 
 **一句话**：decode 的输入 token 不再回 CPU，直接把 device 上的采样结果喂给
 下一步的 embedding；step 拆成 launch / harvest 两半，隔一步读结果。
@@ -114,6 +114,31 @@ D2D 拷进输入 buffer，比现在「CPU 读回再上传」少绕一圈。
 组批时间随 batch 涨、GPU 时间不涨。这条也把 ROADMAP P9 的第一落点从
 「独立进程 + ZMQ」降级为同进程重叠，成本 10% 拿到 90% 收益，且不再与
 F2（单进程 pdb 直达）冲突。
+
+**落地记录（dev-v0.10）**：已按本节设计实现，开关 `LITE_LLAMA_PIPELINE`
+（默认关；显式 `1`/`true`/`on` 打开，`from_pretrained(pipeline=True)` 亦可，
+TP follower 由 driver 经环境变量教会）。循环形态是 `_step_pipelined`：
+schedule → launch(N) → harvest(N-1)，`_inflight` 深度恒 1。与设计的
+差异与补充，如实记下：
+
+- 「多吐一个 token」的对策不是 admit 时预扣 `max_gen_len`，而是 harvest
+  时检查 `request.is_finished`：晚停那步的 pass 照常发射，token 读回后
+  丢弃不追加——占槽一步的代价相同，但停止语义与同步版逐位一致，admit
+  逻辑不用动。
+- 乐观账目落在 `Request.pending_tokens`：launch +1、harvest -1（丢弃的
+  也减，账目闭合归零）；decode 计划的长度加上它，token 用 `-1` 占位——
+  非法 id，若泄漏到 embedding 会响亮失败——真值由 worker 的
+  `_next_tokens` device 网格 gather 接力。
+- 与 recompute preemption 互斥（构造时 ValueError）：领先一步的账目无法
+  为「回滚重算」服务，开 pipeline 必须关 `enable_preemption`。
+- `StreamPool` 扩了 readback 方向（`_spill` ring，与 upload 的 `_staging`
+  对称、独立复用）。落地测试抓出并修掉一个真 bug：D2H 的源 tensor 未
+  `record_stream(copy_stream)`，调用方释放后 block 被 caching allocator
+  复用，readback 读到的是下一个 pass 覆写的值——upload 路径一直有对称
+  的保护，readback 起步时漏了。
+- 契约测试：`tests/engine/test_pipeline_engine.py`（9 例——token 流与
+  同步版一致但晚一步、账目归零、晚停丢弃、互斥拒绝、混合 step）与
+  `tests/executor/test_overlap.py` 的 readback 三例（含 ring 不覆写）。
 
 ### O10 tokenize 移出关键路径
 
@@ -359,7 +384,7 @@ fp8 KV 单列一行精度指标，不达标不开默认。
 | 阶段 | 内容 | 出口标准 |
 |---|---|---|
 | P0 | 立基线：TPOT / TTFT / TPS 三曲线 + nsys 全链路采集一次 | 各项收益的对照基准 |
-| P1 | O2 + O3.1 + TP graph + O6.3 + O9 + O10 + O13 | TPOT -35%+，启动秒级 |
+| P1 | O2（已落地）+ O3.1 + TP graph + O6.3 + O9 + O10 + O13 | TPOT -35%+，启动秒级 |
 | P2 | O1 + O6.2（同版本）+ O14 | 容量与 TTFT 对照达标，golden 双布局全绿 |
 | P3 | O5 ngram + O7 + O8 | accept ≥2；TTFT / 长上下文 TPOT 达标 |
 | P4 | O3.2 TBO + O4 + O12 + O11 | 每项 on/off 对照正收益才保留 |

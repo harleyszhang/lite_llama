@@ -4,6 +4,14 @@ Each ``step()`` asks the :class:`~lite_llama.engine.scheduler.Scheduler` for
 a plan, runs it through the executor, harvests sampled tokens and updates
 request state — so chunked prefills and running decodes share one pass.
 
+The :class:`~lite_llama.executor.worker.PIPELINE_ENV` mode reshapes that order
+into the launch/harvest pipeline: schedule and launch step N while step N-1 is
+still on the GPU, then harvest N-1's tokens — their readback has landed under
+N's forward, so the host's detokenise/stop work overlaps compute instead of
+serialising against it. Decode inputs never cross to the host in that mode:
+the worker feeds them back on the device (see
+:meth:`~lite_llama.executor.worker.ModelWorker`).
+
 Usage:
     engine.add_request(prompt, params)
     finished = engine.step()
@@ -12,7 +20,9 @@ Usage:
 from __future__ import annotations
 
 import itertools
+import os
 import time
+from collections import deque
 from collections.abc import Sequence
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING, NamedTuple
@@ -26,7 +36,7 @@ from ..executor.executor import (
     UniProcExecutor,
     launch_tensor_parallel,
 )
-from ..executor.worker import ModelInput, PassKind, PassLogprobs
+from ..executor.worker import PIPELINE_ENV, ModelInput, PassKind, PassLogprobs, pipeline_enabled
 from ..models.config import read_model_type
 from ..models.registry import ModelRegistry
 from ..observe import EngineMetrics, Tracer
@@ -131,14 +141,25 @@ def _prefill_work(group: list[Request], chunk_lens: list[int]) -> list[_Work]:
     return [_chunk_work(kind, chunks) for kind, chunks in routes if chunks]
 
 
-def _decode_work(running: list[Request]) -> _Work:
+def _decode_work(running: list[Request], *, from_device: bool = False) -> _Work:
     """Plan one decode token for every fully prefilled request.
 
     The input token is the last one each request generated — already back on
-    the host from the previous step's synchronisation.
+    the host from the previous step's synchronisation. With ``from_device``
+    (the launch/harvest pipeline) it is instead whatever the device sampled
+    last, which the host has *not* harvested yet: the plan carries a
+    placeholder id only the worker's device-side gather can replace, and every
+    length is the optimistic one — the request's bookkeeping plus its
+    launched-but-unharvested token.
     """
-    # The request already counts the token it is about to feed.
-    seq_lens = tuple(request.seq_len for request in running)
+
+    def ahead(request: Request) -> int:
+        """How far the device is past the host's ledger; 0 outside the pipeline."""
+        return request.pending_tokens if from_device else 0
+
+    # The request already counts the token it is about to feed, plus the one
+    # the pipeline fed it before the host ever saw it.
+    seq_lens = tuple(request.seq_len + ahead(request) for request in running)
     return _Work(
         ModelInput(
             kind=PassKind.DECODE,
@@ -146,10 +167,19 @@ def _decode_work(running: list[Request]) -> _Work:
             # One token per row, landing at the row its cache length points at.
             seq_starts=tuple(length - 1 for length in seq_lens),
             seq_lens=seq_lens,
-            tokens=tuple(request.output_token_ids[-1] for request in running),
+            # ``-1`` is deliberately not a token id: if a placeholder ever
+            # reaches an embedding, the pipeline's device-side gather was
+            # skipped and the failure is loud, never a silently wrong token.
+            tokens=(
+                tuple(-1 for _ in running)
+                if from_device
+                else tuple(request.output_token_ids[-1] for request in running)
+            ),
             sampling=tuple(request.params for request in running),
             sampled=tuple(range(len(running))),
-            gen_counts=tuple(len(request.output_token_ids) for request in running),
+            gen_counts=tuple(
+                len(request.output_token_ids) + ahead(request) for request in running
+            ),
         ),
         running,
     )
@@ -182,6 +212,8 @@ class ContinuousBatchingEngine:
         engine: LLMEngine,
         config: SchedulerConfig | None = None,
         executor: Executor | None = None,
+        *,
+        pipeline: bool | None = None,
     ) -> None:
         if engine.model_runner.spec.is_multimodal:
             raise NotImplementedError(
@@ -202,8 +234,16 @@ class ContinuousBatchingEngine:
             )
         self.config = config
 
+        self._pipeline = pipeline_enabled() if pipeline is None else pipeline
+        if self._pipeline and config.enable_preemption:
+            raise ValueError(
+                "the launch/harvest pipeline cannot plan one token ahead for a "
+                "request preemption is about to recompute from scratch; drop "
+                "enable_preemption or leave the pipeline off"
+            )
+
         self._executor: Executor = executor or UniProcExecutor(
-            engine, config.max_num_seqs, config.max_seq_len
+            engine, config.max_num_seqs, config.max_seq_len, pipeline=self._pipeline
         )
         # The executor owns the cache, so it decides how many requests can be in
         # flight; the scheduler hands out exactly those slots.
@@ -212,6 +252,12 @@ class ContinuousBatchingEngine:
         self._detokenizers: dict[str, IncrementalDetokenizer] = {}
         self._request_ids = itertools.count()
         self._step_count = 0
+        # One step's launched-but-unharvested passes, when pipelined: each entry
+        # is the launched list of (work, host tokens, event, records). Depth is
+        # one by construction — every step harvests before it schedules.
+        self._inflight: deque[
+            list[tuple[_Work, torch.Tensor, torch.cuda.Event | None, PassLogprobs | None]]
+        ] = deque()
 
         # Observability: metrics and tracing are cheap no-ops when disabled,
         # so the hot loop never branches on them.
@@ -236,6 +282,7 @@ class ContinuousBatchingEngine:
         tensor_parallel_size: int = 1,
         kv_cache_dtype: str = "auto",
         enable_prefix_cache: bool = False,
+        pipeline: bool | None = None,
     ) -> ContinuousBatchingEngine:
         """Load a checkpoint and wrap it in a continuous-batching engine.
 
@@ -264,6 +311,12 @@ class ContinuousBatchingEngine:
                 resident in the cache. Off by default: it only pays when prompts
                 share a prefix, and otherwise costs a hash per block. See
                 :mod:`lite_llama.engine.prefix_cache`.
+            pipeline: Run the launch/harvest engine loop (O2): launches run one
+                step ahead of harvests so the host's bookkeeping overlaps
+                compute, and decode inputs stay on the device. ``None`` reads
+                :data:`~lite_llama.executor.worker.PIPELINE_ENV`. Stop handling
+                runs one token late, and a request asking for logprobs pays
+                its synchronisation inside the pass as usual.
 
         Raises:
             NotImplementedError: The checkpoint is multimodal.
@@ -293,6 +346,13 @@ class ContinuousBatchingEngine:
             "kv_cache_dtype": kv_cache_dtype,
         }
 
+        resolved_pipeline = pipeline_enabled() if pipeline is None else pipeline
+        if resolved_pipeline:
+            # Followers learn the driver's loop shape the way they learn
+            # everything else they never get told: from the environment they
+            # were spawned with. setdefault, so an explicit env never loses.
+            os.environ.setdefault(PIPELINE_ENV, "1")
+
         # Followers must exist before this rank builds its engine: sharded
         # layers read their width from the process group.
         followers: tuple[BaseProcess, ...] = ()
@@ -318,8 +378,11 @@ class ContinuousBatchingEngine:
         )
         executor: Executor | None = None
         if get_tp_world_size() > 1:
-            executor = MultiprocExecutor(engine, config.max_num_seqs, config.max_seq_len, followers)
-        return cls(engine, config, executor)
+            executor = MultiprocExecutor(
+                engine, config.max_num_seqs, config.max_seq_len, followers,
+                pipeline=resolved_pipeline,
+            )
+        return cls(engine, config, executor, pipeline=resolved_pipeline)
 
     # ------------------------------------------------------------- public API #
     def add_request(
@@ -371,8 +434,8 @@ class ContinuousBatchingEngine:
         return request
 
     def has_unfinished_requests(self) -> bool:
-        """Whether anything is queued or in flight."""
-        return self.scheduler.has_unfinished_requests()
+        """Whether anything is queued, in flight, or awaiting its harvest."""
+        return self.scheduler.has_unfinished_requests() or bool(self._inflight)
 
     @torch.inference_mode()
     def step(self) -> list[Request]:
@@ -382,8 +445,118 @@ class ContinuousBatchingEngine:
             The requests that produced a token this step, in pass order. A
             request that stopped on a stop token is included with an empty
             ``delta`` — the async front end learns a request ended only from
-            this list, so leaving it out would strand its stream.
+            this list, so leaving it out would strand its stream. Under the
+            pipeline the requests reported are those whose *previous* step's
+            tokens this step harvested: the return value is one step behind
+            the launches, which is the latency the mode trades for overlap.
         """
+        if self._pipeline:
+            return self._step_pipelined()
+        return self._step_synchronous()
+
+    @torch.inference_mode()
+    def _step_pipelined(self) -> list[Request]:
+        """Launch step N, then harvest step N-1 — the O2 engine loop.
+
+        The order is the whole point. Scheduling and launching happen while
+        the previous step's forward is still on the GPU, and the host stops
+        only to harvest the *previous* step's tokens — by then their readback
+        has landed under the current forward, so the wait is zero and the
+        detokenise/stop work overlaps compute instead of serialising against
+        it.
+
+        What that costs, explicitly:
+
+        * Stop handling runs one token late: a request that samples eos is
+          retired one step after the synchronous engine would retire it, and
+          the extra pass it rides is wasted compute whose token is discarded
+          here. Late, not wrong — the stream hears the same finish reason,
+          one step later.
+        * The host's request ledger is optimistic: between launch and
+          harvest, ``pending_tokens`` says the device is one token ahead, and
+          the next decode plan adds exactly that back to write the right
+          cache row.
+        * A pass whose requests asked for logprob records already paid a host
+          synchronisation inside execute (records are host objects), so it
+          simply rides the same one-step-late harvest without extra cost.
+        """
+        scheduled = self.scheduler.schedule()
+        if scheduled.is_empty and not self._inflight:
+            return []
+
+        self._step_count += 1
+        # Freshly admitted requests owe a queue-time observation (num_computed
+        # equals their first chunk); resumed chunks and preemption re-admissions
+        # are skipped or re-counted by the same test.
+        for request, chunk in zip(scheduled.prefill, scheduled.prefill_chunk_lens, strict=True):
+            if request.num_computed_tokens == chunk:
+                self.metrics.observe_queue_time(request)
+        work: list[_Work] = []
+        if scheduled.prefill:
+            work += _prefill_work(scheduled.prefill, scheduled.prefill_chunk_lens)
+        if scheduled.decode:
+            work.append(_decode_work(scheduled.decode, from_device=True))
+
+        # Detach the previous step's passes before this step's launches join
+        # the queue: taking the harvest set first is what pins the depth at
+        # one — a step never harvests what it just launched, so the tokens it
+        # reads are always one forward old.
+        previous = self._inflight.popleft() if self._inflight else None
+
+        if work:
+            # Launch only: no token is read back here. The readback rides the
+            # executor's copy stream behind the pass that produced it, and its
+            # event is honoured one step later.
+            launched: list[
+                tuple[_Work, torch.Tensor, torch.cuda.Event | None, PassLogprobs | None]
+            ] = []
+            for work_item in work:
+                tokens, logprobs = self._executor.execute(work_item.plan)
+                host, event = self._executor.readback_async(tokens)
+                launched.append((work_item, host, event, logprobs))
+            # Optimistic advance: every request this step samples for owes one
+            # token the host has not harvested; the next plan adds it back.
+            for work_item, *_ in launched:
+                for request in work_item.requests:
+                    request.pending_tokens += 1
+            self._inflight.append(launched)
+
+        advanced: list[Request] = []
+        if previous is not None:
+            for work_item, host, event, logprobs in previous:
+                if logprobs is not None and any(logprobs.prompt):
+                    self._attribute_prompt_logprobs(work_item, logprobs.prompt)
+                records = (
+                    logprobs.sampled
+                    if logprobs is not None and logprobs.sampled
+                    else (None,) * len(work_item.requests)
+                )
+                if event is not None:
+                    # Zero wait in the steady state: this copy landed one
+                    # forward ago. Only a drained queue's final harvest pays.
+                    event.synchronize()
+                values = host.tolist()
+                emitted: list[tuple[Request, int, PositionLogprobs | None]] = []
+                for request, token, record in zip(
+                    work_item.requests, values, records, strict=True
+                ):
+                    # The token is spent either way — the ledger closes for
+                    # retired requests too, so it drains to exactly zero.
+                    request.pending_tokens -= 1
+                    if request.is_finished:
+                        # The request stopped at an earlier harvest; this pass
+                        # is the one extra token the late stop costs, and its
+                        # output is discarded, not appended.
+                        continue
+                    emitted.append((request, token, record))
+                advanced += self._harvest(emitted)
+        # Counter properties, not len(running): those copy the lists.
+        self.metrics.observe_load(self.scheduler.num_running, self.scheduler.num_waiting)
+        return advanced
+
+    @torch.inference_mode()
+    def _step_synchronous(self) -> list[Request]:
+        """Plan, execute, and harvest in one step — the synchronous loop."""
         scheduled = self.scheduler.schedule()
         if scheduled.is_empty:
             return []
@@ -465,6 +638,9 @@ class ContinuousBatchingEngine:
 
     def shutdown(self) -> None:
         """Release the executor. The engine cannot serve any more steps after this."""
+        # Unharvested passes are gone with the executor; their pinned buffers
+        # belong to it, and their requests are nobody's to advance any more.
+        self._inflight.clear()
         self._executor.shutdown()
 
     def timeline_summary(self) -> str:

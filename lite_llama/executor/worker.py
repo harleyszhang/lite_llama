@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import itertools
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -31,6 +32,18 @@ from .overlap import OverlapPolicy, StreamPool, Timeline
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
     from ..engine.llm_engine import LLMEngine
+
+#: Environment variable enabling the launch/harvest engine pipeline (O2): the
+#: engine plans and launches step N+1 while step N is still on the GPU, and
+#: harvests N's tokens one step late. Off by default — it deliberately delays
+#: stop handling by one token, so it is a deployment choice, not a default.
+PIPELINE_ENV = "LITE_LLAMA_PIPELINE"
+
+
+def pipeline_enabled() -> bool:
+    """Read ``LITE_LLAMA_PIPELINE``; only ``1``/``true``/``on`` means on."""
+    raw = os.environ.get(PIPELINE_ENV, "0").strip().lower()
+    return raw in ("1", "true", "on")
 
 
 class PassKind(StrEnum):
@@ -206,20 +219,39 @@ class ModelWorker:
     nothing here has to be invalidated when the running set changes — a plan
     always names the slots it means.
 
+    With the launch/harvest pipeline on, the worker also keeps the *next*
+    decode input per slot on the device (:attr:`_next_tokens`): every pass's
+    sampler writes the tokens it drew straight into that grid, and the next
+    decode pass gathers its inputs out of it — the token the engine would
+    otherwise have to read back, detokenise-adjacent bookkeeping aside, never
+    crosses to the host and back.
+
     Args:
         engine: A built :class:`~lite_llama.engine.llm_engine.LLMEngine`; the
             worker takes its KV cache over via the slot view.
         max_num_seqs: Concurrency ceiling, which caps the slots handed out and so
             the height of the generated-token grid.
         max_seq_len: Context bound, and the grid's width.
+        pipeline: Whether decode inputs come from the device-side
+            next-token grid (the O2 launch/harvest engine). ``None`` reads
+            :data:`PIPELINE_ENV`, which is also how a tensor-parallel
+            follower learns the driver's choice.
     """
 
-    def __init__(self, engine: LLMEngine, max_num_seqs: int, max_seq_len: int) -> None:
+    def __init__(
+        self,
+        engine: LLMEngine,
+        max_num_seqs: int,
+        max_seq_len: int,
+        *,
+        pipeline: bool | None = None,
+    ) -> None:
         self._runner = engine.model_runner
         self._sampler = engine.sampler
         self._device = engine.device
         self._pad_id = engine.pad_id
         self._slot_batch = self._runner.enable_slot_kv_cache()
+        self._pipeline = pipeline_enabled() if pipeline is None else pipeline
 
         # Slot ids stay below max_num_seqs, which keeps the generated-token grid
         # proportional to the concurrency the caller asked for rather than to
@@ -230,6 +262,13 @@ class ModelWorker:
         )
         self._columns = torch.arange(max_seq_len, device=self._device)
         self._no_tokens = torch.empty(0, dtype=torch.long, device=self._device)
+        # The O2 feedback lane: whatever each slot's most recent pass sampled,
+        # kept on the device so the next decode pass feeds it back without a
+        # host round-trip. A prefill's first token lands here too — the engine
+        # has not harvested it yet when it plans the first decode step.
+        self._next_tokens = torch.full(
+            (self.num_slots,), self._pad_id, dtype=torch.long, device=self._device
+        )
 
         # Sampling knobs cost four small uploads to rebuild, so a steady batch
         # reuses them; the key is the plan's own rows, which needs no cooperation
@@ -345,6 +384,26 @@ class ModelWorker:
         else:
             padded_slots, _ = self._slot_batch.pad_decode_rows(plan.slots, plan.seq_lens)
             padded = len(padded_slots)
+
+        if kind is PassKind.DECODE and self._pipeline:
+            # The launch/harvest pipeline: the plan's token entries are
+            # placeholders (``-1``), because the engine has not harvested the
+            # tokens it would name. Gather the real inputs off the device grid
+            # the last pass's sampler wrote, pad with inert ids up to the graph
+            # width, and skip the upload entirely — there is nothing to upload.
+            real = len(plan.slots)
+            gathered = self._next_tokens[self._to_device(plan.slots)]
+            pad = padded - real
+            if pad > 0:
+                gathered = torch.cat(
+                    [
+                        gathered,
+                        torch.full((pad,), self._pad_id, dtype=torch.long, device=self._device),
+                    ]
+                )
+            return _PreparedPass(
+                input_ids=gathered.view(padded, 1), event=None, padded=padded
+            )
 
         rows = plan.tokens + (self._pad_id,) * (padded - len(plan.tokens))
         input_ids, event = self._pool.upload_async(
@@ -469,7 +528,24 @@ class ModelWorker:
         ids, records = self._sampler.sample_batched_with_logprobs(logits, sampling, generated)
         tokens = _sync_tp(ids.reshape(-1))
         self._gen_grid[slots, columns] = tokens
+        if self._pipeline:
+            # Device-side feedback: the next pass that feeds this slot reads
+            # its input here, never through the host.
+            self._next_tokens[slots] = tokens
         return tokens, records
+
+    def readback(
+        self, tokens: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.cuda.Event | None]:
+        """Stage a pass's sampled tokens for the host, without waiting.
+
+        The D2H copy rides the pool's copy stream behind the pass that produced
+        the tokens; the caller synchronises on the returned event one engine
+        step later, by which time the copy has landed under other work. On a
+        pool with the policy off (or a CPU device) this is a plain ``.cpu()``
+        and the event is ``None`` — same contract, no overlap.
+        """
+        return self._pool.readback_async(tokens, label="readback.tokens")
 
     def _batched_sampling(self, params: tuple[SamplingParams, ...]) -> BatchedSamplingParams:
         """Device-side sampling knobs, rebuilt only when the sampled rows change.

@@ -57,6 +57,19 @@ class Executor(ABC):
     def shutdown(self) -> None:
         """Release whatever the executor owns beyond this object's lifetime."""
 
+    def readback_async(
+        self, tokens: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.cuda.Event | None]:
+        """Stage sampled tokens for the host without waiting for their pass.
+
+        The default is the blocking degradation — ``.cpu()`` and no event —
+        which keeps the engine's launch/harvest contract for executors with
+        no copy stream to ride (fakes in tests, CPU-only workers). Real
+        executors forward to their worker's pool and return a pinned view
+        whose copy lands behind the pass that produced it.
+        """
+        return tokens.cpu(), None
+
     def timeline_summary(self) -> str:
         """Region table of the streams this executor ran on, for overlap diagnostics.
 
@@ -75,10 +88,20 @@ class UniProcExecutor(Executor):
             executor takes its KV cache over.
         max_num_seqs: Concurrency ceiling.
         max_seq_len: Context bound.
+        pipeline: Whether the worker feeds decode inputs back on the device
+            (the O2 launch/harvest engine); ``None`` defers to
+            :data:`~lite_llama.executor.worker.PIPELINE_ENV`.
     """
 
-    def __init__(self, engine: LLMEngine, max_num_seqs: int, max_seq_len: int) -> None:
-        self._worker = ModelWorker(engine, max_num_seqs, max_seq_len)
+    def __init__(
+        self,
+        engine: LLMEngine,
+        max_num_seqs: int,
+        max_seq_len: int,
+        *,
+        pipeline: bool | None = None,
+    ) -> None:
+        self._worker = ModelWorker(engine, max_num_seqs, max_seq_len, pipeline=pipeline)
 
     @property
     def num_slots(self) -> int:
@@ -86,6 +109,11 @@ class UniProcExecutor(Executor):
 
     def execute(self, model_input: ModelInput) -> tuple[torch.Tensor, PassLogprobs | None]:
         return self._worker.execute(model_input)
+
+    def readback_async(
+        self, tokens: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.cuda.Event | None]:
+        return self._worker.readback(tokens)
 
     def timeline_summary(self) -> str:
         return self._worker.timeline.summary()
@@ -111,6 +139,10 @@ class MultiprocExecutor(Executor):
             :func:`launch_tensor_parallel`. Empty when someone else owns them
             (the CLI, a DP controller), in which case shutdown only sends the
             stop signal.
+        pipeline: Whether the worker feeds decode inputs back on the device
+            (the O2 launch/harvest engine); ``None`` defers to
+            :data:`~lite_llama.executor.worker.PIPELINE_ENV`, which is also
+            how the follower ranks learn the driver's choice.
     """
 
     def __init__(
@@ -119,8 +151,10 @@ class MultiprocExecutor(Executor):
         max_num_seqs: int,
         max_seq_len: int,
         followers: Sequence[mp.process.BaseProcess] = (),
+        *,
+        pipeline: bool | None = None,
     ) -> None:
-        self._worker = ModelWorker(engine, max_num_seqs, max_seq_len)
+        self._worker = ModelWorker(engine, max_num_seqs, max_seq_len, pipeline=pipeline)
         self._followers = tuple(followers)
         self._live = True
 
@@ -132,6 +166,13 @@ class MultiprocExecutor(Executor):
         ensure_followers_alive(self._followers)
         broadcast_object_tp(model_input)
         return self._worker.execute(model_input)
+
+    def readback_async(
+        self, tokens: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.cuda.Event | None]:
+        # Rank 0's copy is the only one that matters: followers discard their
+        # tokens exactly as they discard their sampled results.
+        return self._worker.readback(tokens)
 
     def timeline_summary(self) -> str:
         """Only this rank's regions; the followers trace their own streams."""
