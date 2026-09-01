@@ -156,7 +156,14 @@ def test_route_matches_hf(tmp_path):
 
     torch.manual_seed(0)
     config = _model_config(
-        tmp_path, hidden_size=64, num_experts=16, num_experts_per_tok=4, moe_intermediate_size=32
+        tmp_path,
+        hidden_size=64,
+        num_experts=16,
+        num_experts_per_tok=4,
+        moe_intermediate_size=32,
+        # The router weight follows config.dtype (bf16 when undeclared); pin
+        # fp16 so the block matches the fp16 activations this test feeds.
+        torch_dtype="float16",
     )
     block = SparseMoeBlock(config)
     gate = torch.randn(config.num_experts, config.hidden_size)

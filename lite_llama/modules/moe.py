@@ -26,10 +26,11 @@ class SparseMoeBlock(nn.Module):
         config: Any config exposing the HF MoE fields ``num_experts``,
             ``num_experts_per_tok``, ``moe_intermediate_size`` and
             ``norm_topk_prob``.
-        quant: Quantisation layout of the expert weights, or ``None`` for fp16.
-            The router is always fp16: it is ``num_experts x hidden``, small
-            enough to be free and precise enough to matter, since a wrong top-k
-            pick costs far more than a rounded weight.
+        quant: Quantisation layout of the expert weights, or ``None``.
+            The router always stays in the model dtype: it is
+            ``num_experts x hidden``, small enough to be free and precise
+            enough to matter, since a wrong top-k pick costs far more than a
+            rounded weight.
     """
 
     def __init__(self, config: ModelConfig, quant: QuantizationConfig | None = None) -> None:
@@ -44,10 +45,12 @@ class SparseMoeBlock(nn.Module):
             config.moe_intermediate_size, get_tp_world_size(), "MoE intermediate"
         )
         self.quant = quant
+        # The model dtype drives every unquantised tensor this block owns: the
+        # router below and the expert storage the quant method allocates.
+        self.dtype = config.dtype
 
-        dtype = torch.float16
         self.gate_weight = nn.Parameter(
-            torch.empty(self.num_experts, self.hidden_size, dtype=dtype)
+            torch.empty(self.num_experts, self.hidden_size, dtype=self.dtype)
         )
         # Experts live in a ParameterDict so the state-dict keys read
         # ``mlp.experts.{gate_up_proj,down_proj}``; gate and up projections are

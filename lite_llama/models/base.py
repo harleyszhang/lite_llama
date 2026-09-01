@@ -56,7 +56,7 @@ class Attention(nn.Module):
         config: Model config supplying the head geometry.
         qkv_bias: Whether q/k/v projections carry a bias (true for Qwen2).
         use_qk_norm: Whether q and k are RMSNormed per head before RoPE (Qwen3).
-        quant: Quantisation layout of the projections, or ``None`` for fp16.
+        quant: Quantisation layout of the projections, or ``None``.
     """
 
     def __init__(
@@ -80,6 +80,7 @@ class Attention(nn.Module):
             config.head_dim,
             bias=qkv_bias,
             quant=quant,
+            dtype=config.dtype,
         )
         # This rank's share of the head geometry, read back from the layer that owns
         # the weight rather than divided a second time here. Attention width is
@@ -90,7 +91,7 @@ class Attention(nn.Module):
         self.kv_size = self.qkv_proj.kv_size
 
         self.o_proj = RowParallelLinear(
-            config.q_size, self.hidden_size, quant=quant, what="query features"
+            config.q_size, self.hidden_size, quant=quant, dtype=config.dtype, what="query features"
         )
 
         if use_qk_norm:
@@ -178,13 +179,15 @@ class DecoderLayer(nn.Module):
         self.post_attention_layernorm_weight = nn.Parameter(
             torch.ones(config.hidden_size, dtype=config.dtype)
         )
-        # 注意力块同理：CausalLM._build_attention 注入，MLA 变体（v0.10）换掉整块
+        # Same injection seam as the MLP: ``CausalLM._build_attention`` supplies
+        # the block, and an MLA variant (v0.10) replaces it whole.
         self.self_attn = (
             attention
             if attention is not None
             else Attention(config, qkv_bias=qkv_bias, use_qk_norm=use_qk_norm, quant=quant)
         )
-        # MoE 变体由 CausalLM._build_mlp 注入 SparseMoeBlock;默认 dense SwiGLU
+        # MoE variants inject a SparseMoeBlock via ``CausalLM._build_mlp``;
+        # the default is the dense SwiGLU.
         self.mlp = mlp if mlp is not None else FusedMLP(config, quant)
 
     def forward(
@@ -296,7 +299,7 @@ class CausalLM(nn.Module):
         )
 
     def _build_mlp(self, config: ModelConfig, layer_index: int) -> nn.Module:
-        """Per-layer MLP factory; MoE 变体覆盖它以按层返回 SparseMoeBlock。"""
+        """Per-layer MLP factory; MoE variants override it to pick per layer."""
         return FusedMLP(config, self._layer_quant(layer_index))
 
     # ---- weight loading --------------------------------------------------- #

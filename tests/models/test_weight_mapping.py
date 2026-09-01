@@ -43,7 +43,10 @@ _PACKED = CausalLM.packed_modules_mapping
         # Flattened: the module level is folded into the parameter name.
         ("norm.weight", ("norm_weight", None)),
         ("layers.3.input_layernorm.weight", ("layers.3.input_layernorm_weight", None)),
-        ("layers.3.post_attention_layernorm.weight", ("layers.3.post_attention_layernorm_weight", None)),
+        (
+            "layers.3.post_attention_layernorm.weight",
+            ("layers.3.post_attention_layernorm_weight", None),
+        ),
         # Projections are submodules (LinearBase), so their parameters use dots.
         ("layers.3.self_attn.o_proj.weight", ("layers.3.self_attn.o_proj.weight", None)),
         ("layers.3.self_attn.q_norm.weight", ("layers.3.self_attn.q_norm_weight", None)),
@@ -170,6 +173,7 @@ def test_expert_gate_and_up_fill_opposite_halves_of_their_own_slice():
             moe_intermediate_size=2,
             norm_topk_prob=True,
             hidden_size=5,
+            dtype=torch.float16,
         )
     )
     param = block.experts["gate_up_proj"]  # [experts, 2 * moe_inter, hidden]
@@ -192,6 +196,7 @@ def test_expert_down_proj_fills_a_whole_slice():
             moe_intermediate_size=2,
             norm_topk_prob=True,
             hidden_size=5,
+            dtype=torch.float16,
         )
     )
     param = block.experts["down_proj"]  # [experts, hidden, moe_inter]
