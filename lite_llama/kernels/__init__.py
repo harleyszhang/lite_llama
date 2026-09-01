@@ -29,6 +29,7 @@ from . import ops as ops
 
 # Dispatch machinery: the ops with contenders go through these.
 from .dispatcher import Selected, dispatch, explain, invalidate_cache, op_backend_env
+from .dispatcher.autotune import install_frozen_perf_provider
 
 # The kernels the model/engine layers call directly.
 from .ops.activation.activations import gelu, leaky_relu, relu, silu, tanh
@@ -49,6 +50,11 @@ from .ops.layernorm.skip_rmsnorm import skip_rmsnorm
 from .ops.moe.fused_moe import fused_moe, moe_align_block_size
 from .ops.quantization import smoothquant_matmul, w4a16_matmul, w8a16_matmul
 from .ops.rope.rope_emb import rope_emb_forward
+
+# Frozen measured ranking (ROADMAP v0.10): records under the autotune cache's
+# frozen/ dir become the rank step's perf input. Nothing is read until the
+# first dispatch asks, and LITE_LLAMA_FROZEN_RANK=0 turns the lookup off.
+install_frozen_perf_provider()
 
 __all__ = [
     "Selected",

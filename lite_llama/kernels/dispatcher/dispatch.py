@@ -185,7 +185,7 @@ def dtype_label(dtype: Any) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Perf lookup (frozen measurements; wired to backends.json in M3)
+# Perf lookup (frozen measurements; autotune/frozen.py wires the store in here)
 # --------------------------------------------------------------------------- #
 PerfProvider = Callable[[KernelSpec, DispatchKey], "float | None"]
 
@@ -200,9 +200,15 @@ _perf_provider: PerfProvider = _no_measurements
 
 
 def set_perf_provider(provider: PerfProvider) -> None:
-    """Install the frozen-latency lookup used by the ranking step."""
+    """Install the frozen-latency lookup used by the ranking step.
+
+    Swapping the provider changes every ranking input, so the global
+    registry's cached decisions are dropped: keeping them would let a
+    decision made under the old provider outlive it.
+    """
     global _perf_provider
     _perf_provider = provider
+    invalidate_cache()
 
 
 def _perf_latency_ms(spec: KernelSpec, key: DispatchKey) -> float | None:

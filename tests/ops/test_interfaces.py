@@ -203,8 +203,13 @@ SIGNATURES = {
             "b_req_idx",
             "b_seq_len",
             "max_actual_seq_len",
+            # v0.10 ABC audit: k_scale/v_scale follow the native kernels
+            # (positional-or-keyword, default 1.0); the keyword-only marker on
+            # the ABC was the one signature drift in the catalogue.
+            "k_scale",
+            "v_scale",
         ],
-        ["k_scale", "v_scale"],
+        [],
     ),
     MlaDecodeOp: (["q", "kv_cache", "block_table", "cache_seqlens"], ["max_seq_len", "sm_scale"]),
     LinearOp: (["x", "weight"], ["bias", "weight_scale", "weight_zeros", "group_n", "group_k"]),

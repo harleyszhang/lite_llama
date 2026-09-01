@@ -1,0 +1,38 @@
+{
+  "gpu": "NVIDIA_A10",
+  "case_dtype": "torch.bfloat16",
+  "ops": {
+    "rmsnorm": {
+      "case": "b8_s8_h4096",
+      "winner": "flashinfer/rmsnorm",
+      "latencies_us": {
+        "native/skip_rmsnorm": 51.19999870657921,
+        "flashinfer/rmsnorm": 17.40800030529499
+      }
+    },
+    "rope": {
+      "case": "b8_s128_h128",
+      "winner": "native/rope_emb_forward",
+      "latencies_us": {
+        "native/rope_emb_forward": 48.128001391887665,
+        "flashinfer/rope": 57.28000029921532
+      }
+    },
+    "attention.prefill": {
+      "case": "ragged11k_gqa4x",
+      "winner": "flashinfer/prefill",
+      "latencies_us": {
+        "native/flash_attention2_no_pad": 5866.4960861206055,
+        "flashinfer/prefill": 2864.6399974823
+      }
+    },
+    "attention.decode": {
+      "case": "b8_s2048_gqa4x",
+      "winner": "native/flash_decoding",
+      "latencies_us": {
+        "native/flash_decoding": 172.64000326395035,
+        "flashinfer/decode": 641.0239934921265
+      }
+    }
+  }
+}

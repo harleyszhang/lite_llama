@@ -100,7 +100,6 @@ class AttentionDecodeOp(LogicalOp):
         b_req_idx: torch.Tensor,
         b_seq_len: torch.Tensor,
         max_actual_seq_len: int,
-        *,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
     ) -> torch.Tensor:
