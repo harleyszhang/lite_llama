@@ -208,7 +208,7 @@ def _fused_moe_kernel(
             # Reshape for broadcast: [BLOCK_K//8, 1, BLOCK_N] x [1, 8, 1] -> [BLOCK_K//8, 8, BLOCK_N]
             b_expanded = (b_packed[:, None, :] >> shifts[None, :, None]) & 0xF
             # Flatten to [BLOCK_K, BLOCK_N]
-            b = tl.reshape(b_expanded, (BLOCK_K, BLOCK_N)).to(tl.float16)
+            b = tl.reshape(b_expanded, (BLOCK_K, BLOCK_N)).to(a.dtype)
             # Load scale and optionally zero point
             b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
             if HAS_ZEROS:
@@ -218,9 +218,11 @@ def _fused_moe_kernel(
                     + (offs_bn // GROUP_N) * stride_bsn
                     + ((k * BLOCK_K) // GROUP_K) * stride_bsk
                 )
-                b = (b - b_zero[None, :]) * b_scale[None, :]
+                # The scale/zero arithmetic stays fp32; only the product the
+                # tensor cores consume comes back to the activation's dtype.
+                b = ((b.to(tl.float32) - b_zero[None, :]) * b_scale[None, :]).to(a.dtype)
             else:
-                b = b * b_scale[None, :]
+                b = (b.to(tl.float32) * b_scale[None, :]).to(a.dtype)
             accumulator += tl.dot(a, b)
             b_ptrs += (BLOCK_K // 8) * stride_bk
         else:
@@ -232,7 +234,12 @@ def _fused_moe_kernel(
                     b = dequant_fp8e4m3(b)
                 else:
                     b = b.to(tl.float16)
-                # Hoisted out of the dot, so the tensor cores still see fp16 operands.
+                # tl.dot needs both operands in the activation's dtype (fp16 or
+                # bf16 — e.g. Qwen3-30B-A3B-FP8 runs bf16 activations). Widening
+                # the widened-from-fp16 weight to bf16 rounds at 2^-8, an order
+                # below the 2^-4 the 8-bit weight itself carries.
+                b = b.to(a.dtype)
+                # Hoisted out of the dot, so the tensor cores still see 16-bit operands.
                 b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
                 accumulator += tl.dot(a, b) * b_scale[None, :]
             b_ptrs += BLOCK_K * stride_bk

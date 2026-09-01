@@ -115,6 +115,30 @@ Benchmarks on A10 (24 GB), decode batch size 4, max_gen_len=64, greedy. Baseline
 > Model Mem = model weights only; KV Capacity = max cached tokens (paged pool fills remaining GPU memory).
 > Benchmark logs: [`docs/benchmark_logs/`](../docs/benchmark_logs/)
 
+### Qwen3-30B-A3B-Instruct-2507-FP8 (MoE, TP2)
+
+30B 级 MoE checkpoint 的权重以 fp8-e4m3（uint8 存储）+ 128×128 block scales 直接驻留显存，kernel 在 `tl.dot` 前反量化（W8A16）。A10 (sm86) 无原生 fp8 tensor core，激活保持 16-bit——checkpoint 声明的 `activation_scheme: dynamic` 只在 sm89+ 的真 W8A8 路径上生效，这里不启用。checkpoint 的 `modules_to_not_convert`（`lm_head`、每层两个 norm、router `mlp.gate`，共 145 项）由 `Fp8Config.ignored` 接住，保持 bf16 不量化。
+
+按层分发的量化算子（`Fp8Config.get_quant_method`）：
+
+| 层 | Quant Method | Kernel | 权重格式 |
+|----|--------------|--------|---------|
+| `self_attn.qkv_proj` / `o_proj` | `Fp8LinearMethod` | `w8a16_matmul` | fp8-e4m3 + 128×128 block scales |
+| `mlp.experts`（128 专家的 gate_up / down） | `Fp8MoEMethod` | `fused_moe` `QUANT_MODE=1` | fp8-e4m3 + block scales（反量化因子 256 折进 `DEQUANT_SCALE` bit-trick） |
+| `mlp.gate`（router）/ `lm_head` | `UnquantizedLinearMethod` | cuBLAS 线性层 | bf16 |
+
+两条 kernel 路径都接受 fp16 或 bf16 激活（checkpoint 的 `torch_dtype: bfloat16` 走 bf16）：反量化后的操作数统一对齐激活 dtype 再进 tensor core。TP2 下每卡存半个副本（权重 + KV 各半），decode 走 eager（NCCL 集合通信不能进 CUDA graph）。
+
+A10×2 (22 GiB each), TP2, batch 4, max_gen_len=64, greedy（与上文 Qwen3-0.6B 同口径；HF 侧无法对照——fp8 checkpoint 反量化为 bf16 需 ~60 GB，双卡放不下）：
+
+| Config | Model Mem | KV Capacity | TTFT (ms) | TPOT (ms) | TPS |
+|--------|-----------|-------------|-----------|-----------|-----|
+| lite fp8 checkpoint (TP2) | 29.06 GB | 104,528 tok | 81.0 | 82.77 | 48.3 |
+
+> Model Mem 为全 replica 权重总量（rank 0 分片 ×2）；KV Capacity 是每卡容量（KV 按 TP 切分后每卡各存一半，同一数字即 replica 的 token 容量）。
+> 复现：`PYTHONPATH=. python benchmarks/bench_quant.py --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8 --schemes fp16 --tp 2 --skip-hf`
+> e2e 指标见 [`benchmark_models.md`](benchmark_models.md)；量化 kernel 精度回归：`python -m pytest tests/kernels/test_fused_moe.py -k fp8`（fp16 与 bf16 激活各一例，对 fp32 反量化参考）
+
 ### Performance Notes
 
 - **lite fp16 vs HF**: 6.5× speedup from CUDA graphs + fused kernels + paged KV
