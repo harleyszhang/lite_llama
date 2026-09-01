@@ -197,8 +197,8 @@ class LinearOp(LogicalOp):
     """Dense ``x @ weight.T (+ bias)``, quantised or not.
 
     The signature is the superset of the quantised GEMMs (fp8 / int8 block /
-    smoothquant / int4): a scheme is a dispatch key dimension, the impl knows
-    which of the optional tensors it consumes and ignores the rest.
+    smoothquant / int4 / nvfp4): a scheme is a dispatch key dimension, the impl
+    knows which of the optional tensors it consumes and ignores the rest.
     """
 
     op_id = "linear"
@@ -212,6 +212,7 @@ class LinearOp(LogicalOp):
         bias: torch.Tensor | None = None,
         weight_scale: torch.Tensor | None = None,
         weight_zeros: torch.Tensor | None = None,
+        weight_global_scale: torch.Tensor | None = None,
         group_n: int = 0,
         group_k: int = 0,
     ) -> torch.Tensor:
@@ -223,6 +224,9 @@ class LinearOp(LogicalOp):
             bias: Optional ``[out_features]`` additive bias.
             weight_scale: Dequantisation scales; ``None`` for plain GEMM.
             weight_zeros: Zero points for asymmetric int4; ``None`` symmetric.
+            weight_global_scale: Second-level per-tensor scale, for formats whose
+                block scales are themselves quantised (NVFP4). ``None`` for the
+                single-level schemes, which is all of the others.
             group_n: Rows per scale block (``0`` = per-tensor).
             group_k: Columns per scale block.
 

@@ -230,7 +230,17 @@ SIGNATURES = {
         ],
         [],
     ),
-    LinearOp: (["x", "weight"], ["bias", "weight_scale", "weight_zeros", "group_n", "group_k"]),
+    LinearOp: (
+        ["x", "weight"],
+        [
+            "bias",
+            "weight_scale",
+            "weight_zeros",
+            "weight_global_scale",
+            "group_n",
+            "group_k",
+        ],
+    ),
     MoeOp: (
         ["hidden_states", "w1", "w2", "topk_weights", "topk_ids"],
         ["w1_scale", "w2_scale", "w1_zeros", "w2_zeros", "group_n", "group_k"],
