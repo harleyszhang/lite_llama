@@ -59,9 +59,17 @@ class ConfigStore:
 
     def get(self, key: TuneKey) -> dict | None:
         """Return the tile config for *key*, or ``None`` on miss."""
-        entries = self._ensure_loaded(key.op)
-        entry = entries.get(key)
+        entry = self.get_entry(key)
         return entry["config"] if entry else None
+
+    def get_entry(self, key: TuneKey) -> dict | None:
+        """Return the full entry for *key* — config, latency, timestamp — or None.
+
+        The frozen-rank provider needs the measured latency, not just the
+        config payload, so the entry is addressable without going behind the
+        store's back.
+        """
+        return self._ensure_loaded(key.op).get(key)
 
     def put(self, key: TuneKey, config: dict, latency_us: float) -> None:
         """Insert or overwrite an entry and flush to disk."""

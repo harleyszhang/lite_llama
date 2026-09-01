@@ -339,7 +339,7 @@ class TestRegistryStaysTorchFree:
 
 
 class TestTargetsMatchTheirContract:
-    """Parameter *names* are the contract, because nothing adapts them.
+    """Parameter *names, kinds and defaults* are the contract, because nothing adapts them.
 
     Dispatch hands the caller the kernel function itself — the backend
     adapters translate library calling conventions, never argument names.
@@ -347,7 +347,10 @@ class TestTargetsMatchTheirContract:
     silently satisfies the ABC while breaking any caller that passes one by
     keyword, and breaking the next backend that reads the ABC to know what it
     must accept. This test is what caught ``update_kv_buffer(K_Values, ...)``
-    and ``skip_rmsnorm(X, ...)``.
+    and ``skip_rmsnorm(X, ...)``. Kinds and defaults joined the pin in
+    v0.10: the ABC evaluation measured exactly one drift (a keyword-only
+    marker on ``attention.decode`` that neither decode row honoured) and
+    removed it — the ABC documents the kernels, not the other way round.
     """
 
     #: ``elementwise.*`` members declare their own arity under an ABC that is
@@ -365,13 +368,24 @@ class TestTargetsMatchTheirContract:
     def _ops_to_check(self) -> list[str]:
         return [op for op in sorted(REGISTRY.ops()) if not op.startswith(self.OPEN_ARITY)]
 
+    @staticmethod
+    def _contract_params(fn) -> list[tuple[str, str, str]]:
+        """(name, kind, default) per parameter — the full substitutability surface."""
+        return [
+            (
+                p.name,
+                p.kind.name,
+                "<required>" if p.default is inspect.Parameter.empty else repr(p.default),
+            )
+            for p in inspect.signature(fn).parameters.values()
+            if p.name != "self"
+        ]
+
     def test_parameter_names_match_the_abc(self) -> None:
         for op in self._ops_to_check():
-            expected = [
-                p for p in inspect.signature(LOGICAL_OPS[op].__call__).parameters if p != "self"
-            ]
+            expected = self._contract_params(LOGICAL_OPS[op].__call__)
             for spec in REGISTRY.implementations(op):
-                got = list(inspect.signature(resolve_target(spec.target)).parameters)
+                got = self._contract_params(resolve_target(spec.target))
                 assert got == expected, (
                     f"{spec.name} takes {got} but the {op!r} contract says {expected}"
                 )

@@ -22,6 +22,7 @@ Usage:
     fn = sel.load()
 """
 
+from .autotune import install_frozen_perf_provider
 from .dispatch import (
     DispatchKey,
     Selected,
@@ -65,6 +66,7 @@ __all__ = [
     "dispatch",
     "dtype_label",
     "explain",
+    "install_frozen_perf_provider",
     "invalidate_cache",
     "op_backend_env",
     "register",

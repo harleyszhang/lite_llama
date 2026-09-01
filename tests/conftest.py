@@ -105,9 +105,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             if is_golden_test:
                 # Golden tests must NOT silently skip — mark as UNVERIFIED.
                 if _GOLDEN_STRICT:
-                    item.add_marker(
-                        pytest.mark.skip(reason="GOLDEN GATE FAIL: no CUDA device")
-                    )
+                    item.add_marker(pytest.mark.skip(reason="GOLDEN GATE FAIL: no CUDA device"))
                     # Override with a custom fixture that calls pytest.fail
                     item.add_marker(
                         pytest.mark.xfail(
@@ -163,6 +161,26 @@ def _reset_torch_state():
     yield
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+#: Hermetic dispatch, process-wide: a developer's frozen records must not flip
+#: the suite. This has to be set at conftest *import*, not only in the
+#: function-scoped fixture below — module/session-scoped fixtures (engine
+#: builders in tests/engine, tests/golden, ...) are instantiated before
+#: function-scoped autouse fixtures, and a dispatch made there caches its
+#: decision on the global registry for the rest of the session.
+os.environ["LITE_LLAMA_FROZEN_RANK"] = "0"
+
+
+@pytest.fixture(autouse=True)
+def _frozen_rank_off(monkeypatch: pytest.MonkeyPatch):
+    """Re-pin the switch per test, so one opting in cannot leak the opt-in.
+
+    A test opting into frozen ranking sets ``LITE_LLAMA_FROZEN_RANK=1`` (via
+    monkeypatch) for its own duration; teardown restores the process-wide
+    ``"0"`` above rather than an unset variable.
+    """
+    monkeypatch.setenv("LITE_LLAMA_FROZEN_RANK", "0")
 
 
 @pytest.fixture(scope="session")
