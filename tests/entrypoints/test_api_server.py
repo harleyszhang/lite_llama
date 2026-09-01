@@ -21,11 +21,13 @@ pytest.importorskip("fastapi", reason="needs the `serve` extra")
 from fastapi.testclient import TestClient
 
 from lite_llama.engine.async_engine import StreamedOutput
+from lite_llama.engine.sampler import PositionLogprobs
 from lite_llama.entrypoints.api_server import (
     ServerConfig,
     build_app,
     parse_sse,
 )
+from lite_llama.observe.metrics import EngineMetrics
 
 pytestmark = pytest.mark.serving
 
@@ -53,12 +55,16 @@ class FakeTokenizer:
     def encode(self, text, add_special_tokens=True):
         return text.split()
 
+    def decode(self, token_ids) -> str:
+        return "".join(f"<{token_id}>" for token_id in token_ids)
+
 
 class FakeEngine:
     """Streams a fixed reply word by word and records every request it saw."""
 
     def __init__(self, reply: str = _REPLY) -> None:
         self.tokenizer = FakeTokenizer()
+        self.metrics = EngineMetrics()
         self._reply = reply
         self.seen: list[tuple[str, object]] = []
         self.started = False
@@ -73,10 +79,35 @@ class FakeEngine:
         self.seen.append((prompt, sampling_params))
         text = ""
         pieces = self._reply.split(" ")
+        k = getattr(sampling_params, "logprobs", None)
+        prompt_k = getattr(sampling_params, "prompt_logprobs", None)
         for index, piece in enumerate(pieces):
             delta = piece if index == 0 else " " + piece
             text += delta
             last = index == len(pieces) - 1
+            record = None
+            if k is not None:
+                record = PositionLogprobs(
+                    token_id=index + 10,
+                    logprob=-0.5,
+                    top_token_ids=tuple(index + 11 + j for j in range(k)),
+                    top_logprobs=tuple(-0.5 - j for j in range(k)),
+                )
+            prompt_records = None
+            if last and prompt_k is not None:
+                prompt_len = len(self.tokenizer.encode(prompt))
+                prompt_records = (
+                    None,
+                    *(
+                        PositionLogprobs(
+                            token_id=position,
+                            logprob=-1.0,
+                            top_token_ids=(position,),
+                            top_logprobs=(-1.0,),
+                        )
+                        for position in range(1, prompt_len)
+                    ),
+                )
             yield StreamedOutput(
                 request_id=request_id or "fake",
                 delta=delta,
@@ -84,6 +115,8 @@ class FakeEngine:
                 finish_reason="eos" if last else None,
                 prompt_tokens=len(self.tokenizer.encode(prompt)),
                 completion_tokens=index + 1,
+                logprobs=record,
+                prompt_logprobs=prompt_records,
             )
 
     async def generate_text(self, prompt, sampling_params=None, request_id=None):
@@ -116,6 +149,24 @@ def test_health_reports_ok(client):
     assert client.get("/health").json() == {"status": "ok"}
 
 
+def test_metrics_endpoint_serves_prometheus_text(client):
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert "lite_llama:num_requests_running" in response.text
+
+
+def test_metrics_endpoint_renders_empty_without_a_registry(engine):
+    """A front end with no registry of its own (the DP coordinator) must not fail."""
+    engine.metrics = None
+    with make_client(engine) as client:
+        response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert response.text == ""
+
+
 def test_the_engine_is_started_by_the_app_lifespan(engine):
     with make_client(engine):
         assert engine.started
@@ -139,7 +190,9 @@ def test_completion_returns_the_openai_shape(client):
     assert body["object"] == "text_completion"
     assert body["model"] == _MODEL
     assert body["id"].startswith("cmpl-")
-    assert body["choices"] == [{"index": 0, "text": _REPLY, "finish_reason": "eos"}]
+    assert body["choices"] == [
+        {"index": 0, "text": _REPLY, "finish_reason": "eos", "logprobs": None}
+    ]
 
 
 def test_completion_reports_token_usage(client):
@@ -170,9 +223,9 @@ def test_usage_counts_come_from_the_engine_not_a_reencode():
             )
 
     with make_client(FixedCountsEngine()) as client:
-        usage = client.post(
-            "/v1/completions", json={"model": _MODEL, "prompt": "Hello"}
-        ).json()["usage"]
+        usage = client.post("/v1/completions", json={"model": _MODEL, "prompt": "Hello"}).json()[
+            "usage"
+        ]
 
     assert usage == {"prompt_tokens": 7, "completion_tokens": 11, "total_tokens": 18}
 
@@ -396,3 +449,107 @@ def test_one_replica_still_builds_the_single_process_engine(monkeypatch):
         body = client.post("/v1/completions", json={"model": _MODEL, "prompt": "Hello"}).json()
 
     assert body["choices"][0]["text"] == _REPLY
+
+
+# --------------------------------------------------------------------------- #
+# logprobs (F6)
+# --------------------------------------------------------------------------- #
+def test_completion_logprobs_follow_the_openai_shape(client, engine):
+    body = client.post(
+        "/v1/completions", json={"model": _MODEL, "prompt": "Hello", "logprobs": 2}
+    ).json()
+
+    assert engine.seen[0][1].logprobs == 2, "the k must reach SamplingParams"
+    block = body["choices"][0]["logprobs"]
+    n_tokens = len(_REPLY.split())
+    assert len(block["tokens"]) == n_tokens
+    assert len(block["token_logprobs"]) == n_tokens
+    assert len(block["top_logprobs"]) == n_tokens
+    assert len(block["text_offset"]) == n_tokens
+    assert all(len(tops) == 2 for tops in block["top_logprobs"])
+    assert block["text_offset"] == sorted(block["text_offset"])
+
+
+def test_completion_logprobs_zero_reports_only_the_chosen_token(client):
+    body = client.post(
+        "/v1/completions", json={"model": _MODEL, "prompt": "Hello", "logprobs": 0}
+    ).json()
+
+    block = body["choices"][0]["logprobs"]
+    assert all(tops == {} for tops in block["top_logprobs"])
+    assert all(isinstance(lp, float) for lp in block["token_logprobs"])
+
+
+def test_completion_prompt_logprobs_mark_position_zero(client, engine):
+    body = client.post(
+        "/v1/completions",
+        json={"model": _MODEL, "prompt": "one two three", "prompt_logprobs": 1},
+    ).json()
+
+    assert engine.seen[0][1].prompt_logprobs == 1
+    records = body["prompt_logprobs"]
+    assert len(records) == 3  # the fake encodes one token per word
+    assert records[0] is None, "position 0 has no predictor"
+    assert records[1]["token_id"] == 1
+    assert len(records[1]["top_logprobs"]) == 1
+
+
+def test_streamed_completion_chunks_carry_logprobs(client):
+    response = client.post(
+        "/v1/completions",
+        json={"model": _MODEL, "prompt": "Hello", "stream": True, "logprobs": 1},
+    )
+    frames = parse_sse(response.text)
+
+    blocks = [f["choices"][0]["logprobs"] for f in frames]
+    assert all(block is not None for block in blocks)
+    assert all(len(block["tokens"]) == 1 for block in blocks), "one token per chunk"
+    # The streamed per-chunk offsets still add up over the whole completion.
+    assert [block["text_offset"][0] for block in blocks] == sorted(
+        block["text_offset"][0] for block in blocks
+    )
+
+
+def test_chat_logprobs_follow_the_openai_shape(client, engine):
+    body = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": _MODEL,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "logprobs": True,
+            "top_logprobs": 1,
+        },
+    ).json()
+
+    assert engine.seen[0][1].logprobs == 1
+    content = body["choices"][0]["logprobs"]["content"]
+    assert len(content) == len(_REPLY.split())
+    assert all("token" in entry and "logprob" in entry for entry in content)
+    assert all(len(entry["top_logprobs"]) == 1 for entry in content)
+
+
+def test_chat_logprobs_without_top_logprobs_reports_the_sampled_token(client):
+    body = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": _MODEL,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "logprobs": True,
+        },
+    ).json()
+
+    content = body["choices"][0]["logprobs"]["content"]
+    assert all(entry["top_logprobs"] == [] for entry in content)
+
+
+def test_top_logprobs_without_logprobs_is_rejected(client):
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": _MODEL,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "top_logprobs": 2,
+        },
+    )
+
+    assert response.status_code == 422

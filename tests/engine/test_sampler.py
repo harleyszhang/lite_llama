@@ -6,10 +6,13 @@ import pytest
 import torch
 
 from lite_llama.engine.sampler import (
+    BatchedSamplingParams,
     GeneratedSpan,
     Sampler,
     SamplingParams,
+    _distribution_records,
     apply_repetition_penalty,
+    rows_logprobs,
     sample_top_p,
 )
 
@@ -283,3 +286,202 @@ def test_the_shards_together_reproduce_the_unsharded_penalty():
     ]
 
     torch.testing.assert_close(torch.cat(shards, dim=-1), expected)
+
+
+# --------------------------------------------------------------------------- #
+# Logprob reporting (ROADMAP F6)
+#
+# ``sample_with_logprobs`` must describe the distribution actually drawn from:
+# penalised, temperature-scaled — except greedy rows, whose clamped temperature
+# (1.0) makes their records the raw model distribution, matching HuggingFace
+# under ``do_sample=False``. ``rows_logprobs`` scores known targets on the raw
+# logits, which is what prompt-logprob reporting during prefill uses.
+# --------------------------------------------------------------------------- #
+def test_sampling_params_rejects_negative_logprobs():
+    with pytest.raises(ValueError):
+        SamplingParams(logprobs=-1)
+    with pytest.raises(ValueError):
+        SamplingParams(prompt_logprobs=-1)
+
+
+def test_no_logprobs_requested_returns_no_records():
+    """``None`` must skip the work entirely — the top-k over the vocabulary is
+    the only part of sampling whose cost scales with the vocabulary size."""
+    ids, records = Sampler().sample_with_logprobs(
+        torch.randn(2, 30), SamplingParams(temperature=0.0)
+    )
+    assert ids.shape == (2, 1)
+    assert records is None
+
+
+def test_greedy_records_match_a_plain_log_softmax():
+    """A greedy row divides by the clamped 1.0, so its record must equal
+    ``log_softmax`` of the raw logits — what HF reports under ``do_sample=False``."""
+    torch.manual_seed(0)
+    logits = torch.randn(3, 50)
+    ids, records = Sampler().sample_with_logprobs(
+        logits, SamplingParams(temperature=0.0, repetition_penalty=1.0, logprobs=4)
+    )
+
+    reference = torch.log_softmax(logits.float(), dim=-1)
+    top_values, top_ids = reference.topk(4, dim=-1)
+    for row in range(3):
+        record = records[row]
+        assert record is not None
+        assert record.token_id == ids[row].item() == logits[row].argmax().item()
+        assert record.logprob == pytest.approx(reference[row, record.token_id].item())
+        assert record.top_token_ids == tuple(top_ids[row].tolist())
+        assert list(record.top_logprobs) == pytest.approx(top_values[row].tolist())
+
+
+def test_logprobs_zero_reports_only_the_chosen_token():
+    """k=0 keeps the sampled token's own logprob but skips the top-k entirely."""
+    torch.manual_seed(0)
+    logits = torch.randn(2, 30)
+    _, records = Sampler().sample_with_logprobs(
+        logits, SamplingParams(temperature=0.0, repetition_penalty=1.0, logprobs=0)
+    )
+
+    reference = torch.log_softmax(logits.float(), dim=-1)
+    for row, record in enumerate(records):
+        assert record is not None
+        assert record.top_token_ids == ()
+        assert record.top_logprobs == ()
+        assert record.logprob == pytest.approx(reference[row, record.token_id].item())
+
+
+def test_records_describe_the_temperature_scaled_distribution():
+    """The sampled token's logprob must come from the scaled distribution, not
+    the raw one: ``temperature=2.0`` flattens it, and the record has to follow."""
+    torch.manual_seed(0)
+    logits = torch.randn(2, 40)
+    params = SamplingParams(temperature=2.0, top_p=1.0, repetition_penalty=1.0, logprobs=3)
+    ids, records = Sampler().sample_with_logprobs(logits, params)
+
+    reference = torch.log_softmax(logits.float() / 2.0, dim=-1)
+    for row in range(2):
+        record = records[row]
+        assert record.token_id == ids[row].item()
+        assert record.logprob == pytest.approx(reference[row, record.token_id].item())
+
+
+def test_records_describe_the_penalised_distribution():
+    """The record follows the penalised logits: the de-moted leader's logprob
+    drops, and the draw moves to the token the penalty made the winner."""
+    logits = torch.tensor([[10.0, 9.0, 1.0]])
+    span = GeneratedSpan(token_ids=torch.tensor([[0]]), mask=torch.tensor([[True]]))
+    params = SamplingParams(temperature=0.0, repetition_penalty=2.0, logprobs=3)
+
+    ids, records = Sampler().sample_with_logprobs(logits, params, generated=span)
+
+    reference = torch.log_softmax(apply_repetition_penalty(logits, span, 2.0), dim=-1)
+    record = records[0]
+    assert record.token_id == ids[0].item() == 1  # 10/2 = 5 now loses to 9
+    assert record.logprob == pytest.approx(reference[0, 1].item(), abs=1e-6)
+    assert list(record.top_logprobs) == pytest.approx(
+        reference.topk(3, dim=-1).values[0].tolist(), abs=1e-6
+    )
+
+
+def test_batched_rows_get_records_only_where_asked():
+    """Rows are independent: a row that opted out gets a ``None`` entry, and a
+    k=0 row gets its chosen token alone — while the draw itself stays batched."""
+    torch.manual_seed(0)
+    logits = torch.randn(3, 30)
+    params = BatchedSamplingParams.build(
+        [
+            SamplingParams(temperature=0.0, repetition_penalty=1.0, logprobs=2),
+            SamplingParams(temperature=0.0, repetition_penalty=1.0),
+            SamplingParams(temperature=0.0, repetition_penalty=1.0, logprobs=0),
+        ],
+        "cpu",
+    )
+
+    ids, records = Sampler().sample_batched_with_logprobs(logits, params)
+
+    assert records[0] is not None
+    assert len(records[0].top_token_ids) == 2
+    assert records[0].token_id == ids[0].item()
+    assert records[1] is None
+    assert records[2] is not None
+    assert records[2].top_token_ids == ()
+    assert records[2].token_id == ids[2].item()
+
+
+def test_batched_records_of_greedy_rows_use_the_clamped_temperature():
+    """Batched greedy rows were clamped to 1.0 at build time; their records
+    must describe the raw distribution, not a division by zero."""
+    torch.manual_seed(0)
+    logits = torch.randn(2, 20)
+    params = BatchedSamplingParams.build(
+        [SamplingParams(temperature=0.0, repetition_penalty=1.0, logprobs=2)] * 2, "cpu"
+    )
+
+    _, records = Sampler().sample_batched_with_logprobs(logits, params)
+
+    reference = torch.log_softmax(logits.float(), dim=-1)
+    for row, record in enumerate(records):
+        assert record.logprob == pytest.approx(reference[row, record.token_id].item())
+
+
+def test_rows_logprobs_scores_known_targets_on_raw_logits():
+    """Prompt scoring: each row's record carries its own target token's logprob
+    under the raw distribution, plus the top-k — no temperature, no penalty."""
+    torch.manual_seed(0)
+    logits = torch.randn(4, 30)
+    targets = torch.tensor([0, 5, 12, 29])
+
+    records = rows_logprobs(logits, targets, 3)
+
+    reference = torch.log_softmax(logits.float(), dim=-1)
+    top_values, top_ids = reference.topk(3, dim=-1)
+    for row in range(4):
+        assert records[row].token_id == targets[row].item()
+        assert records[row].logprob == pytest.approx(reference[row, targets[row]].item())
+        assert records[row].top_token_ids == tuple(top_ids[row].tolist())
+        assert list(records[row].top_logprobs) == pytest.approx(top_values[row].tolist())
+
+
+def test_sharded_distribution_records_reproduce_the_full_vocabulary():
+    """The TP branch's collectives, simulated by hand on one CPU.
+
+    The properties the wire protocol relies on: MAX then SUM over the shards
+    gives the global logsumexp; the masked gather hands the chosen id's logit
+    to its owning rank alone, so a SUM reduce recovers it; and the union of
+    per-rank top-k's contains the global top-k, so gathering ``O(k * tp)``
+    candidates is enough.
+    """
+    torch.manual_seed(0)
+    rows, vocab, tp_size, k = 3, 32, 4, 5
+    local = vocab // tp_size
+    logits = torch.randn(rows, vocab)
+    ids = torch.randint(0, vocab, (rows, 1))
+
+    chosen_ref, top_v_ref, top_i_ref = _distribution_records(logits, ids, None, k)
+
+    shards = [logits[:, r * local : (r + 1) * local] for r in range(tp_size)]
+    row_max = torch.stack([s.amax(dim=-1, keepdim=True) for s in shards]).amax(dim=0)
+    log_z = (
+        row_max
+        + torch.stack([(s - row_max).exp().sum(dim=-1, keepdim=True) for s in shards])
+        .sum(dim=0)
+        .log()
+    )
+
+    chosen = torch.zeros(rows, 1)
+    pool_values, pool_ids = [], []
+    for r, shard in enumerate(shards):
+        local_ids = ids - r * local
+        valid = (local_ids >= 0) & (local_ids < local)
+        gathered = shard.gather(-1, local_ids.clamp(0, local - 1))
+        chosen += torch.where(valid, gathered, torch.zeros_like(gathered))
+        values, indices = (shard - log_z).topk(k, dim=-1)
+        pool_values.append(values)
+        pool_ids.append(indices + r * local)
+    chosen -= log_z
+    top_v_shard, order = torch.cat(pool_values, dim=-1).topk(k, dim=-1)
+    top_i_shard = torch.cat(pool_ids, dim=-1).gather(-1, order)
+
+    torch.testing.assert_close(chosen, chosen_ref)
+    torch.testing.assert_close(top_v_shard, top_v_ref)
+    assert (top_i_shard == top_i_ref).all()

@@ -12,6 +12,10 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
+    from .sampler import PositionLogprobs
 
 
 @dataclass
@@ -23,11 +27,14 @@ class CompletionOutput:
         text: The generated text (detokenised, special tokens stripped).
         finish_reason: Why decoding stopped — ``"eos"``, ``"length"`` or
             ``"repeat"`` (the engine's repetition guard fired).
+        logprobs: Per-token logprob records, parallel to the generated tokens;
+            ``None`` unless the request set :attr:`SamplingParams.logprobs`.
     """
 
     index: int
     text: str
     finish_reason: str | None
+    logprobs: list[PositionLogprobs] | None = None
 
 
 @dataclass
@@ -37,10 +44,14 @@ class RequestOutput:
     Attributes:
         prompt: The prompt as passed in (pre-template).
         outputs: Generated completions; ``outputs[0]`` is the primary one.
+        prompt_logprobs: Per-position records for the prompt, position 0 and
+            prefix-cache hits being ``None``; ``None`` unless the request set
+            :attr:`SamplingParams.prompt_logprobs`.
     """
 
     prompt: str
     outputs: list[CompletionOutput]
+    prompt_logprobs: list[PositionLogprobs | None] | None = None
 
     @property
     def text(self) -> str:

@@ -125,9 +125,7 @@ class StopCriteria:
                 the original prompt and the sampled token is discarded.
         """
         hit = writable & self._is_stop[next_token] & ~self._finished
-        self._reason = torch.where(
-            hit, torch.full_like(self._reason, _REASON_EOS), self._reason
-        )
+        self._reason = torch.where(hit, torch.full_like(self._reason, _REASON_EOS), self._reason)
         self._finished |= hit
 
     def mark_repeat(self, index: int) -> None:

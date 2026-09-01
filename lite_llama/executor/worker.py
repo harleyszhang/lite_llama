@@ -32,7 +32,13 @@ from typing import TYPE_CHECKING
 import torch
 
 from ..distributed.parallel_state import broadcast_tp, get_tp_world_size
-from ..engine.sampler import BatchedSamplingParams, GeneratedSpan, SamplingParams
+from ..engine.sampler import (
+    BatchedSamplingParams,
+    GeneratedSpan,
+    PositionLogprobs,
+    SamplingParams,
+    rows_logprobs,
+)
 from .overlap import OverlapPolicy, StreamPool, Timeline
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
@@ -92,6 +98,17 @@ class ModelInput:
             can attend over a prefix they never computed. Empty on a miss. Every
             tensor-parallel rank replays them against its own shard, which is why
             they travel with the plan rather than being applied by the driver.
+        prompt_logprobs: Per-sequence top-k width for prompt scoring, parallel
+            to ``slots``; ``None`` for a sequence that did not ask. Empty (the
+            default) when no sequence in the pass asked. Parallel to ``slots``
+            rather than ``sampled`` because a partial chunk owes prompt records
+            without having a row to sample.
+        prompt_targets: The token id each input row is scored against, parallel
+            to ``tokens``: row ``j`` of a chunk predicts position
+            ``start + j + 1``, whose true token is known to the scheduler but
+            is not necessarily part of this plan (a partial chunk's last row
+            predicts the *next* chunk's first token). The sampled row's entry
+            is never read; the engine fills it with ``0``.
     """
 
     kind: PassKind
@@ -103,6 +120,8 @@ class ModelInput:
     sampled: tuple[int, ...]
     gen_counts: tuple[int, ...]
     prefix_copies: tuple[tuple[int, int, int, int], ...] = ()
+    prompt_logprobs: tuple[int | None, ...] = ()
+    prompt_targets: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.slots:
@@ -113,6 +132,12 @@ class ModelInput:
             raise ValueError(f"got {len(self.tokens)} tokens for {sum(self.chunk_lens)} cache rows")
         if not len(self.sampled) == len(self.sampling) == len(self.gen_counts):
             raise ValueError("sampled, sampling and gen_counts must describe the same rows")
+        if self.prompt_logprobs and len(self.prompt_logprobs) != len(self.slots):
+            raise ValueError("prompt_logprobs must be empty or parallel to slots")
+        if self.prompt_targets and len(self.prompt_targets) != len(self.tokens):
+            raise ValueError("prompt_targets must be empty or parallel to tokens")
+        if any(k is not None for k in self.prompt_logprobs) and not self.prompt_targets:
+            raise ValueError("prompt_logprobs needs prompt_targets to score against")
 
     @property
     def chunk_lens(self) -> tuple[int, ...]:
@@ -130,6 +155,27 @@ def _sync_tp(tokens: torch.Tensor) -> torch.Tensor:
     if get_tp_world_size() > 1:
         return broadcast_tp(tokens)
     return tokens
+
+
+@dataclass(frozen=True)
+class PassLogprobs:
+    """Logprob records one pass produced, beside the tokens it drew.
+
+    Attributes:
+        sampled: One entry per row of ``ModelInput.sampled`` — the record of
+            the distribution that row's token was drawn from, ``None`` where
+            the request did not ask.
+        prompt: One entry per sequence of ``ModelInput.slots``: the chunk's
+            positions scored against the prompt's own tokens, or ``None`` where
+            the request did not ask. Entry ``j`` of sequence ``i`` describes
+            position ``seq_starts[i] + j + 1`` — the row that consumed token
+            ``seq_starts[i] + j`` produced the distribution that position's
+            own token was scored on. A final chunk's last row is the sampled
+            row, so it appears in ``sampled`` and not here.
+    """
+
+    sampled: tuple[PositionLogprobs | None, ...] = ()
+    prompt: tuple[tuple[PositionLogprobs, ...] | None, ...] = ()
 
 
 @dataclass
@@ -211,20 +257,21 @@ class ModelWorker:
         # to the inline blocking upload.
         on_cuda = torch.device(self._device).type == "cuda"
         self._policy = OverlapPolicy.from_env() if on_cuda else OverlapPolicy(enabled=False)
-        self.timeline = (
-            Timeline.from_env(str(self._device)) if on_cuda else Timeline(enabled=False)
-        )
+        self.timeline = Timeline.from_env(str(self._device)) if on_cuda else Timeline(enabled=False)
         self._pool = StreamPool(str(self._device), self._policy, self.timeline)
 
     @torch.inference_mode()
-    def execute(self, model_input: ModelInput) -> torch.Tensor:
-        """Run one pass and return its sampled tokens.
+    def execute(self, model_input: ModelInput) -> tuple[torch.Tensor, PassLogprobs | None]:
+        """Run one pass and return its sampled tokens plus any logprob records.
 
         Returns:
-            ``[len(model_input.sampled)]`` token ids on this rank's device,
-            identical across tensor-parallel ranks. A pass whose sequences all
-            still owe tokens (a prompt chunk that did not finish) runs the model —
-            its K/V has to land — and returns an empty tensor.
+            ``(tokens, records)``: ``[len(model_input.sampled)]`` token ids on
+            this rank's device, identical across tensor-parallel ranks, and the
+            pass's :class:`PassLogprobs` — ``None`` when no request asked for
+            logprobs, which costs nothing extra. A pass whose sequences all
+            still owe tokens (a prompt chunk that did not finish) runs the
+            model — its K/V has to land — and returns an empty tensor; its
+            records, when asked for, are entirely prompt records.
         """
         prepared = self.prepare(model_input)
         # Before the forward, so extend rows resuming on a reused prefix find it
@@ -232,10 +279,18 @@ class ModelWorker:
         # After the prepare: the pass's own copies cannot overlap its prefix
         # copies, but the next pass's will overlap this pass's forward.
         self._slot_batch.copy_prefix(model_input.prefix_copies)
-        logits = self._forward(model_input, prepared)
+        logits, prompt = self._forward(model_input, prepared)
+        sampled_records = None
         if logits is None:
-            return self._no_tokens
-        return self._sample(model_input, logits)
+            tokens = self._no_tokens
+        else:
+            tokens, sampled_records = self._sample(model_input, logits)
+        if not any(prompt) and sampled_records is None:
+            return tokens, None
+        return tokens, PassLogprobs(
+            sampled=tuple(sampled_records) if sampled_records is not None else (),
+            prompt=prompt,
+        )
 
     # -------------------------------------------------------------- preparing #
     def prepare(self, plan: ModelInput) -> _PreparedPass:
@@ -268,7 +323,9 @@ class ModelWorker:
         # reads past that row's b_seq_len, so the junk positions are inert.
         positions = [list(range(start, start + width)) for start in plan.seq_starts]
 
-        input_ids, _ = self._pool.upload_async(grid, dtype=torch.long, label="upload.prefill.tokens")
+        input_ids, _ = self._pool.upload_async(
+            grid, dtype=torch.long, label="upload.prefill.tokens"
+        )
         positions_t, _ = self._pool.upload_async(
             positions, dtype=torch.long, label="upload.prefill.positions"
         )
@@ -308,7 +365,15 @@ class ModelWorker:
         return _PreparedPass(input_ids=input_ids.view(padded, 1), event=event, padded=padded)
 
     # ---------------------------------------------------------------- forwards #
-    def _forward(self, plan: ModelInput, prepared: _PreparedPass) -> torch.Tensor | None:
+    def _forward(
+        self, plan: ModelInput, prepared: _PreparedPass
+    ) -> tuple[torch.Tensor | None, tuple[tuple[PositionLogprobs, ...] | None, ...]]:
+        """The pass's sampled-row logits and its per-sequence prompt records.
+
+        The second element is parallel to ``plan.slots`` and all-``None`` for a
+        pass nobody asked prompt logprobs of — decode passes always, chunk
+        passes by request.
+        """
         match plan.kind:
             case PassKind.PREFILL:
                 return self._forward_grid(plan, prepared)
@@ -317,7 +382,9 @@ class ModelWorker:
             case PassKind.DECODE:
                 return self._forward_decode(plan, prepared)
 
-    def _forward_grid(self, plan: ModelInput, prepared: _PreparedPass) -> torch.Tensor | None:
+    def _forward_grid(
+        self, plan: ModelInput, prepared: _PreparedPass
+    ) -> tuple[torch.Tensor | None, tuple[tuple[PositionLogprobs, ...] | None, ...]]:
         """A padded token grid through the prefill kernel."""
         self._slot_batch.begin_prefill(plan.slots, plan.seq_starts, plan.seq_lens)
         # The grid, its positions and the gather index all left on the copy
@@ -325,18 +392,29 @@ class ModelWorker:
         self._pool.consume(
             prepared.event, prepared.input_ids, prepared.positions, prepared.logits_positions
         )
+        wants_prompt = any(k is not None for k in plan.prompt_logprobs)
         with self.timeline.region("forward.prefill", "compute"):
             # The model gathers one column per row, so the whole grid is gathered
-            # here and the sampled subset selected after.
+            # here and the sampled subset selected after. A pass that scores
+            # prompt positions needs every column's logits instead: the gather
+            # is skipped and the lm_head projects the whole grid — the price of
+            # prompt_logprobs, paid in GEMM width rather than a second forward.
             logits = self._runner.forward(
                 prepared.input_ids,
                 prepared.positions,
                 None,
-                logits_positions=prepared.logits_positions,
+                logits_positions=None if wants_prompt else prepared.logits_positions,
             )
-        return self._pick(logits, plan.sampled, len(plan.slots))
+        if not wants_prompt:
+            return self._pick(logits, plan.sampled, len(plan.slots)), (None,) * len(plan.slots)
+        prompt = self._prompt_records(plan, logits, grid=True)
+        rows = torch.arange(len(plan.slots), device=logits.device)
+        gathered = logits[rows, prepared.logits_positions]
+        return self._pick(gathered, plan.sampled, len(plan.slots)), prompt
 
-    def _forward_extend(self, plan: ModelInput, prepared: _PreparedPass) -> torch.Tensor | None:
+    def _forward_extend(
+        self, plan: ModelInput, prepared: _PreparedPass
+    ) -> tuple[torch.Tensor | None, tuple[tuple[PositionLogprobs, ...] | None, ...]]:
         """Chunks resuming on a cached prefix: one decode-style row per token."""
         padded = self._slot_batch.begin_extend(plan.slots, plan.seq_starts, plan.seq_lens)
         self._pool.consume(prepared.event, prepared.input_ids)
@@ -345,28 +423,45 @@ class ModelWorker:
         positions = (self._slot_batch.seq_lens - 1).view(-1, 1)
 
         with self.timeline.region("forward.extend", "compute"):
+            # No logits_positions: the pass projects every row anyway (one row
+            # per token), so prompt scoring costs nothing extra here — the
+            # stretch of rows a sequence owns *is* its prompt's distributions.
             logits = self._runner.forward(prepared.input_ids, positions, None)
         # One row per token: a sequence's next-token logits are on the last row of
         # its own stretch of the flattened batch.
         ends = list(itertools.accumulate(plan.chunk_lens))
         rows = tuple(ends[index] - 1 for index in plan.sampled)
-        return self._pick(logits[:, -1, :], rows, padded)
+        flat = logits[:, -1, :]
+        prompt = (None,) * len(plan.slots)
+        if any(k is not None for k in plan.prompt_logprobs):
+            prompt = self._prompt_records(plan, flat, grid=False)
+        return self._pick(flat, rows, padded), prompt
 
-    def _forward_decode(self, plan: ModelInput, prepared: _PreparedPass) -> torch.Tensor | None:
+    def _forward_decode(
+        self, plan: ModelInput, prepared: _PreparedPass
+    ) -> tuple[torch.Tensor | None, tuple[tuple[PositionLogprobs, ...] | None, ...]]:
         """One token for every sequence in the plan."""
         rows = len(plan.slots)
-        padded = self._slot_batch.begin_decode(plan.slots, plan.seq_lens)
+        self._slot_batch.begin_decode(plan.slots, plan.seq_lens)
         self._pool.consume(prepared.event, prepared.input_ids)
         # The token being fed sits at its own cache row, i.e. length minus one.
         positions = self._slot_batch.seq_lens.view(-1, 1) - 1
 
         with self.timeline.region("forward.decode", "compute"):
             logits = self._runner.forward(prepared.input_ids, positions, None)
-        return self._pick(logits[:rows, -1, :], plan.sampled, rows)
+        # Decode never has prompt positions to score: they were all covered
+        # during prefill, so the second element is uniformly empty.
+        return self._pick(logits[:rows, -1, :], plan.sampled, rows), (None,) * len(plan.slots)
 
     # ---------------------------------------------------------------- sampling #
-    def _sample(self, plan: ModelInput, logits: torch.Tensor) -> torch.Tensor:
-        """Draw one token per sampled row and record it in the generated grid."""
+    def _sample(
+        self, plan: ModelInput, logits: torch.Tensor
+    ) -> tuple[torch.Tensor, list[PositionLogprobs | None] | None]:
+        """Draw one token per sampled row and record it in the generated grid.
+
+        The second return is the per-row logprob records, ``None`` when no
+        sampled row asked — the common case, which costs nothing extra.
+        """
         sampling = self._batched_sampling(plan.sampling)
         slots = self._to_device([plan.slots[index] for index in plan.sampled])
         # Where each row's new token goes, which is also how much history its
@@ -383,9 +478,10 @@ class ModelWorker:
                 self._gen_grid[slots.unsqueeze(1), span], span < columns.unsqueeze(1)
             )
 
-        tokens = _sync_tp(self._sampler.sample_batched(logits, sampling, generated).reshape(-1))
+        ids, records = self._sampler.sample_batched_with_logprobs(logits, sampling, generated)
+        tokens = _sync_tp(ids.reshape(-1))
         self._gen_grid[slots, columns] = tokens
-        return tokens
+        return tokens, records
 
     def _batched_sampling(self, params: tuple[SamplingParams, ...]) -> BatchedSamplingParams:
         """Device-side sampling knobs, rebuilt only when the sampled rows change.
@@ -401,6 +497,39 @@ class ModelWorker:
         return self._sampling  # type: ignore[return-value]
 
     # --------------------------------------------------------------- internals #
+    def _prompt_records(
+        self, plan: ModelInput, logits: torch.Tensor, *, grid: bool
+    ) -> tuple[tuple[PositionLogprobs, ...] | None, ...]:
+        """Score each asking sequence's chunk against the prompt's own tokens.
+
+        ``grid`` selects the logits layout: a prefill grid is ``[n, width, V]``,
+        where sequence ``i``'s rows are row ``i``'s leading columns; an extend
+        pass is the flattened ``[total_tokens, V]``, where they are the
+        sequence's stretch. Either way row ``j`` of sequence ``i`` predicted
+        position ``seq_starts[i] + j + 1``, so the score target is
+        ``prompt_targets`` at the same token offset. A final chunk's last row
+        is excluded — it is the sampled row, whose record the sampler produces.
+        """
+        records: list[tuple[PositionLogprobs, ...] | None] = []
+        sampled = set(plan.sampled)
+        offset = 0
+        for index, k in enumerate(plan.prompt_logprobs):
+            chunk = plan.chunk_lens[index]
+            if k is None:
+                records.append(None)
+            else:
+                rows = chunk - 1 if index in sampled else chunk
+                if rows <= 0:
+                    # A one-token final chunk covers no prompt position: its
+                    # only row is the one being sampled.
+                    records.append(())
+                else:
+                    rows_t = logits[index, :rows] if grid else logits[offset : offset + rows]
+                    targets = self._to_device(plan.prompt_targets[offset : offset + rows])
+                    records.append(tuple(rows_logprobs(rows_t, targets, k)))
+            offset += chunk
+        return tuple(records)
+
     def _pick(self, logits: torch.Tensor, rows: tuple[int, ...], total: int) -> torch.Tensor | None:
         """Narrow logits to the rows that will be sampled.
 

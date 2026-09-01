@@ -125,7 +125,7 @@ class TestFirstChunkPlans:
     def test_a_whole_prompt_is_planned_from_row_zero(self):
         request = make_request("a", prompt_len=5, slot=2)
 
-        plan, requests = _chunk_work(PassKind.PREFILL, [(request, 5)])
+        plan, requests, _ = _chunk_work(PassKind.PREFILL, [(request, 5)])
 
         assert plan.kind is PassKind.PREFILL
         assert plan.slots == (2,)
@@ -140,7 +140,7 @@ class TestFirstChunkPlans:
         first = make_request("a", prompt_len=3, slot=0)
         second = make_request("b", prompt_len=2, slot=1)
 
-        plan, _ = _chunk_work(PassKind.PREFILL, [(first, 3), (second, 2)])
+        plan, _, _ = _chunk_work(PassKind.PREFILL, [(first, 3), (second, 2)])
 
         assert plan.tokens == (0, 1, 2, 1000, 1001)
         assert plan.chunk_lens == (3, 2)
@@ -149,7 +149,7 @@ class TestFirstChunkPlans:
         """A capped chunk still runs — its K/V has to land — but samples nothing."""
         request = make_request("a", prompt_len=100, slot=0, computed=64)
 
-        plan, requests = _chunk_work(PassKind.PREFILL, [(request, 64)])
+        plan, requests, _ = _chunk_work(PassKind.PREFILL, [(request, 64)])
 
         assert plan.seq_starts == (0,) and plan.seq_lens == (64,)
         assert len(plan.tokens) == 64
@@ -167,7 +167,7 @@ class TestFirstChunkPlans:
         capped = make_request("long", prompt_len=100, slot=0, computed=64)
         short = make_request("short", prompt_len=5, slot=1)
 
-        plan, requests = _chunk_work(PassKind.PREFILL, [(capped, 64), (short, 5)])
+        plan, requests, _ = _chunk_work(PassKind.PREFILL, [(capped, 64), (short, 5)])
 
         assert plan.sampled == (1,)
         assert plan.sampling == (short.params,)
@@ -180,7 +180,7 @@ class TestResumedChunkPlans:
     def test_a_resumed_chunk_starts_where_the_prefix_ended(self):
         request = make_request("a", prompt_len=200, slot=3, computed=128)
 
-        plan, _ = _chunk_work(PassKind.EXTEND, [(request, 64)])
+        plan, _, _ = _chunk_work(PassKind.EXTEND, [(request, 64)])
 
         assert plan.kind is PassKind.EXTEND
         assert plan.seq_starts == (64,)
@@ -213,7 +213,7 @@ class TestDecodePlans:
     def test_the_input_token_is_the_last_one_generated(self):
         request = make_request("a", prompt_len=5, slot=0, generated=3)
 
-        plan, requests = _decode_work([request])
+        plan, requests, _ = _decode_work([request])
 
         assert plan.kind is PassKind.DECODE
         assert plan.tokens == (request.output_token_ids[-1],)
@@ -223,7 +223,7 @@ class TestDecodePlans:
         short = make_request("a", prompt_len=5, slot=0, generated=1)
         longer = make_request("b", prompt_len=9, slot=1, generated=4)
 
-        plan, _ = _decode_work([short, longer])
+        plan, _, _ = _decode_work([short, longer])
 
         # seq_len counts the token about to be fed, so it writes to seq_len - 1.
         assert plan.seq_lens == (6, 13)
@@ -233,7 +233,7 @@ class TestDecodePlans:
     def test_every_row_is_sampled(self):
         requests = [make_request(str(index), 4, index, generated=1) for index in range(3)]
 
-        plan, _ = _decode_work(requests)
+        plan, _, _ = _decode_work(requests)
 
         assert plan.sampled == (0, 1, 2)
         assert len(plan.sampling) == 3
@@ -243,7 +243,7 @@ class TestDecodePlans:
         of the history its repetition penalty may see."""
         request = make_request("a", prompt_len=5, slot=0, generated=3, params=PENALISED)
 
-        plan, _ = _decode_work([request])
+        plan, _, _ = _decode_work([request])
 
         assert plan.gen_counts == (3,)
         assert plan.sampling == (PENALISED,)

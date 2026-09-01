@@ -40,7 +40,7 @@ import torch
 
 from ..distributed.parallel_state import broadcast_object_tp
 from ..utils.logger import get_logger
-from .worker import ModelInput, ModelWorker
+from .worker import ModelInput, ModelWorker, PassLogprobs
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
     from ..engine.llm_engine import LLMEngine
@@ -68,12 +68,22 @@ class Executor(ABC):
         """How many cache slots plans may address, i.e. the concurrency ceiling."""
 
     @abstractmethod
-    def execute(self, model_input: ModelInput) -> torch.Tensor:
-        """Run one pass and return its sampled token ids, one per sampled row."""
+    def execute(self, model_input: ModelInput) -> tuple[torch.Tensor, PassLogprobs | None]:
+        """Run one pass: its sampled token ids, one per sampled row, and any
+        logprob records the plan asked for (``None`` when none did)."""
 
     @abstractmethod
     def shutdown(self) -> None:
         """Release whatever the executor owns beyond this object's lifetime."""
+
+    def timeline_summary(self) -> str:
+        """Region table of the streams this executor ran on, for overlap diagnostics.
+
+        Empty unless stream tracing is enabled (``LITE_LLAMA_OVERLAP_TIMELINE``), so
+        callers can print it unconditionally; an executor that owns no streams keeps
+        this default.
+        """
+        return ""
 
 
 class UniProcExecutor(Executor):
@@ -93,8 +103,11 @@ class UniProcExecutor(Executor):
     def num_slots(self) -> int:
         return self._worker.num_slots
 
-    def execute(self, model_input: ModelInput) -> torch.Tensor:
+    def execute(self, model_input: ModelInput) -> tuple[torch.Tensor, PassLogprobs | None]:
         return self._worker.execute(model_input)
+
+    def timeline_summary(self) -> str:
+        return self._worker.timeline.summary()
 
     def shutdown(self) -> None:
         """Nothing to tear down: the caller still owns the engine it passed in."""
@@ -134,10 +147,14 @@ class MultiprocExecutor(Executor):
     def num_slots(self) -> int:
         return self._worker.num_slots
 
-    def execute(self, model_input: ModelInput) -> torch.Tensor:
+    def execute(self, model_input: ModelInput) -> tuple[torch.Tensor, PassLogprobs | None]:
         ensure_followers_alive(self._followers)
         broadcast_object_tp(model_input)
         return self._worker.execute(model_input)
+
+    def timeline_summary(self) -> str:
+        """Only this rank's regions; the followers trace their own streams."""
+        return self._worker.timeline.summary()
 
     def shutdown(self) -> None:
         """Tell the followers to leave their loop, then reap them.
@@ -252,6 +269,8 @@ def serve_plans(engine: LLMEngine, max_num_seqs: int) -> None:
     """
     worker = ModelWorker(engine, max_num_seqs, engine.max_seq_len)
     while (plan := broadcast_object_tp()) is not None:
+        # The records are discarded exactly as the tokens are: every rank
+        # computed identical ones, and rank 0 is the one that reports them.
         worker.execute(plan)
 
 

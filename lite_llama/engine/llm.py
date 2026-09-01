@@ -136,9 +136,18 @@ class LLM(LLMEngine):
             completions = LLMEngine.generate_text(self, token_ids, params)
             reasons = self.last_stop_reasons or ["length"] * len(prompts)
 
+        n = len(prompts)
+        output_lps = self.last_output_logprobs or [None] * n
+        prompt_lps = self.last_prompt_logprobs or [None] * n
         return [
-            RequestOutput(prompt=p, outputs=[CompletionOutput(0, text, reason)])
-            for p, text, reason in zip(prompts, completions, reasons, strict=True)
+            RequestOutput(
+                prompt=p,
+                outputs=[CompletionOutput(0, text, reason, logprobs=out_lp)],
+                prompt_logprobs=prompt_lp,
+            )
+            for p, text, reason, out_lp, prompt_lp in zip(
+                prompts, completions, reasons, output_lps, prompt_lps, strict=True
+            )
         ]
 
     def stream(
@@ -187,14 +196,25 @@ class LLM(LLMEngine):
         preparer = self._require_multimodal()
         completions: list[str] = []
         reasons: list[str | None] = []
+        out_lps: list = []
+        prompt_lps: list = []
         for prompt in prompts:
             token_ids, mm_inputs, position_ids = preparer.prepare(prompt, images)
             completions.extend(
                 LLMEngine.generate_text(
-                    self, [token_ids], params,
-                    position_ids=position_ids, multi_modal_inputs=mm_inputs,
+                    self,
+                    [token_ids],
+                    params,
+                    position_ids=position_ids,
+                    multi_modal_inputs=mm_inputs,
                 )
             )
-            # last_stop_reasons is overwritten per engine call — collect as we go.
+            # Per-call engine results are overwritten each iteration — collect
+            # as we go, the same reason stop reasons are.
             reasons.append(self.last_stop_reasons[0] if self.last_stop_reasons else None)
+            out_lps.append(self.last_output_logprobs[0] if self.last_output_logprobs else None)
+            prompt_lps.append(self.last_prompt_logprobs[0] if self.last_prompt_logprobs else None)
+        # Publish the per-prompt aggregates where generate() reads them.
+        self.last_output_logprobs = out_lps if any(lp is not None for lp in out_lps) else None
+        self.last_prompt_logprobs = prompt_lps if any(lp is not None for lp in prompt_lps) else None
         return completions, reasons

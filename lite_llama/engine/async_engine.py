@@ -30,7 +30,7 @@ from typing import Any
 
 from ..utils.logger import get_logger
 from .continuous_engine import ContinuousBatchingEngine
-from .sampler import SamplingParams
+from .sampler import PositionLogprobs, SamplingParams
 
 logger = get_logger(__name__)
 
@@ -47,6 +47,10 @@ class StreamedOutput:
         finish_reason: ``None`` while generating, else why it stopped.
         prompt_tokens: Prompt size as the engine tokenised it.
         completion_tokens: Tokens sampled so far, this chunk included.
+        logprobs: The record for the token this chunk carries; ``None`` unless
+            the request asked for them.
+        prompt_logprobs: The request's whole prompt records, attached to the
+            final chunk only; ``None`` unless the request asked for them.
     """
 
     request_id: str
@@ -59,6 +63,8 @@ class StreamedOutput:
     # token boundaries.
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    logprobs: PositionLogprobs | None = None
+    prompt_logprobs: tuple[PositionLogprobs | None, ...] | None = None
 
     @property
     def is_finished(self) -> bool:
@@ -136,6 +142,11 @@ class AsyncLLMEngine:
     def tokenizer(self):
         """The engine's tokenizer, for chat templating in an entrypoint layer."""
         return self._engine.tokenizer
+
+    @property
+    def metrics(self):
+        """The engine's metric registry, for the entrypoint's ``/metrics``."""
+        return self._engine.metrics
 
     def start(self) -> None:
         """Start the worker thread. Idempotent, and safe to call from any loop."""
@@ -289,6 +300,12 @@ class AsyncLLMEngine:
                     finish_reason=request.finish_reason,
                     prompt_tokens=request.prompt_len,
                     completion_tokens=len(request.output_token_ids),
+                    logprobs=request.delta_logprobs,
+                    prompt_logprobs=(
+                        tuple(request.prompt_logprobs)
+                        if request.is_finished and request.prompt_logprobs is not None
+                        else None
+                    ),
                 )
             )
 

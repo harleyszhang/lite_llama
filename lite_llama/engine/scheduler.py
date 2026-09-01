@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from .prefix_cache import PREFIX_CACHE_BLOCK_SIZE, PrefixCache, PrefixMatch
-from .sampler import SamplingParams
+from .sampler import PositionLogprobs, SamplingParams
 
 
 class RequestStatus(StrEnum):
@@ -69,6 +69,9 @@ class Request:
             the cached prefix plus every chunk scheduled so far. The next chunk
             of this request starts at exactly this offset.
         arrival_time: ``time.monotonic()`` when the request entered the queue.
+        scheduled_time: When the request last left the queue for a slot — the
+            queue wait is ``scheduled_time - arrival_time`` (re-admission after
+            a preemption restarts it, since the request was waiting again).
         status: Lifecycle position.
         slot: Cache slot while running, ``None`` otherwise.
         output_token_ids: Tokens generated so far.
@@ -86,6 +89,7 @@ class Request:
     max_new_tokens: int = 0
     num_computed_tokens: int = 0
     arrival_time: float = field(default_factory=time.monotonic)
+    scheduled_time: float | None = None
     status: RequestStatus = RequestStatus.WAITING
     slot: int | None = None
     output_token_ids: list[int] = field(default_factory=list)
@@ -103,6 +107,18 @@ class Request:
     #: this request's slot before its first chunk runs. Empty on a miss, and on
     #: every later chunk.
     prefix_copies: tuple[tuple[int, int, int], ...] = ()
+    #: Per-position records for the prompt, ``prompt_len`` long once prefill
+    #: completes; position 0 and prefix-cache hits stay ``None`` (their
+    #: predictor never ran). Built chunk by chunk; ``None`` until the first
+    #: chunk of a request that asked arrives, ``None`` forever when it did not.
+    prompt_logprobs: list[PositionLogprobs | None] | None = None
+    #: Per-token records for the generated span, parallel to
+    #: ``output_token_ids``; ``None`` when the request did not ask.
+    output_logprobs: list[PositionLogprobs] | None = None
+    #: Per-step scratch like ``delta``: the record of the token this step
+    #: produced, drained by the streaming layer. ``None`` on steps with no new
+    #: token, and for requests that did not ask.
+    delta_logprobs: PositionLogprobs | None = None
 
     @property
     def prompt_len(self) -> int:
@@ -431,6 +447,7 @@ class Scheduler:
             _discard(self._waiting, candidate)
             candidate.slot = self._free_slots.pop()
             candidate.status = RequestStatus.RUNNING
+            candidate.scheduled_time = time.monotonic()
             self._running.append(candidate)
 
             # Prefix cache: reuse the K/V of leading blocks that are both cached
@@ -609,6 +626,13 @@ class Scheduler:
         request.num_computed_tokens = 0
         request.num_cached_tokens = 0
         request.prefix_copies = ()
+        # The prompt is about to change underneath the records (the generated
+        # tokens move into it), so both spans will be recomputed on
+        # re-admission — the old ones would describe positions that no longer
+        # mean the same tokens.
+        request.prompt_logprobs = None
+        request.output_logprobs = None
+        request.delta_logprobs = None
         # The prefix this request was going to own never landed, and the prompt is
         # about to change underneath it.
         self._drop_pending_owner(request)

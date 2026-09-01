@@ -92,7 +92,7 @@ class MultimodalPreparer:
             "video_grid_thw": batch.get("video_grid_thw"),
             "attention_mask": batch.get("attention_mask"),
         }
-        
+
         # transformers >= 5 groups tokens by modality through mm_token_type_ids
         # (returned by the processor) instead of scanning for vision markers.
         if "mm_token_type_ids" in inspect.signature(Qwen3VLModel.get_rope_index).parameters:
