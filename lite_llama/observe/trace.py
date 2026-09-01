@@ -1,21 +1,12 @@
 """Optional OTLP tracing: one span per request, exported over OTLP/HTTP.
 
-A request's span opens when it enters the scheduler and closes when the engine
-retires it, carrying the numbers a trace backend is good at slicing by:
-prompt/output lengths, finish reason and the queue/prefill/decode breakdown.
-Step-level spans would multiply volume by the decode length for information the
-metrics already aggregate, so they are deliberately absent.
-
-OpenTelemetry is an optional dependency: with it installed and
-``LITE_LLAMA_OTLP_ENDPOINT`` set, spans export to that collector; without
-either, every call here is a no-op costing one ``None`` check. That mirrors
-how the serving extras work — tracing must never make offline generation
-heavier to install.
+:class:`Tracer` wraps an OpenTelemetry tracer when the endpoint is
+configured via :meth:`Tracer.from_env`; unconfigured, ``start_span``
+returns None and every call is a cheap no-op.
 
 Usage:
     tracer = Tracer.from_env()
-    span = tracer.start_span("request", request_id="req-0", prompt_tokens=12)
-    tracer.end_span(span, finish_reason="eos", output_tokens=42)
+    span = tracer.start_span("generate")
 """
 
 from __future__ import annotations

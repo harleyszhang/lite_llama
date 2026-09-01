@@ -1,14 +1,11 @@
-"""Qwen3-VL: SigLIP-style vision tower + Qwen3 language model, with mrope + DeepStack.
+"""Qwen3-VL: SigLIP-style vision tower + Qwen3 language model, mrope + DeepStack.
 
-Two things make it more than "encode image, scatter embeddings". **mrope**: each
-vision token carries a ``(t, h, w)`` position and the rotary dims are split across
-those components (:class:`~lite_llama.modules.rotary_embedding.MRotaryEmbedding`; the
-``[3, batch, seq]`` ids come from the processor). **DeepStack**: the tower emits
-extra feature maps that are *added into* the LM hidden states at the vision-token
-positions after the first few layers — skipping it silently degrades quality.
+:class:`Qwen3VLForCausalLM` implements :class:`MultiModalCausalLM`:
+the vision tower produces patch features, mrope positions carry the 2-D
+layout, and DeepStack injects features at several decoder depths.
 
 Usage:
-    model = Qwen3VLForCausalLM(config)   # via ModelRegistry
+    model = Qwen3VLForCausalLM(config)
 """
 
 from __future__ import annotations
@@ -19,6 +16,7 @@ from typing import Any
 import torch
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 
+from ..modules.rotary_embedding import MRotaryEmbedding
 from .base import CausalLM
 from .config import ModelConfig
 from .interfaces import (
@@ -26,7 +24,6 @@ from .interfaces import (
     MultiModalCausalLM,
     merge_multimodal_embeddings,
 )
-from ..modules.rotary_embedding import MRotaryEmbedding
 
 
 class Qwen3VLTextModel(CausalLM):

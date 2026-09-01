@@ -1,11 +1,11 @@
-"""教学示例:HuggingFace ``generate()`` 与 ``pipeline()`` 两种基线用法。
+"""Teaching demo: HuggingFace ``generate()`` and ``pipeline()`` baselines.
 
-作为 lite_llama 的性能/精度对照基线保留:同样的 prompt 与采样参数下,
-``benchmarks/bench_e2e.py --backend hf`` 用的就是这套调用方式。
+``generate_text`` shows the built-in sampler path and ``pipline_text``
+the one-call pipeline, so later comparisons against lite_llama's
+engines have an honest reference point.
 
-用法::
-
-    python examples/teaching/hf_llama_generate.py --model-dir my_weight/Llama-3.2-1B-Instruct
+Usage:
+    python examples/teaching/hf_llama_generate.py
 """
 
 import argparse

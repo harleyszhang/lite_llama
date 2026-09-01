@@ -1,5 +1,15 @@
 # 代码可直接运行，用于测试标准 "MHA 层" 的结果
 
+"""Teaching demo: standard multi-head attention spelled out in full.
+
+:class:`MultiHeadAttention` splits q/k/v by hand, scores with the causal
+mask from ``generate_causal_mask``, and concatenates heads — no fused
+kernel, so every step of the maths is visible.
+
+Usage:
+    python examples/teaching/standard_mha.py
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

@@ -1,31 +1,11 @@
 """Frozen measured ranking: the autotune store's answer to ``set_perf_provider``.
 
-The dispatcher's rank step consults a pluggable ``PerfProvider`` before shape
-preferences and static priority (see ``dispatch._rank_key``). This module is
-the wiring ROADMAP v0.10's foundation-2 close-out asks for: latencies measured
-once by ``benchmarks/kernels/freeze_dispatch_ranking.py`` are frozen into a
-store, and :func:`install_frozen_perf_provider` turns that store into the
-provider — so one dispatch key keeps selecting the same implementation until
-the records are re-frozen, and an external backend flips a default only when a
-measurement says it is faster (``UNMEASURED`` priority alone never does).
+``install_frozen_perf_provider`` turns a store's measured timings into a
+dispatch ranking provider, so production dispatch replays offline
+measurements instead of guessing.
 
-Record layout:
-
-* Records live in a dedicated ``frozen/`` subdirectory of the autotune cache,
-  so tile-config entries and frozen-rank entries never share a namespace.
-* The scheme folds into the bucket string (``"unquantized@M16_N4096_K4096"``)
-  because :class:`TuneKey` — the v0.5 stable contract — has no scheme field.
-* ``config`` carries *every* measured implementation's latency, not just the
-  winner's, so the rank step orders the whole feasible set on real numbers and
-  ``explain`` can quote them.
-* Ops whose dispatch key carries no GEMM dims (attention, rmsnorm, …) collapse
-  onto the canonical ``M16_N0_K0`` bucket: one record per (op, scheme, dtype),
-  which matches the granularity those call sites dispatch at.
-
-Decisions are cached per :class:`DispatchKey`, so re-frozen records take effect
-only after :func:`~lite_llama.kernels.dispatcher.invalidate_cache` or a
-restart. ``LITE_LLAMA_FROZEN_RANK=0`` disables the lookup entirely (the test
-suite sets this; a developer's machine records must never flip CI).
+Usage:
+    install_frozen_perf_provider(store)
 """
 
 from __future__ import annotations

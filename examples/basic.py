@@ -1,11 +1,11 @@
-"""Basic batch inference — mirrors ``vllm/examples/basic/offline_inference/basic.py``.
+"""Basic batch inference — mirrors vllm's ``examples/basic/basic.py``.
 
-One entry point (:class:`LLM`), one config object (:class:`SamplingParams`),
-one call (``generate``) returning structured :class:`RequestOutput` objects.
+The script builds an :class:`~lite_llama.engine.llm.LLM` over the
+checkpoint named at the top, generates for a fixed prompt list with
+greedy params, and prints the texts — the smallest honest smoke test.
 
-Run from the repository root:
-
-    python examples/basic.py
+Usage:
+    python examples/basic.py   # set ``checkpoints_dir`` first
 """
 
 from lite_llama import LLM, SamplingParams

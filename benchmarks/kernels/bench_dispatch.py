@@ -1,9 +1,11 @@
-"""Dispatch costs pure Python and happens only once at startup.
-The hot path never touches it—implementation is cached as an attribute at construction.
+"""Dispatch overhead: pure-Python cost, paid once at startup.
+
+``probe_op`` times one dispatch through filter / rank / cache, and
+``breakdown`` splits the cost per stage — the number that decides
+whether dispatch can run per-call or must be cached.
 
 Usage:
     python benchmarks/kernels/bench_dispatch.py
-    python benchmarks/kernels/bench_dispatch.py --iters 200 --json out.json
 """
 
 from __future__ import annotations

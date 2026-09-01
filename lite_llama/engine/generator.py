@@ -1,13 +1,13 @@
 """Backward-compatible ``TextGenerator`` / ``VisionGenerator`` wrappers.
 
-Thin delegating shells over :class:`~lite_llama.engine.llm.LLM` (which now
-subsumes both with one ``generate``/``stream`` API); kept so existing CLI,
-examples, benchmarks and tests keep working. New code should use ``LLM``
-directly — nothing is implemented here beyond argument/result adaptation.
+Both classes build and hold an
+:class:`~lite_llama.engine.llm_engine.LLMEngine` and forward ``generate``
+to it — thin facades kept so older scripts keep working while new code
+uses :class:`~lite_llama.engine.llm.LLM`.
 
 Usage:
-    gen = TextGenerator(checkpoints_dir="my_weight/Qwen2.5-0.5B")
-    text = gen.generate(prompts, SamplingParams(...))
+    gen = TextGenerator(checkpoints_dir, tokenizer_path)
+    texts = gen.generate(prompts, params)
 """
 
 from __future__ import annotations

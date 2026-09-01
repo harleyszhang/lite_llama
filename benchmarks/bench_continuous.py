@@ -1,21 +1,11 @@
-"""连续批处理 vs 一次性批处理:吞吐、延迟与在线到达场景的对比基线。
+"""Continuous vs static batching, across offline and skewed-arrival scenarios.
 
-三个场景分测,不合成单一数字——两种调度的差距完全取决于场景:
+The same prompts run through a one-shot engine and a continuous engine;
+``Measurement`` captures TTFT / TPOT / throughput per scenario so the
+gain from continuous batching is one comparable table.
 
-- offline:同一批一起提交。一次性批处理锁步推进,EOS 后的 batch 行仍参与计算;
-  连续批处理让它立刻离场、槽位补给等待队列。差距来自输出长度的离散度,
-  长度一致时两者持平。
-- offline-skew:每请求要的长度不同。``generate()`` 只接受一个 ``max_gen_len``,
-  一次性批处理只能按最长的跑,短请求的超额产出是浪费;TPS 只计用户要的 token,
-  并单独报出浪费量。
-- online:请求陆续到达。一次性批处理调用时就把 batch 定死,晚到者只能串行等
-  下一趟;连续批处理把它插进正在跑的 batch。量的是每请求延迟,不是峰值吞吐。
-
-指标口径与 benchmarks/common.py 一致;greedy 保证两条路径的工作量同源。
-
-用法:
-    python benchmarks/bench_continuous.py --model-dir my_weight/Qwen2.5-1.5B-Instruct
-    python benchmarks/bench_continuous.py --scenario online --batch 16 --json out.json
+Usage:
+    python benchmarks/bench_continuous.py --model-dir <ckpt>
 """
 
 from __future__ import annotations

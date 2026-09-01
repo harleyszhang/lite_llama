@@ -1,31 +1,11 @@
 """Linear layers: one place that knows about both quantisation and sharding.
 
-Every projection in the decoder goes through one of the four classes here.
-The classes themselves answer only the *sharding* question — the Megatron rule
-that chaining a column-parallel layer into a row-parallel one (``gate/up`` then
-``down``, ``qkv`` then ``o``) makes one all-reduce per block enough. The
-*storage* question — fp16 ``F.linear`` or which quantised kernel — is delegated
-to a quant-method object from :mod:`lite_llama.modules.quantization`,
-so adding a scheme touches no layer code.
-
-:class:`QKVParallelLinear` is the one class that is not a plain division: with
-grouped-query attention the query and key/value blocks have different head counts,
-so each is split by its own rule and the fused weight is assembled from the two.
-
-Parameter names deliberately match HuggingFace (``weight``, ``weight_scale_inv``),
-so :mod:`lite_llama.models.weights` needs no rule for them.
-
-Every parameter carries a ``weight_loader`` attribute, bound in
-:meth:`LinearBase.__init__`: given an incoming checkpoint tensor it narrows the
-tensor to this rank's slice, selects the block of a packed parameter the tensor
-belongs to (``shard_id``), copies, and returns the view written. The weight
-loading loop in :mod:`lite_llama.models.weights` only renames keys and calls
-the loader; all sharding geometry lives here, next to the shapes it derives
-from.
+Every layer is a :class:`LinearBase` subclass; the column/row/QKV variants
+own their TP shard maths, and the weight layout (quant method, scales) is
+delegated to the quantisation sub-package's method objects.
 
 Usage:
-    self.qkv_proj = QKVParallelLinear(hidden, num_heads, num_kv_heads, head_dim)
-    self.o_proj = RowParallelLinear(q_size, hidden, quant=quant)
+    qkv = QKVParallelLinear(hidden_size, num_heads, num_kv_heads, head_dim)
 """
 
 from __future__ import annotations

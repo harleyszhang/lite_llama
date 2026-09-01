@@ -1,26 +1,11 @@
 """Tests for the vocabulary-sharded embedding and LM head.
 
-The invariant these pin down is *equivalence*: with the same weight table, ``tp_size=2``
-must produce what an unsharded lookup produces. Two failure modes make that worth running
-on a real process group rather than reasoning about:
-
-* the lookup's **mask**. Without it a rank returns row ``id - start`` for an id it does
-  not own, and the all-reduce sums that row in. The result is a well-formed hidden state
-  built from the wrong tokens — no exception, no NaN, just a model that talks nonsense at
-  ``tp_size=2`` only. The mask now lives inside a Triton kernel, so this is also that
-  kernel's only correctness check.
-* the head's **shard offset**. Concatenating the ranks' local logits in rank order has to
-  reproduce the full logits column for column; an off-by-one-shard offset shifts every
-  token id by ``vocab / tp`` and is invisible until someone reads the output text.
-
-References are computed analytically in the parent rather than by a second ``tp_size=1``
-run, which halves the process spawns and removes the possibility of a bug that cancels
-out across both sides. Layout arithmetic is tested without processes at all —
-:func:`vocab_shard` is a pure function of three integers, and asserting it *partitions*
-the vocabulary is stronger than any single case.
+Shards must partition the vocabulary exactly; foreign ids contribute
+zeros so the all-reduce sums to the unsharded result. Runs on CPU with
+a filled fake table.
 
 Usage:
-    pytest tests/distributed/test_vocab_parallel.py     # needs 2+ CUDA devices
+    pytest tests/distributed/test_vocab_parallel.py
 """
 
 from __future__ import annotations

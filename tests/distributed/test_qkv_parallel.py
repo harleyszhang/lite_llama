@@ -1,20 +1,11 @@
 """Tests for the fused, head-aware QKV projection under tensor parallelism.
 
-:class:`~lite_llama.modules.linear.QKVParallelLinear` exists because ``q``, ``k`` and
-``v`` share one weight but not one split rule: grouped-query attention gives q more
-heads, so each block is divided by its own head count. Every failure mode here is
-silent — the shapes stay valid whichever way the fused width is cut — so the tests
-assert *where each block lands*, not that loading succeeds.
-
-Two things make the layout tests CPU-only sweeps rather than two-GPU spawns: building
-and loading a column-parallel layer performs no collective at all, and the rank/world it
-reads are module globals read at call time. So a fake grid is a ``monkeypatch``, and every
-rank of every ``tp_size`` can be checked and then reassembled into the checkpoint it came
-from — an invariant a single rank cannot see. What does need a GPU is the last test: that
-the fused GEMM answers what three separate ones answer.
+A one-layer checkpoint is loaded per rank slice through ``tp_harness``;
+each rank must hold exactly its heads, and the fused output must equal
+the unsharded reference.
 
 Usage:
-    pytest tests/distributed/test_qkv_parallel.py     # layout tests need no GPU
+    pytest tests/distributed/test_qkv_parallel.py
 """
 
 from __future__ import annotations

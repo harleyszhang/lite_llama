@@ -1,7 +1,11 @@
-"""End-to-end tensor parallelism: what two ranks answer, one rank must answer too.
+"""End-to-end tensor parallelism: what two ranks answer, one rank must too.
+
+TP-2 groupings generate with real checkpoints and are compared against
+single-rank answers; shared-prefix agreement and tie-gap-tolerant greedy
+checks keep the comparison deterministic.
 
 Usage:
-    pytest tests/distributed/test_tp_engine.py     # skips below 2 GPUs
+    pytest tests/distributed/test_tp_engine.py
 """
 
 from __future__ import annotations

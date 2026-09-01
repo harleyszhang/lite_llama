@@ -1,10 +1,11 @@
 """RawParameter: marker for "do not cast this".
 
-:func:`lite_llama.executor.loader.materialise_parameters` gives every
-floating-point parameter fp16 storage, which is right for weights and wrong
-for the two things quantisation adds: the 8-bit weight itself (``uint8`` /
-``int8``, so it is not floating point anyway) and its fp32 scales, whose
-dynamic range is the reason the fp8 format works at all.
+Casting passes (dtype moves, ``to`` calls) skip :class:`RawParameter`
+instances so quantised payloads — int4 packs, fp8 blocks, scale tables —
+keep their storage layout while the rest of the model casts.
+
+Usage:
+    weight = RawParameter(data, requires_grad=False)
 """
 
 from __future__ import annotations

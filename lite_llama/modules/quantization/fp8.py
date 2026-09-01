@@ -1,8 +1,11 @@
 """Fp8 weight-only config (fp8-e4m3 weights, fp16 activations).
 
-Covers Qwen3 / DeepSeek fp8 checkpoints with 128×128 block-wise scales.
-Also serves the weight-only portion of MoE experts in fp8 checkpoints.
-Mirrors sglang's ``fp8.py`` (the weight-only variant, not W8A8).
+:class:`Fp8Config` marks checkpoint-stored fp8 weights;
+:class:`Fp8LinearMethod` dequantises per block inside the w8a16 kernel,
+so no fp8 arithmetic happens at run time.
+
+Usage:
+    quant = Fp8Config(group_n, group_k, ignored)
 """
 
 from __future__ import annotations

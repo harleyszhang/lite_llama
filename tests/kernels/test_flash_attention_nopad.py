@@ -1,20 +1,11 @@
 """Numerical tests for the prefill attention kernel.
 
-``flash_attention2_no_pad`` is the kernel every prompt token goes through, and
-the one with the most ways to be subtly wrong: variable-length sequences packed
-without padding, a causal mask applied per block, and grouped-query head
-mapping. Each of those is exercised separately below against
-:func:`tests.reference.varlen_causal_attention`.
+Ragged batches, GQA ratios and head dims are parametrised against the
+pure-torch reference; isolation cases prove the first token attends
+only to itself and sequences do not leak.
 
-Two conventions drive the assertions:
-
-* **The scale is the plain one.** The kernel evaluates ``exp2`` rather than
-  ``exp`` and folds ``log2(e)`` in itself, so caller and reference are handed
-  the same ``1/sqrt(d)``. If that fold ever moves back out to the callers,
-  these tests turn into a differently-normalised softmax and fail.
-* **Inputs are cast to fp16.** The entry point is wrapped in
-  ``custom_fwd(cast_inputs=torch.float16)``, so tolerances are fp16-sized
-  whatever dtype goes in.
+Usage:
+    pytest tests/kernels/test_flash_attention_nopad.py
 """
 
 from __future__ import annotations

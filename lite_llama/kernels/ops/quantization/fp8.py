@@ -1,12 +1,11 @@
 """FP8 W8A8 GEMM: fp8-e4m3 weights + dynamic per-token fp8-e4m3 activations.
 
-True W8A8: both operands are fp8 in the GEMM. On sm89+ native fp8 tensor cores
-are used; on sm86 (A10) both operands are widened to fp16 by bit surgery inside
-the loop. Activation is quantised per-token on the fly.
+Both operands are quantised before the launch — activations per token,
+weights per block — and the kernel multiplies in fp8 with fp32
+accumulation, applying scales in the epilogue.
 
 Usage:
-    qx, x_scale = quantize_fp8_per_token(x)
-    y = fp8_matmul(qx, x_scale, qweight, weight_scale_inv, group_n=1, group_k=K)
+    y = fp8_matmul(qx, x_scale, qweight, weight_scale_inv)
 """
 
 from __future__ import annotations

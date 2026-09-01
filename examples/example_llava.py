@@ -1,11 +1,13 @@
 """Single-image chat with :class:`~lite_llama.engine.generator.VisionGenerator`.
 
-Works for both LLaVA (``<image>`` marker in the prompt) and Qwen3-VL (plain
-prompt; the generator wraps it in the chat template and computes mrope ids).
+Builds a :class:`VisionGenerator` over an LLaVA checkpoint, runs one
+image + question turn, and prints the answer — the multimodal smoke
+test.
 
-Run from the repository root:
-    python examples/example_llava.py
+Usage:
+    python examples/example_llava.py   # set paths at the top first
 """
+
 from __future__ import annotations
 
 import torch

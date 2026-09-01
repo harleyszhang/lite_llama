@@ -1,15 +1,11 @@
 """Global KernelSpec registry: one table for every implementation of every op.
 
-Registration happens once, at import of the impl modules, and never touches
-torch — a spec is strings and frozen dataclasses. The registry owns the table,
-its invariants (unique names, lookup helpers) and the per-op decision cache
-that :mod:`lite_llama.kernels.dispatcher.dispatch` fills in.
+:class:`OpRegistry` indexes specs by op name; the module-level ``REGISTRY``
+is the single instance every ops package registers into via
+:func:`register` at import time.
 
 Usage:
-    from lite_llama.kernels.dispatcher.registry import REGISTRY, register
-
-    register(KernelSpec(name="native/linear_torch", op="linear", ...))
-    REGISTRY.implementations("linear")   # -> specs, native floor included
+    from lite_llama.kernels.dispatcher import register; register(spec)
 """
 
 from __future__ import annotations

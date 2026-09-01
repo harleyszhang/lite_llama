@@ -1,21 +1,11 @@
 """DeepGEMM dense fp8 GEMM — the ``deepgemm/fp8_gemm_nt`` row's wrapper.
 
-The contract is :class:`~lite_llama.kernels.ops.interfaces.LinearOp`'s superset
-signature; the weight arrives the way native fp8 checkpoints store it
-(``[N, K]`` uint8 e4m3 bit patterns plus ``weight_scale`` in the native block
-convention), and the wrapper owns turning that into DeepGEMM's NT operand:
+``fp8_gemm_nt`` repacks the weight into DeepGEMM's NT layout via
+:func:`_nt_weight` and calls the library, standing behind the native
+linear signature so dispatch can pick it transparently.
 
-* the transpose-and-quantise result is cached per weight tensor
-  (``data_ptr``-keyed, shape-checked) — inference weights never change, so the
-  NT form is built exactly once, which is what the row's ``weight:nt`` /
-  ``scale:block_128`` layout tags promise;
-* activations are quantised per-token-group-128 on the fly, the same
-  "quantisation is part of the format" contract ``linear_w8a8_fp8`` follows
-  (native per-token scales are too coarse for DeepGEMM's ``[m, k // 128]``).
-
-The row is ``verified=False``: this wrapper is written against the upstream
-``deep_gemm.fp8_gemm_nt`` API but has never run on Hopper, so the golden gate
-keeps it out of default dispatch until a max-abs-diff lands.
+Usage:
+    y = fp8_gemm_nt(x, weight)
 """
 
 from __future__ import annotations

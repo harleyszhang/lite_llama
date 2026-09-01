@@ -1,19 +1,10 @@
 """FlashInfer RoPE wrapper behind the native signature.
 
-The contract (:class:`~lite_llama.kernels.ops.interfaces.RopeOp`) is
-table-driven: the module layer computes ``cos``/``sin`` for the batch's
-geometry and hands them over. FlashInfer's ``apply_rope`` is varlen- and
-offset-driven — packed ``q``/``k``, batch ``indptr``, per-sequence position
-``offsets``, tables derived internally from ``rope_theta`` — so the wrapper
-rebuilds those from the table geometry: this repo's tables cover contiguous
-positions 0..seq-1 per sequence, which is ``indptr = arange * seq_len`` with
-zero offsets. The rotation bases (``rope_theta``) must match too: the contract
-carries no theta, so the row's golden record is measured on the default
-10000-base models and a theta-divergent model would surface as a golden
-failure, not a silent wrong rotation.
+``rope`` applies the rotation with FlashInfer's kernel using the cos/sin
+tables the native rope kernel already receives.
 
-Usage (from a spec row's ``target``):
-    from lite_llama.kernels.backend.flashinfer.rope import rope
+Usage:
+    rope(q, k, cos, sin)
 """
 
 from __future__ import annotations

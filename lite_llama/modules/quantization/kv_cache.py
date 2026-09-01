@@ -1,7 +1,11 @@
 """KV cache quantisation methods (mirrors sglang ``kv_cache.py``).
 
-Encapsulates the write-side quantisation for the paged KV cache, currently
-supporting fp8-e4m3.
+``get_kv_cache_method`` maps a ``kv_cache_dtype`` string to its method;
+:class:`Fp8KVCacheMethod` stores K/V rows as fp8-e4m3 with the scale
+plumbing the attention kernels already accept.
+
+Usage:
+    method = get_kv_cache_method(kv_cache_dtype)
 """
 
 from __future__ import annotations

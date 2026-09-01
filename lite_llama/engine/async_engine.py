@@ -1,20 +1,12 @@
 """Asyncio front end for the continuous-batching engine.
 
-:class:`~lite_llama.engine.continuous_engine.ContinuousBatchingEngine` is
-synchronous and blocking by design: ``step()`` runs a model pass and returns. An
-HTTP server cannot call that from its event loop — one step would stall every
-other connection — so the engine runs on a dedicated worker thread and talks to
-the loop through queues.
-
-The split is deliberate. The worker thread owns the engine outright and is the
-only thing that ever touches the scheduler or the GPU, which is what keeps both
-free of locks. Coroutines never call into the engine; they post commands to it
-and await deltas back. Nothing here knows about HTTP.
+:class:`AsyncLLMEngine` runs one pump thread that drives the synchronous
+engine's ``step()`` loop and fans results out to per-request asyncio
+streams, so many callers share a single batching loop.
 
 Usage:
-    async with AsyncLLMEngine.from_pretrained("my_weight/Qwen2.5-0.5B") as engine:
-        async for chunk in engine.generate("Hello", SamplingParams()):
-            print(chunk.delta, end="")
+    engine = AsyncLLMEngine(sync_engine)
+    async for chunk in await engine.generate(prompt): ...
 """
 
 from __future__ import annotations

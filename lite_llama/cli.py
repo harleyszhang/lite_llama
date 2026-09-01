@@ -1,23 +1,11 @@
-"""``lite-llama`` command-line entry point.
+"""The ``lite-llama`` command line: chat, vl-chat, serve and batch subcommands.
 
-Built bottom-up in four decoupled layers: a declarative option table
-(:class:`CliOption` + ``COMMON_OPTIONS``) shared by every subcommand; frozen
-option objects (:class:`BaseOptions` for what every engine build shares,
-:class:`TextEngineOptions` adding the text engine's own switches) that
-validate the parsed args; the
-:class:`~lite_llama.utils.prompt_templates.PrompterResolver` that picks
-base-vs-instruct prompting; and :class:`CliCommand` subclasses that wire it
-up. Adding a subcommand = one ``CliCommand`` subclass listed in ``COMMANDS``.
-
-Every text command runs on the continuous-batching engine, which is what makes
-``--tensor-parallel-size N`` uniform across them: the engine spawns the extra
-ranks and broadcasts each step's plan to them, so nothing in this file knows
-that more than one GPU is involved.
+Each subcommand is a :class:`CliCommand` that owns its parser section and its
+engine wiring, so a new command never touches ``main``; engine knobs shared
+by all commands live once in :class:`TextEngineOptions`.
 
 Usage:
-    lite-llama chat --model-dir my_weight/Qwen2.5-0.5B
-    lite-llama chat --model-dir my_weight/Qwen3-8B --tensor-parallel-size 2
-    lite-llama vl-chat --model-dir my_weight/llava-1.5-7b-hf
+    lite-llama chat --help
 """
 
 from __future__ import annotations

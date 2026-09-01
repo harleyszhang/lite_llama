@@ -1,21 +1,11 @@
-"""Tests for :class:`KVCacheManager`.
+"""Tests for :class:`~lite_llama.executor.kv_cache_manager.KVCacheManager`.
 
-The manager hands out cache rows and tracks refcounts. Two things make it worth
-testing carefully:
+Pure CPU against a tiny pool: alloc marks rows and debits the counter,
+over-allocation returns None and changes nothing, contiguous allocs
+find runs or fail on fragmentation, and ref-counts free the last holder.
 
-* **The bump-allocator fast path.** ``alloc_kvcache_index`` normally answers from
-  a cursor with no device reads, because ``generate()`` opens with ``free_all``
-  and the cache is then append-only. The cursor is only valid while that holds:
-  any partial free leaves holes, so it must fall back to searching and must not
-  resume until ``free_all``. A cursor that stayed "exact" after a partial free
-  would hand out rows that are still in use -- two sequences sharing KV, which
-  shows up as garbled text far from here.
-* **Accounting.** ``can_use_mem_size`` drives the "can I admit this request?"
-  decision. If it drifts from the real occupancy the engine either OOMs or
-  refuses work it could do.
-
-These run on CPU when no GPU is present: the manager allocates real KV buffers,
-so the tiny sizes here keep it cheap either way.
+Usage:
+    pytest tests/executor/test_kv_cache_manager.py
 """
 
 from __future__ import annotations

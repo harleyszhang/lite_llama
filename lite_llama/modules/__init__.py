@@ -1,13 +1,11 @@
 """``nn.Module`` building blocks shared by the decoder models.
 
-Everything here is a *component* — a projection, an attention block, an MLP,
-an MoE block, a RoPE table — with no notion of how blocks stack into a model.
-The layer/model level (:class:`~lite_llama.models.base.DecoderLayer`,
-:class:`~lite_llama.models.base.CausalLM`, the concrete model classes) lives in
-:mod:`lite_llama.models`.
+Re-exports the parallel-aware layers (linear, embedding, LM head),
+:class:`PagedAttention`, :class:`FusedMLP`, :class:`SparseMoeBlock` and
+the RoPE tables — everything a model definition composes.
 
-Import the public API from here:
-    ``from lite_llama.modules import ColumnParallelLinear, PagedAttention``
+Usage:
+    from lite_llama.modules import QKVParallelLinear, FusedMLP
 """
 
 from __future__ import annotations
@@ -62,6 +60,7 @@ def __getattr__(name: str) -> Any:
 
 def __dir__() -> list[str]:
     return sorted(set(globals()) | _EXPORTS.keys())
+
 
 __all__ = [
     "ColumnParallelLinear",

@@ -1,38 +1,13 @@
-"""Data parallelism: N whole-model replicas, one process each, requests routed between them.
+"""Data parallelism: N whole-model replicas, one process each, routed between.
 
-Where tensor parallelism splits a *weight matrix* and pays an all-reduce per block,
-data parallelism splits the *request stream* and pays nothing in the forward: a
-replica holds the entire model, so it needs no collective at all. The only machinery
-is therefore routing pick a replica per request, collect its answer  which is why
-the replicas here are OS processes talking over ``multiprocessing`` queues rather than
-NCCL ranks, and why each worker profiles and sizes its own KV cache against its card.
-
-The structure mirrors how vLLM and SGLang lay this out, scaled down to lite_llama's
-synchronous batch API:
-
-* a **worker** (:func:`_dp_worker`) is a rank-aware process that builds one
-  :class:`~lite_llama.engine.continuous_engine.ContinuousBatchingEngine` on its own
-  GPU and serves requests off a queue for as long as it lives — the role of vLLM's
-  ``DPEngineCoreProc`` and SGLang's scheduler process. The engine being *resident*
-  is what makes a dispatch cheap and a batch non-blocking: requests join the
-  replica's running batch and a finished sequence frees its slot immediately,
-  instead of every batch running at full width until its longest member stops;
-* a **load balancer** (:mod:`lite_llama.engine.dp_load_balancer`) decides which replica
-  each request goes to  SGLang's ``LoadBalanceMethod``, vLLM's ``DPLBAsyncMPClient``;
-* the **coordinator** (:class:`DataParallelEngine`) owns the worker processes, routes
-  through the balancer, and reassembles results in the caller's order  SGLang's
-  ``DataParallelController``.
-
-The cost model that follows: DP multiplies throughput (each replica decodes an
-independent batch) while leaving per-token latency alone, and needs the weights
-resident once per GPU. TP is the opposite trade  it splits the weights so a model too
-large for one card fits, and pays latency for the collectives. They compose:
-``dp_size`` replicas of ``tp_size`` ranks each, the grid
-:func:`~lite_llama.distributed.parallel_state.init_parallel` describes.
+:class:`DataParallelEngine` is the parent half: it spawns one ``_dp_worker``
+process per replica, routes every request through a
+:class:`~lite_llama.engine.dp_load_balancer.LoadBalancer`, and merges the
+replicas' results into one ordered output stream.
 
 Usage:
-    with DataParallelEngine(model="my_weight/Qwen2.5-0.5B", data_parallel_size=2) as engine:
-        outputs = engine.generate(prompts, SamplingParams(temperature=0.0))
+    engine = DataParallelEngine(model, data_parallel_size=2)
+    outs = engine.generate(prompts, sampling_params)
 """
 
 from __future__ import annotations

@@ -1,13 +1,11 @@
 """Fused MoE: top-k routed experts as a Triton grouped GEMM.
 
-Pipeline: moe_align_block_size -> GEMM1 (gate_up) -> silu_and_mul -> GEMM2
-(down, router weight folded in) -> moe_sum. Supports fp16, fp8, int8, and int4
-packed expert weights with group-wise scales.
+``moe_align_block_size`` sorts tokens by expert into padded blocks; the
+fused kernel then runs both expert GEMMs and the activation for every
+block, with quantisation folded in per weight format.
 
 Usage:
-    out = fused_moe(hidden_states, w1, w2, topk_weights, topk_ids)
-    out = fused_moe(x, qw1, qw2, tw, ids, w1_scale=s1, w2_scale=s2,
-                    group_n=128, group_k=128)
+    y = fused_moe(hidden_states, w1, w2, topk_weights, topk_ids)
 """
 
 from __future__ import annotations

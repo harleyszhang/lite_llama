@@ -1,14 +1,11 @@
 """SwiGLU activation as a fused Triton kernel.
 
-Computes silu(gate) * up in one pass, reading both projection halves and writing
-the product without a temporary in HBM. :func:`swiglu_forward` takes the halves
-as two tensors; :func:`swiglu_forward_fused` reads them out of the single
-``[..., 2 * n_cols]`` tensor the merged gate/up GEMM produces, so the halves are
-never split into separate allocations.
+``swiglu_forward`` fuses the silu gate with the elementwise multiply
+over two input tensors; ``swiglu_forward_fused`` is the single-input
+variant used by the fused-MLP path.
 
 Usage:
-    out = swiglu_forward(gate, up)
-    out = swiglu_forward_fused(torch.cat([gate, up], dim=-1))
+    y = swiglu_forward(gate, up)
 """
 
 import torch

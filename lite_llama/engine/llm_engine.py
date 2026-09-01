@@ -1,11 +1,12 @@
-"""Unified generation engine.
+"""Unified generation engine: one-shot batches over the executor.
 
-Owns the prefill/decode loop (:class:`_DecodeSession` carries the per-call
-state) and the long-lived handles every session shares: executor, tokenizer,
-sampler and the stop-token set. Everything that can *end* a sequence — where
-the stop ids come from, the device-side matcher, the repetition breaker —
-lives in :mod:`~lite_llama.engine.stop_criteria`, the single source of truth
-(this mirrors vLLM's split between ``LLMEngine`` and ``StopChecker``).
+:class:`LLMEngine` owns the tokenizer, model runner and executor end to
+end; ``generate`` tokenises prompts, runs whole-batch passes until every
+request finishes, then detokenises the results.
+
+Usage:
+    engine = LLMEngine(checkpoints_dir, tokenizer_path)
+    outputs = engine.generate(prompt_token_ids, params)
 """
 
 from __future__ import annotations

@@ -1,16 +1,8 @@
-"""The engine → executor contract: what a step ships, and what it leaves out.
+"""The engine -> executor contract: what a step ships, and what it leaves out.
 
-A :class:`~lite_llama.executor.worker.ModelInput` is the whole interface between
-"decide what to run" and "run it". Under tensor parallelism it also has to survive
-a trip through pickle and arrive at a worker that will derive its tensor layout
-from these numbers alone — so the plan is worth pinning down on its own, without a
-GPU in the room. These tests do exactly that: they build plans from requests in
-the states a scheduler actually produces and assert the fields, which is where the
-mistakes hide (an off-by-one start, a sampled row that names the wrong sequence, a
-token count that disagrees with the cache rows it claims).
-
-The plan builders are engine internals by design — they speak ``Request`` — so
-they are imported by their private names.
+:class:`~lite_llama.executor.worker.ModelInput` invariants — flattened
+rows, cached sampling tensors that detect mutated params, first-chunk
+vs resumed-chunk vs decode plans — pinned before any GPU work.
 
 Usage:
     pytest tests/executor/test_model_input.py

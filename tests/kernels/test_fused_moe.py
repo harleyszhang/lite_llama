@@ -1,4 +1,12 @@
-"""Tests for the fused MoE grouped-GEMM kernels against a pure-torch reference."""
+"""Tests for the fused MoE grouped-GEMM kernels against a pure-torch reference.
+
+``moe_align_block_size`` sorting and padding is checked exactly, then
+the fused kernel is diffed against ``_torch_moe_reference`` across
+token, expert and top-k counts, including fp8 blockwise.
+
+Usage:
+    pytest tests/kernels/test_fused_moe.py
+"""
 
 from __future__ import annotations
 

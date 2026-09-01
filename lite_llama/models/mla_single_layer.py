@@ -1,30 +1,11 @@
 """Minimal single-layer MLA harness — the flashmla row's verification vehicle.
 
-A single MLA layer (DeepSeek-V2 style latent attention) with random weights,
-deliberately ahead of the v0.10 wiring (ROADMAP: verifying MLA's structure
-and numeric path needs no 671B checkpoint). It is not in
-:mod:`lite_llama.models.registry` — today it answers exactly two questions:
-
-* does the flashmla row have a golden vehicle? :meth:`MinimalMlaLayer.
-  reference_decode` is the pure-PyTorch baseline; running the flashmla row
-  next to it yields the ``max_abs_diff`` the row's ``GoldenRecord`` is waiting
-  for (``benchmarks/kernels/bench_mla_decode.py`` does exactly that);
-* what does the latent cache look like in this repo? ``q_a``/``q_b``/``kv_a``
-  projections plus a head-less paged latent cache — the shape
-  :class:`~lite_llama.kernels.ops.interfaces.MlaDecodeOp`'s contract spells
-  out, with its own ``kv:mla_latent`` layout tag so it can never be
-  dispatched against the per-head paged pool.
-
-Structure-wise this is MLA minimised, not faithfully replicated: the
-absorption projections are out of scope (``qk_head_dim == v_head_dim ==
-kv_lora_rank``), q/k norms are absent, and there is no tensor parallelism.
-``mla_decode_fn`` is the seam — the layer is constructed with the reference
-implementation and never knows whether a caller swaps in the flashmla row.
+:class:`MinimalMlaLayer` is one attention layer with latent KV compression
+and no MLP, small enough to diff against a reference while still driving
+the real ``mla_decode`` call.
 
 Usage:
-    layer = MinimalMlaLayer(hidden, heads, kv_lora)
-    layer.write_kv(x, kv_cache, block_table, cache_seqlens)   # one step
-    out = layer.decode(x, kv_cache, block_table, cache_seqlens, max_seq_len=L)
+    layer = MinimalMlaLayer(hidden_size, num_heads, kv_lora_rank)
 """
 
 from __future__ import annotations

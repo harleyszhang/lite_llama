@@ -1,30 +1,8 @@
-"""Microbenchmark the KV-cache *write* path: the scatter, and the allocation before it.
+"""Microbenchmark the KV-cache write path: the scatter, and the alloc before it.
 
-A decode step touches the cache twice: :func:`update_kv_buffer` stores this
-token's K/V into rows that :meth:`KVCacheManager.alloc_kvcache_index` picked one
-instruction earlier. Both are cheap next to attention, which is exactly why they
-get benchmarked badly — and a few microseconds of per-step overhead is a few
-percent of TPOT at decode batch 1.
-
-The two halves need different timing discipline, which is the point of this file:
-
-*Scatter* is idempotent — writing the same rows twice leaves the same bytes — so
-back-to-back replay through :func:`microbench.bench` is valid.
-
-*Allocation* is not. Every call consumes rows, and which of the allocator's three
-strategies runs depends on how the pool got into its current state. Replaying it
-back to back walks the pool from empty to full and averages a staircase, so it
-goes through :func:`microbench.bench_host`, whose ``reset`` rebuilds the state
-outside the timed interval. Host wall time, not CUDA events: the allocator's cost
-is a ``nonzero(...).item()`` stalling the launch queue, which a device-timeline
-timer reports as nearly free. The trap worth naming: ``free_all()`` restores
-``_bump_is_exact``, so a reset that just calls it measures the bump fast path
-three times over, no matter which state the row is labelled with.
-
-That state turned out to be the largest effect anywhere in the KV path — 265 us
-once the bump cursor is invalidated against 24 us while it holds, an 11x swing
-that a benchmark using a fresh manager never sees and that dwarfs the 4 us
-scatter it precedes.
+``bench_scatter`` times the row scatter and ``bench_alloc`` the block
+allocator with its cache states invalidated between runs, so neither
+number borrows warmth from the previous call.
 
 Usage:
     python benchmarks/kernels/bench_kv_write.py

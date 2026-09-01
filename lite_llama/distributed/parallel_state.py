@@ -1,30 +1,12 @@
-"""Parallel process groups: the rank grid that TP and DP agree on.
+"""The DP x TP rank grid: one global rank space both parallel axes agree on.
 
-Ranks form a ``dp_size x tp_size`` grid laid out so that one replica's TP ranks are
-contiguous — ``global_rank = dp_rank * tp_size + tp_rank`` — which is what lets the two
-kinds of parallelism stay unaware of each other. **TP** splits every weight matrix
-across the ranks of one replica, so layers that split their input finish with an
-all-reduce (:func:`all_reduce_tp`) over *that replica's* group only. **DP** replicates
-the whole model per group and shards the *requests* instead, so it needs no collective
-in the forward at all; ``torch.distributed`` is therefore only initialised when
-``tp_size > 1``, and pure DP runs on plain multiprocessing queues
-(:mod:`lite_llama.engine.data_parallel`).
-
-Keeping the grid in one module means a layer can ask "how many ranks, which one am I"
-without the plumbing being threaded through its constructor, exactly as vLLM's
-``parallel_state`` does. The default state is a world of one, where every collective is
-a no-op and every layer is full width — so single-GPU code paths never branch.
-
-Each replica gets *two* groups over the same ranks: an NCCL one for the data plane
-(activations, logits) and a gloo one for the control plane
-(:func:`broadcast_object_tp`), because the thing a driver rank has to tell its workers
-is a Python object, not a device tensor. Every collective here reports its payload to
-:mod:`lite_llama.tools.observability.collective_stats`, so the traffic a step costs is
-a number a test or a profile can read instead of an intuition.
+``init_parallel`` splits the world into contiguous TP groups — one per DP
+replica — and builds the TP process group; the ``get_*`` accessors then
+answer rank queries from module state anywhere in the codebase.
 
 Usage:
-    init_parallel(global_rank=3, tp_size=2, dp_size=2)   # replica 1, tp rank 1
-    y = all_reduce_tp(partial_y)
+    init_parallel(global_rank, tp_size, dp_size, master_port)
+    assert get_tp_rank() < get_tp_world_size()
 """
 
 from __future__ import annotations

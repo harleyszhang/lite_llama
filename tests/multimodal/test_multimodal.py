@@ -1,4 +1,12 @@
-"""CPU tests for multimodal helpers (no vision tower, no GPU)."""
+"""CPU tests for multimodal helpers (no vision tower, no GPU).
+
+``merge_multimodal_embeddings`` placeholder splicing: replacement
+positions, multiple placeholder ids, count-mismatch errors, and
+higher-rank vision inputs.
+
+Usage:
+    pytest tests/multimodal/test_multimodal.py
+"""
 
 from __future__ import annotations
 

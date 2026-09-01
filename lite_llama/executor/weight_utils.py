@@ -1,21 +1,12 @@
 """Reading HuggingFace checkpoint files into a stream of ``(key, tensor)`` pairs.
 
-safetensors shards are opened once and read lazily, so a 30B checkpoint never
-exists in host RAM as a whole state dict.
-
-Block-FP8 checkpoints (Qwen3-30B-A3B-FP8) can be read two ways, and which one the
-loader picks is the difference between a model that fits and one that does not:
-
-* ``dequantize=True`` widens each e4m3 block to fp16 here, on the target device
-  where the GPU is ~30x faster than the CPU (~2 s vs ~56 s for 30B). The model
-  then holds plain fp16 weights, at twice the memory.
-* ``dequantize=False`` passes the raw bytes through as ``uint8`` and yields the
-  ``*.weight_scale_inv`` tables alongside them, for a model whose layers are
-  themselves 8-bit (:mod:`lite_llama.models.quantization`).
+:func:`hf_weights_iterator` walks safetensors / ``pytorch_model*.bin`` files
+in checkpoint order, optionally dequantising block-fp8 weights on the fly,
+so loaders never care which on-disk format a checkpoint uses.
 
 Usage:
-    for key, tensor in hf_weights_iterator(checkpoints_dir, device="cuda"):
-        ...
+    for key, tensor in hf_weights_iterator(checkpoints_dir, device):
+        sink[key] = tensor
 """
 
 from __future__ import annotations

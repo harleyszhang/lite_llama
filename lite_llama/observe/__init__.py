@@ -1,12 +1,11 @@
 """Runtime observability: request metrics, and optional OTLP tracing.
 
-* :mod:`~lite_llama.observe.metrics` — the per-request numbers (queue time,
-  TTFT, TPOT, token counts) rendered as Prometheus text for ``/metrics``.
-* :mod:`~lite_llama.observe.trace` — one OTLP span per request when a
-  collector is configured, a no-op otherwise.
+Re-exports :class:`EngineMetrics` and :class:`Tracer`; both degrade to
+no-ops unless their environment switches opt in, so observability never
+costs anything by default.
 
-Both default to cheap: metrics are a few float additions on the finish path,
-and tracing without an endpoint is a ``None`` check.
+Usage:
+    from lite_llama.observe import EngineMetrics, Tracer
 """
 
 from .metrics import METRICS_ENV, EngineMetrics

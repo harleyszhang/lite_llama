@@ -1,21 +1,17 @@
 """Sampling domain: turning logits into token ids.
 
-``sample`` deliberately has no native row — the engine's sampler
-(``engine/sampler.py``) already runs on the TP-sharded vocab with repetition
-penalty, and a second implementation would be a second place sampling could
-diverge between ranks. The FlashInfer row exists because its top-k/top-p
-kernels are what a fused-sampling future would dispatch to, and registering
-the op keeps the contract pinned even while the engine owns the default path.
+Registers the domain's spec rows; the stochastic draw itself is served
+by the native sampler or an external backend's sampling wrapper.
 
 Usage:
-    from lite_llama.kernels.ops import sampling  # noqa: F401  (registers the row)
+    from lite_llama.kernels.ops import SampleOp
 """
 
 from lite_llama.kernels.backend.flashinfer import CUDA_SM75
 from lite_llama.kernels.dispatcher import (
+    UNMEASURED,
     GoldenRecord,
     KernelSpec,
-    UNMEASURED,
     register,
 )
 

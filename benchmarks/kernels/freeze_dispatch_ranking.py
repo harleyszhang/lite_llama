@@ -1,29 +1,11 @@
 """Freeze measured dispatch ranking records (ROADMAP v0.10, foundation 2).
 
-Times every feasible row of each multi-candidate op on this GPU and writes the
-latencies into the frozen store (``<autotune cache>/frozen/``), which
-:func:`~lite_llama.kernels.dispatcher.autotune.install_frozen_perf_provider` —
-wired at ``lite_llama.kernels`` import — turns into the rank step's perf input.
-From then on a dispatch key selects the measured winner until the records are
-re-frozen; ``UNMEASURED`` static priority alone never flips a default.
-
-An op joins the freeze only when at least two of its rows pass the physical
-gates here (probe, capability, dtype, scheme, layout) — a one-row op has
-nothing to rank — and this file has an input builder for it. Every external
-row is verified against the native floor's output *before any timing loop
-runs* (the stateful timers mutate their operands), at twice the row's golden
-record: a plausibility bar that catches a fast-but-wrong kernel, while the
-strict number stays the golden gate's own business.
-
-Records are frozen at the granularity the call sites dispatch at — today the
-attention/glue call sites pass no shape dims, so each op gets one record per
-(scheme, dtype) under the canonical bucket; the measured case label rides in
-the JSON log for provenance.
+Each op's feasible specs are timed against a reference with a per-spec
+tolerance, and the winner is written into the frozen store that
+``install_frozen_perf_provider`` later replays in production.
 
 Usage:
-    python benchmarks/kernels/freeze_dispatch_ranking.py            # all known ops
-    python benchmarks/kernels/freeze_dispatch_ranking.py --ops rope,rmsnorm
-    python benchmarks/kernels/freeze_dispatch_ranking.py --dry-run  # measure, don't write
+    python benchmarks/kernels/freeze_dispatch_ranking.py --dry-run
 """
 
 from __future__ import annotations

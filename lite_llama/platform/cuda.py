@@ -1,8 +1,11 @@
 """The CUDA platform: device probe for NVIDIA GPUs (sm75 through sm100+).
 
-Kept deliberately thin — the interesting policy (which kernel may run where)
-lives in ``CapabilityRequirement`` next to each kernel implementation, not in
-the platform. This module only answers "what am I running on".
+:class:`CudaPlatform` reads the device name, capability and memory from
+torch at first use, so the platform layer can filter kernels by real
+hardware instead of hardcoded machine assumptions.
+
+Usage:
+    from lite_llama.platform import current_platform
 """
 
 from __future__ import annotations

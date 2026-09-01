@@ -1,31 +1,12 @@
 """Executor: the one interface an engine has for running a model pass.
 
-Core design
------------
-An engine should not know whether the model it drives lives in this process or in
-eight of them. It hands a :class:`~lite_llama.executor.worker.ModelInput` to an
-:class:`Executor` and gets sampled tokens back — three methods, and no tensor in
-any signature except the result.
-
-Two implementations, differing only in *who else runs the plan*:
-
-* :class:`UniProcExecutor` calls the local :class:`~lite_llama.executor.worker.ModelWorker`
-  and stops there. One process, so a breakpoint in the engine loop is a breakpoint
-  in the kernel; this is the default for one GPU.
-* :class:`MultiprocExecutor` first broadcasts the plan to its follower ranks, then
-  runs *the same* worker method. Because the plan is pure data and every rank
-  derives its layout from it identically, driver and followers execute one code
-  path, not two — there is no separate "worker forward" to keep in sync. This
-  replaces the mirror-process scheme, where each rank re-derived the batch from a
-  broadcast prompt string and any disagreement became an NCCL hang.
-
-The schedule is computed once, on the driver. Followers never see a request, a
-queue or a stop condition; they receive plans until they receive ``None``.
+:class:`Executor` is the abstract seam — ``execute`` a :class:`ModelInput`
+in, sampled tokens out; :class:`UniProcExecutor` runs the worker in-process
+while :class:`MultiprocExecutor` forwards plans to TP follower ranks.
 
 Usage:
-    executor = UniProcExecutor(llm_engine, max_num_seqs=32, max_seq_len=2048)
-    tokens = executor.execute(plan)
-    executor.shutdown()
+    executor = UniProcExecutor(engine, max_num_seqs, max_seq_len)
+    tokens, logprobs = executor.execute(model_input)
 """
 
 from __future__ import annotations

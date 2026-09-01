@@ -1,13 +1,10 @@
 """FlashInfer sampling wrapper behind the native signature.
 
-The contract (:class:`~lite_llama.kernels.ops.interfaces.SampleOp`) is the
-sampler's kernel core: temperature, top-k, top-p, one token per row. The
-deterministic (greedy) path is plain argmax on purpose — golden runs and the
-argmax-parity check need both implementations to agree exactly, and routing
-greedy through a sampling kernel would only add a place to disagree.
+``sample`` delegates the top-p draw to FlashInfer's sampling kernel,
+taking the same logits tensor the native sampler path receives.
 
-Usage (from a spec row's ``target``):
-    from lite_llama.kernels.backend.flashinfer.sample import sample
+Usage:
+    token = sample(logits)
 """
 
 from __future__ import annotations

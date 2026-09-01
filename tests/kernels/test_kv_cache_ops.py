@@ -1,18 +1,11 @@
 """Tests for the KV-cache scatter kernels.
 
-These two kernels are pure bookkeeping, which is exactly why they are dangerous:
-they produce no numbers of their own, so a wrong index silently poisons the
-attention that reads the cache several layers later. Neither has a natural
-"looks wrong" signature.
+Scatter writes only selected rows (in any destination order); the
+index kernel records tokens at the last occupied slot and leaves
+unrelated entries untouched; scatter + gather round-trips.
 
-* ``update_kv_buffer`` scatters freshly computed K/V rows into the pool:
-  K lands in the first ``num_kv_heads`` rows of ``kv_buffer[select_index[i]]``
-  and V in the second half. The rows it must *not* touch matter as much as the
-  ones it writes, so untouched rows are asserted too.
-* ``update_kv_index`` records where a token landed:
-  ``req_to_token_indexs[b_req_idx[i]][b_seq_len[i] - 1] = select_index[i]``.
-  The ``- 1`` is the whole subtlety: ``b_seq_len`` is the length *including* the
-  new token, so the write goes to the last occupied slot, not one past it.
+Usage:
+    pytest tests/kernels/test_kv_cache_ops.py
 """
 
 from __future__ import annotations

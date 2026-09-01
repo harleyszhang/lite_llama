@@ -1,4 +1,12 @@
-"""LLaMA: the baseline configuration — no q/k/v bias, no per-head q/k normalisation."""
+"""LLaMA: the baseline decoder configuration.
+
+:class:`LlamaModel` inherits :class:`~lite_llama.models.base.CausalLM`
+and flips only the family switches — no q/k/v bias, no per-head q/k
+norm — so every other behaviour comes from the shared skeleton.
+
+Usage:
+    model = LlamaModel(config)
+"""
 
 from __future__ import annotations
 

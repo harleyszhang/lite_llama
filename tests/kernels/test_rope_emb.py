@@ -1,24 +1,11 @@
 """Tests for the fused RoPE application kernel.
 
-``rope_emb_forward`` rotates q and k in place against precomputed cos/sin
-tables. Three things about it are easy to get wrong and impossible to notice
-from output shapes alone:
+Against the reference across shapes; in-place semantics, identity at
+zero angle, norm preservation, distinct rotations per position, and
+rejection of mismatched table geometry.
 
-* **Half-split, not interleaved.** It pairs ``x[:d/2]`` with ``x[d/2:]``. The
-  interleaved convention (pairing adjacent elements) is equally common and
-  produces a same-shaped, same-magnitude, entirely wrong result.
-* **Only the first half of cos/sin is read.** The tables arrive duplicated
-  across the full head dim; feeding the second half in would rotate twice.
-* **It mutates q and k in place** and returns the same tensors. A caller that
-  needs the pre-rotation values must clone first.
-* **The batch/seq geometry comes from cos/sin,** not from arguments the caller
-  repeats. Tables that describe a different number of positions than q holds
-  tokens is a caller bug, and the kernel would otherwise index past them.
-
-The previous test for this kernel pasted a second copy of the Triton source into
-the test file and never ran at all -- ``@triton.jit`` cannot read the source of
-a pytest-rewritten module, so the file failed at collection. This one imports
-the shipped kernel and compares against :func:`tests.reference.rope_half_split`.
+Usage:
+    pytest tests/kernels/test_rope_emb.py
 """
 
 from __future__ import annotations

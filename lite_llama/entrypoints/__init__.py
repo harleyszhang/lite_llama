@@ -1,9 +1,11 @@
 """Server entrypoints: the OpenAI-compatible HTTP API.
 
-Kept in its own package because serving is an optional extra. FastAPI and uvicorn
-are imported inside :mod:`lite_llama.entrypoints.api_server`, so importing
-``lite_llama`` on a machine that only runs offline generation costs nothing and
-fails nowhere.
+Re-exports the request models :class:`CompletionRequest` and
+:class:`ChatCompletionRequest`; the server itself lives in
+:mod:`lite_llama.entrypoints.api_server`.
+
+Usage:
+    from lite_llama.entrypoints import CompletionRequest
 """
 
 from .protocol import ChatCompletionRequest, CompletionRequest

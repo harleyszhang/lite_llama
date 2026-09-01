@@ -1,23 +1,11 @@
 """Tests for :class:`IncrementalDetokenizer`.
 
-Streaming detokenisation looks trivial and is not. The class exists to replace
-"decode the whole span every step and diff it", which is O(n^2), with a sliding
-window that is O(1) amortised. Two tokenizer behaviours make the naive
-per-token shortcut wrong, and both are reproduced here with fake tokenizers
-rather than a real checkpoint, so these run on CPU in milliseconds:
+Fake SentencePiece-like and byte-level tokenizers drive the edge cases:
+leading spaces, multibyte characters held back until complete, and the
+invariant stream == full decode.
 
-* **SentencePiece leading spaces.** LLaMA/LLaVA/Vicuna tokenizers represent a
-  word-initial space as ``U+2581`` and ``decode()`` strips it when the input is a
-  lone token. Decoding token-by-token therefore glues words together
-  ("A large black dog" -> "Alargeblackdog"). Only decoding a *window* with
-  preceding context recovers the space.
-* **Multi-byte UTF-8 split across tokens.** Byte-level BPE can end a token
-  mid-character; decoding that prefix yields U+FFFD. Emitting it would put a
-  replacement character into the user's stream, so the text must be held back
-  until the character completes.
-
-The invariant every test ultimately checks is that concatenated deltas equal a
-single full decode of the same tokens.
+Usage:
+    pytest tests/engine/test_detokenizer.py
 """
 
 from __future__ import annotations

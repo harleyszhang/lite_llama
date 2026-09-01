@@ -1,37 +1,12 @@
-"""Token sampling: turns a step's logits into the next token id per sequence.
+"""Token sampling: turn a step's logits into the next token id per sequence.
 
-The single implementation of the temperature + top-p logic the legacy generators
-each used to inline: :class:`Sampler` does the work, :class:`SamplingParams` carries
-the knobs, and ``temperature == 0`` is greedy decoding.
-
-A one-shot batch shares one :class:`SamplingParams` across every sequence, but an
-online batch does not: each request arrives with its own temperature, top-p and
-penalty. :class:`BatchedSamplingParams` holds those knobs as per-row tensors so
-:meth:`Sampler.sample_batched` still samples the whole batch in one pass instead
-of looping over requests.
-
-Under tensor parallelism the logits arriving here are a *slice* of the vocabulary
-(:class:`~lite_llama.modules.vocab_parallel.ParallelLMHead` does not gather), and the
-sampler reconstructs the global distribution without ever assembling one:
-``log_softmax(x)_i = x_i - logsumexp(x)``, so two **scalars per row** — the maximum and
-the sum of exponentials — are all that must cross the wire. Candidates then come from a
-local top-k, because the union of per-rank top-k provably contains the global top-k, so
-the gather is ``O(k * tp)`` and independent of the vocabulary size.
-
-Logprob reporting (ROADMAP F6) rides the same pass: ``sample_with_logprobs``
-returns, beside the ids, one :class:`PositionLogprobs` per row — the sampled
-token's own logprob plus the ``k`` best alternatives — computed from the very
-distribution the draw came from (post-penalty, temperature-scaled; the greedy
-rows' temperature is clamped to 1.0, so their records describe the raw model
-distribution, exactly what HuggingFace reports under ``do_sample=False``).
-:func:`rows_logprobs` is the same arithmetic for a block of positions at once,
-which is what prompt-logprob reporting during prefill uses — on the *raw*
-logits there, since temperature and penalties are sampling-time notions.
+:class:`Sampler` applies temperature, top-p nucleus sampling and repetition
+penalty to a batch of logits; greedy decoding short-circuits to argmax. The
+pure helpers below stay unit-testable on CPU without a model.
 
 Usage:
-    next_ids = Sampler().sample(logits, SamplingParams(temperature=0.0))
-    next_ids = Sampler().sample_batched(logits, BatchedSamplingParams.build(...))
-    ids, records = Sampler().sample_with_logprobs(logits, SamplingParams(logprobs=5))
+    probs = torch.softmax(logits / temperature, -1)
+    token = sample_top_p(probs, top_p, k)
 """
 
 from __future__ import annotations

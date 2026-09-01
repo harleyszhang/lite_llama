@@ -1,19 +1,8 @@
 """Native vs FlashInfer on identical shapes: the priority-flip evidence.
 
-Static dispatch ranks every external row below the native floor
-(``priority=UNMEASURED``) until a measured number says otherwise — that is
-deliberate, and this script is where those numbers come from: the same op,
-the same shape, the native Triton kernel and the FlashInfer row side by side,
-``verify`` printing the max-abs-diff the golden records cite and ``Row``
-pairs making the latency gap (or its absence) a table instead of an anecdote.
-
-Rows are forced with ``dispatch(..., backend="flashinfer")`` — the same
-mechanism ``LITE_LLAMA_<OP>_BACKEND`` exposes to a serving process — because
-the point is to measure the registered row, not some hand-imported function.
-Requires ``flashinfer`` (``pip install lite-llama[flashinfer]``) and an
-sm75+ GPU; the tolerance windows match the flashinfer rows' golden records
-(attention 2e-2, rope 2e-2 — the bf16 catastrophic-cancellation floor — and
-rmsnorm 1e-2).
+rmsnorm, rope, prefill and decode each run through both backends on
+the same tensors; the table shows where the external wheel wins enough
+to outrank the native row.
 
 Usage:
     python benchmarks/kernels/bench_flashinfer.py

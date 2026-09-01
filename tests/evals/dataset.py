@@ -1,19 +1,11 @@
 """Benchmark data acquisition: download once, cache on disk, read as JSONL.
 
-Kept separate from the benchmarks themselves so the scoring logic stays a set of
-pure functions over ``list[dict]`` and can be unit-tested without a network.
+``fetch`` mirrors the upstream layout into a local cache dir and raises
+:class:`DatasetUnavailable` (never a hang) when offline, so evals skip
+cleanly instead of failing the suite.
 
-The cache lives outside the repository (``~/.cache/lite_llama/evals`` by
-default) so that a checkout stays clean and several worktrees share one copy.
-Both the location and the download host are overridable:
-
-* ``LITE_LLAMA_EVAL_DATA_DIR`` — cache directory,
-* ``LITE_LLAMA_EVAL_BASE_URL`` — base URL to fetch from, for mirrors or for an
-  air-gapped machine serving the files locally.
-
-A machine with no route to the host raises :class:`DatasetUnavailable`, which
-the pytest layer turns into a skip rather than a failure: an offline CI box
-should report "no dataset" and not "the model regressed".
+Usage:
+    rows = load_gsm8k()
 """
 
 from __future__ import annotations

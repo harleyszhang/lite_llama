@@ -1,26 +1,11 @@
 """Kernel layer: implementations in ``ops/``, policy in ``dispatcher/``.
 
-Three layers, one direction of knowledge:
-
-* :mod:`lite_llama.kernels.ops` — what lite_llama computes. One directory per
-  operator domain, each holding the native Triton implementations beside the
-  registration rows that put them (and the external-library contenders) into
-  the registry as data.
-* :mod:`lite_llama.kernels.dispatcher` — which row runs here. Torch-free
-  machinery (spec rows, registry, deterministic dispatch, autotune store).
-* :mod:`lite_llama.kernels.backend` — one package per external library:
-  install metadata, an availability probe, and the adapters that translate
-  the op contracts into each library's calling convention.
-
-This facade re-exports exactly what the model and engine layers call: the
-kernels they invoke directly (the ``linear_*`` entries, paged attention,
-MoE, …) and the dispatch entry point for the ops that have contenders.
-Importing it registers every spec row; nothing loads a kernel eagerly.
+The public names re-export the dispatch tier (``dispatch``) and the
+individual op entry points; importing the package loads no CUDA library
+until a kernel is actually dispatched.
 
 Usage:
-    from lite_llama.kernels import dispatch, flash_decoding
-    sel = dispatch("attention.decode", dtype="bf16")
-    fn = sel.load()
+    from lite_llama.kernels import dispatch, fused_moe
 """
 
 from __future__ import annotations
@@ -79,6 +64,7 @@ def __getattr__(name: str) -> Any:
 
 def __dir__() -> list[str]:
     return sorted(set(globals()) | _EXPORTS.keys())
+
 
 # Frozen measured ranking (ROADMAP v0.10): records under the autotune cache's
 # frozen/ dir become the rank step's perf input. Nothing is read until the

@@ -1,13 +1,13 @@
 """Accuracy evaluation on HotpotQA / HellaSwag with lite_llama.
 
-Feeds the benchmark prompts through a :class:`~lite_llama.engine.generator.TextGenerator`
-in batches and hands the completions to the dataset evaluators in
-``evaluator/datasets.py`` (HotpotQA uses sentence-embedding similarity, HellaSwag
-scores multiple-choice selections).
+:class:`EvaluatorAccuracy` drives one dataset end to end — load data,
+generate completions, score exact match / F1 — so a checkpoint swap
+yields one comparable accuracy number.
 
-Run from the ``examples/`` directory:
-    python eval_accuracy.py
+Usage:
+    python examples/eval_accuracy.py   # set the checkpoint path first
 """
+
 from __future__ import annotations
 
 import torch

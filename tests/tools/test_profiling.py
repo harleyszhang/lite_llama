@@ -1,11 +1,8 @@
 """Tests for the profiling tools: the structure tree and the memory budget.
 
-Both are pure functions over shapes, so the whole surface is CPU-testable — which is
-why they get exact assertions rather than smoke tests. The tree is checked glyph by
-glyph, because the failure mode of a tree renderer is not a crash: it is a tree that
-prints, looks plausible, and puts a node under the wrong parent. The budget is checked
-against hand-computed byte counts, because the failure mode of a budget is a number
-that is merely the wrong size.
+Tree rendering (branch glyphs, hidden-depth reporting, per-node
+parameter accounting, dtype naming) and the static memory budget are
+checked with hand-built ``nn.Module`` trees — CPU only.
 
 Usage:
     pytest tests/tools/test_profiling.py

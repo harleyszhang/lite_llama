@@ -1,7 +1,7 @@
-"""Shared helpers for the Triton kernels (block sizing, contiguity, HIP detection).
+"""Shared helpers for the Triton kernels (block sizing, contiguity, HIP).
 
-Small utilities the kernels reuse: ``calculate_settings`` picks BLOCK_SIZE /
-num_warps, ``ensure_contiguous`` guards kernel inputs, plus a HIP check.
+``calculate_settings`` picks BLOCK_SIZE / num_warps for a row length,
+``ensure_contiguous`` guards kernel inputs, plus a HIP check.
 
 Incorporates code from Unsloth (Apache-2.0, https://github.com/unslothai/unsloth)
 and Liger-Kernel; modifications by Yanning Chen, 2024.

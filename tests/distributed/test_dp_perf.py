@@ -1,23 +1,11 @@
 """Performance guard for data parallelism: two replicas must actually serve twice.
 
-Data parallelism has exactly one performance claim, and it is the reason the
-replicas are separate processes: they share no collective, so adding one should
-add its whole card's worth of decode throughput. That is a structural difference
-rather than a marginal one, which is what makes it worth asserting in a test at
-all -- a regression that serialised the replicas (a shared lock, a coordinator
-that dispatched and waited, a follower that consumed its leader's queue) would
-collapse the ratio to about 1.0 rather than shaving a few percent off it.
-
-Design: the same prompt set is served by a one-replica coordinator and by a
-two-replica one, measured back to back on an otherwise idle pair of cards. The
-baseline is a ``DataParallelEngine`` too, not an ``LLM``, so the routing,
-queueing and cross-process hand-off are inside *both* numbers and the ratio
-isolates the second GPU. The threshold is deliberately far below the ideal 2x:
-this asserts the ordering, not the efficiency, and ``benchmarks/`` is where
-absolute numbers belong.
+Two GPU replicas run the same fixed workload once singly and once in
+parallel; throughput must scale and every prompt must be answered — a
+lower bound, not a microbenchmark.
 
 Usage:
-    pytest tests/distributed/test_dp_perf.py     # skips below 2 GPUs
+    pytest tests/distributed/test_dp_perf.py
 """
 
 from __future__ import annotations

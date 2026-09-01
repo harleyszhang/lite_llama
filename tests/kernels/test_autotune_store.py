@@ -1,8 +1,10 @@
 """Tests for the autotune config store — pure CPU, no GPU required.
 
-Validates the key structure, bucket logic, JSON persistence round-trip,
-and miss-returns-None behaviour. These tests pin the format that v0.6
-perf_key will depend on.
+Bucket maths, key equality, JSON round-trips and the lookup miss path:
+the storage contract everything else trusts.
+
+Usage:
+    pytest tests/kernels/test_autotune_store.py
 """
 
 from __future__ import annotations

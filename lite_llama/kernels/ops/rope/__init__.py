@@ -1,14 +1,11 @@
 """RoPE domain: applying rotary position embeddings in place.
 
-The native kernel takes the position ids the engine already computed; the
-FlashInfer row does the same with its own CUDA implementation. Both are
-verified against each other, and both rank below a hypothetical measured
-winner until the frozen store says otherwise — position embedding is cheap
-enough that the wrong choice is invisible in a profile and only shows up in
-aggregate, which is exactly what the ranking tier is for.
+Registers the domain's spec row and re-exports
+:func:`~lite_llama.kernels.ops.rope.rope_emb.rope_emb_forward`, the
+fused kernel that rotates q and k against the cos/sin tables.
 
 Usage:
-    from lite_llama.kernels.ops import rope  # noqa: F401  (registers rows)
+    from lite_llama.kernels import rope_emb_forward
 """
 
 from lite_llama.kernels.backend.flashinfer import CUDA_SM75

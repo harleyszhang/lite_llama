@@ -1,21 +1,11 @@
 """Tests for prefix caching — pure CPU, no GPU or checkpoint required.
 
-Test structure mirrors vLLM's ``test_prefix_caching.py`` (block-hash lifecycle,
-LRU eviction order, salting, stats, reset) and SGLang's ``test_radix_cache_unit``
-(prefix matching at arbitrary divergence depth, repeating tokens, page
-alignment, reference counting), adapted to lite_llama's ``PrefixCache`` API.
+One test class per behaviour: hashing, matching, reference counting,
+LRU eviction, capacity boundaries, cache isolation, and the scheduler
+integration that reuses copied blocks.
 
-Nine test classes, each owning one concern:
-
-    TestPrefixHashing       — block boundaries, trailing partial, block sizes
-    TestPrefixMatching      — divergence at every depth, repeating tokens
-    TestReferenceCounting   — multi-holder ref_cnt, over-release safety
-    TestLRUEviction         — LRU persistence, touch-on-hit, capacity eviction
-    TestCapacityBoundary    — capacity=1, capacity=None, exact-fit
-    TestCacheIsolation      — hash_seed salting, reset semantics
-    TestStatistics          — cumulative counters, hit-rate, eviction count
-    TestSchedulerIntegration— admission path, finish release, preemption reset
-    TestBlockCopyReuse      — block→slot ownership, copy plans, same-slot reuse
+Usage:
+    pytest tests/engine/test_prefix_cache.py
 """
 
 from __future__ import annotations

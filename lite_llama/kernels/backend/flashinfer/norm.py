@@ -1,16 +1,10 @@
 """FlashInfer RMSNorm wrapper behind the native signature.
 
-The contract (:class:`~lite_llama.kernels.ops.interfaces.RmsNormOp`) returns a
-pair — ``(normalised, residual)`` — with the second element being the summed
-input on the fused path and ``x`` itself on the plain one. FlashInfer's plain
-``rmsnorm`` is functional (returns the normalised tensor), while
-``fused_add_rmsnorm`` is in-place over its two arguments (reading each before
-writing both), so the wrapper's whole job is to make it look like the same
-functional pair: clone both operands before the kernel consumes them, hand
-back the pair the decoder layer threads into the next norm without branching.
+``rmsnorm`` delegates to the FlashInfer fused kernel (norm plus residual
+add) with tensors in the layout the native ``skip_rmsnorm`` expects.
 
-Usage (from a spec row's ``target``):
-    from lite_llama.kernels.backend.flashinfer.norm import rmsnorm
+Usage:
+    y = rmsnorm(x, residual, weight, eps)
 """
 
 from __future__ import annotations

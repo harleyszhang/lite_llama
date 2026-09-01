@@ -1,12 +1,13 @@
 """FlashDecoding: single-token decode attention against the paged KV cache.
 
-Splits each sequence's KV history into partitions processed in parallel (stage 1),
-then combines via a log-sum-exp reduction (stage 2). Supports both fp16 and fp8
-(e4m3) KV cache with per-tensor dequantisation scales.
+Two stages — partial attention per KV partition, then a logsumexp-combine
+— so history length is split across blocks instead of serially walked,
+with scales applied inside the kernel.
 
 Usage:
-    out = flash_decoding(q, k_cache, v_cache, scale, table, b_req_idx, b_seq_len, max_len)
-    out = flash_decoding(q, k_fp8, v_fp8, scale, table, idx, lens, max_len, k_scale=0.5, v_scale=0.5)
+    out = flash_decoding(q, k_cache, v_cache, qk_scale,
+                         b_req_tokens_table, b_req_idx, b_seq_len,
+                         max_actual_seq_len)
 """
 
 import torch

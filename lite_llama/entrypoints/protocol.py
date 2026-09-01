@@ -1,12 +1,13 @@
 """Request and response schemas for the OpenAI-compatible endpoints.
 
-Only the fields lite_llama can actually honour are modelled. Accepting a knob and
-ignoring it is worse than rejecting it: a client that sets ``n=4`` and silently
-gets one completion has no way to notice, so unsupported values raise instead.
+Pydantic models mirror the OpenAI wire format —
+:class:`CompletionRequest`, :class:`ChatCompletionRequest` and the
+response objects — so parsing, defaults and validation live once where
+FastAPI can see them.
 
 Usage:
-    body = CompletionRequest(model="qwen", prompt="hi", max_tokens=16)
-    params = body.to_sampling_params()
+    req = CompletionRequest(model="m", prompt="hi")
+    params = req.to_sampling_params()
 """
 
 from __future__ import annotations

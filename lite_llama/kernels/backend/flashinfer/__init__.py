@@ -1,22 +1,11 @@
-"""FlashInfer: the wheel-installable external backend, Ampere onward.
+"""FlashInfer: the wheel-installable external backend, Ampere (sm75) onward.
 
-FlashInfer is the first external backend on purpose — it is the only one of
-the four that installs from a wheel and runs on Ampere, so it is what proves
-the whole chain (filter, rank, explain, fall back) on the CI A10 rather than
-only on Hopper.
-
-The registration rows live in the ops groups they serve
-(:mod:`~lite_llama.kernels.ops.attention`,
-:mod:`~lite_llama.kernels.ops.layernorm`, :mod:`~lite_llama.kernels.ops.rope`,
-:mod:`~lite_llama.kernels.ops.sampling`); this package holds the metadata
-every one of those rows shares — the install recipe, the availability probe
-and the capability window — plus the kernel wrappers under
-``flashinfer.attention`` / ``norm`` / ``rope`` / ``sample`` that the rows'
-``target`` strings resolve to.
+``available()`` probes the wheel; until it returns True the flashinfer
+rows stay filtered out of dispatch and the native Triton rows serve.
 
 Usage:
     from lite_llama.kernels.backend import flashinfer
-    flashinfer.available()   # False without the wheel; never raises
+    flashinfer.available()
 """
 
 from __future__ import annotations

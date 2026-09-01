@@ -1,18 +1,11 @@
-"""L1 跨 stream 重叠:copy-stream 输入上传的 on/off A/B 与 timeline 佐证。
+"""L1 cross-stream overlap: copy-stream input upload on/off, with timeline proof.
 
-连续批处理一步可携带 prefill/decode 混合 pass;默认输入上传在 compute stream 上
-串行,``LITE_LLAMA_OVERLAP`` 开启后读回推迟到步末,上传从 pinned staging 经 copy
-stream 起飞,与上一个 pass 的计算重叠。脚本回答两个问题:
+``measure`` A/B-runs the same workload with overlap enabled and
+disabled; ``timeline_evidence`` records the timeline showing uploads
+actually overlapping compute.
 
-1. 墙钟差多少:同一负载 overlap 开关各跑一遍。负载刻意选长 prompt + 小 token
-   预算,让 prefill 切成多个 chunk、与 decode 交错出混合步——重叠的收益集中在
-   混合步,纯 decode 稳态步差值落在噪声里是预期行为。
-2. 机制真的发生了吗:``--timeline`` 打印 copy/compute 两条 stream 的 region 表,
-   混合步里 upload.* 与 forward.* 区间相交才是"重叠"的证据。
-
-用法:
-    python benchmarks/bench_overlap_l1.py --model-dir my_weight/Qwen2.5-1.5B-Instruct
-    python benchmarks/bench_overlap_l1.py --timeline --json out.json
+Usage:
+    python benchmarks/bench_overlap_l1.py --model-dir <ckpt> --timeline
 """
 
 from __future__ import annotations

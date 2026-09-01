@@ -1,27 +1,11 @@
 """DeepEP: expert-parallel all-to-all dispatch and combine.
 
-DeepEP is what makes ``comm.dispatch`` and ``comm.combine`` real. Those two
-contracts have no native row on purpose: MoE in this repo is *tensor* parallel,
-every rank runs every expert over a slice of the intermediate dimension, so
-there is no expert-parallel group to all-to-all across and the local permute is
-already ``fused_moe``'s ``moe_align_block_size``. The EP group and these rows
-land together (M2.5) — a placeholder before that would have been untestable.
-
-Planned domains: ``comm.dispatch`` and ``comm.combine`` through DeepEP's buffer
-interface, whose masked-GEMM output layout must line up with what the DeepGEMM
-MoE row expects; the two declare that contract to each other in layout tags
-rather than agreeing informally.
-
-Unlike the other three, availability is not only about the import: these kernels
-need several GPUs and an initialised EP group. The import probe is the honest
-floor here, and the group check belongs to the rows' own gates when they land.
-
-Installation needs NVSHMEM built first, then upstream's ``setup.py`` — no pip
-requirement can express that, so this backend has a source recipe and no extra.
+``available()`` probes the DeepEP install; until it returns True the
+dispatcher treats the deepep rows as unusable and routing falls back.
 
 Usage:
     from lite_llama.kernels.backend import deepep
-    deepep.available()   # False on a single-GPU box without NVSHMEM
+    deepep.available()
 """
 
 from __future__ import annotations

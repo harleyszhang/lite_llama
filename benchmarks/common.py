@@ -1,36 +1,12 @@
-"""benchmark 公共层:一套指标口径、一组测量策略、一份运行时工具。
+"""Shared benchmark layer: one metrics vocabulary, one timing discipline.
 
-benchmarks/ 下的脚本测量同一组 prompts,指标口径对齐 vLLM/TensorRT-LLM:
-    TTFT = prefill 提交到第一个 token 可见的墙钟时间
-    TPOT = 稳态每步(每 token)延迟,取首 token 之后所有步间隔的均值
-    TPS  = batch 聚合生成吞吐 = gen_tokens / 总时间
+``BenchResult`` plus ``steps_to_result`` define every script's numbers,
+the :class:`Backend` ABC adapts engines into one interface, and the
+helpers (``expand_prompts``, ``sampling_params``) keep workload shapes
+reproducible across scripts.
 
-三层结构:
-
-口径层——改测试输入或采样口径只动这里
-    PROMPTS / SAMPLE_KW / GREEDY_PARAMS / expand_prompts() / sampling_params()
-
-测量层(Strategy + Factory + Template Method)
-    BenchResult       指标值对象,负责把自身渲染成一行表格
-    steps_to_result() 逐 step 时间戳 -> BenchResult,消掉各后端重复的统计代码
-    Backend           策略接口:measure() 出一个 BenchResult,close() 交还显存
-      LiteBackend     lite_llama 单卡:stream 逐步打点,TTFT/TPOT 直接可读
-      EngineBackend   连续批处理引擎:逐 step 打点,TP>1 只有这条路
-      VisionBackend   多模态:VisionGenerator 逐请求串行 stream 打点
-      HFBackend       HF transformers:generate 无逐步回调,两段式拆 TTFT
-    make_backend()    工厂:按 checkpoint 的 model_type 与并行度选后端
-    print_table()     按插入顺序打印对比表
-
-运行时层(各脚本复用,替代各自重写)
-    free_gpu()           gc + empty_cache:引擎互引用必须显式回收才能释放显存
-    peak_mem_gb() / reset_peak_mem()   显存峰值取样
-    describe_footprint() 从 model_runner 读权重占用与 KV 池容量
-    timed_runs()         sync 包夹的计时循环,报中位墙钟并保留每轮输出
-    measure_generate()   一次性 generate 路径的"预热 + 计时 + 计 token"三件套
-    count_gen_tokens()   重分词计输出 token 数(vLLM 同款方法)
-    report_agreement()   多配置输出一致性检查,低一致率是 bug 信号
-    require_gpus()       GPU 数目预检,不够即退出
-    write_json_log() / timestamped_log_path()  统一 JSON 落盘形态
+Usage:
+    from benchmarks.common import BenchResult, print_table
 """
 
 from __future__ import annotations

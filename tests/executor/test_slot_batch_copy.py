@@ -1,15 +1,11 @@
-"""Row arithmetic of :meth:`SlotBatch.copy_prefix` — pure CPU, no model needed.
+"""Row arithmetic of :meth:`SlotBatch.copy_prefix` — pure CPU, no model.
 
-Fixed slot regions leave no indirection to share K/V through, so reusing a prefix
-means physically moving rows between slots. The move is the one place where a
-wrong offset is invisible: attention would read plausible numbers from the wrong
-tokens and the request would simply produce worse text. So the offsets are pinned
-here against a cache filled with a per-row fingerprint, on the CPU, where the
-whole buffer can be read back and compared.
+Stub runner and KV manager track which rows a copy touches: runs land
+at the same offset in the destination slot, calls are independent, and
+empty segments touch nothing.
 
-The stubs below implement only what :class:`SlotBatch` touches at construction
-(a slot table to seed, a K/V buffer whose filler region is zeroed, and the
-allocator hand-off) plus the buffer itself, which is all ``copy_prefix`` uses.
+Usage:
+    pytest tests/executor/test_slot_batch_copy.py
 """
 
 from __future__ import annotations

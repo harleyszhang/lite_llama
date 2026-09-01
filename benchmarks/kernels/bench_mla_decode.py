@@ -1,18 +1,8 @@
-"""MLA decode: reference vs FlashMLA — where the flashmla row's golden comes from.
+"""MLA decode: reference vs FlashMLA — the flashmla row's golden source.
 
-The flashmla row is ``verified=False`` because no Hopper box has produced a
-max-abs-diff yet. This script is the vehicle that produces it: the minimal
-single-layer MLA harness (random weights, paged latent cache) runs its
-pure-PyTorch :meth:`reference_decode` first — always — and the flashmla row
-second, on the same cache; the printed diff is the number the row's
-``GoldenRecord`` freezes, and the paired :class:`~microbench.Row` entries are
-the latency comparison.
-
-On the CI A10 the script still has a job: it validates the harness's own
-reference path end to end (projections, page writes, gather) and prints the
-flashmla install recipe — the row stays out of dispatch until the library is
-importable and the capability window (sm90+) opens. Requires a CUDA device
-for the reference path.
+``build_case`` makes one latent-compressed KV cache per history length
+and ``_traffic`` computes the bytes the kernel must move, so measured
+milliseconds and roofline seconds sit side by side.
 
 Usage:
     python benchmarks/kernels/bench_mla_decode.py

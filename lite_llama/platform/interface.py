@@ -1,14 +1,11 @@
 """Platform ABC: one subclass per accelerator family, CUDA first.
 
-Modelled on vLLM's ``Platform`` base class but trimmed to what lite_llama's
-kernel dispatch actually asks: a device-type identity, an availability probe,
-and the ``PlatformInfo`` snapshot the registry filters on. The subclass list
-in ``_PLATFORM_CLASSES`` is the registration point — ROCm slots in ahead of
-``CpuPlatform`` when it lands (ROADMAP A9); nothing else changes.
+Subclasses implement the probe (device name, capability, memory);
+``register_platform`` installs them and :func:`current_platform` picks
+the one whose probe succeeds, defaulting to :class:`CpuPlatform`.
 
 Usage:
-    plat = current_platform()
-    info = plat.detect()          # PlatformInfo("cuda", 9, 0, "H100") or cpu
+    platform = current_platform()
 """
 
 from __future__ import annotations

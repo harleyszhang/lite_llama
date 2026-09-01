@@ -1,14 +1,11 @@
-"""Model runner: builds the model, sizes the KV cache, and runs each forward step.
+"""Model runner: builds the model, sizes the KV cache, runs each forward step.
 
-:meth:`ModelRunner.build` parses the config, resolves the architecture via the
-:class:`~lite_llama.models.registry.ModelRegistry` and loads weights; the
-``*_alloc_kv_cache`` methods reserve cache rows; :meth:`forward` dispatches to the
-model (CUDA-graphed on decode, eager otherwise) and passes multimodal inputs only
-when the resolved :class:`ModelSpec` wants them.
+``ModelRunner.build`` is the one-call constructor (config, loader, KV
+blocks); the instance then owns the KV buffers, the request-to-token
+table and ``forward`` for both phases.
 
 Usage:
-    runner = ModelRunner.build(config, ...)
-    logits = runner.forward(input_ids, position_ids, multi_modal_inputs)
+    runner = ModelRunner.build(checkpoints_dir, max_seq_len)
 """
 
 from __future__ import annotations
@@ -358,4 +355,6 @@ class ModelRunner:
                 input_ids, position_ids, self.atten_info, multi_modal_inputs, logits_positions
             )
 
-        return self.model(input_ids, position_ids, self.atten_info, logits_positions=logits_positions)
+        return self.model(
+            input_ids, position_ids, self.atten_info, logits_positions=logits_positions
+        )

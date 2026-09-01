@@ -1,13 +1,11 @@
-"""量化基准:速度、显存、精度一次测完。
+"""Quantisation benchmark: speed, memory and accuracy in one run.
 
-每个方案跑同一批 prompt,报 TTFT/TPOT/TPS、权重与 KV 池占用、以及与 HF fp16 基线的
-输出一致率。后端与指标口径全部来自 benchmarks/common.py,``--tp`` 大于 1 时自动走
-连续批处理引擎(decode eager)。
+Each scheme runs the same prompts (``_run_lite``); peak memory,
+tokens/s and the token-match rate against HF fp16 land in one markdown
+table so a scheme choice can cite all three.
 
-用法:
-    python benchmarks/bench_quant.py --model-dir my_weight/Qwen3-0.6B
-    python benchmarks/bench_quant.py --model-dir my_weight/Qwen3-0.6B --schemes fp16 int8 fp8
-    python benchmarks/bench_quant.py --all --json docs/benchmark_logs/quant.json
+Usage:
+    python benchmarks/bench_quant.py --model-dir <ckpt> --schemes w8a8_int8
 """
 
 from __future__ import annotations

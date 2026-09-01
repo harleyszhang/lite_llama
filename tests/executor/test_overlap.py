@@ -1,14 +1,11 @@
-"""L1 cross-stream overlap: the policy, the stream pool, the timeline, and the
-host helpers the prepared path shares with the inline one.
+"""L1 cross-stream overlap: the policy, the stream pool, the timeline.
 
-The property under test is *equivalence*: :meth:`ModelWorker.prepare` must feed
-the model exactly the tensors the inline path would have built, so the only
-thing overlap may change is *when* the host pays for the upload. The host halves
-of that equivalence (row expansion, graph padding) are pinned here on the CPU;
-the device half (a copy that lands where a kernel can read it) needs a GPU.
+Stub KV manager and runner drive the row arithmetic on CPU; the env
+spellings (``1``/``0``, ``on``/``off``) and the extend-row planning are
+checked without a GPU.
 
-Run the device tier with:
-    pytest tests/executor/test_overlap.py -m gpu
+Usage:
+    pytest tests/executor/test_overlap.py
 """
 
 from __future__ import annotations

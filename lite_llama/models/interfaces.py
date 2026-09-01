@@ -1,14 +1,11 @@
 """Capability interfaces a model opts into, plus their shared helpers.
 
-Today just :class:`MultiModalCausalLM`, inherited by a model to accept
-``multi_modal_inputs`` (mirrors vLLM's ``interfaces.py``). Because the HF
-processors already expand ``<image>`` into the exact number of placeholder tokens
-the vision tower emits, merging vision embeddings is a plain masked scatter
-(:func:`merge_multimodal_embeddings`) — no sequence-expanding rewrite, positions
-stay a plain ``arange``, and KV reservation needs no vision-specific arithmetic.
+:class:`MultiModalCausalLM` marks models that splice vision features
+into token embeddings; :func:`merge_multimodal_embeddings` is the one
+splice implementation they share.
 
 Usage:
-    class MyVLM(MultiModalCausalLM): ...
+    inputs = merge_multimodal_embeddings(ids, embeds, vision, placeholder_ids)
 """
 
 from __future__ import annotations

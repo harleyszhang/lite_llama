@@ -1,29 +1,11 @@
-"""Logical-operator ABCs: the call contracts behind each dispatch().
+"""Logical-operator ABCs: the call contracts behind each ``dispatch()``.
 
-Each logical operator (ROADMAP foundation 2) owns exactly one stable ``op_id``
-and one abstract call signature. KernelSpec rows declare *which* op they
-implement; these ABCs define *how it is called*, so every backend picked by
-:func:`~lite_llama.kernels.dispatcher.dispatch` can be dropped in without touching the
-model code. The signatures follow the in-tree kernels, so the native rows point
-straight at those kernels instead of at wrappers.
-
-Design rules:
-    * torch-free at runtime — torch appears only under ``TYPE_CHECKING`` so
-      importing this module stays cold-start friendly (annotations are lazy).
-    * A contract may be implemented by a plain function or a stateful class
-      (external backends often hold buffers); dispatch never requires an
-      isinstance check, the ABC is documentation plus a test hook.
-    * ``elementwise.*`` is an open namespace: the ABC pins the loose shape
-      contract, concrete ops (``elementwise.swiglu``, ...) register their own
-      spec rows.
+Each :class:`LogicalOp` subclass (``LinearOp``, ``MoeOp``, ...) pins the
+signature an implementation must expose, torch-free, so specs, registry
+and dispatch can reason about ops without importing the kernels.
 
 Usage:
-    from lite_llama.kernels.ops.interfaces import LinearOp
-
-    class TorchLinear(LinearOp):
-        def __call__(self, x, weight, *, bias=None, weight_scale=None,
-                     weight_zeros=None, group_n=0, group_k=0):
-            return torch.nn.functional.linear(x, weight, bias)
+    from lite_llama.kernels.ops import LinearOp
 """
 
 from __future__ import annotations

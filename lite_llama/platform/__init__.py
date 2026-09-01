@@ -1,13 +1,11 @@
 """Accelerator platform layer (ROADMAP A9): detect once, filter kernels anywhere.
 
-The package answers one question — *what hardware is this process running
-on?* — in a form the kernel registry can filter against without importing
-torch: ``spec.py`` holds the torch-free dataclasses, ``cuda.py`` the real
-detector, ``interface.py`` the ABC and the ``current_platform`` singleton.
+``current_platform()`` returns the platform for this machine; specs and
+dispatch ask it (or match :class:`PlatformInfo` directly) whether a
+kernel's requirements hold.
 
 Usage:
     from lite_llama.platform import current_platform
-    info = current_platform().detect()
 """
 
 from .interface import CpuPlatform, Platform, current_platform, register_platform

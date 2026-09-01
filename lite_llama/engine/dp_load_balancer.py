@@ -1,33 +1,11 @@
 """Load-balancing policies for the data-parallel router.
 
-Deciding *which* replica a request goes to is the one interesting choice in data
-parallelism, so it lives here as a small strategy object rather than inline in the
-router — the same split SGLang draws between its ``DataParallelController`` and the
-``LoadBalanceMethod`` it is configured with (``round_robin`` / ``total_requests`` /
-``total_tokens`` / ``cache_aware``), and vLLM between ``DPLBAsyncMPClient`` and its
-balancing.
-
-A balancer sees only what the router can cheaply tell it: how many replicas exist,
-how much work each is carrying, and — for ``cache_aware`` — the prompt's token ids.
-It never touches a queue, a process or a tensor, which is what keeps it pure and
-unit-testable without a GPU.
-
-Each policy declares which of those it actually reads, through
-:attr:`LoadBalancer.needs_token_estimate` and :attr:`LoadBalancer.needs_token_ids`.
-Those flags are the honest contract the router needs: either one costs a tokenizer
-pass over the whole batch, and only two of the four policies spend it. A policy that
-quietly accepted an argument and ignored it (as ``least_loaded`` used to) made the
-router pay for something no one read — and invited it to pass a cheap wrong number
-instead.
+Every policy is a :class:`LoadBalancer` asked where a new request should
+go, so the router code never branches on policy specifics;
+``make_load_balancer`` builds one by registered name.
 
 Usage:
-    balancer = make_load_balancer("total_tokens", dp_size=2)
-    replica = balancer.select(estimated_tokens=len(prompt_ids))
-    balancer.release(replica, estimated_tokens=len(prompt_ids))   # request finished
-
-    balancer = make_load_balancer("cache_aware", dp_size=2)
-    replica = balancer.select(token_ids=prompt_ids)   # affinity + load in one number
-    balancer.release(replica)
+    balancer = make_load_balancer("round_robin", dp_size)
 """
 
 from __future__ import annotations

@@ -1,10 +1,11 @@
 """Tests for the registered spec rows: catalogue, routing and the floor impl.
 
-Importing :mod:`lite_llama.kernels` registers every spec row as a side
-effect — native and external side by side in the nine ops groups. These tests
-pin that catalogue and the scheme→row routing on CPU — no kernel runs here,
-only dispatch and the ``F.linear`` floor (GPU numerics of the Triton rows
-live in ``tests/kernels/test_linear_dispatch.py``).
+Every op group has its rows, scheme-to-row routing is pinned, the
+native row is always feasible where promised, and rows stay torch-free
+— the registry's structural invariants.
+
+Usage:
+    pytest tests/ops/test_native_specs.py
 """
 
 from __future__ import annotations

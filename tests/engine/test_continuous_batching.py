@@ -1,27 +1,11 @@
 """End-to-end correctness of continuous batching against the one-shot batch path.
 
-Continuous batching is only worth having if it changes *scheduling* and nothing
-else, so the property under test throughout is co-tenancy independence: a
-request's output must not depend on who else was in the batch, when they arrived,
-or when they left.
+The same prompts run through the static engine and the continuous engine
+with arrivals spread over time; texts must match, with no foreign tail
+leaking between sequences.
 
-Exactly *how* that gets asserted needs care, because "same text" is only a valid
-expectation when the arithmetic is identical. Batch width reaches cuBLAS as the
-GEMM's M dimension, so a batch of three and a batch of four accumulate fp16 in
-different orders, and a token whose top-2 logits are within ~1e-2 can flip. That
-is inherent to batching, not a defect, and vLLM behaves the same way. So:
-
-* **Exact comparisons** are used only where the shapes match on both sides —
-  a lone request against a static batch of one, and, thanks to CUDA-graph batch
-  padding, a batch that shrinks from four to three while still executing at the
-  captured width of four.
-* **Everything else** is checked with :func:`assert_no_foreign_tail`, which
-  targets the failure mode that actually matters: a request emitting a
-  *neighbour's* text. Corruption of that kind is never a one-token flip; it is
-  whole clauses belonging to somebody else.
-
-Greedy sampling with the repetition penalty off keeps the exact comparisons free
-of sampling noise.
+Usage:
+    pytest tests/engine/test_continuous_batching.py
 """
 
 from __future__ import annotations

@@ -1,9 +1,11 @@
 """Unit tests for the observability primitives, no engine required.
 
-The registry is hand-rolled, so its Prometheus rendering is the contract worth
-pinning: cumulative ``le`` buckets, ``_sum``/``_count`` lines, and the null
-behaviour when ``LITE_LLAMA_METRICS=0``. The engine wiring tests live in
-``tests/engine/test_continuous_engine.py``.
+Counters accumulate per label set, gauges report the latest value,
+histogram buckets are cumulative, and ``observe_finish`` records the
+full latency breakdown — or no-ops when disabled.
+
+Usage:
+    pytest tests/observe/test_metrics.py
 """
 
 from __future__ import annotations

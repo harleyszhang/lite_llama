@@ -1,9 +1,10 @@
 """Tests for the platform layer (ROADMAP A9).
 
-Everything here runs on a CPU-only box: the descriptors are pure dataclasses
-and the singleton degrades to ``CpuPlatform``. On a CUDA machine the same
-tests assert the real detection instead — never silently skipping, so both
-environments keep a meaningful assertion.
+``PlatformInfo`` / ``CapabilityRequirement`` construction and matching,
+plus ``current_platform()`` agreeing with the torch-visible device.
+
+Usage:
+    pytest tests/platform/test_platform.py
 """
 
 from __future__ import annotations

@@ -1,14 +1,8 @@
 """What the CLI hands the engine, and what it does with the engine's output.
 
-The CLI is where a typo becomes a silent behaviour change: a flag that stops
-being forwarded does not raise, it just runs the wrong configuration — decode
-graphs off, one GPU instead of four — and only shows up as a number nobody
-notices. So the assertions here are on the wiring: the options a subcommand
-derives, the engine call it makes, and the release it owes on the way out.
-
-Nothing loads a checkpoint. The engine is a fake, ``--model-dir`` is a temporary
-directory (the CLI only checks that it exists), and every test runs on CPU in
-milliseconds, which is what makes this tier worth running on every commit.
+A ``FakeEngine`` records the kwargs each subcommand passes, so the
+tests pin the wiring — cuda-graph defaults, tensor-parallel surface,
+chat REPL behaviour — instead of running real engines.
 
 Usage:
     pytest tests/entrypoints/test_cli_wiring.py

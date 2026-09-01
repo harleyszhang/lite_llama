@@ -1,17 +1,12 @@
 """Torch-free platform descriptors: what a device is, what a kernel needs.
 
-``PlatformInfo`` is an immutable snapshot of the accelerator this process
-runs on and ``CapabilityRequirement`` is the declarative gate a kernel
-implementation states ("CUDA, SM >= 9.0"). Both are plain dataclasses with
-no torch import, so the kernel registry (``kernels/dispatcher/spec.py``) can filter
-implementations at import time on a CPU-only box and the cold-start path
-never initialises CUDA. The only method that touches torch is
-``PlatformInfo.detect``, which imports it lazily inside the call.
+:class:`PlatformInfo` states the facts (arch, capability, memory) and
+:class:`CapabilityRequirement` the needs; :func:`capabilities_match`
+answers yes/no with stdlib-only imports, so KernelSpec rows stay
+filterable everywhere.
 
 Usage:
-    info = PlatformInfo("cuda", 8, 6, "A10")
-    CapabilityRequirement("cuda", min_cc=(9, 0)).matches(info)   # False
-    capabilities_match([CapabilityRequirement("cuda")], info)    # True
+    assert capabilities_match(requirement, info)
 """
 
 from __future__ import annotations

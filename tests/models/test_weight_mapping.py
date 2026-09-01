@@ -1,19 +1,11 @@
-"""Weight-mapping unit tests: key translation, per-layer loaders, coverage accounting.
+"""Weight-mapping unit tests: key translation, per-layer loaders, coverage.
 
-Three tiers, all pure CPU and free of real checkpoints:
+Checkpoint key -> parameter translation, fused gate/up and QKV block
+boundaries (with GQA and scale grids), and the coverage accounting
+that ``load_weights`` enforces.
 
-1. **Key translation** (:func:`lite_llama.models.weights.translate_text_key`) as a
-   pure function: one assertion per key shape, no tensors involved.
-2. **Layer loaders**: each sharded parameter carries a ``weight_loader`` that owns
-   its destination view — which block of a fused parameter an incoming tensor fills.
-   These build one real layer and call the loader directly.
-3. **Coverage accounting** in :func:`lite_llama.models.weights.load_weights`. This
-   is the safety net that makes the rest of the suite trustworthy: a rename rule
-   that stops matching leaves a parameter unwritten, and an unwritten parameter
-   produces a model that runs and returns nonsense instead of failing.
-
-Round-trip parity against real HuggingFace models lives in
-``test_weight_parity.py``.
+Usage:
+    pytest tests/models/test_weight_mapping.py
 """
 
 from __future__ import annotations

@@ -1,28 +1,11 @@
-"""Declarative KernelSpec: one implementation's full dispatch contract, torch-free.
+"""Declarative KernelSpec: one implementation's dispatch contract, torch-free.
 
-Everything the deterministic dispatcher (:mod:`lite_llama.kernels.dispatcher.dispatch`)
-needs to filter, rank and explain an implementation lives here as pure data:
-hardware window, dtypes, quantisation schemes, shape constraints, layout tags
-and the golden-accuracy gate. Registrations are plain strings and dataclasses,
-so importing this module — and registering every impl at startup — never loads
-torch, keeping cold start at seconds (ROADMAP foundation 2, pillar 4).
-
-Field provenance: ``capability``/``available`` follow sglang's KernelSpec
-shape; ``shape``/``layout``/``golden`` are lite_llama originals — layout
-changes become explicit, cacheable and visible in ``explain`` instead of being
-silent assumptions inside a kernel.
+A :class:`KernelSpec` names its op and backend target, states its shape /
+layout requirements, and carries golden records plus perf tags; it is
+pure data, so the registry can filter rows without importing torch.
 
 Usage:
-    spec = KernelSpec(
-        name="native/w8a16_triton",
-        op="linear",
-        backend="native",
-        target="lite_llama.kernels.ops.quantization.w8a16:w8a16_matmul",
-        dtypes=("bf16", "fp16"),
-        schemes=("w8a16_fp8", "w8a16_int8"),
-        shape=ShapeRequirement(hard=(ShapeConstraint("k", "mod", 16),)),
-        golden=GoldenRecord(verified=True, max_abs_diff=0.0, baseline="F.linear"),
-    )
+    spec = KernelSpec(...); register(spec)
 """
 
 from __future__ import annotations

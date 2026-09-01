@@ -1,10 +1,11 @@
 """Tests for RoPE and mrope frequency generation.
 
-These only exercise the CPU forward path; the Triton apply kernel is covered by
-the GPU tests. What matters here is that the tables have the right shape, that
-mrope reduces to plain RoPE when its position ids collapse to a single component,
-and that the flat config mapping the layer now takes is exactly what
-:attr:`~lite_llama.models.config.ModelConfig.rope_config` produces.
+Default and llama3 rescaling factors read from flat configs, fp32
+inv-freq preservation, cached-table equality with per-step maths, and
+rejection of unsupported rope types.
+
+Usage:
+    pytest tests/models/test_rotary_embedding.py
 """
 
 from __future__ import annotations

@@ -1,12 +1,11 @@
 """CPU-only tests for :class:`~lite_llama.models.config.ModelConfig`.
 
-The config layer no longer declares its own schema, so what needs pinning changed:
-not "does the alias table rename ``num_attention_heads``", but "does the HF config
-get read correctly, including the fields transformers has moved between versions".
+Tiny HF-style config dicts are written to tmp dirs, so every geometry
+rule — head_dim derivation, GQA defaults, rope theta — is checked
+without downloading any checkpoint.
 
-Real ``config.json`` bodies are used rather than hand-built ``PretrainedConfig``
-instances, because the whole point of the refactor is that ``AutoConfig`` does the
-parsing — building the config object by hand would test nothing.
+Usage:
+    pytest tests/config/test_config.py
 """
 
 from __future__ import annotations

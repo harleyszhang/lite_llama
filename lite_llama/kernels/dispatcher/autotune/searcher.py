@@ -1,23 +1,11 @@
 """Offline autotune searcher: benchmark kernel configs and persist the best.
 
-The searcher runs a grid of tile configurations for a given kernel/shape pair,
-measures each with CUDA events (warmup + repeated median), and writes the
-winner into a :class:`~lite_llama.kernels.dispatcher.autotune.ConfigStore`.
+:class:`AutotuneSearcher` runs each candidate config through a
+caller-supplied ``run_fn``, keeps the median timing, and writes the
+winner into a :class:`~lite_llama.kernels.dispatcher.autotune.config_store.ConfigStore`.
 
-Usage::
-
-    from lite_llama.kernels.dispatcher.autotune import ConfigStore
-    from lite_llama.kernels.dispatcher.autotune.searcher import AutotuneSearcher
-
-    store = ConfigStore()
-    searcher = AutotuneSearcher(store)
-    best = searcher.search(
-        op="fused_moe",
-        shape=(16, 4096, 11008),
-        dtype="fp16",
-        configs=[{"BLOCK_M": 16, "BLOCK_N": 64, ...}, ...],
-        run_fn=lambda cfg: _invoke_moe_gemm(..., config=cfg),
-    )
+Usage:
+    AutotuneSearcher(store).search(op, shape, dtype, configs, run_fn)
 """
 
 from __future__ import annotations

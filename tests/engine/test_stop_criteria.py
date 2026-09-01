@@ -1,17 +1,11 @@
 """Tests for :class:`StopCriteria`.
 
-The class exists to track stop state *without* per-step device-to-host syncs:
-membership is a boolean lookup table indexed by the sampled token, and the
-finished/reason state stays on device. Reading it back costs a sync, so
-``all_finished`` and ``reasons`` are the only methods allowed to do that.
+Writable-position bookkeeping with tiny tensors: a stop token finishes
+only its own sequence, non-stop tokens change nothing, and unwritable
+positions are skipped safely.
 
-Everything here runs on CPU tensors -- the logic is device-agnostic, and testing
-it on CPU keeps it in the fast tier where it will actually be run.
-
-The subtle contract is ``writable``: during batched prefill some positions belong
-to the original prompt, and the token sampled there is discarded rather than
-appended. Those positions must not be able to finish a sequence, or a prompt that
-happens to contain an EOS id would truncate generation before it started.
+Usage:
+    pytest tests/engine/test_stop_criteria.py
 """
 
 from __future__ import annotations

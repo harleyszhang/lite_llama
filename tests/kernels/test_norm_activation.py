@@ -1,16 +1,11 @@
 """Tests for the fused norm and activation kernels.
 
-These are the elementwise/reduction kernels on the transformer block's critical
-path. What each test is really pinning down:
+``skip_rmsnorm`` is checked for value, post-add residual and unit-RMS
+invariants; the SwiGLU pair (split and fused) against eager references
+including the zero-gate edge.
 
-* ``skip_rmsnorm`` fuses the residual add into the norm and returns *both* the
-  normed activation and the updated residual. Callers thread that second value
-  into the next block, so a kernel that returned the pre-add residual would
-  silently drop one skip connection per layer -- the model still runs and still
-  emits plausible text, only worse. The residual output is therefore asserted
-  as explicitly as the normed one.
-* ``swiglu_forward`` must compute the sigmoid in fp32; doing it in fp16 drifts
-  enough to matter after 28 layers.
+Usage:
+    pytest tests/kernels/test_norm_activation.py
 """
 
 from __future__ import annotations

@@ -1,20 +1,8 @@
-"""Benchmark the fused vocab-parallel embedding kernel against the eager chain.
+"""Fused vocab-parallel embedding kernel vs the eager chain.
 
-The old forward ran the id->row mapping as an eager chain of seven kernels
-(subtract, compare, compare, and, clamp, gather, multiply); the fused kernel
-does all of it in one launch. That matters most at decode sizes: under TP
-there is no CUDA graph to hide launch overhead behind, so the gap between
-seven launches and one is paid in full on every step.
-
-Two regimes are measured at a Qwen2.5-sized layout (vocab 151936, hidden
-4096, a tp=8 shard of 18992 rows):
-
-* decode  (1-256 tokens per step): launch-bound — the fusion's home turf.
-* prefill (1K-8K tokens):          bandwidth-bound — both should converge.
-
-``plain`` is an unmasked ``F.embedding`` on the same shard — the theoretical
-floor (one gather, nothing else), shown so the fused kernel's margin over it
-is visible rather than implied.
+The eager chain (masked lookup + zeros + all-reduce) is the reference;
+``bench_regime`` times both across id-batch regimes while ``verify``
+proves the kernel matches the chain exactly first.
 
 Usage:
     python benchmarks/kernels/bench_vocab_embedding.py

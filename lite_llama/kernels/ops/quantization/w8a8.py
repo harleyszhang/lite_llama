@@ -1,21 +1,8 @@
 """SmoothQuant W8A8 GEMM: int8 weights + dynamic per-token int8 activations.
 
-SmoothQuant migrates the quantization difficulty from activations to weights by
-applying a mathematically equivalent transformation that smooths the activation
-distribution. At inference time:
-
-* **Weights** are pre-quantised to int8 with per-channel scales (static).
-* **Activations** are quantised on-the-fly to int8 with per-token scales (dynamic).
-
-The GEMM then runs as ``int8 @ int8 -> int32 -> fp16``, which is faster than
-fp16 @ fp16 on Ampere+ GPUs that have int8 tensor cores.
-
-Unlike w8a16 (which keeps activations at fp16), SmoothQuant quantises both
-operands, so the kernel must:
-1. Compute per-token activation scales on the fly.
-2. Quantise activations to int8.
-3. Perform int8 @ int8 matmul with int32 accumulation.
-4. Dequantise the result using both weight and activation scales.
+A pre-kernel quantises activations per token
+(``_quantize_activations_kernel``) and the main GEMM multiplies int8 x
+int8 with fp32 accumulation, applying both scales in the epilogue.
 
 Usage:
     y = smoothquant_matmul(x, qweight, weight_scales)

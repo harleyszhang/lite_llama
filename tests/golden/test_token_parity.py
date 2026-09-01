@@ -1,23 +1,11 @@
 """Golden-output regression: optimisations must not move a single token.
 
-Greedy decoding is deterministic, so any refactor of the engine, executor or
-kernels must reproduce the previous output byte for byte. Everything else in the
-suite checks *relational* properties (batched equals individual, graph equals
-eager); this tier is the only one that can catch a change that is
-self-consistently wrong -- a kernel that is uniformly slightly off, say, would
-keep every relation intact while degrading output.
+Eager generation is diffed against graph replay, against a re-run in
+the same process, and against the committed JSON goldens — any single
+token change fails the suite.
 
-Two levels, deliberately:
-
-* :func:`test_eager_matches_graph` needs no stored data and can never go stale.
-  It is the load-bearing check and always runs when a checkpoint is present.
-* :func:`test_matches_committed_golden` compares against a JSON baseline keyed by
-  checkpoint name. It is strictly stronger, but only meaningful for the exact
-  checkpoint it was recorded from, so it skips (with the regeneration command)
-  when no baseline exists for the checkpoint under test.
-
-The public API exposes text rather than token ids, so "token-level" here means
-byte-exact generated text, which for greedy decoding is equivalent.
+Usage:
+    pytest tests/golden/test_token_parity.py
 """
 
 from __future__ import annotations

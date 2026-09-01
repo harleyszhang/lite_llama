@@ -1,10 +1,8 @@
-"""Benchmark two Triton row-wise softmax kernels against ``torch.softmax``.
+"""Two Triton row-wise softmax kernels vs ``torch.softmax``.
 
-Both subtract the row max before ``exp`` (safe softmax) and reduce in fp32.
-``softmax_native_fwd`` runs one program per row — simplest and fastest while a
-row fits in SRAM; ``softmax_split`` tiles a wide row across programs via
-log-sum-exp, staying stable when a row does not. The CLI verifies correctness,
-then prints a GB/s table and saves a plot.
+The one-pass naive kernel is compared with a split variant (logsumexp,
+then combine) on wide rows; correctness is checked before any timing
+loop starts.
 
 Usage:
     python benchmarks/kernels/bench_softmax.py

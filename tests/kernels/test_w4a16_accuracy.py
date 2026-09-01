@@ -1,10 +1,11 @@
-"""Accuracy test for the w4a16 tl.dot kernel rewrite.
+"""Accuracy test for the w4a16 ``tl.dot`` kernel rewrite.
 
-Verifies that the new tensor-core-accelerated w4a16_matmul produces numerically
-equivalent results to the reference dequant-then-matmul path.
+The kernel is diffed against ``_reference_w4a16`` across group sizes
+and batch shapes, with and without bias — tolerance sized for the
+fp32-accumulation rewrite.
 
-Run:
-    pytest tests/kernels/test_w4a16_accuracy.py -v
+Usage:
+    pytest tests/kernels/test_w4a16_accuracy.py
 """
 
 from __future__ import annotations

@@ -1,12 +1,11 @@
 """Profiling tools: model structure tree and memory budget table.
 
-Exports readable representations of model architecture and memory allocation
-for debugging, documentation, and capacity planning.
+Re-exports both halves — ``print_structure_tree`` /
+``export_structure_tree`` and ``compute_memory_budget`` /
+``print_memory_budget`` — one import for the whole toolkit.
 
 Usage:
-    from lite_llama.tools.profiling import print_structure_tree, print_memory_budget
-    print_structure_tree(model)
-    print_memory_budget(num_layers=28, hidden_size=1024, ...)
+    from lite_llama.tools.profiling import print_memory_budget
 """
 
 from .memory import (

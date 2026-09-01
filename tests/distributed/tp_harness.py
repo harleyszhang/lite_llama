@@ -1,35 +1,11 @@
-"""Run a payload on a real tensor-parallel process group so sharded layers can be tested.
+"""Run a payload on a real TP process group so sharded layers can be tested.
 
-Sharded layers cannot be checked by inspection: the interesting failures — a mask that
-lets another rank's rows into the sum, an offset that shifts token ids by one shard —
-produce plausible numbers rather than exceptions, and only surface when two ranks
-disagree. So these tests run the *real* code on the *real* collectives.
-
-Design: spawn one process per rank, bind it to its own CUDA device, initialise
-``parallel_state`` over **nccl** on a free port, run ``payload(rank)`` and post the
-answer back over a queue. Three consequences worth knowing:
-
-* **spawn, not fork.** The vocabulary-parallel lookup is a Triton kernel, and CUDA
-  cannot be re-initialised in a forked child — so payloads must be importable
-  module-level functions rather than closures.
-* **the parent stays clean.** Every rank lives in its own process, so a hung or crashed
-  rank cannot leak a ``tp_size=4`` grid into ``parallel_state`` for the rest of the
-  session, where every layer reads it at construction time.
-* **device count is the ceiling.** Use :func:`needs_gpus` to skip a ``tp_size`` this
-  machine cannot host; asking for more ranks than devices would put two ranks on one
-  card and make the timings, though not the numbers, meaningless.
-
-Payloads must return plain Python data (numbers, lists, strings): a returned CUDA tensor
-would have to survive its owning process, which it does not. ``.tolist()`` costs nothing
-at test sizes.
+``run_on_tp_ranks`` spawns one process per TP rank, initialises the
+grid, and returns the payload's results — the bridge between CPU unit
+tests and full TP engine tests.
 
 Usage:
-    @needs_gpus(2)
-    def test_something():
-        shards = run_on_tp_ranks(my_module_level_payload, tp_size=2)
-
-    def test_the_control_plane():           # no device needed
-        seen = run_on_tp_ranks(my_payload, tp_size=2, backend="gloo")
+    results = run_on_tp_ranks(payload, tp_size=2)
 """
 
 from __future__ import annotations

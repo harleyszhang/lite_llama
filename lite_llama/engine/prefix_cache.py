@@ -1,25 +1,12 @@
-"""Prefix caching: reuse KV of shared prompt prefixes across requests.
+"""Prefix caching: reuse the KV of shared prompt prefixes across requests.
 
-Design mirrors vLLM v1's ``BlockPool`` + ``KVCacheBlock`` + free-block LRU queue:
-
-* A prompt is split into fixed-size blocks. Each block's hash **chains** the
-  previous block's hash, so one hash identifies a *prefix* (this block plus all
-  before it), not just the block's own tokens -- the same trick as vLLM's
-  ``hash_block_tokens(parent_hash, block_tokens)``.
-* A cached block carries a **reference count**. ``ref_cnt == 0`` does NOT evict
-  it: like vLLM, a released block stays resident and remains hittable, moving to
-  the tail of an **LRU** order. It is only physically dropped when the pool is
-  over ``capacity`` and the block is the least-recently-used unreferenced one.
-
-That LRU persistence is what makes a shared system prompt pay off: the first
-request populates the cache and *finishes*, yet the next request still hits the
-prefix instead of re-prefilling it.
+:class:`PrefixCache` hashes fixed-size blocks of tokens, matches a new
+prompt's block run against cached ones, and reference-counts blocks so
+several sequences share one physical KV region until all finish.
 
 Usage:
-    cache = PrefixCache(block_size=16, capacity=4096)
-    cache.register(req_a.prompt_token_ids)     # ref_cnt +1 per block
-    hit = cache.query(req_b.prompt_token_ids)  # -> cached leading tokens
-    cache.release(req_a.prompt_token_ids)      # ref_cnt -1; stays cached (LRU)
+    cache = PrefixCache(); match = cache.admit(token_ids)
+    cache.release(token_ids)
 """
 
 from __future__ import annotations
@@ -32,7 +19,7 @@ from dataclasses import dataclass
 
 #: Tokens per prefix-cache block; 16 mirrors vLLM's default page granularity.
 #: It lives here rather than on the scheduler because everyone who computes a
-#: block hash has to agree on it -- the replica's own cache and the DP router's
+#: block hash must agree on it -- the replica's cache and the DP router's
 #: affinity index -- and only one of those owns a scheduler.
 PREFIX_CACHE_BLOCK_SIZE = 16
 
@@ -42,22 +29,19 @@ def iter_block_hashes(token_ids: Sequence[int], block_size: int, seed: int = 0) 
 
     Each block's hash folds in the previous block's hash (and a per-cache
     ``seed``), so identical hashes imply identical prefixes rather than merely
-    identical block contents at some offset. A trailing partial block is skipped:
-    a half-filled block's KV is not reusable until it is complete.
+    identical block contents at some offset. A trailing partial block is
+    skipped: a half-filled block's KV is not reusable until it is complete.
 
     The digest is ``blake2b`` rather than the builtin ``hash()`` because these
-    values are a *cross-process contract*: the DP router hashes a prompt to find
-    which replica already holds its prefix, and the replica hashes it again to
-    look the blocks up. Builtin ``hash()`` is in fact stable for tuples of ints
-    (``PYTHONHASHSEED`` randomises only str/bytes), but that is a property of one
-    interpreter build rather than a promise, and a router that disagreed with its
-    replicas would not raise -- it would quietly route every request as a miss.
+    values are a *cross-process contract*: the DP router hashes a prompt to
+    find which replica already holds its prefix, and the replica hashes it
+    again. A router that disagreed with its replicas would not raise — it
+    would quietly route every request as a miss.
 
     Args:
         token_ids: Prompt tokens, each fitting in 32 bits.
         block_size: Tokens per block. Must match every party that hashes.
-        seed: Salt folded into the chain, isolating one cache's hashes from
-            another's. Must match every party that hashes.
+        seed: Salt folded into the chain; must match every party that hashes.
 
     Yields:
         One 64-bit hash per complete block, in prefix order.
@@ -104,20 +88,17 @@ class PrefixMatch:
     """What a prompt may reuse, and where the reusable K/V must be copied from.
 
     Attributes:
-        num_tokens: Leading prompt tokens whose blocks are cached, block-aligned.
-            This is the hit-rate numerator, and it is *not* how much prefill can
-            be skipped: a block can be cached (its hash is still true) while no
-            slot holds its K/V any more.
-        copyable_tokens: Leading prompt tokens whose K/V is both cached and still
-            resident in some slot, hence reusable by copying instead of
-            recomputing. Always ``<= num_tokens``, and always a prefix -- reuse
-            stops at the first block without a live copy, because attention reads
-            a slot's rows contiguously from 0.
+        num_tokens: Leading tokens whose blocks are cached, block-aligned. This
+            is the hit-rate numerator, *not* what prefill can skip: a block can
+            be cached while no slot holds its K/V any more.
+        copyable_tokens: Leading tokens whose K/V is both cached and still
+            resident in some slot. Always ``<= num_tokens`` and always a prefix
+            — attention reads a slot's rows contiguously from 0, so reuse stops
+            at the first block without a live copy.
         segments: ``(src_slot, start_token, num_tokens)`` runs covering exactly
             ``copyable_tokens``, merged across adjacent blocks sharing an owner.
-            The destination offset is ``start_token`` again: a chained hash pins a
-            block to one absolute prompt position, so source and destination rows
-            always line up.
+            The chained hash pins a block to one absolute prompt position, so
+            source and destination rows always line up.
     """
 
     num_tokens: int = 0
@@ -130,15 +111,12 @@ class _CachedBlock:
     """One resident prefix block: its chained hash, references, and live copy.
 
     Attributes:
-        block_hash: Chained hash identifying this block *and* every block before
-            it, so it names a prefix rather than a bag of tokens.
+        block_hash: Chained hash naming this block *and* every block before it,
+            i.e. a prefix rather than a bag of tokens.
         ref_cnt: Live requests holding this block; zero does not evict.
         owner_slot: Cache slot whose rows currently hold this block's K/V, or
-            ``None`` when no live copy exists. The hash alone is bookkeeping:
-            reusing a block means reading real K/V out of some slot, and under the
-            fixed-slot layout a slot's rows are overwritten wholesale when it is
-            handed to a new request. So a block may be hittable yet unreadable,
-            in which case the requester recomputes it and becomes the new owner.
+            ``None`` when no live copy exists. A block may be hittable yet
+            unreadable; whoever recomputes it next becomes the new owner.
     """
 
     block_hash: int
@@ -149,21 +127,18 @@ class _CachedBlock:
 class PrefixCache:
     """Ref-counted, LRU-evicted store of cached prefix blocks.
 
-    The block map doubles as the LRU order: it is an ``OrderedDict`` whose tail
-    is most-recently-used. A hit or a fresh reference moves a block to the tail;
+    The block map doubles as the LRU order: an ``OrderedDict`` whose tail is
+    most-recently-used. A hit or a fresh reference moves a block to the tail;
     eviction (only when over ``capacity``) removes unreferenced blocks from the
     head. Referenced blocks (``ref_cnt > 0``) are never evicted.
 
     Args:
         block_size: Tokens per block. Larger blocks hash cheaper but match
             coarser; 16 mirrors vLLM's default page granularity.
-        capacity: Maximum resident blocks. ``None`` means unbounded (no
-            eviction) -- set it in memory-constrained deployments.
+        capacity: Maximum resident blocks. ``None`` means unbounded.
         hash_seed: Salt folded into every block hash, isolating one cache's
-            hashes from another's (e.g. per-tenant) to avoid cross-hits. Under
-            data parallelism every replica -- and the router's affinity index --
-            must be given the same seed, or the router's guess about who holds a
-            prefix never matches what the replicas actually cached.
+            hashes from another's. Under data parallelism every replica — and
+            the router's affinity index — must share the seed.
     """
 
     def __init__(
@@ -181,10 +156,9 @@ class PrefixCache:
         self.hash_seed = hash_seed
         #: block-hash -> _CachedBlock, ordered least- to most-recently-used.
         self._blocks: OrderedDict[int, _CachedBlock] = OrderedDict()
-        #: slot -> hashes it is the live copy of. A reverse index because
-        #: :meth:`invalidate_slot` runs on every admission and would otherwise
-        #: scan the whole pool, which is sized by the KV cache rather than by
-        #: the prompt and so would dominate the admission path.
+        #: slot -> hashes it is the live copy of. A reverse index so
+        #: :meth:`invalidate_slot` (which runs on every admission) does not scan
+        #: the whole pool.
         self._owned: dict[int, set[int]] = {}
         self.stats = PrefixCacheStats()
 
@@ -193,9 +167,8 @@ class PrefixCache:
         """Return the number of leading tokens already cached for this prompt.
 
         Walks the prompt's block hashes from the front and stops at the first
-        block that is not cached: prefix reuse must be contiguous from token 0,
-        exactly as a KV cache read is. Hit blocks are refreshed to most-recently
-        -used so a hot prefix is not evicted out from under future requests.
+        uncached block: prefix reuse must be contiguous from token 0. Hit blocks
+        are refreshed to most-recently-used.
         """
         self.stats.num_requests += 1
         self.stats.queried_tokens += len(token_ids)
@@ -213,23 +186,18 @@ class PrefixCache:
     def register(self, token_ids: list[int]) -> int:
         """Reference every full block of *token_ids*, creating missing ones.
 
-        Returns the cached-prefix length (in tokens) that existed *before* this
-        call -- i.e. the reuse this request enjoys. Newly created blocks may
-        trigger LRU eviction of unreferenced blocks when over capacity.
+        Returns the cached-prefix length that existed before this call — the
+        reuse this request enjoys. Newly created blocks may trigger LRU
+        eviction of unreferenced blocks when over capacity.
         """
         return self._reference_blocks(token_ids).num_tokens
 
     def admit(self, token_ids: list[int]) -> PrefixMatch:
         """One-pass :meth:`query` + :meth:`register`, for the admission path.
 
-        The scheduler needs both answers about the same prompt in the same
-        breath: how much of it is already cached, and a reference on every block
-        so the prefix survives while the request runs. Asking as two calls hashes
-        the prompt twice -- 256 chained block hashes for a 4 k-token prompt, all
-        of it duplicate, on the critical path of every admission -- and the
-        second traversal cannot see anything the first did not, because
-        :meth:`register` already reports the hit length that preceded it.
-
+        The scheduler needs both answers in the same breath; asking as two
+        calls would hash the prompt twice — 256 chained hashes for a 4 k-token
+        prompt, all duplicate, on the critical path of every admission.
         Counts towards the hit-rate statistics exactly as :meth:`query` does.
 
         Returns:
@@ -245,19 +213,14 @@ class PrefixCache:
     def invalidate_slot(self, slot: int) -> None:
         """Forget that *slot* holds any block's K/V, as it changes hands.
 
-        A slot owns one contiguous ``max_seq_len`` region that its next occupant
-        refills from that occupant's own token 0, so every block this slot was the
-        live copy of becomes unreadable the moment the slot is handed over. The
-        blocks stay cached and stay hittable -- their hashes are still true, and
-        whoever recomputes them next becomes the new owner -- they merely stop
-        being copy sources.
+        A slot's next occupant refills it from its own token 0, so every block
+        this slot was the live copy of becomes unreadable. The blocks stay
+        cached and hittable — their hashes are still true — they merely stop
+        being copy sources; whoever recomputes them next becomes the new owner.
 
-        Must run *after* the new occupant's match, not before: a freed slot keeps
-        its rows until they are overwritten, so the commonest hit of all is the
-        request that lands on the slot whose prefix it wanted. Invalidating first
-        would throw that away; invalidating after leaves the new occupant's own
-        blocks briefly ownerless, which costs nothing because it re-claims them
-        one step later as the request that now genuinely holds them.
+        Must run *after* the new occupant's match, not before: a freed slot
+        keeps its rows until they are overwritten, so the commonest hit of all
+        is the request that lands on the slot whose prefix it wanted.
         """
         for block_hash in self._owned.pop(slot, ()):
             block = self._blocks.get(block_hash)
@@ -309,9 +272,9 @@ class PrefixCache:
             block.ref_cnt += 1
             self._blocks.move_to_end(h)  # newest / just-touched -> MRU
 
-            # The copy plan tracks the *unbroken* run of cached blocks that still
-            # have a live copy: the first gap ends it, because a slot's rows are
-            # only meaningful read from 0 up.
+            # The copy plan tracks the *unbroken* run of cached blocks that
+            # still have a live copy: the first gap ends it, because a slot's
+            # rows are only meaningful read from 0 up.
             if (
                 copyable == index * self.block_size
                 and counting_hit
@@ -328,12 +291,7 @@ class PrefixCache:
         return PrefixMatch(hit, copyable, tuple(tuple(run) for run in segments))
 
     def release(self, token_ids: list[int]) -> None:
-        """Drop one reference per block; blocks stay cached (LRU) at zero.
-
-        Unlike a naive cache, hitting ``ref_cnt == 0`` does not evict: the block
-        remains resident and hittable until capacity pressure reclaims it, so a
-        finished request still leaves its prefix warm for the next one.
-        """
+        """Drop one reference per block; blocks stay cached (LRU) at zero."""
         for h in iter_block_hashes(token_ids, self.block_size, self.hash_seed):
             block = self._blocks.get(h)
             if block is not None and block.ref_cnt > 0:

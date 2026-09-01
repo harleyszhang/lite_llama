@@ -1,18 +1,12 @@
-"""Generation engine: two batching strategies over one shared executor.
+"""Generation engines: two batching strategies over one shared executor.
 
-:class:`LLM` / :class:`LLMEngine` run a *one-shot* batch — every prompt starts on
-the same step and the batch keeps its width until the longest sequence ends. That
-is the right shape for offline generation, where all the prompts are known up
-front.
+:class:`ContinuousBatchingEngine` interleaves prefills and decodes step by
+step while :class:`LLMEngine` runs one-shot batches; both drive the same
+:class:`~lite_llama.executor.executor.Executor`. Imports are lazy so the
+package import stays CUDA-free.
 
-:class:`ContinuousBatchingEngine` decides the batch per step instead, so requests
-join and leave mid-flight; :class:`AsyncLLMEngine` puts an asyncio face on it for
-online serving.
-
-:class:`DataParallelEngine` is orthogonal to both: it runs several whole-model
-replicas in separate processes and routes requests between them, for throughput once
-one GPU is saturated. :class:`AsyncDataParallelEngine` puts an asyncio face on that
-for online serving, the way :class:`AsyncLLMEngine` does for a single replica.
+Usage:
+    from lite_llama.engine import LLMEngine, SamplingParams
 """
 
 from __future__ import annotations
@@ -72,6 +66,7 @@ def __getattr__(name: str) -> Any:
 
 def __dir__() -> list[str]:
     return sorted(set(globals()) | _EXPORTS.keys())
+
 
 __all__ = [
     "LLM",

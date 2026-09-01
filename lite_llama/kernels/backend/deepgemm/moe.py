@@ -1,26 +1,11 @@
 """DeepGEMM grouped fp8 MoE — the ``deepgemm/grouped_fp8_moe`` row's wrapper.
 
-The contract is :class:`~lite_llama.kernels.ops.interfaces.MoeOp`. The native
-``fused_moe`` permutes tokens with Triton and runs both expert GEMMs in one
-kernel family; here the same computation is expressed as two
-``m_grouped_fp8_gemm_nt_contiguous`` calls over a 128-aligned grouped layout:
+:func:`grouped_moe` repacks per-expert weights into contiguous grouped
+tensors (:func:`_nt_experts`) and runs the grouped GEMM for the tokens
+each expert actually holds.
 
-1. tokens are grouped per expert (stable sort over the flattened
-   ``topk_ids``), each expert's segment padded to a multiple of
-   ``ALIGNMENT`` because the contiguous grouped kernel requires aligned
-   segment starts (``m_indices`` marks which expert owns each padded row);
-2. gate/up GEMM on the grouped activations, SwiGLU, down GEMM —
-   per-token-group-128 activations, cached NT fp8 experts;
-3. the padded rows quantify to zero and are dropped by the gather-back, so
-   padding never leaks into the weighted reduce.
-
-The ``_masked`` grouped variant (variable-length segments for decode) is the
-upstream alternative; the contiguous path is used for both phases because its
-alignment padding is small next to the expert GEMMs and one code path is
-easier to keep golden-comparable.
-
-The row is ``verified=False``: written against the upstream API, never run on
-Hopper (CI is sm86), so the golden gate keeps it out of default dispatch.
+Usage:
+    y = grouped_moe(hidden_states, w1, w2, topk_weights, topk_ids)
 """
 
 from __future__ import annotations

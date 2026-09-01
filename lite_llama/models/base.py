@@ -1,18 +1,11 @@
 """Layer/model skeleton shared by the decoder-only models.
 
-LLaMA, Qwen2 and Qwen3 differ only in a few knobs — q/k/v bias, per-head q/k
-RMSNorm, and how wide the attention projections are versus the residual stream.
-Everything else (the attention composition — fused-QKV projection, q/k norm,
-RoPE — the KV-cache write, the prefill/decode kernel split, SwiGLU MLP,
-pre-norm residual wiring, the forward skeleton) is assembled here once in
-:class:`DecoderLayer` / :class:`CausalLM` from the building blocks in
-:mod:`lite_llama.modules`; concrete models only declare their differences.
-Q, K and V are stored fused as ``qkv_proj.weight`` so each block runs one
-projection GEMM instead of three (:mod:`lite_llama.models.weights` owns the key
-translation that folds the checkpoint's three tensors into it).
+:class:`DecoderLayer` composes attention and MLP behind flag-driven seams
+(qkv bias, qk norm, quant, MoE) and :class:`CausalLM` stacks the layers
+with the embedding, LM head and weight-loading plumbing.
 
 Usage:
-    class LlamaModel(CausalLM): ...   # built via ModelRegistry + ModelLoader
+    model = CausalLM(config)
 """
 
 from __future__ import annotations

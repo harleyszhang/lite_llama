@@ -1,14 +1,11 @@
 """Quantisation base classes (mirrors sglang ``base_config.py``).
 
-Three-layer method hierarchy:
-    QuantizeMethodBase          — abstract root (create_weights + apply)
-    ├── LinearMethodBase        — linear layer strategy
-    └── FusedMoEMethodBase      — stacked expert strategy
+:class:`QuantizationConfig` is the checkpoint-side contract and
+:class:`LinearMethodBase` / :class:`FusedMoEMethodBase` the runtime one;
+:func:`run_quant_linear` is the shared dispatch over runtime schemes.
 
-QuantizationConfig is the per-checkpoint-format class (one subclass per
-precision: Fp8Config, W8A8Fp8Config, AWQConfig …). It owns the registry
-dispatch (``get_quant_method``) and the layout metadata used by linear
-layers and the weight loader.
+Usage:
+    y = run_quant_linear(scheme, x, weight)
 """
 
 from __future__ import annotations

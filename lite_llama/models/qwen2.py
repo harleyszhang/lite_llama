@@ -1,4 +1,11 @@
-"""Qwen2: identical to LLaMA except that the q/k/v projections carry a bias."""
+"""Qwen2: identical to LLaMA except that the q/k/v projections carry a bias.
+
+:class:`Qwen2Model` reuses the whole :class:`~lite_llama.models.base.CausalLM`
+skeleton and sets ``qkv_bias`` — the family difference is one flag.
+
+Usage:
+    model = Qwen2Model(config)
+"""
 
 from __future__ import annotations
 

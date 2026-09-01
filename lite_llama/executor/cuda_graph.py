@@ -1,14 +1,12 @@
 """CUDA Graph capture and replay for the decode phase.
 
-A CUDA Graph bakes in *tensor pointers* at capture time, so the decode path must
-never reallocate the tensors the model reads. Three rules make that hold:
-persistent input buffers that each replay ``copy_()`` into in place; one graph per
-``(batch_size, seq_len_bucket)`` because FlashDecoding sizes scratch by
-``max_actual_seq_len``; and decode-only capture (``seq_len == 1``), with prefill
-always eager.
+:class:`CUDAGraphManager` captures one graph per (batch, seq-bucket)
+shape via :class:`CUDAGraphRunner`; ``try_replay`` launches the matching
+graph when a decode step fits one, else returns None so eager runs.
 
 Usage:
-    mgr = CUDAGraphManager(...); logits = mgr.decode(input_ids, positions, ...)
+    mgr = CUDAGraphManager(model)
+    logits = mgr.try_replay(input_ids, position_ids, attn_info)
 """
 
 from __future__ import annotations

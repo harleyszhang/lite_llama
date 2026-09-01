@@ -1,17 +1,11 @@
 """Slot-based KV layout and per-step attention metadata for continuous batching.
 
-The one-shot batch path (:class:`~lite_llama.engine.llm_engine._DecodeSession`)
-can bump-allocate cache rows because it owns the whole cache and only ever
-appends. Continuous batching cannot: requests join and leave mid-flight, so
-every step would hit :meth:`KVCacheManager.alloc_contiguous_kvcache`, whose
-``nonzero`` scan plus two ``.item()`` reads costs three device synchronisations
-per decode step. This module removes the allocator from the decode path
-entirely.
+:class:`SlotBatch` gives every active sequence one KV row range ("slot")
+and builds the flat row indices each phase needs: prefill rows, extend rows
+via :func:`flatten_extend_rows`, or padded decode rows for graph replay.
 
 Usage:
-    batch = SlotBatch(runner)
-    batch.begin_prefill([0, 1], [17, 23]); logits = runner.forward(...)
-    padded = batch.begin_decode([0, 1], [18, 24]); logits = runner.forward(...)
+    batch = SlotBatch(runner); batch.begin_decode(slots, seq_lens)
 """
 
 from __future__ import annotations

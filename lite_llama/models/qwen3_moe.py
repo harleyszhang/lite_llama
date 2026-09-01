@@ -1,12 +1,11 @@
 """Qwen3 MoE (A3B) model definition.
 
-Attention, q/k-norm and RoPE are identical to dense Qwen3; the only difference
-is the per-layer MLP choice in :meth:`Qwen3MoeModel._build_mlp`: layers selected
-by :func:`is_moe_layer` get the routed :class:`~lite_llama.modules.moe.SparseMoeBlock`,
-the rest keep the dense SwiGLU.
+``is_moe_layer`` reads the config's layer boundaries so dense and
+routed layers interleave correctly; :class:`Qwen3MoeModel` stacks them
+on the shared CausalLM skeleton with :class:`SparseMoeBlock` MLPs.
 
 Usage:
-    model = Qwen3MoeModel(config)   # via ModelRegistry
+    model = Qwen3MoeModel(config)
 """
 
 from __future__ import annotations

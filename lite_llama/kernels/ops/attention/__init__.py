@@ -1,18 +1,11 @@
 """Attention domain: the prefill/decode phases, KV write and MLA decode.
 
-Two phases get separate op ids (``attention.prefill`` / ``attention.decode``)
-because their shapes and kernels have nothing in common beyond the KV cache:
-prefill is ragged batch GEMM, decode is paged single-token gather. The native
-rows point straight at the Triton kernels; FlashInfer's rows are the first
-externally-verified implementations and cover both phases with their own paged
-KV pool (same ``kv:paged`` contract, different allocation). FlashMLA serves
-``attention.mla_decode`` — an op that has no native row at all, because MLA's
-latent cache is a different layout, not a different size, and the tree has no
-MLA model to host a Triton fallback (v0.11 wires the real thing; the single-
-layer harness in ``models/mla_single_layer.py`` is the bench vehicle).
+Registers the domain's spec rows and points at the implementations:
+:mod:`flashattention2_nopad` for prefill, :mod:`flashdecoding` for paged
+decode, plus the KV-write kernels in ``kvcache``.
 
 Usage:
-    from lite_llama.kernels.ops import attention  # noqa: F401  (registers rows)
+    from lite_llama.kernels.ops.attention.flashdecoding import flash_decoding
 """
 
 from lite_llama.kernels.backend.flashinfer import CUDA_SM75

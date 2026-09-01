@@ -1,15 +1,11 @@
 """Pure-PyTorch reference implementations for the Triton kernels.
 
-Every kernel test compares against one of these instead of against a second
-copy of the kernel. The previous suite hand-copied the Triton source into the
-test file and asserted the copy matched a local torch snippet, which could not
-detect a regression in the shipped kernel — and broke collection outright,
-because ``@triton.jit`` cannot introspect the source of a module that pytest has
-rewritten for assertions.
+Every function here is the slow, obvious maths —
+``varlen_causal_attention``, ``paged_decode_attention``, ``swiglu`` —
+that the kernel tests diff against; correctness from readability.
 
-These functions are deliberately slow and obvious: loops over the batch, fp32
-math, no fusion. Readability is the point, since they define what "correct"
-means for the kernels.
+Usage:
+    from tests.reference import skip_rmsnorm
 """
 
 from __future__ import annotations

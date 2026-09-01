@@ -1,10 +1,11 @@
 """Tests for the logical-operator ABCs (ROADMAP foundation 2).
 
-Two things get pinned here: the *catalogue* (the op ids dispatch keys on)
-and the *call signatures* (what every backend must accept). The CPU
-implementations at the top double as templates for the native impl
-adapters — if a fake implementation binds the pinned signature and matches
-an eager reference numerically, the contract is self-consistent.
+Catalogue completeness, ABC enforcement (unimplemented ops cannot
+instantiate), signature pinning against the pinned table, and CPU
+reference implementations honouring the contracts.
+
+Usage:
+    pytest tests/ops/test_interfaces.py
 """
 
 from __future__ import annotations

@@ -1,21 +1,11 @@
 """Performance regression guards for continuous batching.
 
-Timing assertions are only worth having when the effect is structural rather than
-marginal, so this file tests exactly one claim, the one the feature exists for:
-**a request that arrives while the engine is busy joins the running batch instead
-of queueing behind a whole generation.**
+Requests arrive on a schedule while the engine steps; the guard asserts
+throughput and latency improve over the static baseline by at least the
+recorded margins — catching regressions, not chasing speed.
 
-That is an asymptotic difference, not a constant factor. Serving N staggered
-requests one at a time costs the sum of their generations; folding them into one
-batch costs roughly the longest of them, because decode at these batch widths is
-bound by streaming the weights, not by the arithmetic. Measured on an idle A10
-with Qwen2.5-1.5B-Instruct the gap is ~7x, so the thresholds below are set to a
-small fraction of that -- enough that a genuine regression (a lost fast path, a
-sync per step, a scheduler that stopped admitting) trips them, while ordinary
-machine-to-machine variance and a busy GPU do not.
-
-The absolute numbers belong in ``benchmarks/bench_continuous.py``; this file only
-asserts the ordering holds.
+Usage:
+    pytest tests/engine/test_continuous_perf.py
 """
 
 from __future__ import annotations

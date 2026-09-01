@@ -1,25 +1,11 @@
 """FlashMLA decode — the ``flashmla/mla_decode`` row's wrapper.
 
-The contract is
-:class:`~lite_llama.kernels.ops.interfaces.MlaDecodeOp` — an op with no native
-row at all: MLA's latent cache (``kv_cache`` pages are ``[page_size,
-kv_lora_dim]``, no head axis) is a different layout from the per-head paged
-pool the native attention rows share, and the tree has no MLA model to host a
-Triton fallback. FlashMLA is the only implementation.
+``mla_decode`` maps the paged KV buffer, block table and per-sequence
+lengths onto FlashMLA's arguments, so latent-attention decode runs
+against the same cache the native kernels use.
 
-Two shape conversions, both views: ``q`` ``[bsz, heads, qk_dim]`` becomes
-``[bsz, 1, heads, qk_dim]``, and the latent cache gains its implicit single KV
-head — ``[pages, page, lkv]`` → ``[pages, page, 1, lkv]``.
-
-``get_mla_metadata`` is the tile-scheduler handle: the wrapper recomputes it
-per call from ``cache_seqlens`` (one small kernel) and feeds it to
-``flash_mla_with_kvcache``, so callers never manage a handle across the
-decode loop.
-
-The row is ``verified=False``: this wrapper follows the upstream README's
-calling convention but has never run on Hopper — the minimal single-layer MLA
-harness (``models/mla_single_layer.py``) is the vehicle that will produce the
-golden comparison.
+Usage:
+    out = mla_decode(q, kv_cache, block_table, cache_seqlens)
 """
 
 from __future__ import annotations

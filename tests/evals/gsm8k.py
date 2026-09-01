@@ -1,23 +1,11 @@
 """GSM8K: grade-school word problems, scored by exact match on the final number.
 
-The protocol is the standard one and matches vLLM's ``tests/evals/gsm8k`` so the
-two harnesses' numbers are comparable:
+``extract_answer`` pulls the final number, ``build_prompts`` renders
+the few-shot template, and ``score`` compares answers — the whole
+benchmark in three pure functions.
 
-* the prompt is ``num_shots`` worked examples from the *train* split followed by
-  the test question, all in ``Question: ... \\nAnswer: ...`` form;
-* generation is greedy and stops at the next ``Question`` — see
-  :func:`~tests.evals.runner.truncate_at_stop` for how "stops" is implemented
-  here;
-* the prediction is the **last integer** in the completion, compared against the
-  number after ``####`` in the reference answer.
-
-Everything above the engine call is a pure function of the loaded data, so
-:mod:`tests.evals.test_gsm8k_scoring` exercises it on the CPU tier with no
-network, no GPU and no checkpoint.
-
-Run it standalone from the repository root::
-
-    python -m tests.evals.gsm8k --model-dir my_weight/Qwen2.5-0.5B --num-questions 200
+Usage:
+    prompts, labels = build_prompts(train, test)
 """
 
 from __future__ import annotations

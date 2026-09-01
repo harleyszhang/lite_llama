@@ -1,15 +1,12 @@
 """Incremental detokenisation: per-step token ids to per-step text deltas.
 
-Decoding the whole span each step and diffing is ``O(n^2)``. Instead, per sequence
-two offsets (``prefix_offset`` for context, ``read_offset`` for what was already
-emitted) bound each step to decoding a small window — ``O(1)`` amortised. A window
-rather than a lone token is required for correctness: SentencePiece strips a
-leading ``▁`` from a single token (gluing words together), and multi-byte UTF-8
-split across tokens must be held back until the character completes.
+:class:`IncrementalDetokenizer` keeps one state per sequence and re-decodes
+the trailing partial-token boundary each step, so streaming text always
+equals the one-shot decode of the same token stream.
 
 Usage:
-    det = IncrementalDetokenizer(tokenizer, batch_size)
-    delta = det.append(seq_index, token_id)   # "" until a character completes
+    detok = IncrementalDetokenizer(tokenizer, batch_size)
+    delta = detok.append(0, token_id)
 """
 
 from __future__ import annotations

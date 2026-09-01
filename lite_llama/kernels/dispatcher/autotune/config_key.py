@@ -1,17 +1,11 @@
-"""Autotune key structure — the stable contract for v0.6 perf_key.
+"""Autotune key structure — the stable contract behind a stored config.
 
-A :class:`TuneKey` uniquely identifies a (GPU, op, problem shape, dtype)
-combination. It is the lookup key into the persisted JSON config store and
-must remain backward-compatible: once a key is written, any future version
-must still be able to load it.
+:class:`TuneKey` normalises (op, m/n/k buckets, dtype, GPU name) into one
+hashable key, so a config measured for one shape or machine is never
+silently reused for another.
 
-Key design choices:
-    - ``gpu``: normalised device name (spaces → underscores).
-    - ``op``: kernel family identifier (e.g. ``"fused_moe"``).
-    - ``shape_bucket``: ``M{m}_N{n}_K{k}`` where M is bucket-quantised.
-    - ``dtype``: activation/weight dtype label (``"fp16"``, ``"int8"``, ``"int4"``).
-
-M-bucketing keeps the cache manageable: decode batches 1–16 share one entry.
+Usage:
+    key = TuneKey.build("fused_moe", 16, 4096, 4096, "fp16", gpu_name)
 """
 
 from __future__ import annotations
