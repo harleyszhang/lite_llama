@@ -1,26 +1,87 @@
 """端到端指标基线:lite_llama eager / CUDA Graph 的 TTFT / TPOT / TPS 分解。
 
-指标口径见 benchmarks/common.py(对齐 vLLM/TensorRT-LLM);
-与 HF transformers 的同口径对照见 benchmarks/bench_hf_baseline.py。
-
-多模态 checkpoint(llava / qwen3_vl)自动走 VisionBackend:逐请求串行
-stream 打点,decode 步同样 eager / graph 对照——视觉 token 在 prefill 后
-已写入 KV cache,捕获的 decode 步与纯文本模型同构。
+指标口径见 benchmarks/common.py(对齐 vLLM/TensorRT-LLM)。多模态 checkpoint
+(llava / qwen3_vl)自动走 VisionBackend。--backend hf 跑 HF transformers 同口径
+对照;--verify 用短 prompt 隔离 decode,断言 graph capture 不改变贪心输出。
 
 用法:
     .venv/bin/python benchmarks/bench_e2e.py --greedy --json out.json
     .venv/bin/python benchmarks/bench_e2e.py --model-dir my_weight/Qwen3-VL-4B-Instruct
+    .venv/bin/python benchmarks/bench_e2e.py --backend hf --greedy --model-dir my_weight/Qwen2.5-1.5B-Instruct
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
+from pathlib import Path
 
-from common import PROMPTS, LiteBackend, VisionBackend, expand_prompts, print_table
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from benchmarks.common import (
+    GREEDY_PARAMS,
+    PROMPTS,
+    HFBackend,
+    LiteBackend,
+    expand_prompts,
+    make_backend,
+    print_table,
+    write_json_log,
+)
 
 CKPT = "my_weight/Qwen2.5-0.5B"
+
+
+def run_hf(args, prompts: list[str]) -> None:
+    """HF transformers 对照:同一批 prompt、同一指标口径。"""
+    backend = HFBackend(args.model_dir, attn=args.attn)
+    result = backend.measure(prompts, args.max_gen_len, greedy=args.greedy)
+    print_table({f"hf-{args.attn}": result})
+    print(f"sample[0]: {backend.sample_text()!r}")
+
+
+def run_lite(args, prompts: list[str]) -> dict:
+    """每个 mode 一行;后端由工厂按 checkpoint 选(多模态自动走视觉口径)。"""
+    modes = [("eager", False), ("graph", True)]
+    if args.mode != "both":
+        modes = [m for m in modes if m[0] == args.mode]
+
+    results = {}
+    for label, graph in modes:
+        backend = make_backend(
+            args.model_dir,
+            use_cuda_graph=graph,
+            image_path=args.image,
+            max_seq_len=2048,
+            max_gpu_num_blocks=args.max_gpu_num_blocks,
+        )
+        results[label] = backend.measure(prompts, args.max_gen_len, args.greedy)
+        backend.close()
+    return results
+
+
+def verify_graph_matches_eager(args) -> int:
+    """短 prompt + 长生成隔离 decode:graph capture 不能改变贪心输出。"""
+    from lite_llama import SamplingParams
+
+    params = SamplingParams(max_gen_len=args.max_gen_len, **GREEDY_PARAMS)
+    outputs = {}
+    for label, graph in (("eager", False), ("graph", True)):
+        backend = LiteBackend(
+            args.model_dir,
+            use_cuda_graph=graph,
+            max_seq_len=2048,
+            max_gpu_num_blocks=args.max_gpu_num_blocks,
+        )
+        outputs[label] = backend.generator.generate(["The capital of France is"], params)[0]
+        backend.close()
+    if outputs["eager"] == outputs["graph"]:
+        print("\nverify: eager == graph greedy output")
+        return 0
+    print("\nERROR: CUDA Graph output diverged from eager!")
+    print("  eager:", repr(outputs["eager"]))
+    print("  graph:", repr(outputs["graph"]))
+    return 1
 
 
 def main() -> int:
@@ -30,7 +91,14 @@ def main() -> int:
     ap.add_argument("--json", type=str, default=None)
     ap.add_argument("--greedy", action="store_true", help="temperature=0, deterministic")
     ap.add_argument("--mode", choices=["eager", "graph", "both"], default="both")
+    ap.add_argument("--backend", choices=["lite", "hf"], default="lite")
     ap.add_argument("--model-dir", type=str, default=CKPT)
+    ap.add_argument(
+        "--attn",
+        default="sdpa",
+        help="hf backend 的 attn_implementation: sdpa | flash_attention_2 | eager",
+    )
+    ap.add_argument("--verify", action="store_true", help="断言 eager 与 graph 贪心输出一致")
     ap.add_argument(
         "--max-gpu-num-blocks",
         type=int,
@@ -44,45 +112,19 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    modes = [("eager", False), ("graph", True)]
-    if args.mode != "both":
-        modes = [m for m in modes if m[0] == args.mode]
-
-    from lite_llama.models.config import read_model_type
-    from lite_llama.models.registry import ModelRegistry
-
-    is_multimodal = ModelRegistry.resolve(read_model_type(args.model_dir)).is_multimodal
-
     prompts = expand_prompts(PROMPTS, args.batch)
-    results = {}
-    for label, graph in modes:
-        if is_multimodal:
-            backend = VisionBackend(
-                args.model_dir, graph, args.image, max_seq_len=2048
-            )
-        else:
-            backend = LiteBackend(
-                args.model_dir,
-                use_cuda_graph=graph,
-                max_seq_len=2048,
-                max_gpu_num_blocks=args.max_gpu_num_blocks,
-            )
-        results[label] = backend.measure(prompts, args.max_gen_len, args.greedy)
-        backend.close()
+
+    if args.backend == "hf":
+        run_hf(args, prompts)
+        return 0
+
+    results = run_lite(args, prompts)
     print_table(results)
+    rc = verify_graph_matches_eager(args) if args.verify else 0
 
     if args.json:
-        with open(args.json, "w") as f:
-            json.dump(
-                {
-                    "config": vars(args),
-                    "results": {k: v.as_dict() for k, v in results.items()},
-                },
-                f,
-                indent=2,
-            )
-        print(f"-> {args.json}")
-    return 0
+        write_json_log(args.json, vars(args), {k: v.as_dict() for k, v in results.items()})
+    return rc
 
 
 if __name__ == "__main__":

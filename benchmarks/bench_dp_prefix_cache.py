@@ -2,30 +2,19 @@
 """Benchmark prefix caching *across* data-parallel replicas.
 
 Each replica owns its KV cache outright — there is no cross-replica transfer — so a
-prompt whose prefix was prefilled on replica 0 hits nothing on replica 1. On a workload
-where requests fall into a handful of prefix groups (a system prompt per tenant, a
-few-shot preamble per task, a chat history per session) round-robin therefore scatters
-every group over every replica and makes each one pay the prefill again. Prefix-affinity
-routing (``--load-balancer cache_aware``) is what turns the per-replica cache into a
-pool-wide one, and this script measures the three configurations that separate the two
-effects:
+prompt whose prefix was prefilled on replica 0 hits nothing on replica 1: round-robin
+scatters every prefix group over every replica and makes each one pay the prefill
+again. Prefix-affinity routing (``--load-balancer cache_aware``) turns the
+per-replica cache into a pool-wide one. Three configurations separate the effects:
 
-* **off / round_robin** — the baseline: every prompt prefills in full.
-* **on / round_robin** — the cache alone. Still wins, because within one replica the
-  group members that happen to land together share their prefix; but each group is
-  instantiated on all ``dp`` replicas, so the pool holds ``dp`` copies of it.
-* **on / cache_aware** — the cache plus affinity, which is the configuration under test.
+* **off / round_robin** — baseline: every prompt prefills in full.
+* **on / round_robin** — the cache alone: group members landing together share, but
+  each group is instantiated on all ``dp`` replicas.
+* **on / cache_aware** — cache + affinity, the configuration under test.
 
-The workload is deliberately prefill-heavy (long shared prefix, short generation): the
-saving is prefill work, and a long generation dilutes it until the decode steps, which
-prefix caching cannot touch, dominate the wall clock. ``--gen-len 256`` on the same
-workload measures a real regime, just not this one.
-
-What the measurements say (Qwen2.5-0.5B, 2x A10, ~980-token prefixes, ``--gen-len 4``):
-affinity's share of the win grows with the number of *distinct* prefixes and shrinks
-with the number of requests per prefix, which is what the arithmetic predicts — the work
-round-robin wastes is ``(dp - 1) x groups`` extra prefills however many requests share
-each group, so it fades as a fraction of the run when the groups are large::
+The workload is deliberately prefill-heavy (long shared prefix, short generation):
+the saving is prefill work, and a long generation dilutes it. Measured on
+Qwen2.5-0.5B, 2x A10, ~980-token prefixes, ``--gen-len 4``::
 
     groups x per-group    cache alone    + affinity
      4 x 32                  2.75x          2.93x
@@ -35,48 +24,40 @@ each group, so it fades as a fraction of the run when the groups are large::
     32 x  4                  1.06x          1.26x
     64 x  4                  1.04x          1.14x
 
-So the cache is what pays when a few prefixes are shared very widely, and affinity is
-what pays when many prefixes are each shared narrowly — the regime a multi-tenant server
-is actually in, and the one where the cache on its own is nearly worthless (1.04x). Below
-about 64 requests the wall clock is decided by how many admission waves each replica
-needs, so the ±1 request affinity costs against an exactly even split can swamp the
-prefill it saves; that is a small-batch artefact, not the policy.
+Round-robin wastes ``(dp - 1) x groups`` extra prefills however many requests share
+each group, so the cache pays when a few prefixes are shared very widely and affinity
+pays when many prefixes are each shared narrowly — the multi-tenant regime where the
+cache alone is nearly worthless (1.04x). Below ~64 requests the wall clock is decided
+by admission waves, so affinity's ±1-request cost against an exactly even split can
+swamp the prefill it saves: a small-batch artefact, not the policy.
 
 Usage:
-    # where affinity pays: many prefixes, few requests each
     python benchmarks/bench_dp_prefix_cache.py --dp 2 --groups 32 --per-group 4
-
-    # where the cache pays and affinity has nothing left to add
     python benchmarks/bench_dp_prefix_cache.py --dp 2 --groups 4 --per-group 32
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import random
-import statistics
 import sys
-import time
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
 
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lite_llama import DataParallelEngine, SamplingParams
+from benchmarks.common import (
+    free_gpu,
+    measure_generate,
+    report_agreement,
+    require_gpus,
+    timestamped_log_path,
+    write_json_log,
+)
+from lite_llama import DataParallelEngine
 from lite_llama.engine.dp_load_balancer import make_load_balancer
-
-#: Greedy, with the repetition guard off: a benchmark must not have its token count
-#: decided by a heuristic that fires on some rows and not others.
-_GREEDY = {
-    "temperature": 0.0,
-    "top_p": 1.0,
-    "repetition_penalty": 1.0,
-    "stop_on_repeat": False,
-}
 
 #: One sentence of filler, repeated to build a prefix of the requested length. Its
 #: content is irrelevant — what matters is that group members share it *exactly*, since
@@ -181,7 +162,6 @@ def measure(
         The measurement, the completions, and the checkpoint's tokenizer — the last so
         the caller can replay the routing decisions on exactly the ids the router saw.
     """
-    params = SamplingParams(max_gen_len=gen_len, **_GREEDY)
     with DataParallelEngine(
         model=model,
         data_parallel_size=dp,
@@ -190,23 +170,20 @@ def measure(
         enable_prefix_cache=prefix_cache,
         **kw,
     ) as engine:
-        # Warm up weights, autotune and the allocator — but on prompts from *outside*
-        # the workload, or the warm-up would leave the measured run's prefixes already
-        # cached and every row would report a hit rate it did not earn.
-        engine.generate(["Warm up the replicas."] * dp, SamplingParams(max_gen_len=4, **_GREEDY))
-
-        latencies, texts = [], []
-        for _ in range(iters):
-            torch.cuda.synchronize()
-            start = time.perf_counter()
-            outputs = engine.generate(prompts, params)
-            torch.cuda.synchronize()
-            latencies.append(time.perf_counter() - start)
-            texts = [out.text for out in outputs]
         tokenizer = engine.tokenizer
-        gen_tokens = sum(len(tokenizer(t, add_special_tokens=False).input_ids) for t in texts)
-    torch.cuda.empty_cache()
-    return Row(prefix_cache, policy, statistics.median(latencies), gen_tokens), texts, tokenizer
+        # Warm up on prompts from *outside* the workload, or the warm-up would leave the
+        # measured run's prefixes already cached and every row would report a hit rate it
+        # did not earn.
+        latency, gen_tokens, texts = measure_generate(
+            engine.generate,
+            prompts,
+            gen_len=gen_len,
+            iters=iters,
+            tokenizer=tokenizer,
+            warmup_prompts=["Warm up the replicas."] * dp,
+        )
+    free_gpu()
+    return Row(prefix_cache, policy, latency, gen_tokens), texts, tokenizer
 
 
 def print_table(rows: list[Row], baseline: Row) -> None:
@@ -228,21 +205,6 @@ def print_table(rows: list[Row], baseline: Row) -> None:
         f"+ affinity routing: {baseline.latency_s / affinity.latency_s:.2f}x   "
         f"(affinity adds {cache_only.latency_s / affinity.latency_s:.2f}x over the cache alone)"
     )
-
-
-def report_agreement(reference: list[str], rows: list[tuple[str, list[str]]]) -> None:
-    """Every configuration must return the same completions: routing is not sampling.
-
-    A shared prefix that hits the cache is *copied* K/V, not recomputed, so it can differ
-    from a fresh prefill in the last bits — and an fp16 greedy tie can flip on that. A
-    low agreement rate here is the flag that says the reuse is not merely inexact but
-    wrong.
-    """
-    for label, texts in rows:
-        if len(texts) != len(reference):
-            continue
-        same = sum(a == b for a, b in zip(reference, texts, strict=True))
-        print(f"{label}: {same}/{len(reference)} completions identical to the baseline")
 
 
 def main() -> None:
@@ -279,12 +241,7 @@ def main() -> None:
     parser.add_argument("--log-dir", default=None, help="Write a JSON log here")
     args = parser.parse_args()
 
-    if torch.cuda.device_count() < args.dp:
-        print(
-            f"--dp {args.dp} needs {args.dp} GPUs, found {torch.cuda.device_count()}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    require_gpus(args.dp)
 
     prompts, group_of = build_workload(args.groups, args.per_group, args.prefix_sentences)
     kw = {"max_seq_len": args.max_seq_len, "max_gpu_num_blocks": args.max_gpu_num_blocks}
@@ -330,31 +287,22 @@ def main() -> None:
     report_agreement(reference, texts_by_label)
 
     if args.log_dir:
-        log_dir = Path(args.log_dir)
-        log_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = log_dir / f"bench_dp_prefix_{Path(args.model).name}_{stamp}.json"
-        path.write_text(
-            json.dumps(
-                {
-                    "config": {
-                        "model": args.model,
-                        "gpu": torch.cuda.get_device_name(0),
-                        "dp": args.dp,
-                        "groups": args.groups,
-                        "per_group": args.per_group,
-                        "prefix_sentences": args.prefix_sentences,
-                        "gen_len": args.gen_len,
-                        "iters": args.iters,
-                        "max_num_seqs": args.max_num_seqs,
-                        "timestamp": datetime.now().isoformat(timespec="seconds"),
-                    },
-                    "results": [r.as_dict() for r in rows],
-                },
-                indent=2,
-            )
+        path = timestamped_log_path(args.log_dir, f"bench_dp_prefix_{Path(args.model).name}")
+        write_json_log(
+            path,
+            {
+                "model": args.model,
+                "gpu": torch.cuda.get_device_name(0),
+                "dp": args.dp,
+                "groups": args.groups,
+                "per_group": args.per_group,
+                "prefix_sentences": args.prefix_sentences,
+                "gen_len": args.gen_len,
+                "iters": args.iters,
+                "max_num_seqs": args.max_num_seqs,
+            },
+            [r.as_dict() for r in rows],
         )
-        print(f"\nsaved log -> {path}")
 
 
 if __name__ == "__main__":

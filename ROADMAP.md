@@ -587,7 +587,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - acc.golden 升为强制门禁:上 GPU runner、禁止静默 skip、覆盖面扩到 continuous / 量化 / VL / DP
   - perf.watchdog:benchmark 入库,劣化超阈值报警
 - **benchmark**
-  - 立零点:全部在库模型跑 `bench_e2e` 与 `bench_hf_baseline`,同 prompt 同口径,作为后续版本的对照基准
+  - 立零点:全部在库模型跑 `bench_e2e`(lite 与 `--backend hf` 两路),同 prompt 同口径,作为后续版本的对照基准
   - 量化路径(fp8 / W8A16 / W4A16 / SmoothQuant)单列一张表,性能与精度成对给出
 - **验收**
   - 无卡时 CI 明确报"未验证",不再判绿

@@ -1,36 +1,35 @@
-"""Quantization speed + precision + memory benchmark.
+"""量化基准:速度、显存、精度一次测完。
 
-Compares lite_llama quantization schemes against HuggingFace fp16 as baseline.
-Measures: TTFT, TPOT, TPS, peak GPU memory, greedy token match rate.
+每个方案跑同一批 prompt,报 TTFT/TPOT/TPS、权重与 KV 池占用、以及与 HF fp16 基线的
+输出一致率。后端与指标口径全部来自 benchmarks/common.py,``--tp`` 大于 1 时自动走
+连续批处理引擎(decode eager)。
 
-Usage:
-    python benchmarks/bench_quant.py --model-dir /data/shared/llm_weights/Qwen3-0.6B
-    python benchmarks/bench_quant.py --model-dir /data/shared/llm_weights/Qwen3-0.6B --json results.json
-    python benchmarks/bench_quant.py --all  # run all representative models
+用法:
+    python benchmarks/bench_quant.py --model-dir my_weight/Qwen3-0.6B
+    python benchmarks/bench_quant.py --model-dir my_weight/Qwen3-0.6B --schemes fp16 int8 fp8
+    python benchmarks/bench_quant.py --all --json docs/benchmark_logs/quant.json
 """
 
 from __future__ import annotations
 
 import argparse
-import gc
-import json
 import sys
-import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 # Ensure the benchmarks package is importable when running as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import torch
-
 from benchmarks.common import (
+    PROMPTS,
     BenchResult,
     HFBackend,
-    LiteBackend,
-    PROMPTS,
+    describe_footprint,
     expand_prompts,
-    print_table,
+    make_backend,
+    peak_mem_gb,
+    reset_peak_mem,
+    write_json_log,
 )
 
 _MAX_GEN = 64
@@ -38,95 +37,76 @@ _BATCH = 4
 
 
 @dataclass
-class QuantBenchResult:
-    """Extended result including memory and precision metrics."""
+class QuantRow:
+    """一个方案的测量结果:速度 + 显存 + 精度。"""
 
-    config_label: str
+    label: str
     model: str
     speed: BenchResult
     peak_mem_gb: float
-    model_mem_gb: float = 0.0  # Model weights only
-    kv_cache_tokens: int = 0   # KV cache capacity in tokens
-    # Precision (vs HF fp16 greedy): fraction of generated tokens matching.
+    weights_gb: float = 0.0
+    kv_cache_tokens: int = 0
+    #: 与 HF fp16 基线逐 token 比对的一致率;跳过基线时为 None。
     token_match_rate: float | None = None
 
+    def as_dict(self) -> dict:
+        return {
+            "model": self.model,
+            "config": self.label,
+            "peak_mem_gb": self.peak_mem_gb,
+            "weights_gb": self.weights_gb,
+            "kv_cache_tokens": self.kv_cache_tokens,
+            "token_match_rate": self.token_match_rate,
+            **self.speed.as_dict(),
+        }
 
-def _peak_mem_gb() -> float:
-    torch.cuda.synchronize()
-    return torch.cuda.max_memory_allocated() / (1024**3)
 
-
-def _measure_lite(
-    model_dir: str,
-    quantization: str | None = None,
-    kv_cache_dtype: str = "auto",
-    tensor_parallel_size: int = 1,
+def _run_lite(
+    model_dir: str, scheme: str | None, tp: int, kv_cache_dtype: str, image: str
 ) -> tuple[BenchResult, float, float, int, list[str]]:
-    """Run lite_llama and return (result, peak_mem_gb, model_mem_gb, kv_tokens, texts)."""
-    torch.cuda.reset_peak_memory_stats()
-    kwargs: dict = {}
-    if quantization:
-        kwargs["quantization"] = quantization
-    if kv_cache_dtype != "auto":
-        kwargs["kv_cache_dtype"] = kv_cache_dtype
-    if tensor_parallel_size > 1:
-        kwargs["tensor_parallel_size"] = tensor_parallel_size
-
-    backend = LiteBackend(model_dir, use_cuda_graph=True, **kwargs)
-    prompts = expand_prompts(PROMPTS, _BATCH)
-
-    # Measure greedy speed
-    result = backend.measure(prompts, _MAX_GEN, greedy=True)
-    peak = _peak_mem_gb()
-
-    # Extract model weight memory and KV cache capacity
+    """一个量化方案:返回 (速度, 显存峰值 GiB, 权重 GiB, KV 容量 token, 输出文本)。"""
+    reset_peak_mem()
+    backend = make_backend(
+        model_dir,
+        tensor_parallel_size=tp,
+        image_path=image,
+        max_seq_len=2048,
+        quantization=scheme,
+        kv_cache_dtype=kv_cache_dtype,
+    )
     try:
-        runner = backend.generator.engine.model_runner
-        model_bytes = sum(p.numel() * p.element_size() for p in runner.model.parameters())
-        model_mem_gb = model_bytes / (1024**3)
-        kv_tokens = runner.kv_cache_manager.gpu_kv_buffer[0].shape[0]
-    except Exception:
-        model_mem_gb = 0.0
-        kv_tokens = 0
-
-    # Collect generated texts for precision comparison
-    from lite_llama import SamplingParams
-
-    gen = backend.generator
-    texts = gen.generate(prompts, SamplingParams(temperature=0.0, max_gen_len=_MAX_GEN))
-
-    backend.close()
-    return result, peak, model_mem_gb, kv_tokens, texts
+        speed = backend.measure(expand_prompts(PROMPTS, _BATCH), _MAX_GEN, greedy=True)
+        weights_gb, kv_tokens = describe_footprint(backend.runner, tp)
+        return speed, peak_mem_gb(), weights_gb, kv_tokens, backend.texts()
+    finally:
+        backend.close()
 
 
-def _measure_hf(model_dir: str) -> tuple[BenchResult, float, list[str]]:
-    """Run HF transformers fp16 baseline."""
-    torch.cuda.reset_peak_memory_stats()
+def _run_hf(model_dir: str) -> tuple[BenchResult, float, list[str], object]:
+    """HF fp16 基线;tokenizer 一并返回,供逐 token 比对复用同一套分词。"""
+    reset_peak_mem()
     backend = HFBackend(model_dir)
-    prompts = expand_prompts(PROMPTS, _BATCH)
-    result = backend.measure(prompts, _MAX_GEN, greedy=True)
-    peak = _peak_mem_gb()
-
-    # Get generated texts
-    texts_tensor = backend._last_gen
-    texts = [backend.tokenizer.decode(t, skip_special_tokens=True) for t in texts_tensor]
-
-    del backend
-    gc.collect()
-    torch.cuda.empty_cache()
-    return result, peak, texts
+    try:
+        speed = backend.measure(expand_prompts(PROMPTS, _BATCH), _MAX_GEN, greedy=True)
+        return speed, peak_mem_gb(), backend.texts(), backend.tokenizer
+    finally:
+        backend.close()
 
 
-def _token_match_rate(lite_texts: list[str], hf_texts: list[str]) -> float:
-    """Compute fraction of tokens matching between two text lists."""
-    total, match = 0, 0
-    for lt, ht in zip(lite_texts, hf_texts):
-        lt_toks = lt.split()
-        ht_toks = ht.split()
-        n = min(len(lt_toks), len(ht_toks))
+def _token_match_rate(lite_texts: list[str], hf_texts: list[str], tokenizer) -> float:
+    """两侧输出重分词后的逐 token 一致率。
+
+    greedy 下第一个分歧点之后两条轨迹会一路散开,所以这个数字量的是"多久才分歧",
+    不是数值精度——逐元素精度看 tests/golden 的 max_abs_diff。
+    """
+    total = match = 0
+    for lite, hf in zip(lite_texts, hf_texts, strict=False):
+        lite_ids = tokenizer.encode(lite, add_special_tokens=False)
+        hf_ids = tokenizer.encode(hf, add_special_tokens=False)
+        n = min(len(lite_ids), len(hf_ids))
         total += n
-        match += sum(1 for a, b in zip(lt_toks[:n], ht_toks[:n]) if a == b)
-    return match / total if total > 0 else 0.0
+        match += sum(1 for a, b in zip(lite_ids[:n], hf_ids[:n], strict=True) if a == b)
+    return match / total if total else 0.0
 
 
 def benchmark_model(
@@ -134,131 +114,115 @@ def benchmark_model(
     schemes: list[str | None],
     tp: int = 1,
     skip_hf: bool = False,
-) -> list[QuantBenchResult]:
-    """Run all requested schemes on one model."""
+    kv_cache_dtype: str = "auto",
+    image: str = "examples/assets/vision_bench.jpg",
+) -> list[QuantRow]:
+    """一个 checkpoint 上跑完所有请求的方案(基线在前,方案在后)。"""
     model_name = Path(model_dir).name
-    results: list[QuantBenchResult] = []
+    rows: list[QuantRow] = []
 
-    # HF baseline
     hf_texts: list[str] | None = None
+    tokenizer = None
     if not skip_hf:
-        print(f"\n{'='*60}")
-        print(f"  {model_name} — HF fp16 baseline")
-        print(f"{'='*60}")
-        hf_res, hf_mem, hf_texts = _measure_hf(model_dir)
-        results.append(QuantBenchResult(
-            config_label="HF fp16",
-            model=model_name,
-            speed=hf_res,
-            peak_mem_gb=hf_mem,
-        ))
-        print(f"  Peak mem: {hf_mem:.2f} GB | TPS: {hf_res.tps:.1f}")
+        print(f"\n{'=' * 60}\n  {model_name} — HF fp16 baseline\n{'=' * 60}")
+        speed, peak, hf_texts, tokenizer = _run_hf(model_dir)
+        rows.append(QuantRow("HF fp16", model_name, speed, peak))
+        print(f"  Peak mem: {peak:.2f} GB | TPS: {speed.tps:.1f}")
 
     for scheme in schemes:
-        label = f"lite {'fp16' if scheme is None else scheme}"
+        label = f"lite {scheme or 'fp16'}"
         print(f"\n  {model_name} — {label} (TP={tp})")
         try:
-            lite_res, lite_mem, model_mem, kv_tokens, lite_texts = _measure_lite(
-                model_dir, quantization=scheme, tensor_parallel_size=tp
+            speed, peak, weights_gb, kv_tokens, texts = _run_lite(
+                model_dir, scheme, tp, kv_cache_dtype, image
             )
-        except Exception as e:
-            print(f"  SKIP: {e}")
+        except Exception as exc:  # 方案不支持这个 checkpoint 时跳过,不中断整轮
+            print(f"  SKIP: {exc}")
             continue
 
-        match_rate = None
-        if hf_texts is not None:
-            match_rate = _token_match_rate(lite_texts, hf_texts)
-
-        results.append(QuantBenchResult(
-            config_label=label,
-            model=model_name,
-            speed=lite_res,
-            peak_mem_gb=lite_mem,
-            model_mem_gb=model_mem,
-            kv_cache_tokens=kv_tokens,
-            token_match_rate=match_rate,
-        ))
+        match = _token_match_rate(texts, hf_texts, tokenizer) if hf_texts else None
+        rows.append(QuantRow(label, model_name, speed, peak, weights_gb, kv_tokens, match))
         print(
-            f"  Model: {model_mem:.2f} GB | KV: {kv_tokens} tok | TPS: {lite_res.tps:.1f}" +
-            (f" | Match: {match_rate*100:.1f}%" if match_rate is not None else "")
+            f"  Weights: {weights_gb:.2f} GB | KV: {kv_tokens} tok | TPS: {speed.tps:.1f}"
+            + (f" | Match: {match * 100:.1f}%" if match is not None else "")
         )
 
-    return results
+    return rows
 
 
-def render_markdown_table(results: list[QuantBenchResult]) -> str:
-    """Render results as a markdown table."""
+def render_markdown_table(rows: list[QuantRow]) -> str:
     lines = [
-        "| Model | Config | Model Mem | KV Tokens | TTFT (ms) | TPOT (ms) | TPS |",
-        "|-------|--------|-----------|-----------|-----------|-----------|-----|",
+        "| Model | Config | Weights | KV Tokens | TTFT (ms) | TPOT (ms) | TPS | Match |",
+        "|-------|--------|---------|-----------|-----------|-----------|-----|-------|",
     ]
-    for r in results:
-        model_mem = f"{r.model_mem_gb:.2f} GB" if r.model_mem_gb > 0 else r.peak_mem_gb and f"{r.peak_mem_gb:.2f} GB" or "N/A"
-        kv = f"{r.kv_cache_tokens:,}" if r.kv_cache_tokens > 0 else "N/A"
+    for r in rows:
+        # 基线不报权重占用(HF 侧没有 ModelRunner 可问),退回显存峰值。
+        weights = f"{r.weights_gb:.2f} GB" if r.weights_gb else f"{r.peak_mem_gb:.2f} GB peak"
+        kv = f"{r.kv_cache_tokens:,}" if r.kv_cache_tokens else "N/A"
+        match = "—" if r.token_match_rate is None else f"{r.token_match_rate * 100:.0f}%"
         lines.append(
-            f"| {r.model} | {r.config_label} | {model_mem} | "
-            f"{kv} | {r.speed.ttft_ms:.1f} | {r.speed.tpot_ms:.2f} | "
-            f"{r.speed.tps:.1f} |"
+            f"| {r.model} | {r.label} | {weights} | {kv} | {r.speed.ttft_ms:.1f} | "
+            f"{r.speed.tpot_ms:.2f} | {r.speed.tps:.1f} | {match} |"
         )
     return "\n".join(lines)
 
 
-def main():
+#: ``--all`` 的代表性组合:(checkpoint, 方案, TP, 是否跳过 HF 基线)。
+#: 30B MoE 的 fp16 基线反量化后放不进两张卡,只测 lite 侧。
+_ALL_CONFIGS = [
+    ("/data/shared/llm_weights/Qwen3-0.6B", [None, "int8", "fp8", "int4"], 1, False),
+    ("/data/shared/llm_weights/Qwen3-0.6B-FP8", [None], 1, False),
+    ("/data/shared/llm_weights/Qwen3-VL-4B-Instruct", [None, "int8"], 1, False),
+    ("/data/shared/llm_weights/Qwen3-30B-A3B-Instruct-2507-FP8", [None], 2, True),
+]
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(description="Quantization benchmark")
     parser.add_argument("--model-dir", type=str, help="Single model to benchmark")
-    parser.add_argument("--schemes", nargs="*", default=None,
-                        help="Quantization schemes (None=fp16, int8, fp8, int4, smoothquant)")
+    parser.add_argument(
+        "--schemes",
+        nargs="*",
+        default=None,
+        help="Quantization schemes (fp16, int8, fp8, int4, smoothquant)",
+    )
     parser.add_argument("--tp", type=int, default=1, help="Tensor parallel size")
-    parser.add_argument("--json", type=str, help="Output JSON path (default: docs/benchmark_logs/)")
+    parser.add_argument("--kv-cache-dtype", default="auto", help="auto (fp16) or fp8")
+    parser.add_argument(
+        "--image",
+        default="examples/assets/vision_bench.jpg",
+        help="Image fed to vision-language checkpoints (ignored for text models)",
+    )
+    parser.add_argument("--json", type=str, help="Output JSON path")
     parser.add_argument("--all", action="store_true", help="Run representative subset")
     parser.add_argument("--skip-hf", action="store_true", help="Skip HF baseline")
     args = parser.parse_args()
 
-    all_results: list[QuantBenchResult] = []
-
+    rows: list[QuantRow] = []
     if args.all:
-        # Representative subset from the plan
-        configs = [
-            ("/data/shared/llm_weights/Qwen3-0.6B", [None, "int8", "fp8", "int4"], 1, False),
-            ("/data/shared/llm_weights/Qwen3-0.6B-FP8", [None], 1, False),
-            ("/data/shared/llm_weights/Qwen3-VL-4B-Instruct", [None, "int8"], 1, False),
-            ("/data/shared/llm_weights/Qwen3-30B-A3B-Instruct-2507-FP8", [None], 2, True),
-        ]
-        for model_dir, schemes, tp, skip_hf in configs:
+        for model_dir, schemes, tp, skip_hf in _ALL_CONFIGS:
             if not Path(model_dir).exists():
                 print(f"SKIP (not found): {model_dir}")
                 continue
-            all_results.extend(benchmark_model(model_dir, schemes, tp, skip_hf))
+            rows.extend(
+                benchmark_model(model_dir, schemes, tp, skip_hf, args.kv_cache_dtype, args.image)
+            )
     elif args.model_dir:
-        schemes = args.schemes if args.schemes else [None, "int8", "fp8"]
-        # Convert "None" string to actual None
-        schemes = [None if s in ("None", "none", "fp16") else s for s in schemes]
-        all_results = benchmark_model(args.model_dir, schemes, args.tp, args.skip_hf)
+        # "fp16" 是"不量化"的用户拼写,内部用 None 表示。
+        requested = args.schemes or ["fp16", "int8", "fp8"]
+        schemes = [None if s in ("None", "none", "fp16") else s for s in requested]
+        rows = benchmark_model(
+            args.model_dir, schemes, args.tp, args.skip_hf, args.kv_cache_dtype, args.image
+        )
     else:
         parser.print_help()
         return
 
-    # Print summary
-    print(f"\n{'='*60}")
-    print("  RESULTS")
-    print(f"{'='*60}")
-    print(render_markdown_table(all_results))
+    print(f"\n{'=' * 60}\n  RESULTS\n{'=' * 60}")
+    print(render_markdown_table(rows))
 
     if args.json:
-        out = [
-            {
-                "model": r.model,
-                "config": r.config_label,
-                "peak_mem_gb": r.peak_mem_gb,
-                "model_mem_gb": r.model_mem_gb,
-                "kv_cache_tokens": r.kv_cache_tokens,
-                "token_match_rate": r.token_match_rate,
-                **r.speed.as_dict(),
-            }
-            for r in all_results
-        ]
-        Path(args.json).write_text(json.dumps(out, indent=2))
-        print(f"\nJSON saved to {args.json}")
+        write_json_log(args.json, vars(args), [r.as_dict() for r in rows])
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 """教学示例:HuggingFace ``generate()`` 与 ``pipeline()`` 两种基线用法。
 
 作为 lite_llama 的性能/精度对照基线保留:同样的 prompt 与采样参数下,
-``benchmarks/bench_hf_baseline.py`` 用的就是这套调用方式。
+``benchmarks/bench_e2e.py --backend hf`` 用的就是这套调用方式。
 
 用法::
 

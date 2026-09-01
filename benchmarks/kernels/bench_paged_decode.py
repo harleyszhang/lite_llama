@@ -43,13 +43,13 @@ Usage:
 from __future__ import annotations
 
 import math
-import os
 import sys
 from dataclasses import replace
+from pathlib import Path
 
 import torch
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from kv_pool import PagedPool, paged_pool
 from microbench import Row, Work, bench, metadata, report, verify
