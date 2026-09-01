@@ -1,0 +1,234 @@
+"""v0.10 两个新可观测面的热路径开销:logprobs 与 metrics/trace 各要多少。
+
+两者都是"看见推理内部"的功能,但代价的性质完全不同,所以分开量:
+
+- logprobs / prompt_logprobs 在 **GPU 侧**:每步多一次 log_softmax、一次 topk,
+  以及把结果搬回 host。开销随 batch 与 vocab 走,是真花钱的那一类。
+  prompt_logprobs 更贵——它要给整个 prompt 的每个位置打分,prefill 的 logits
+  从"只留最后一行"变成"全留",显存与拷贝都按 prompt 长度放大。
+- metrics / trace 在 **host 侧**:每步几个 float 加法(占用 gauge)、每请求一次
+  直方图落桶和一个 span。理应淹没在步循环的噪声里,本脚本就是来证实这一点的。
+
+判据是"能不能从噪声里分辨出来",不是单跑一次看数字大小:同一配置两次测量本身
+就有百分之几的抖动,所以基线跑两遍,把它的自差当噪声下限印出来。小于噪声的差值
+只能说"测不出来",不能报成提速或变慢。
+
+同一个引擎跑完所有配置,只换 SamplingParams 与 engine.metrics/engine.tracer——
+重建引擎会换一份 KV 池和一次新的 autotune,那点差异比要测的量还大。
+
+口径同 benchmarks/common.py(TTFT/TPOT/TPS),离线推理:整批一起提交,不模拟到达。
+
+用法:
+    python benchmarks/bench_observability.py --model-dir my_weight/Qwen3-0.6B
+    python benchmarks/bench_observability.py --batch 16 --max-gen-len 128 --json out.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import statistics
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from benchmarks.common import (
+    GREEDY_PARAMS,
+    PROMPTS,
+    BenchResult,
+    expand_prompts,
+    free_gpu,
+    print_table,
+    require_gpus,
+    steps_to_result,
+    write_json_log,
+)
+from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
+from lite_llama.engine.sampler import SamplingParams
+from lite_llama.observe import METRICS_ENV, EngineMetrics, Tracer
+
+CKPT = "my_weight/Qwen3-0.6B"
+
+_TOP_K = 5  # 报几个备选;topk 的宽度对耗时的影响远小于"报不报"
+
+
+@dataclass(frozen=True)
+class Variant:
+    """一个被测配置:采样参数上的开关 + 引擎侧的观测对象。"""
+
+    label: str
+    logprobs: int | None = None
+    prompt_logprobs: int | None = None
+    metrics: bool = False
+    trace: bool = False
+
+    def params(self, max_gen_len: int) -> SamplingParams:
+        return SamplingParams(
+            max_gen_len=max_gen_len,
+            logprobs=self.logprobs,
+            prompt_logprobs=self.prompt_logprobs,
+            **GREEDY_PARAMS,
+        )
+
+
+#: 顺序有意:基线在头尾各一次,中间每行只相对基线多开一个东西。
+VARIANTS = (
+    Variant("baseline"),
+    Variant("metrics", metrics=True),
+    Variant("metrics+trace", metrics=True, trace=True),
+    Variant(f"logprobs={_TOP_K}", logprobs=_TOP_K),
+    Variant(f"prompt_logprobs={_TOP_K}", prompt_logprobs=_TOP_K),
+    Variant("both", logprobs=_TOP_K, prompt_logprobs=_TOP_K),
+    Variant("baseline (again)"),
+)
+
+
+def build_metrics(enabled: bool) -> EngineMetrics:
+    """关/开一份 metrics。
+
+    必须走 ``from_env``:``EngineMetrics(enabled=False)`` 只是把标志位置掉,真正
+    换成空仪表(即"一次属性查找 + 一个空方法")是 ``from_env`` 做的,直接构造
+    出来的关闭态仍然在落桶,量出来的就不是关掉的样子。
+    """
+    previous = os.environ.get(METRICS_ENV)
+    os.environ[METRICS_ENV] = "1" if enabled else "0"
+    try:
+        return EngineMetrics.from_env()
+    finally:
+        if previous is None:
+            os.environ.pop(METRICS_ENV, None)
+        else:
+            os.environ[METRICS_ENV] = previous
+
+
+def build_tracer(enabled: bool) -> Tracer:
+    """开启态导到内存,不走网络。
+
+    要量的是 span 创建与属性写入压在步循环上的成本;真实部署里导出由
+    ``BatchSpanProcessor`` 的后台线程做,collector 的往返不该记到 TTFT 上。
+    换成内存 exporter 后这条路径与线上完全同构,只是终点不同。
+    """
+    if not enabled:
+        return Tracer()
+    try:
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter,
+        )
+    except ModuleNotFoundError:
+        print("opentelemetry SDK 未安装,trace 行退化为 no-op(等同 baseline)")
+        return Tracer()
+
+    provider = TracerProvider()
+    provider.add_span_processor(BatchSpanProcessor(InMemorySpanExporter()))
+    return Tracer(provider.get_tracer("bench_observability"))
+
+
+def measure(engine, prompts: list[str], params: SamplingParams) -> BenchResult:
+    """整批提交后逐 step 打点,口径同 EngineBackend。"""
+    requests = [engine.add_request(prompt, params) for prompt in prompts]
+    torch.cuda.synchronize()
+    t_start = time.perf_counter()
+    step_ends: list[float] = []
+    while engine.has_unfinished_requests():
+        engine.step()
+        step_ends.append(time.perf_counter())
+    torch.cuda.synchronize()
+    total = time.perf_counter() - t_start
+    return steps_to_result(
+        step_ends,
+        t_start=t_start,
+        total_s=total,
+        batch=len(prompts),
+        gen_tokens=sum(len(r.output_token_ids) for r in requests),
+    )
+
+
+def run_variant(
+    engine, variant: Variant, prompts: list[str], max_gen_len: int, iters: int
+) -> BenchResult:
+    """装好这个配置,预热到稳态,取 iters 轮里 TPS 的中位那轮。
+
+    预热要用配置本身的参数:第一次带 logprobs 的步会现编 topk kernel,把它算进
+    测量就等于把编译时间报成 logprobs 的开销。
+    """
+    engine.metrics = build_metrics(variant.metrics)
+    engine.tracer = build_tracer(variant.trace)
+    params = variant.params(max_gen_len)
+
+    engine.generate(prompts[:2], variant.params(8))
+    rounds = [measure(engine, prompts, params) for _ in range(iters)]
+    return sorted(rounds, key=lambda r: r.tps)[len(rounds) // 2]
+
+
+def report(results: dict[str, BenchResult]) -> dict[str, float]:
+    """相对基线的代价,连同噪声下限一起印——小于噪声的差值不作数。"""
+    baselines = [r.tps for label, r in results.items() if label.startswith("baseline")]
+    reference = statistics.mean(baselines)
+    noise = (max(baselines) - min(baselines)) / reference if len(baselines) > 1 else 0.0
+
+    print(f"\nbaseline TPS {reference:.1f} tok/s, 两次自差 {noise * 100:.1f}% (噪声下限)")
+    costs: dict[str, float] = {}
+    for label, result in results.items():
+        cost = 1.0 - result.tps / reference
+        costs[label] = cost
+        if label.startswith("baseline"):
+            continue
+        verdict = "低于噪声" if abs(cost) <= noise else f"{cost * 100:+.1f}%"
+        print(f"{label:22s} 吞吐代价 {cost * 100:+6.1f}% -> {verdict}")
+    return {"baseline_tps": reference, "noise": noise, **costs}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model-dir", default=CKPT)
+    ap.add_argument("--batch", type=int, default=16)
+    ap.add_argument("--max-gen-len", type=int, default=128)
+    ap.add_argument("--max-seq-len", type=int, default=1024)
+    ap.add_argument("--max-num-seqs", type=int, default=16)
+    ap.add_argument("--kv-blocks", type=int, default=40960)
+    ap.add_argument("--iters", type=int, default=3, help="每个配置测几轮,取 TPS 中位")
+    ap.add_argument("--json", default=None)
+    args = ap.parse_args()
+
+    require_gpus(1)
+    prompts = expand_prompts(PROMPTS, args.batch)
+
+    engine = ContinuousBatchingEngine.from_pretrained(
+        args.model_dir,
+        max_seq_len=args.max_seq_len,
+        max_num_seqs=args.max_num_seqs,
+        max_gpu_num_blocks=args.kv_blocks,
+        use_cuda_graph=True,
+    )
+    try:
+        print(f"=== {args.batch} requests x {args.max_gen_len} tokens, {args.iters} iters ===")
+        results = {
+            variant.label: run_variant(engine, variant, prompts, args.max_gen_len, args.iters)
+            for variant in VARIANTS
+        }
+    finally:
+        engine.shutdown()
+        del engine
+        free_gpu()
+
+    print_table(results)
+    summary = report(results)
+
+    if args.json:
+        write_json_log(
+            args.json,
+            vars(args),
+            {"runs": {k: v.as_dict() for k, v in results.items()}, "summary": summary},
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

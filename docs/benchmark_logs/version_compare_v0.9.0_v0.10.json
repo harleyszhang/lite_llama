@@ -1,0 +1,56 @@
+{
+  "config": {
+    "note": "identical measurement script run against both worktrees; only lite_llama differs",
+    "model": "my_weight/Qwen3-0.6B",
+    "batch": 16,
+    "gen_len": 128,
+    "iters": 3,
+    "mode": "offline inference (whole batch submitted at once, no arrival simulation)",
+    "gpu": "NVIDIA A10",
+    "timestamp": "2026-09-01T21:02:53"
+  },
+  "v0.9.0": {
+    "continuous": {
+      "ttft_ms": 22.774409502744675,
+      "tpot_ms": 4.7449425273523556,
+      "total_s": 0.6254203580319881,
+      "gen_tokens": 2048,
+      "tps": 3274.597594559357
+    },
+    "static_graph": {
+      "ttft_ms": 24.306271225214005,
+      "tpot_ms": 4.574454294180307,
+      "total_s": 0.605817299336195,
+      "gen_tokens": 2048,
+      "tps": 3380.5571452714057
+    }
+  },
+  "v0.10.0": {
+    "continuous": {
+      "ttft_ms": 23.19352701306343,
+      "tpot_ms": 4.748697502641227,
+      "total_s": 0.626315888017416,
+      "gen_tokens": 2048,
+      "tps": 3269.9154519022054
+    },
+    "static_graph": {
+      "ttft_ms": 24.66951683163643,
+      "tpot_ms": 4.562427443782176,
+      "total_s": 0.6046633422374725,
+      "gen_tokens": 2048,
+      "tps": 3387.008698793714
+    }
+  },
+  "delta_pct": {
+    "continuous": {
+      "tps": -0.14,
+      "tpot": 0.08,
+      "ttft": 1.84
+    },
+    "static_graph": {
+      "tps": 0.19,
+      "tpot": -0.26,
+      "ttft": 1.49
+    }
+  }
+}
