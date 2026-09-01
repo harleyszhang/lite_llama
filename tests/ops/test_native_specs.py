@@ -213,7 +213,7 @@ class TestAttentionCatalogue:
     def test_mla_decode_never_dispatches_without_its_gates(self) -> None:
         # The latent cache is not interchangeable with the per-head paged
         # pool, so the row demands the ``kv:mla_latent`` tag — and then still
-        # has to survive the availability probe. Either gate refuses, and the
+        # has to survive the availability check. Either gate refuses, and the
         # failure names the row instead of silently routing somewhere wrong.
         with pytest.raises(LookupError, match="no usable implementation"):
             dispatch("attention.mla_decode", dtype="bf16")

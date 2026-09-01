@@ -10,7 +10,7 @@ Usage:
 
 from __future__ import annotations
 
-from ..probe import BackendInstall, library_present
+from ..capability import BackendInstall, library_present
 
 INSTALL = BackendInstall(
     backend="deepep",
