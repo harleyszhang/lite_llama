@@ -1,0 +1,984 @@
+{
+ "meta": {
+  "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507",
+  "date": "2026-09-01 06:55:14",
+  "device": "NVIDIA H100 80GB HBM3",
+  "torch": "2.13.0+cu130",
+  "python": "3.14.7",
+  "commit": "v0.8.0-32-g4f256d7-dirty",
+  "command": "scripts/quant_kv_error.py --model-dir /mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507 --max-gen-len 128 --gsm8k 500 --json docs/benchmark_logs/kv_fp8_error_qwen3-4b_20260901.json"
+ },
+ "gates": {
+  "clip_limit": 448.0,
+  "match_floor": 0.98
+ },
+ "prompts": [
+  "Explain in detail how a paged key-value cache lets an inference server serve many sequences of different lengths without fragmenting memory.",
+  "Write a Python function that merges two sorted lists in linear time, then explain why the naive concatenate-and-sort version is asymptotically worse.",
+  "A train leaves at 09:15 travelling 84 km/h and a second leaves the same station at 10:00 travelling 112 km/h. When does the second catch the first?",
+  "Translate to French, then back to English, and comment on what the round trip lost: 'The quantisation error is small but it is not zero.'"
+ ],
+ "layers": {
+  "layers.0.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 294.0,
+    "clipped": 0,
+    "subnormal": 11858,
+    "rms_value": 15.014010517878374,
+    "rel_rms_static": 0.027649345960145618,
+    "rel_rms_oracle": 0.02332600251191058
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 0.55078125,
+    "clipped": 0,
+    "subnormal": 371275,
+    "rms_value": 0.03094707157051285,
+    "rel_rms_static": 0.029578172297422267,
+    "rel_rms_oracle": 0.02589699360797744
+   }
+  },
+  "layers.1.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 52.5,
+    "clipped": 0,
+    "subnormal": 7341,
+    "rms_value": 3.265210419656682,
+    "rel_rms_static": 0.027152130335749532,
+    "rel_rms_oracle": 0.024746753249369584
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 0.4765625,
+    "clipped": 0,
+    "subnormal": 227892,
+    "rms_value": 0.04866864123780149,
+    "rel_rms_static": 0.027378342142239068,
+    "rel_rms_oracle": 0.02612565993458422
+   }
+  },
+  "layers.2.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 22.375,
+    "clipped": 0,
+    "subnormal": 9784,
+    "rms_value": 1.7787729154876692,
+    "rel_rms_static": 0.026809391013786536,
+    "rel_rms_oracle": 0.025589758812235804
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 0.5703125,
+    "clipped": 0,
+    "subnormal": 149738,
+    "rms_value": 0.07035079205531881,
+    "rel_rms_static": 0.0269415405250734,
+    "rel_rms_oracle": 0.026202080961961978
+   }
+  },
+  "layers.3.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 26.625,
+    "clipped": 0,
+    "subnormal": 9154,
+    "rms_value": 1.9708775569768864,
+    "rel_rms_static": 0.026655204097519595,
+    "rel_rms_oracle": 0.02611467211803001
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 0.765625,
+    "clipped": 0,
+    "subnormal": 110401,
+    "rms_value": 0.09689194728991707,
+    "rel_rms_static": 0.026700381783704402,
+    "rel_rms_oracle": 0.02621631981600259
+   }
+  },
+  "layers.4.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 60.5,
+    "clipped": 0,
+    "subnormal": 11592,
+    "rms_value": 3.310260597154539,
+    "rel_rms_static": 0.025859842370124623,
+    "rel_rms_oracle": 0.02521929906695894
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 1.234375,
+    "clipped": 0,
+    "subnormal": 90336,
+    "rms_value": 0.12314272007996895,
+    "rel_rms_static": 0.02665976452436068,
+    "rel_rms_oracle": 0.026222095505273886
+   }
+  },
+  "layers.5.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 92.0,
+    "clipped": 0,
+    "subnormal": 6467,
+    "rms_value": 5.097510812870815,
+    "rel_rms_static": 0.0255154065185759,
+    "rel_rms_oracle": 0.024474357498615623
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 1.21875,
+    "clipped": 0,
+    "subnormal": 79567,
+    "rms_value": 0.14269031862515746,
+    "rel_rms_static": 0.02659012554363537,
+    "rel_rms_oracle": 0.02622050664745928
+   }
+  },
+  "layers.6.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 35.0,
+    "clipped": 0,
+    "subnormal": 8332,
+    "rms_value": 2.6131463814278746,
+    "rel_rms_static": 0.02495274313789729,
+    "rel_rms_oracle": 0.024121131104675883
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 1.3125,
+    "clipped": 0,
+    "subnormal": 66445,
+    "rms_value": 0.17660105820693,
+    "rel_rms_static": 0.026649621187914353,
+    "rel_rms_oracle": 0.02630574643584727
+   }
+  },
+  "layers.7.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 33.25,
+    "clipped": 0,
+    "subnormal": 8051,
+    "rms_value": 1.880431468315022,
+    "rel_rms_static": 0.02651770795459948,
+    "rel_rms_oracle": 0.025800463555395628
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 2.140625,
+    "clipped": 0,
+    "subnormal": 40717,
+    "rms_value": 0.25039583539826366,
+    "rel_rms_static": 0.026584354335236596,
+    "rel_rms_oracle": 0.026227167004788953
+   }
+  },
+  "layers.8.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 49.5,
+    "clipped": 0,
+    "subnormal": 9496,
+    "rms_value": 3.2598708755422594,
+    "rel_rms_static": 0.028004754347270108,
+    "rel_rms_oracle": 0.0238993170272256
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 3.15625,
+    "clipped": 0,
+    "subnormal": 33152,
+    "rms_value": 0.30898216692601366,
+    "rel_rms_static": 0.02657774737835322,
+    "rel_rms_oracle": 0.026261406159621397
+   }
+  },
+  "layers.9.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 25.25,
+    "clipped": 0,
+    "subnormal": 10752,
+    "rms_value": 1.8104727897481925,
+    "rel_rms_static": 0.026552841011044628,
+    "rel_rms_oracle": 0.026241114981104707
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 2.609375,
+    "clipped": 0,
+    "subnormal": 31680,
+    "rms_value": 0.3172427653030116,
+    "rel_rms_static": 0.026621048138479795,
+    "rel_rms_oracle": 0.026310863944259147
+   }
+  },
+  "layers.10.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 39.25,
+    "clipped": 0,
+    "subnormal": 10414,
+    "rms_value": 2.9289222065063982,
+    "rel_rms_static": 0.024828930350418277,
+    "rel_rms_oracle": 0.024757503677033426
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 4.65625,
+    "clipped": 0,
+    "subnormal": 25778,
+    "rms_value": 0.4059511920748146,
+    "rel_rms_static": 0.026626023530220016,
+    "rel_rms_oracle": 0.026279097875307723
+   }
+  },
+  "layers.11.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 34.5,
+    "clipped": 0,
+    "subnormal": 8365,
+    "rms_value": 2.7654188832978734,
+    "rel_rms_static": 0.02757419109579946,
+    "rel_rms_oracle": 0.025689336746277474
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 3.203125,
+    "clipped": 0,
+    "subnormal": 34429,
+    "rms_value": 0.2926537619433508,
+    "rel_rms_static": 0.026599064796001475,
+    "rel_rms_oracle": 0.026179959563173375
+   }
+  },
+  "layers.12.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 27.0,
+    "clipped": 0,
+    "subnormal": 9162,
+    "rms_value": 2.2600027047358924,
+    "rel_rms_static": 0.027093056882240774,
+    "rel_rms_oracle": 0.02565735766205061
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 2.53125,
+    "clipped": 0,
+    "subnormal": 31033,
+    "rms_value": 0.32445221682456543,
+    "rel_rms_static": 0.026606261423249854,
+    "rel_rms_oracle": 0.02630422611925278
+   }
+  },
+  "layers.13.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 27.75,
+    "clipped": 0,
+    "subnormal": 13648,
+    "rms_value": 1.8554483801720165,
+    "rel_rms_static": 0.026756525106106432,
+    "rel_rms_oracle": 0.02612970621154091
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 20.625,
+    "clipped": 0,
+    "subnormal": 33181,
+    "rms_value": 0.33521561241162473,
+    "rel_rms_static": 0.02664130869671346,
+    "rel_rms_oracle": 0.025756427570376213
+   }
+  },
+  "layers.14.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 33.0,
+    "clipped": 0,
+    "subnormal": 9464,
+    "rms_value": 2.509842668406983,
+    "rel_rms_static": 0.027005381635093074,
+    "rel_rms_oracle": 0.02542700887142434
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 10.1875,
+    "clipped": 0,
+    "subnormal": 26432,
+    "rms_value": 0.39413200061626524,
+    "rel_rms_static": 0.026554634205643947,
+    "rel_rms_oracle": 0.026191603018222317
+   }
+  },
+  "layers.15.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 23.75,
+    "clipped": 0,
+    "subnormal": 10549,
+    "rms_value": 1.9594358617479248,
+    "rel_rms_static": 0.02662901844919031,
+    "rel_rms_oracle": 0.026178981561190955
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 28.75,
+    "clipped": 0,
+    "subnormal": 27288,
+    "rms_value": 0.43458443067149094,
+    "rel_rms_static": 0.02642980512584325,
+    "rel_rms_oracle": 0.026029191967631853
+   }
+  },
+  "layers.16.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 26.25,
+    "clipped": 0,
+    "subnormal": 13654,
+    "rms_value": 1.952482425482883,
+    "rel_rms_static": 0.026533328688024046,
+    "rel_rms_oracle": 0.02590951792996608
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 25.0,
+    "clipped": 0,
+    "subnormal": 22586,
+    "rms_value": 0.5473294032279798,
+    "rel_rms_static": 0.026779866071131628,
+    "rel_rms_oracle": 0.026162550032588452
+   }
+  },
+  "layers.17.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 22.125,
+    "clipped": 0,
+    "subnormal": 13724,
+    "rms_value": 1.9779408897707493,
+    "rel_rms_static": 0.02660971379469204,
+    "rel_rms_oracle": 0.025899330471810013
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 40.25,
+    "clipped": 0,
+    "subnormal": 24457,
+    "rms_value": 0.5479963662138603,
+    "rel_rms_static": 0.0264782556290422,
+    "rel_rms_oracle": 0.024635385356681885
+   }
+  },
+  "layers.18.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 23.375,
+    "clipped": 0,
+    "subnormal": 13051,
+    "rms_value": 1.9946286542534477,
+    "rel_rms_static": 0.026634395662247307,
+    "rel_rms_oracle": 0.025890922958712443
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 21.25,
+    "clipped": 0,
+    "subnormal": 20894,
+    "rms_value": 0.6351330008816743,
+    "rel_rms_static": 0.02659734409693483,
+    "rel_rms_oracle": 0.026143096208717912
+   }
+  },
+  "layers.19.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 27.875,
+    "clipped": 0,
+    "subnormal": 10574,
+    "rms_value": 2.0304210621987626,
+    "rel_rms_static": 0.026587921315719156,
+    "rel_rms_oracle": 0.026143415972536735
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 7.8125,
+    "clipped": 0,
+    "subnormal": 17733,
+    "rms_value": 0.600785481541072,
+    "rel_rms_static": 0.02660908796044948,
+    "rel_rms_oracle": 0.02608188049988254
+   }
+  },
+  "layers.20.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 24.5,
+    "clipped": 0,
+    "subnormal": 16239,
+    "rms_value": 1.966163668189782,
+    "rel_rms_static": 0.026637709110834917,
+    "rel_rms_oracle": 0.026127611089569725
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 6.9375,
+    "clipped": 0,
+    "subnormal": 17942,
+    "rms_value": 0.5896185656558417,
+    "rel_rms_static": 0.026663523954364773,
+    "rel_rms_oracle": 0.026165556081552313
+   }
+  },
+  "layers.21.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 21.625,
+    "clipped": 0,
+    "subnormal": 15425,
+    "rms_value": 2.0385653464623448,
+    "rel_rms_static": 0.026723568425688873,
+    "rel_rms_oracle": 0.02597408351857212
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 5.59375,
+    "clipped": 0,
+    "subnormal": 15235,
+    "rms_value": 0.6789234202815305,
+    "rel_rms_static": 0.026569859837014022,
+    "rel_rms_oracle": 0.026206651164584104
+   }
+  },
+  "layers.22.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 27.0,
+    "clipped": 0,
+    "subnormal": 17308,
+    "rms_value": 2.153959854654556,
+    "rel_rms_static": 0.02670421075765782,
+    "rel_rms_oracle": 0.026073169767609067
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 8.6875,
+    "clipped": 0,
+    "subnormal": 12608,
+    "rms_value": 0.8096282126159234,
+    "rel_rms_static": 0.02659066244443237,
+    "rel_rms_oracle": 0.02623831840332077
+   }
+  },
+  "layers.23.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 28.0,
+    "clipped": 0,
+    "subnormal": 13512,
+    "rms_value": 2.3986009581602135,
+    "rel_rms_static": 0.026865642502975483,
+    "rel_rms_oracle": 0.025652681094137736
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 8.5625,
+    "clipped": 0,
+    "subnormal": 12638,
+    "rms_value": 0.8360242940991957,
+    "rel_rms_static": 0.026612603515062064,
+    "rel_rms_oracle": 0.02625613395252912
+   }
+  },
+  "layers.24.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 27.375,
+    "clipped": 0,
+    "subnormal": 21191,
+    "rms_value": 1.9530292332326984,
+    "rel_rms_static": 0.026608016038322798,
+    "rel_rms_oracle": 0.026240534881139633
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 8.9375,
+    "clipped": 0,
+    "subnormal": 11035,
+    "rms_value": 1.032041510794154,
+    "rel_rms_static": 0.02666301389329703,
+    "rel_rms_oracle": 0.0262740984533468
+   }
+  },
+  "layers.25.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 19.0,
+    "clipped": 0,
+    "subnormal": 15779,
+    "rms_value": 2.128965763172049,
+    "rel_rms_static": 0.026589065664438766,
+    "rel_rms_oracle": 0.02616307394004601
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 9.75,
+    "clipped": 0,
+    "subnormal": 11522,
+    "rms_value": 0.9827980342813997,
+    "rel_rms_static": 0.02651069867418466,
+    "rel_rms_oracle": 0.026243513432352105
+   }
+  },
+  "layers.26.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 19.5,
+    "clipped": 0,
+    "subnormal": 19734,
+    "rms_value": 1.8263124639765766,
+    "rel_rms_static": 0.026545188542651803,
+    "rel_rms_oracle": 0.02589293198757019
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 9.75,
+    "clipped": 0,
+    "subnormal": 9995,
+    "rms_value": 1.1221742249896738,
+    "rel_rms_static": 0.02662512654555132,
+    "rel_rms_oracle": 0.02629109891398773
+   }
+  },
+  "layers.27.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 19.25,
+    "clipped": 0,
+    "subnormal": 18078,
+    "rms_value": 1.7799099579475683,
+    "rel_rms_static": 0.026569265610885406,
+    "rel_rms_oracle": 0.025792049045390102
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 10.25,
+    "clipped": 0,
+    "subnormal": 8918,
+    "rms_value": 1.2469661273474628,
+    "rel_rms_static": 0.026653845833358787,
+    "rel_rms_oracle": 0.02621006823096947
+   }
+  },
+  "layers.28.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 18.0,
+    "clipped": 0,
+    "subnormal": 11083,
+    "rms_value": 1.9111202030945267,
+    "rel_rms_static": 0.026518874946099162,
+    "rel_rms_oracle": 0.025976980147132987
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 12.4375,
+    "clipped": 0,
+    "subnormal": 8013,
+    "rms_value": 1.3826825164805123,
+    "rel_rms_static": 0.02655884704328252,
+    "rel_rms_oracle": 0.02627642502574812
+   }
+  },
+  "layers.29.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 23.125,
+    "clipped": 0,
+    "subnormal": 29212,
+    "rms_value": 1.8591030343886716,
+    "rel_rms_static": 0.026735495706644984,
+    "rel_rms_oracle": 0.026089059021136663
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 31.5,
+    "clipped": 0,
+    "subnormal": 6500,
+    "rms_value": 1.9596757004897285,
+    "rel_rms_static": 0.02655417983017944,
+    "rel_rms_oracle": 0.026343388667269506
+   }
+  },
+  "layers.30.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 20.625,
+    "clipped": 0,
+    "subnormal": 10602,
+    "rms_value": 2.0774920192545934,
+    "rel_rms_static": 0.026429604664760173,
+    "rel_rms_oracle": 0.025928041454737236
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 28.375,
+    "clipped": 0,
+    "subnormal": 5581,
+    "rms_value": 2.124635100864877,
+    "rel_rms_static": 0.026573213628445315,
+    "rel_rms_oracle": 0.026245406856636656
+   }
+  },
+  "layers.31.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 20.875,
+    "clipped": 0,
+    "subnormal": 16698,
+    "rms_value": 1.8761509904780689,
+    "rel_rms_static": 0.026776750172959496,
+    "rel_rms_oracle": 0.02611464632128056
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 25.5,
+    "clipped": 0,
+    "subnormal": 4803,
+    "rms_value": 2.5344235918127653,
+    "rel_rms_static": 0.02657570422458233,
+    "rel_rms_oracle": 0.026312008957467475
+   }
+  },
+  "layers.32.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 16.5,
+    "clipped": 0,
+    "subnormal": 12448,
+    "rms_value": 1.87548235557425,
+    "rel_rms_static": 0.026290932978050602,
+    "rel_rms_oracle": 0.02582115568620536
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 32.0,
+    "clipped": 0,
+    "subnormal": 3910,
+    "rms_value": 3.126168833898363,
+    "rel_rms_static": 0.02659738966042821,
+    "rel_rms_oracle": 0.02620540956578785
+   }
+  },
+  "layers.33.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 20.375,
+    "clipped": 0,
+    "subnormal": 19699,
+    "rms_value": 1.7538903771973873,
+    "rel_rms_static": 0.026561061784586077,
+    "rel_rms_oracle": 0.026045738096950037
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 60.5,
+    "clipped": 0,
+    "subnormal": 2829,
+    "rms_value": 4.534999350578035,
+    "rel_rms_static": 0.02664871979015076,
+    "rel_rms_oracle": 0.02627946140833378
+   }
+  },
+  "layers.34.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 19.75,
+    "clipped": 0,
+    "subnormal": 11074,
+    "rms_value": 1.9829136773360792,
+    "rel_rms_static": 0.02623663576830497,
+    "rel_rms_oracle": 0.025790818823932183
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 55.0,
+    "clipped": 0,
+    "subnormal": 3133,
+    "rms_value": 4.093771610368159,
+    "rel_rms_static": 0.026573575225300232,
+    "rel_rms_oracle": 0.02585419271618692
+   }
+  },
+  "layers.35.self_attn.attn": {
+   "k": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 44.5,
+    "clipped": 0,
+    "subnormal": 9448,
+    "rms_value": 2.980882906950959,
+    "rel_rms_static": 0.026046674257535186,
+    "rel_rms_oracle": 0.024712114724561116
+   },
+   "v": {
+    "calls": 512,
+    "count": 654336,
+    "nonfinite": 0,
+    "amax": 48.5,
+    "clipped": 0,
+    "subnormal": 3699,
+    "rms_value": 2.9462123628417225,
+    "rel_rms_static": 0.026581405887553505,
+    "rel_rms_oracle": 0.026156476612223735
+   }
+  }
+ },
+ "summary": {
+  "layers_probed": 36,
+  "max_amax": 294.0,
+  "max_amax_at": "layers.0.self_attn.attn.k",
+  "any_clipped": false,
+  "total_clipped": 0,
+  "total_values": 47112192,
+  "max_subnormal_frac": 0.5674072647691706,
+  "max_subnormal_at": "layers.0.self_attn.attn.v",
+  "total_nonfinite": 0,
+  "mean_rel_rms_static": 0.026646050639409405,
+  "mean_rel_rms_oracle": 0.025873904281388107,
+  "mean_oracle_gain": 1.02984266887687,
+  "max_oracle_gain": 1.1853443789190832,
+  "max_oracle_gain_at": "layers.0.self_attn.attn.k"
+ },
+ "token_agreement": {
+  "match_rate": 0.31640625,
+  "matched": 162,
+  "positions": 512,
+  "per_prompt": [
+   0.328125,
+   0.1015625,
+   0.578125,
+   0.2578125
+  ],
+  "first_divergence": [
+   22,
+   11,
+   74,
+   33
+  ]
+ },
+ "token_agreement_control": {
+  "match_rate": 1.0,
+  "matched": 512,
+  "positions": 512,
+  "per_prompt": [
+   1.0,
+   1.0,
+   1.0,
+   1.0
+  ],
+  "first_divergence": [
+   -1,
+   -1,
+   -1,
+   -1
+  ]
+ },
+ "completions": [
+  {
+   "auto": " Also, page size is 4KB, and the cache is 16GB. How many pages are in the cache? How many pages are used by a single sequence of length 1000 tokens? How many pages are used by a single sequence of length 10000 tokens? How many pages are used by a single sequence of length 100000 tokens? How many pages are used by a single sequence of length 1000000 tokens? How many pages are used by a single sequence of length 10000000 tokens? How many",
+   "fp8_e4m3": " Also, page size is 4KB, and the cache is 16GB. How many pages are there in the cache? How many pages are used by a single sequence of length 1000 tokens? How many pages are used by a single sequence of length 10000 tokens? How many pages are used by a single sequence of length 100000 tokens? How many pages are used by a single sequence of length 1000000 tokens? How many pages are used by a single sequence of length 10000000 tokens? How"
+  },
+  {
+   "auto": " Also, provide a step-by-step explanation of the merge function and an example of how it works.\n\nWe are going to write a function `merge_sorted_lists` that takes two sorted lists and returns a new sorted list in linear time.\n Steps:\n 1. We'll initialize an empty list for the result.\n 2. We'll use two pointers, one for each list (starting at index 0).\n 3. We compare the elements at the current pointers of both lists and take the smaller one, appending it to the result and moving the pointer of that list forward.\n 4. If one list is exhausted, we append the",
+   "fp8_e4m3": " Also, provide a step-by-step explanation of the merge process for two lists of size \\( n \\) and \\( m \\).\n\nWe are going to write a function `merge_sorted_lists` that takes two sorted lists and returns a single sorted list in linear time.\n Steps:\n 1. We'll create an empty list for the result.\n 2. We'll use two pointers, one for each list, starting at index 0.\n 3. We compare the elements at the current pointers of both lists and append the smaller one to the result, then move that pointer forward.\n 4. If one list is exhausted, we append"
+  },
+  {
+   "auto": " How far from the station does the second train catch the first?\n\nTo determine when the second train catches the first, we need to calculate the distance each train has traveled by the time the second train starts. The first train leaves at 09:15 and travels for 45 minutes (or 0.75 hours) before the second train departs at 10:00. During this time, the first train covers a distance of \\( 84 \\times 0.75 = 63 \\) km. \n\nLet \\( t \\) be the time in hours after 10:",
+   "fp8_e4m3": " How far from the station does the second train catch the first?\n\nTo determine when the second train catches the first, we need to calculate the distance each train has traveled by the time the second train starts. The first train leaves at 09:15 and travels for 45 minutes (or 0.75 hours) before the second train departs. In that time, it covers a distance of \\( 84 \\times 0.75 = 63 \\) km. \n\nLet \\( t \\) be the time in hours after 10:00 when the second train catches the first"
+  },
+  {
+   "auto": " \n\nFirst, translate to French: \n\nThen, translate back to English: \n\nFinally, comment on what the round trip lost: \n\nOkay, let's tackle this step by step. The user wants me to translate the English sentence \"The quantisation error is small but it is not zero.\" into French, then back to English, and comment on what was lost in the round trip.\n\nFirst, translating to French. Let me recall some French terms. \"Quantisation error\" is \"erreur de quantification\". \"Is small\" would be \"est petite\" or \"est petite mais\". Wait, in French, adjectives agree in",
+   "fp8_e4m3": " \n\nFirst, translate to French: \n\nThen, translate back to English: \n\nFinally, comment on what the round trip lost: \n\nOkay, let's tackle this translation task. The sentence is: 'The quantisation error is small but it is not zero.'\n\nFirst, I need to translate this into French. Let me recall some French terms. \"Quantisation error\" – in French, \"quantisation\" is the same as in English, right? So \"erreur de quantisation\". Then \"is small\" would be \"est petite\" or \"est petite mais\". Wait, \"small\" here is an adjective. In French"
+  }
+ ],
+ "gsm8k": {
+  "num_questions": 500,
+  "auto": {
+   "accuracy": 0.192,
+   "invalid_rate": 0.002,
+   "tokens_per_second": 2296.5299864561925
+  },
+  "fp8_e4m3": {
+   "accuracy": 0.164,
+   "invalid_rate": 0.002,
+   "tokens_per_second": 1952.1280838994987
+  },
+  "delta": -0.027999999999999997,
+  "stderr_unpaired": 0.024176021178018522,
+  "resolvable": false
+ },
+ "verdict": {
+  "clip_gate_tripped": false,
+  "match_gate_tripped": true,
+  "control_match_rate": 1.0,
+  "control_reproduces": true,
+  "needs_calibration": false,
+  "reasons": [
+   "token match 0.3164 < 0.98"
+  ],
+  "action": "divergence is real but per-tensor calibration cannot fix it (oracle headroom mean 1.030x, best layer 1.185x at layers.0.self_attn.attn.k, below 1.1); decide on task accuracy, not on 4b",
+  "oracle_headroom": 1.02984266887687,
+  "oracle_headroom_basis": "mean over layers and roles"
+ }
+}

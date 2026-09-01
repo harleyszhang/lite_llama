@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "device": "NVIDIA H100 80GB HBM3",
+    "device_count": 2,
+    "compute_capability": "9.0",
+    "peak_gbps": 3352.32,
+    "peak_tflops_dense_tc": 989.0,
+    "l2_mib": 50,
+    "software": "torch 2.13.0+cu130, triton 3.7.1, python 3.14.7",
+    "commit": "v0.8.0-32-g4f256d7",
+    "modelzoo_env": "LITE_LLAMA_MODELZOO",
+    "external_backends": {
+      "deep_gemm": "not installed",
+      "flashinfer": "not installed",
+      "flash_mla": "not installed",
+      "deep_ep": "not installed"
+    }
+  },
+  "model_verification": [
+    {
+      "alias": "M_TINY",
+      "path": "Qwen/Qwen2___5-0___5B-Instruct",
+      "arch": "Qwen2Model",
+      "status": "PASS",
+      "load_s": 5.7,
+      "greedy_tok_s": 63.6,
+      "batch": 2,
+      "kv_cache_tokens": 6079185
+    },
+    {
+      "alias": "M_MAIN",
+      "path": "Qwen3/Qwen3-4B-Thinking-2507",
+      "arch": "Qwen3Model",
+      "status": "PASS",
+      "load_s": 16.7,
+      "greedy_tok_s": 51.2,
+      "batch": 2,
+      "kv_cache_tokens": 458738
+    },
+    {
+      "alias": "M_MOE",
+      "path": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+      "arch": "Qwen3MoeModel",
+      "status": "PASS",
+      "load_s": 57.5,
+      "greedy_tok_s": 27.9,
+      "batch": 2,
+      "kv_cache_tokens": 149329,
+      "note": "bf16 weights occupy 57.59 GB of the 79.18 GB card; max_seq_len=2048 keeps the KV pool viable on one GPU"
+    },
+    {
+      "alias": "M_MOE_INT4",
+      "path": "okwinds/Qwen3-30B-A3B-Instruct-2507-Int4-W4A16",
+      "arch": "Qwen3MoeForCausalLM",
+      "status": "FAIL",
+      "error": "ValueError: unsupported quant_method 'compressed-tensors'; supported: ['awq', 'blockwise_int8', 'fp8', 'gptq', 'int8', 'smoothquant', 'w8a8_fp8', 'w8a8_int8']",
+      "raised_at": "lite_llama/modules/quantization/__init__.py:105 get_quant_config_from_hf",
+      "note": "Dropped from the later matrices. The checkpoint uses the compressed-tensors serialisation, which has no reader in this repo; adding one is out of scope for this round."
+    }
+  ],
+  "golden_baselines": [
+    {
+      "model": "Qwen2___5-0___5B-Instruct",
+      "file": "tests/golden/data/Qwen2___5-0___5B-Instruct.json",
+      "cases": 8,
+      "config": "bf16 / eager / tp1, max_seq_len=1024, max_gpu_num_blocks=8192"
+    },
+    {
+      "model": "Qwen3-4B-Thinking-2507",
+      "file": "tests/golden/data/Qwen3-4B-Thinking-2507.json",
+      "cases": 8,
+      "config": "bf16 / eager / tp1, max_seq_len=1024, max_gpu_num_blocks=8192"
+    }
+  ]
+}

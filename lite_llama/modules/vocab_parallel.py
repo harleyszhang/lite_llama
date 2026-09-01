@@ -44,10 +44,20 @@ class VocabParallelEmbedding(nn.Module):
     ``id - start`` for an id this rank does not own, and the all-reduce would
     sum that garbage in.
 
-    The mapping, gather and zeroing are one fused Triton kernel
-    (:func:`~lite_llama.kernels.ops.embeddings.vocab_embedding.vocab_parallel_embedding`);
-    launch overhead matters here more than anywhere else because TP disables
-    CUDA graphs, so no replay hides it on the decode path.
+    The mapping, the gather and the zeroing are one fused Triton kernel
+    (:func:`~lite_llama.kernels.ops.embeddings.vocab_embedding.vocab_parallel_embedding`):
+    the id->row arithmetic that used to run as an eager chain of seven kernels
+    per lookup is two scalar register ops inside it. Decode may replay from a
+    CUDA graph, which would hide those launches, but the saving still has to
+    hold without one: prefill is always eager, and the graphs are dropped
+    whenever the startup checks in
+    :meth:`~lite_llama.executor.model_runner.ModelRunner.enable_cuda_graph`
+    fail on any rank.
+
+    Args:
+        vocab_size: Full vocabulary size (split across ranks).
+        hidden_size: Width of the residual stream (not split).
+        dtype: Storage type of the weight.
     """
 
     def __init__(

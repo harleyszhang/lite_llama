@@ -152,6 +152,8 @@ lite-llama batch --model-dir my_weight/Qwen2.5-1.5B-Instruct --show-stats
 更多用法（异步接口、SSE、CLI 参数、线程模型）见
 [docs/online_serving.md](docs/online_serving.md)。
 
+## 架构
+
 单向分层 —— 用户代码只与 Facade 层交互；计划向下传递，token 向上返回：
 
 ```text

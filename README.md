@@ -12,6 +12,7 @@
 <b>Acceleration Features</b>
          ✅ Flash attention     ✅ Cuda Graph Optimize   ✅ Chunked Prefill         ✅ Prefix Caching
          ✅ W8A16 (fp8/int8)    ✅ W4A16 (AWQ/GPTQ)      ✅ SmoothQuant W8A8        ✅ FP8 KV Cache (2×)
+         ✅ NVFP4 weight-only   ✅ FP8 W8A8 Fused MoE    ✅ TP + CUDA Graph
          ✅ Kernel Autotune     ✅ Fused MoE             ✅ Tensor Parallel         ✅ Data Parallel
 
 <b>Framework Design</b>
@@ -26,10 +27,10 @@
 - **Online batch inference with continuous batching**: requests join and leave a running batch, so an arrival never waits for the current generation to finish. On one A10 with Qwen2.5-1.5B-Instruct and requests arriving 250 ms apart, throughput goes from 93 → 644 tok/s (**6.9×**) and mean latency from 19.1 s → 2.3 s (**8.3×**) — see [docs/continuous_batching.md](./docs/continuous_batching.md).
 - **OpenAI-compatible server** (`lite-llama serve`): `/v1/completions` and `/v1/chat/completions` with streaming — the official `openai` client works unchanged. See [docs/online_serving.md](./docs/online_serving.md).
 - Supports `llama3`, `Qwen2.5/Qwen3`, `Qwen3-MoE`, `LLaVA-1.5`, `Qwen3-VL`; `top-p` / `top-k` sampling and streaming output.
-- **CUDA graph**: decode-stage CUDA graph capture (within batch-size limits).
+- **CUDA graph**: decode-stage CUDA graph capture (within batch-size limits), including under tensor parallelism — capture is gated by a grid-agreement all-reduce and a graph-vs-eager numerical check, because a mismatched graph under TP hangs in a collective instead of raising. `LITE_LLAMA_TP_CUDA_GRAPH=0` restores eager.
 - **Attention backends**: `flashattention2`, `flashdecoding` (with `NopadAttention` for unpadded sequences and GQA support). Dynamic KV-cache management via paged `TokenAttention` slots.
 - **Operator fusion**: `silu` multiply, K/V projection fusion, skip-connection + `rmsnorm`. Custom `triton` kernels for `rmsnorm`, `rope`, `softmax`, and element-wise multiply.
-- **Quantization**: W8A16 (fp8/int8), W4A16 (AWQ/GPTQ), SmoothQuant W8A8 — up to **6.9×** decode speedup over HF fp16.
+- **Quantization**: W8A16 (fp8/int8), W4A16 (AWQ/GPTQ), SmoothQuant W8A8, fp8 W8A8 (dense + MoE experts), NVFP4 weight-only — up to **6.9×** decode speedup over HF fp16. 4-bit schemes trade speed for footprint on an H100; the per-shape numbers are in [docs/quantization.md](docs/quantization.md).
 - **Tensor Parallelism**: split a 30B MoE model across 2× A10 (24 GB) with one all-reduce per block.
 - **Data Parallelism**: replicate the model across GPUs and route requests between them — **2.00×** throughput on 2 GPUs (100% linear).
 - **Kernel Autotune** (v0.5): offline search persists optimal tile configs per `(GPU, op, shape)` to `~/.cache/lite_llama/autotune/`; kernels auto-load on startup.
@@ -192,6 +193,11 @@ After `cli_llava.py` runs successfully, the terminal displays the interface as s
 ![llava model streaming output](./docs/images/llava_output2.gif)
 
 For performance test, after changing your model weight path, run `lite_llama/examples/benchmark.py` file directly, it will output the latency and throughput performance comparison between lite_llama and transformers libraries, the result of the first run is not very accurate, so we suggest you to take the second run as a reference. For example, for the Llama-3.2-3B model with `prompt_len = 25`, `batch_size = 12`, and `max_gen_len = 1900`, the result of benchmark:
+
+
+
+
+
 ```bash
 lite_llama inference time: 31.3463 s
 Transformers inference time: 69.1433 s
@@ -308,16 +314,25 @@ The GIF is rendered from the engine's own CUDA-event timeline (`LITE_LLAMA_OVERL
 
 ### Quantization
 
-lite_llama supports multiple weight quantization schemes (architecture aligned with [sglang](https://github.com/sgl-project/sglang)). See [docs/quantization.md](docs/quantization.md) for the full design and API.
+l ite_llam a  supports  m ultiple  w eight quanti z ation schemes ( architecture aligned with [sglang](https://github.com/sgl-project/sglang)). See [docs/quantization.md](docs/quantization.md) for the full design and API.
 
-| Scheme | CLI Flag | Weight | Activation | Speedup vs HF |
-|--------|----------|--------|------------|---------------|
+|  Scheme  |  CLI Flag  |  Weight  |  Activation  |  Speedup vs HF  |
+| -------- | ---------- | -------- | ------------ | --------------- |
 | fp8 (checkpoint) | auto-detected | fp8-e4m3 | fp16 | 6.4× |
 | int8 (runtime) | `--quantization int8` | int8 | fp16 | 6.3× |
 | fp8 W8A8 (runtime) | `--quantization fp8` | fp8-e4m3 | fp8-e4m3 | 3.1× |
 | int4 AWQ/GPTQ | auto-detected | int4 | fp16 | — |
 | smoothquant | `--quantization smoothquant` | int8 | int8 | — |
+| nvfp4 | `--quantization nvfp4` | fp4-e2m1 | bf16 | smallest weights, **slower than bf16** |
 | fp8 KV cache | `--kv-cache-dtype fp8` | — | — | 2× KV capacity |
+
+fp8 W8A8 covers MoE experts too: `fused_moe` quantises activations per token, worth
+1.18× over fp16 at 512 tokens and **33% slower** at decode width, where the two extra
+quantisation launches land on an already launch-bound layer. NVFP4 is weight-only
+(sm90 has no fp4 MMA), so it buys memory and costs time. Both, with the measured
+numbers behind them, are in [docs/quantization.md](docs/quantization.md); the full
+2×H100 matrix — kernel, offline, online, TP/DP/graph/KV — is in
+[docs/benchmark_logs/quant_matrix_20260901.md](docs/benchmark_logs/quant_matrix_20260901.md).
 
 **FP8 checkpoint** (auto-detected from `config.json`):
 
@@ -357,11 +372,11 @@ python -m lite_llama.cli vl-chat \
     --image photo.jpg --quantization int8
 ```
 
-> `vl-chat` is single-GPU: tensor parallelism runs through the continuous-batching
-> engine, which hosts text checkpoints only, so `--tensor-parallel-size > 1` exits with
-> that message rather than pretending.
+> `vl-chat` is single-GPU tensor parallelism runs through the continuous-batching
+> engine, which hosts tex checkpoints only, so `--tensor-parallel-size > 1` exits with
+> that message rather tha pretending.
 
-#### Qwen3-0.6B Benchmark 
+#### Qwen3-0.6B Benchmark
 
 Envirnment: (A10, batch=4, greedy)
 
@@ -376,10 +391,10 @@ python benchmarks/bench_quant.py --model-dir /data/shared/llm_weights/Qwen3-0.6B
 python benchmarks/bench_quant.py --all
 ```
 
-Quantization Benchmark Result (A10, Qwen3-0.6B, batch=4, seq_len=25, gen_len=64, greedy):
+Q uantizat i on Benchmar k  Result (A10,   Qwen3-0.6B,   batch = 4, seq_len=2 5, gen_len=64, greedy):
 
-| Config | Model Mem | KV Capacity | TPOT (ms) | TPS | vs HF fp16 |
-|--------|-----------|-------------|-----------|-----|------------|
+|  Config  |  Model Mem  |  KV Capacity  |  TPOT (ms)  |  TPS  |  vs HF fp16  |
+| -------- | ----------- | ------------- | ----------- | ----- | ------------ |
 | HF fp16 (baseline) | 1.17 GB | — | 28.19 | 141.7 | 1.0× |
 | lite fp16 | 1.40 GB | 147,875 tok | 4.14 | 918.8 | **6.5×** |
 | lite int8 | 0.99 GB | 141,549 tok | 4.16 | 904.1 | **6.4×** |
@@ -396,10 +411,10 @@ Quantization benchmark visualization (Qwen3-0.6B, A10, all schemes vs HF fp16):
 
 #### Qwen3-VL-4B-Instruct Benchmark
 
-A10, batch=4, seq_len=25, gen_len=64, greedy benchmark result:
+A 10, batc h =4, seq_len = 25, gen_len=6 4 , greedy be n chmar k result:
 
-| Config | Model Mem | KV Capacity | TPOT (ms) | TPS |
-|--------|-----------|-------------|-----------|-----|
+|  Config  |  Model Mem  |  KV Capacity  |  TPOT (ms)  |  TPS  |
+| -------- | ----------- | ------------- | ----------- | ----- |
 | lite fp16 | 8.99 GB | 73,676 tok | 23.36 | 170.7 |
 | lite int8 | 5.61 GB | 93,559 tok | 27.47 | 145.3 |
 | lite int8-blockwise | 5.71 GB | 92,748 tok | 27.97 | 142.7 |
