@@ -245,8 +245,6 @@ class Scheme:
     atol: float
 
 
-
-
 def _build_bf16(w: torch.Tensor):
     wb = w.to(torch.bfloat16)
     return (lambda x: linear_torch(x, wb)), wb.float(), 0

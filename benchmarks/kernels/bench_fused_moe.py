@@ -260,8 +260,6 @@ class Scheme:
     tune_dtype: str = "fp16"
 
 
-
-
 def _build_fp16(w1: torch.Tensor, w2: torch.Tensor) -> Built:
     a, b = w1.to(ACT_DTYPE), w2.to(ACT_DTYPE)
 

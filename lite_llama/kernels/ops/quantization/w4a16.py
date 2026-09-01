@@ -164,10 +164,31 @@ def launch_config(m: int) -> dict[str, int]:
     run to run, so the guard reported noise as a divergence.
     """
     if m <= 32:
-        return {"BLOCK_M": 16, "BLOCK_N": 32, "BLOCK_K": 256, "GROUP_M": 8, "num_warps": 4, "num_stages": 4}
+        return {
+            "BLOCK_M": 16,
+            "BLOCK_N": 32,
+            "BLOCK_K": 256,
+            "GROUP_M": 8,
+            "num_warps": 4,
+            "num_stages": 4,
+        }
     if m <= 128:
-        return {"BLOCK_M": 64, "BLOCK_N": 32, "BLOCK_K": 256, "GROUP_M": 8, "num_warps": 4, "num_stages": 4}
-    return {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 256, "GROUP_M": 8, "num_warps": 4, "num_stages": 3}
+        return {
+            "BLOCK_M": 64,
+            "BLOCK_N": 32,
+            "BLOCK_K": 256,
+            "GROUP_M": 8,
+            "num_warps": 4,
+            "num_stages": 4,
+        }
+    return {
+        "BLOCK_M": 64,
+        "BLOCK_N": 64,
+        "BLOCK_K": 256,
+        "GROUP_M": 8,
+        "num_warps": 4,
+        "num_stages": 3,
+    }
 
 
 def w4a16_matmul(
