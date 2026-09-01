@@ -1,39 +1,5 @@
 """End-to-end tensor parallelism: what two ranks answer, one rank must answer too.
 
-Every other test in ``tests/distributed`` checks one sharded piece against a
-reference computed in the same process. This one checks the assembled thing: a
-real :class:`~lite_llama.engine.continuous_engine.ContinuousBatchingEngine` with
-``tensor_parallel_size=2``, a real follower process, real NCCL collectives, driven
-through the public ``generate`` API — the configuration a user actually runs.
-
-Design: each width is measured by a *probe* — a spawned, non-daemonic process
-(non-daemonic because it must spawn the follower itself) that builds one engine,
-answers a fixed set of prompt layouts, and reports both the text and the facts
-about the object it built. Two probes, one per width, and the assertions compare
-their reports. The parent process never touches CUDA or ``parallel_state``, so a
-crashed rank cannot leak a TP grid into the rest of the session.
-
-One probe collects everything because loading a checkpoint and rendezvousing a
-group is the expensive part; the assertions are cheap and read from its report.
-
-Parity is asserted where it *is* an identity. Sharding is exact in exact
-arithmetic, but fp16 reduction is not associative: a row-parallel GEMM plus an
-all-reduce adds the same products in a different order. On this checkpoint the
-prompt "The history of the Roman Empire spans many centuries, and" sits on a
-greedy tie fourteen tokens in, and merely running it inside a batch instead of
-alone flips it -- at the very same character, with no tensor parallelism in the
-picture at all. Demanding byte equality everywhere would assert something about
-fp16, not about the shards.
-
-So every prompt is answered twice, in its batch and on its own, and the
-single-GPU probe disagreeing with *itself* is what defines the noise floor. A
-prompt that answers the same either way is not near a tie, and on those the two
-widths must agree byte for byte. On the rest the weaker claim is the one a
-sharding bug would still fail: a wrong offset or a leaked row corrupts the
-*first* token, so the answers must share a substantial prefix. And the stable
-prompts have to be the majority, or the strong assertion would be quietly
-vacuous.
-
 Usage:
     pytest tests/distributed/test_tp_engine.py     # skips below 2 GPUs
 """
@@ -64,9 +30,15 @@ _MAX_NUM_SEQS = 8
 _PROBE_TIMEOUT_S = 600.0
 
 #: Greedy, no repetition penalty, no early exit: the only thing that may move a
-#: token between the two widths is the arithmetic itself.
+#: token between the two widths is the arithmetic itself. ``logprobs=2`` is not
+#: under test here -- it is the instrument, reporting the runner-up at every step
+#: so a tie can be measured instead of inferred.
 _GREEDY = SamplingParams(
-    temperature=0.0, max_gen_len=24, repetition_penalty=1.0, stop_on_repeat=False
+    temperature=0.0,
+    max_gen_len=24,
+    repetition_penalty=1.0,
+    stop_on_repeat=False,
+    logprobs=2,
 )
 
 #: Prompt layouts, not a golden baseline (``tests/golden`` owns that). What varies
@@ -90,19 +62,31 @@ _CASES: list[tuple[str, list[str]]] = [
 ]
 
 
+#: Log-probability margin below which the runner-up is close enough that a
+#: differently ordered sum can take the step either way. Half a nat is a few bf16
+#: ULPs at this checkpoint's logit scale (logits reach ~16, where one ULP is
+#: 0.125): measured here, every step the two widths disagreed about had a margin of
+#: 0.125 or less, while a step decided by the weights leads by whole nats. It is an
+#: upper bound on the noise, not a fitted constant.
+_TIE_GAP = 0.5
+
 #: Characters two answers must share before a divergence counts as arithmetic
-#: noise rather than a broken shard. A wrong offset or an unmasked row corrupts
-#: the first token, so any real prefix at all is evidence; this is comfortably
-#: more than one token and comfortably less than a short answer.
+#: noise rather than a broken shard. Used where no per-step record is available
+#: (the online probe streams text only); a wrong offset or an unmasked row
+#: corrupts the first token, so any real prefix at all is evidence.
 _MIN_SHARED_PREFIX = 16
 
-#: Fraction of prompts that must be batch-shape stable. Below this the strong
-#: parity assertion would cover too little to mean anything.
-_MIN_STABLE_FRACTION = 2 / 3
+#: Fraction of generated tokens the two widths must agree on outright. Every
+#: divergence is licensed by a small margin, so without this a checkpoint that had
+#: become noise would satisfy the parity test one coin flip at a time.
+_MIN_AGREEING_FRACTION = 2 / 3
 
 #: Which prompts the online (async) probe serves concurrently, as ``(case, index)``
 #: so its answers can be held against the offline ones.
 _ONLINE = [("single", 0), ("batch6", 0)]
+
+#: The two batch shapes every prompt is answered in.
+_GROUPINGS = ("batched", "alone")
 
 
 def _prompt_at(name: str, index: int) -> str:
@@ -134,8 +118,8 @@ def _probe(spec: dict[str, Any], results: mp.Queue) -> None:
         try:
             model = engine.engine.model_runner.model
             report: dict[str, Any] = {
-                # Every prompt twice: in its batch, and by itself. The pair is what
-                # separates "this shard is wrong" from "this token is a coin flip".
+                # Every prompt twice: in its batch, and by itself, so a bug that
+                # only bites a multi-row prefill has both shapes to survive.
                 "batched": {name: _answer(engine, prompts) for name, prompts in _CASES},
                 "alone": {
                     name: [_answer(engine, [prompt])[0] for prompt in prompts]
@@ -159,9 +143,33 @@ def _probe(spec: dict[str, Any], results: mp.Queue) -> None:
         results.put(("ok", report))
 
 
-def _answer(engine, prompts: list[str]) -> list[str]:
-    """Greedy completions for one batch, in submission order."""
-    return [output.outputs[0].text for output in engine.generate(prompts, _GREEDY)]
+def _answer(engine, prompts: list[str]) -> list[dict[str, Any]]:
+    """Greedy completions for one batch, in submission order, with their margins."""
+    return [_record(output.outputs[0]) for output in engine.generate(prompts, _GREEDY)]
+
+
+def _record(completion) -> dict[str, Any]:
+    """One completion as picklable primitives: text, its tokens, and their margins.
+
+    The margins are the point — they say which of these tokens the arithmetic was
+    entitled to change its mind about. Nothing but ints, floats and str, because
+    this crosses a process boundary on the results queue.
+    """
+    return {
+        "text": completion.text,
+        "tokens": [record.token_id for record in completion.logprobs or ()],
+        "gaps": [_margin(record) for record in completion.logprobs or ()],
+    }
+
+
+def _margin(record) -> float:
+    """How far the sampled token led the runner-up, in log-probability.
+
+    Zero means the two are indistinguishable at this precision, which is exactly
+    when a differently ordered sum may pick the other one.
+    """
+    top = record.top_logprobs
+    return float(top[0] - top[1]) if len(top) >= 2 else float("inf")
 
 
 def _async_probe(spec: dict[str, Any], results: mp.Queue) -> None:
@@ -258,17 +266,45 @@ def _shared_prefix(one: str, two: str) -> int:
     return min(len(one), len(two))
 
 
-def _stable(probes) -> set[tuple[str, int]]:
-    """Entries whose answer does not depend on the batch they rode in.
+def _text(probes, width: int, grouping: str, name: str, index: int) -> str:
+    return probes[width][grouping][name][index]["text"]
 
-    Measured on the *single-GPU* probe, so it is a statement about the checkpoint's
-    numerics alone: one engine, one device, no collectives, only the reduction
-    shape of the GEMM changing. Whatever survives that is not sitting on a tie.
+
+def _first_token_difference(one: list[int], two: list[int]) -> int:
+    """Step at which two token sequences part, or the length of the shorter one."""
+    for step, (a, b) in enumerate(zip(one, two, strict=False)):
+        if a != b:
+            return step
+    return min(len(one), len(two))
+
+
+def _fork(probes, grouping: str, name: str, index: int) -> int:
+    """Step at which the two widths first said different things about one prompt."""
+    return _first_token_difference(
+        probes[1][grouping][name][index]["tokens"], probes[2][grouping][name][index]["tokens"]
+    )
+
+
+def _margin_at(probes, grouping: str, name: str, index: int, step: int) -> float:
+    """How decisive the single-GPU probe was at one step of one answer.
+
+    A step past the end of the record has no margin to appeal to, and is reported
+    as infinitely decisive: two widths that agree on every token but stop at
+    different lengths have nothing about the arithmetic to blame.
     """
+    gaps = probes[1][grouping][name][index]["gaps"]
+    return gaps[step] if step < len(gaps) else float("inf")
+
+
+def _agreeing(probes) -> set[tuple[str, int]]:
+    """Entries the two widths answered byte for byte alike, in both batch shapes."""
     return {
         (name, index)
         for name, index in _entries()
-        if probes[1]["batched"][name][index] == probes[1]["alone"][name][index]
+        if all(
+            _text(probes, 1, grouping, name, index) == _text(probes, 2, grouping, name, index)
+            for grouping in _GROUPINGS
+        )
     }
 
 
@@ -276,80 +312,87 @@ def _stable(probes) -> set[tuple[str, int]]:
 # Numerics
 # --------------------------------------------------------------------------- #
 @needs_gpus(2)
-def test_two_ranks_answer_exactly_what_one_rank_answers(probes):
-    """Where greedy decoding is determinate, sharding must not move a single byte.
+def test_two_ranks_only_diverge_where_the_arithmetic_had_a_choice(probes):
+    """Sharding may only change a token the single GPU could not decide either.
 
     Sharding is meant to be an arithmetic identity: a row-parallel GEMM plus an
     all-reduce computes the same sum as the whole GEMM, and the sampler's
     two-scalar exchange reconstructs the same log-softmax as the full vocabulary.
-    Byte equality says so in the way that catches the failures which produce
-    *plausible* numbers — an off-by-one shard offset, a mask that lets another
-    rank's rows into the sum — and which no relational check would notice.
+    The failures worth fearing produce *plausible* numbers — an off-by-one shard
+    offset, a mask that lets another rank's rows into the sum — and they show up
+    immediately, on a token the weights had already decided by whole nats.
 
-    Restricted to the entries the single-GPU probe answers identically batched and
-    alone: those are the ones where the assertion is about the shards rather than
-    about fp16 associativity. Both groupings are then compared, so a bug that only
-    shows up in a multi-row prefill has nowhere to hide.
+    So instead of demanding byte equality and excusing the prompts it cannot get,
+    this asks each divergence to account for itself: wherever the two widths first
+    part company, the single-GPU margin at that very step must be within
+    :data:`_TIE_GAP`. A reordered sum can flip a step decided by a few ULPs and
+    nothing else, and the check is made in both batch shapes, so a bug that only
+    bites a multi-row prefill has nowhere to hide.
     """
-    stable = _stable(probes)
-    assert stable, "nothing was batch-shape stable; this assertion would be vacuous"
-    for name, index in sorted(stable):
-        for grouping in ("batched", "alone"):
+    for name, index in _entries():
+        for grouping in _GROUPINGS:
             one = probes[1][grouping][name][index]
             two = probes[2][grouping][name][index]
-            assert one == two, (
-                f"{grouping} case {name!r} prompt {index}: {_first_difference(one, two)}"
+            fork = _fork(probes, grouping, name, index)
+            if fork == len(one["tokens"]) == len(two["tokens"]):
+                continue
+            margin = _margin_at(probes, grouping, name, index, fork)
+            assert margin <= _TIE_GAP, (
+                f"{grouping} case {name!r} prompt {index} diverges at token {fork}, which one "
+                f"GPU decided by {margin:.3f} — too much to be the order of a sum:\n"
+                f"{_first_difference(one['text'], two['text'])}"
             )
 
 
 @needs_gpus(2)
-def test_an_unstable_prompt_still_starts_the_same(probes):
-    """A prompt on a tie may end differently, but it may not *begin* differently.
+def test_most_of_what_two_ranks_say_is_byte_identical(probes):
+    """Guards the test above: a coin flip has to be the exception, not the rule.
 
-    This is the half of parity that survives without determinism. Every sharding
-    bug worth fearing is wrong immediately — the first token is drawn from the
-    same logits as the thousandth — so a shared prefix separates "the arithmetic
-    reordered" from "a rank read the wrong rows".
+    Every divergence there is licensed by a small margin, and a checkpoint that had
+    degenerated into noise would have a small margin at every step — it would pass
+    while agreeing about almost nothing. So how much the widths agree on outright is
+    asserted too, counted in tokens rather than prompts, because one flip fourteen
+    tokens in would otherwise write off the thirteen that matched.
     """
-    for name, index in sorted(set(_entries()) - _stable(probes)):
-        one = probes[1]["batched"][name][index]
-        two = probes[2]["batched"][name][index]
-        shared = _shared_prefix(one, two)
-        assert shared >= _MIN_SHARED_PREFIX, (
-            f"case {name!r} prompt {index} diverges after only {shared} characters, "
-            f"which is too early to be a tie:\n{_first_difference(one, two)}"
-        )
+    agreed = total = 0
+    forks: list[str] = []
+    for name, index in _entries():
+        for grouping in _GROUPINGS:
+            steps = len(probes[1][grouping][name][index]["tokens"])
+            fork = _fork(probes, grouping, name, index)
+            agreed += fork
+            total += steps
+            if fork < steps:
+                margin = _margin_at(probes, grouping, name, index, fork)
+                forks.append(f"{name}/{index} {grouping} at token {fork} (margin {margin:.3f})")
 
-
-@needs_gpus(2)
-def test_most_prompts_are_batch_shape_stable(probes):
-    """Guards the strong assertion's reach: ties must be the exception.
-
-    If a regression made this checkpoint broadly non-deterministic, every entry
-    would fall out of the stable set and byte parity would stop being checked
-    while still passing. So the size of the set is itself asserted.
-    """
-    entries = _entries()
-    stable = _stable(probes)
-    unstable = sorted(set(entries) - stable)
-    # Printed, not just asserted: how much of the prompt set the byte-parity check
-    # actually covers is the thing a reader of a green run wants to know. Visible
-    # under `pytest -s`.
-    print(f"\nbatch-shape stable: {len(stable)}/{len(entries)}; on a tie: {unstable}")
-    assert len(stable) >= _MIN_STABLE_FRACTION * len(entries), (
-        f"only {len(stable)}/{len(entries)} prompts were batch-shape stable; unstable: {unstable}"
+    print(f"\nidentical tokens: {agreed}/{total}")
+    for fork in forks:
+        print(f"  diverged: {fork}")
+    assert agreed >= _MIN_AGREEING_FRACTION * total, (
+        f"the two widths agreed on only {agreed}/{total} tokens: {forks}"
     )
 
 
 @needs_gpus(2)
 def test_neither_width_answers_nothing(probes):
-    """Guards the comparisons above: two empty answers are also byte-identical."""
+    """Guards the comparisons above: two empty answers are also byte-identical.
+
+    The margins are guarded with them, since they are what licenses a divergence —
+    a record that reported no margin at all would read as a step nobody can be held
+    responsible for.
+    """
     for width in (1, 2):
-        for grouping in ("batched", "alone"):
+        for grouping in _GROUPINGS:
             for name, prompts in _CASES:
                 answers = probes[width][grouping][name]
                 assert len(answers) == len(prompts)
-                assert all(answer.strip() for answer in answers), f"tp={width}, {grouping} {name}"
+                where = f"tp={width}, {grouping} {name}"
+                assert all(answer["text"].strip() for answer in answers), where
+                assert all(answer["gaps"] for answer in answers), f"{where}: no margins reported"
+                assert all(len(answer["gaps"]) == len(answer["tokens"]) for answer in answers), (
+                    f"{where}: a margin per token is what licenses a divergence"
+                )
 
 
 # --------------------------------------------------------------------------- #
@@ -364,9 +407,10 @@ def test_online_serving_over_two_ranks_answers_what_offline_does(probes, model_d
     one (a desynchronised group hangs, which the probe timeout reports), and that
     what comes out is what the offline path produced for the same prompt.
 
-    Byte equality is demanded only for prompts the offline probes showed to be
-    batch-shape stable; the others are held to a shared prefix, since an async
-    arrival order groups requests into batches the offline path never formed.
+    Byte equality is demanded only for prompts the two offline widths answered
+    identically; the others are held to a shared prefix, since an async arrival
+    order groups requests into batches the offline path never formed, and the
+    streamed output carries text rather than the per-step margins to appeal to.
     """
     answers = _run_probe(
         model_dir,
@@ -376,11 +420,11 @@ def test_online_serving_over_two_ranks_answers_what_offline_does(probes, model_d
     )["answers"]
     assert len(answers) == len(_ONLINE)
 
-    stable = _stable(probes)
+    agreeing = _agreeing(probes)
     for (name, index), online in zip(_ONLINE, answers, strict=True):
-        offline = probes[2]["alone"][name][index]
+        offline = _text(probes, 2, "alone", name, index)
         assert online.strip(), f"case {name!r} prompt {index} came back empty"
-        if (name, index) in stable:
+        if (name, index) in agreeing:
             assert online == offline, (
                 f"case {name!r} prompt {index}: {_first_difference(offline, online)}"
             )
