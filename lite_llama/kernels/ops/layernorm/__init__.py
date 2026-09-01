@@ -1,13 +1,11 @@
 """LayerNorm domain: RMSNorm, fused with the residual add when there is one.
 
-One native row covers both the fused (residual) and plain paths — the kernel
-picks between them on ``residual is None``, and a backend that only has the
-plain one would be a different row, not a different flag. FlashInfer's row is
-the per-layer glue case where an external library first beats the map: small,
-latency-bound, called once per layer per pass.
+Registers the domain's spec row and re-exports
+:func:`~lite_llama.kernels.ops.layernorm.skip_rmsnorm.skip_rmsnorm`,
+the fused residual-add + RMSNorm kernel.
 
 Usage:
-    from lite_llama.kernels.ops import layernorm  # noqa: F401  (registers rows)
+    from lite_llama.kernels import skip_rmsnorm
 """
 
 from lite_llama.kernels.backend.flashinfer import CUDA_SM75

@@ -1,22 +1,11 @@
 """Tests for the continuous-batching admission policy.
 
-Structure follows vLLM's ``v1/core/test_scheduler.py`` (admission order,
-budget gating, preemption lifecycle, prefix-cache interaction, SchedulerOutput
-field integrity) and SGLang's scheduler tests (chunked prefill interleaving,
-fairness under oversubscription), adapted to lite_llama's API.
+Requests are plain objects driven through the :class:`Scheduler` on
+CPU: admission, chunked prefill, decode budget, slot accounting and
+preemption — one test class per concern.
 
-Ten test classes, each owning one concern:
-
-    TestRequestAdmission      — generation cap, unservable refusal, slot ceiling
-    TestPrefillScheduling     — FCFS order, token budget, padded grid gating
-    TestChunkedPrefill        — chunk splitting, committed progress, decode interleave
-    TestDecodeScheduling      — full decode coverage, idle no-op
-    TestSlotAccounting        — distinct slots, finish/free, leak detection
-    TestPreemption            — opt-in oversubscription, progress quantum, fairness
-    TestSchedulerOutput       — chunk_lens, preempted, prefill+decode coexist
-    TestAbort                 — running/queued/unknown
-    TestRequestBookkeeping    — seq_len, has_room, finish_reason
-    TestPrefixCacheIntegration— admission hit, finish release, preempt reset
+Usage:
+    pytest tests/engine/test_scheduler.py
 """
 
 from __future__ import annotations
@@ -294,6 +283,32 @@ class TestDecodeScheduling:
         output = scheduler.schedule()
         assert output.prefill == []
         assert [r.request_id for r in output.decode] == ["a", "b", "c"]
+
+    def test_a_request_finishing_prefill_joins_decode_the_next_step(self, scheduler):
+        """The step that completes a prompt samples it in the prefill pass.
+
+        Decode gets it only from the following step: the engine executes each
+        request in exactly one pass per step, so admitting a just-prefilled
+        request into the same step's decode batch would run its slot twice.
+        """
+        scheduler.add_request(make_request("a"))
+        scheduler.add_request(make_request("b"))
+        first = scheduler.schedule()  # both prompts fit one chunk, both finish
+        assert [r.request_id for r in first.prefill] == ["a", "b"]
+        assert first.decode == []
+        second = scheduler.schedule()
+        assert second.prefill == []
+        assert [r.request_id for r in second.decode] == ["a", "b"]
+
+    def test_a_mix_of_old_decoders_and_new_prefills_stay_pass_disjoint(self, scheduler):
+        """Running decodes and this step's prefills never share a request."""
+        scheduler.add_request(make_request("old"))
+        scheduler.schedule()  # old is now decoding
+        scheduler.add_request(make_request("new"))
+        out = scheduler.schedule()  # prefills new while old decodes
+        assert [r.request_id for r in out.prefill] == ["new"]
+        assert [r.request_id for r in out.decode] == ["old"]
+        assert not ({id(r) for r in out.prefill} & {id(r) for r in out.decode})
 
     def test_an_idle_scheduler_schedules_nothing(self, scheduler):
         assert scheduler.schedule().is_empty

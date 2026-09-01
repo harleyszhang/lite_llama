@@ -1,40 +1,8 @@
 """Microbenchmark ``attention.decode`` over the paged KV cache.
 
-Decode attention is the kernel every generated token waits on, and it is
-bandwidth-bound: one query row per sequence against the whole cached history, so
-the score is achieved GB/s against the pool's minimum traffic. Three plausible
-ways of building the inputs could each make the gather cheaper than production's,
-which is why the same kernel is timed over four constructions rather than one.
-What each construction is worth on an A10 is recorded below — two of the three
-turned out to be worth nothing, and that result is more useful than the warning
-it replaced:
-
-``production``
-    Fragmented pool, strided K/V views out of the combined per-layer buffer.
-    This is what ``lite_llama/modules/attention.py`` passes, so this row is the
-    kernel's speed and the only row to quote. It reaches 63-67% of peak
-    bandwidth at batch >= 8, and 55% at batch 1 where there is not enough work to
-    cover launch latency.
-``contiguous``
-    Same kernel, sequence rows laid out consecutively. Measures 2-4% faster than
-    ``production``: at 2 KiB per cache row a random gather runs near streaming
-    speed, so paging is not what a decode regression would be hiding in. Kept as
-    the bound it establishes — it says the whole of paging is worth a few
-    percent, so a change claiming more than that is measuring something else.
-``split_alloc``
-    Two separately allocated caches instead of views into one buffer, halving the
-    row stride. Never beats ``production``: equal at three of the four shapes and
-    8% *slower* at one, which is the wrong direction for a stride explanation. 8
-    heads x 128 dim fp16 is already 16 cache lines per side, so halving the
-    stride changes no line's useful payload. Worth keeping as a regression guard
-    for smaller head geometries (MQA, or 64-dim heads), where the row approaches
-    a single line and the stride starts to matter.
-``fp8_pool``
-    e4m3 bytes in a uint8 container with caller-side scales. Halves the traffic
-    but only takes 6-10% off the time, so its %bw drops from 67% to 37%: the fp8
-    path is limited by the dequant, not by memory. That inversion is the reason
-    it is a case of its own and not a dtype column — read as a dtype variant, a
-    lower GB/s looks like a regression when it is a different bottleneck.
+``decode_work`` builds the pool, table and queries;
+``check_correctness`` / ``check_fp8`` diff against a reference first,
+and ``show_dispatch`` prints which implementation actually ran.
 
 Usage:
     python benchmarks/kernels/bench_paged_decode.py

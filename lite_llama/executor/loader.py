@@ -1,14 +1,11 @@
 """Model loading: a HuggingFace checkpoint in, a ready-to-run ``nn.Module`` out.
 
-Mirrors vLLM's executor/loader split so loading is unit-testable and open to new
-sources (TP shards, remote stores). It never holds a second copy of the model:
-build the tree on ``meta`` (no alloc, no init), swap in real fp16 storage on the
-target device, then stream the checkpoint through ``model.load_weights`` — a copy
-loop (not ``load_state_dict``) because tensors land in the *middle* of fused K/V
-and stacked-expert parameters. There is deliberately no trailing ``half()``.
+:class:`DefaultModelLoader` builds the model with empty parameters
+(:func:`init_empty_parameters`), streams checkpoint weights through the
+translator, then :func:`materialise_parameters` moves them to device.
 
 Usage:
-    model = DefaultModelLoader().load_model(config, model_cls, device)
+    model = DefaultModelLoader().load(...)
 """
 
 from __future__ import annotations
@@ -177,8 +174,7 @@ class DefaultModelLoader:
             ) from None
         if not hasattr(model, "quantize_"):
             raise ValueError(f"{type(model).__name__} does not support runtime quantisation")
-        logger.info("Quantising weights to %s (%s)",
-                    quantization, quant.get_name())
+        logger.info("Quantising weights to %s (%s)", quantization, quant.get_name())
         model.quantize_(quant)
 
     @staticmethod

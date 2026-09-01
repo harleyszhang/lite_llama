@@ -1,24 +1,11 @@
-"""Vocabulary-parallel embedding and LM head: the two ends of the token axis, sharded.
+"""Vocabulary-parallel embedding and LM head: both token-axis ends, sharded.
 
-Both tensors are ``[vocab_size, hidden_size]``, so tensor parallelism cuts them along
-the *vocabulary*: rank ``r`` owns rows ``[r * vocab/tp, (r+1) * vocab/tp)``. The
-embedding is a gather, so each rank looks up only the ids it owns and one
-``all_reduce`` sums the (mostly zero) contributions into the full hidden vector. The LM
-head is a GEMM against those same rows, so each rank produces a *slice* of the logits
-and deliberately does **not** gather them: the sampler consumes local logits directly
-(:mod:`lite_llama.engine.sampler`), which keeps the per-step transfer independent of
-the vocabulary size and never materialises a full logits tensor.
-
-Why shard at all: for a 151K-token vocabulary at 8192 hidden these two tensors are
-~4.9 GB per rank in fp16, and the decode-step ``lm_head`` GEMM is ``batch x vocab x
-hidden`` — the dominant matmul of a large-vocabulary model. Sharding divides both by
-``tp``. For tied models it is also the only *correct* option: an unsharded head over a
-sharded embedding would be two different tensors claiming to be one.
+:class:`VocabParallelEmbedding` owns one vocab shard and masks foreign ids;
+:class:`ParallelLMHead` reuses the same sharded weight for the output
+projection, so TP never materialises the full vocab matrix.
 
 Usage:
-    self.embed_tokens = VocabParallelEmbedding(vocab, hidden)
-    self.lm_head = ParallelLMHead(vocab, hidden)
-    self.lm_head.weight = self.embed_tokens.weight   # tie_word_embeddings
+    embed = VocabParallelEmbedding(vocab_size, hidden_size, dtype)
 """
 
 from __future__ import annotations

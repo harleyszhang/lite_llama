@@ -1,20 +1,10 @@
 """Numerical tests for the decode attention kernel.
 
-``flash_decoding`` runs once per generated token, so every sampled token depends
-on it. It differs from prefill in three ways that each get their own test:
+History lengths, ragged batches, GQA ratios and head dims run against
+the paged reference; boundary cases pin page-crossing behaviour.
 
-* **Paged gather.** History is not contiguous. Row ``i`` of
-  ``b_req_tokens_table`` lists the cache slots holding sequence ``i``'s tokens,
-  and those slots can be scattered anywhere in the pool. A kernel that assumed
-  ``batch_idx * seq_len`` addressing passes a contiguous test and corrupts a
-  fragmented cache, so the scattered case is tested explicitly.
-* **Two-stage reduction.** Stage 1 attends within 128-token partitions, stage 2
-  combines their partial softmax statistics. Sequence lengths straddling the
-  partition and ``BLOCK_N`` (16) boundaries are where the combine step fails.
-* **Plain scale.** Unlike prefill this kernel calls ``exp``, so it takes
-  ``1/sqrt(d)`` with no ``log2(e)`` factor.
-
-The reference is :func:`tests.reference.paged_decode_attention`.
+Usage:
+    pytest tests/kernels/test_flash_decoding.py
 """
 
 from __future__ import annotations

@@ -1,12 +1,11 @@
-"""W8A16 GEMM: 8-bit weights (fp8-e4m3 or int8), fp16 activations, fp32 accumulation.
+"""W8A16 GEMM: 8-bit weights (fp8-e4m3 or int8), fp16 activations.
 
-The weight stays 8-bit into the multiply-accumulate loop and is widened to fp16
-one tile at a time. Two formats share one kernel via the IS_FP8 constexpr:
-fp8-e4m3 (Qwen/DeepSeek checkpoints, bit-surgery dequant) and symmetric int8
-(per-channel or group-wise, produced at load time).
+The kernel dequantises each weight tile on the fly (fp8 via a bit-trick
+fast path, int8 by scale multiply) and accumulates in fp32, so
+activations never leave fp16.
 
 Usage:
-    y = w8a16_matmul(x, qweight, scales, group_n=128, group_k=128)
+    y = w8a16_matmul(x, qweight, scales)
 """
 
 from __future__ import annotations

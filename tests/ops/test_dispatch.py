@@ -1,9 +1,11 @@
 """Tests for the registry and deterministic dispatch (ROADMAP foundation 2).
 
-Everything runs on CPU against a private :class:`OpRegistry` and injected
-:class:`PlatformInfo` snapshots — the whole point of the design is that the
-selection logic is testable without any hardware. Probes point at functions
-defined in this very module (importable under its pytest module name).
+Filtering by shape / dtype / platform, ranking with the native floor,
+caching, forced backends, and the ``explain()`` reasons — a fresh fake
+registry per test keeps cases independent.
+
+Usage:
+    pytest tests/ops/test_dispatch.py
 """
 
 from __future__ import annotations

@@ -1,18 +1,12 @@
-"""Continuous batching: a step-driven engine where requests join and leave mid-flight.
+"""Continuous batching: a step-driven engine where requests join and leave freely.
 
-LLMEngine uses a fixed batch at generate() time—all sequences run until the longest finishes, 
-wasting compute on padding and rejecting late arrivals.
-
-ContinuousBatchingEngine replans per step (schedule → execute → harvest), producing up to 
-three passes in one step: prefill, extend, and decode—chunked prefill interleaves with decode 
-instead of stalling it.
+Each ``step()`` asks the :class:`~lite_llama.engine.scheduler.Scheduler` for
+a plan, runs it through the executor, harvests sampled tokens and updates
+request state — so chunked prefills and running decodes share one pass.
 
 Usage:
-    engine = ContinuousBatchingEngine.from_pretrained("my_weight/Qwen2.5-0.5B")
-    engine.add_request("The capital of France is", SamplingParams(temperature=0.0))
-    while engine.has_unfinished_requests():
-        for request in engine.step():
-            print(request.delta, end="")
+    engine.add_request(prompt, params)
+    finished = engine.step()
 """
 
 from __future__ import annotations
@@ -53,14 +47,11 @@ if TYPE_CHECKING:
 
 
 class _Work(NamedTuple):
-    """A plan, and the requests whose tokens it will produce, in that order.
+    """A plan plus the requests whose tokens it will produce, in that order.
 
-    The plan is anonymous by design — it names slots, not requests — so the step
-    keeps the request objects alongside it to attribute the sampled tokens.
-
-    ``requests`` is parallel to ``plan.sampled``; ``chunk_requests`` is parallel
-    to ``plan.slots`` and exists only on chunk passes, to attribute the prompt
-    logprob records of sequences that owe no token this pass.
+    The plan names slots, not requests, so the step keeps request objects
+    alongside it. ``requests`` is parallel to ``plan.sampled``;
+    ``chunk_requests`` is parallel to ``plan.slots`` (chunk passes only).
     """
 
     plan: ModelInput
@@ -72,10 +63,8 @@ def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
     """Plan one prompt-chunk pass; the two routes differ only in ``kind``.
 
     Chunk ``i`` writes cache rows ``[num_computed_tokens - chunk,
-    num_computed_tokens)`` of its slot — the scheduler has already advanced the
-    counter, so this reads the chunk's span off the request rather than tracking
-    it separately. A chunk that resumes on a prefix-cache hit also carries the
-    copies that put that prefix in its slot.
+    num_computed_tokens)`` of its slot — the scheduler already advanced the
+    counter. A chunk resuming on a prefix-cache hit also carries the copies.
     """
     slots, starts, lens, tokens = [], [], [], []
     sampled, requests = [], []
@@ -89,24 +78,18 @@ def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
         lens.append(end)
         tokens.extend(request.prompt_token_ids[start:end])
         prompt_logprobs.append(request.params.prompt_logprobs)
-        # Row j of the chunk is scored against the token at start+j+1, which
-        # sits inside the plan's own tokens — except a partial chunk's last
-        # row, whose target is the *next* chunk's first token, and a final
-        # chunk's last row, which is the sampled row and has no target yet.
-        # Both tails are padded with 0; the worker never reads the final one.
+        # Row j is scored against the token at start+j+1. A partial chunk's
+        # last row targets the *next* chunk's first token; a final chunk's
+        # last row is sampled and has no target. Both tails pad with 0.
         targets = request.prompt_token_ids[start + 1 : end + 1]
         prompt_targets.extend(targets + [0] * (chunk - len(targets)))
-        # The scheduler names the source slot and offset; the destination is this
-        # request's own slot, which only the plan knows about.
         copies += [
             (src_slot, request.slot, start_token, length)
             for src_slot, start_token, length in request.prefix_copies
         ]
         if request.num_computed_tokens == request.prompt_len:
-            # Only a chunk that finished its prompt has a next token to sample,
-            # and a pass mixes the two: the admission budget happily takes a
-            # short prompt (done in one chunk) beside a long one (chunk-capped).
-            # So the sampled rows are a subset, named by row index.
+            # Only a finished prompt has a next token to sample; the pass
+            # mixes both, so sampled rows are a subset named by row index.
             sampled.append(row)
             requests.append(request)
 
@@ -120,8 +103,7 @@ def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
             tokens=tuple(tokens),
             sampling=tuple(request.params for request in requests),
             sampled=tuple(sampled),
-            # A first token has no generated history yet, so the repetition
-            # penalty is a no-op here whatever the request configured.
+            # A first token has no repetition-penalty history yet.
             gen_counts=(0,) * len(requests),
             prefix_copies=tuple(copies),
             prompt_logprobs=tuple(prompt_logprobs) if wants_prompt else (),
@@ -135,15 +117,11 @@ def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
 def _prefill_work(group: list[Request], chunk_lens: list[int]) -> list[_Work]:
     """Split the step's prompt chunks by the kernel each may legally use.
 
-    A chunk routes by whether its slot already holds K/V from an earlier chunk:
-
-    * a *first* chunk (``num_computed_tokens == chunk``) runs as a padded grid
-      through the prefill kernel — pure self-attention over the grid, the cheap
-      path, correct because nothing of the prompt is cached yet;
-    * a *resumed* chunk cannot take it: the prefill kernel never reads the cache,
-      so its tokens would attend only within the chunk and silently drop the
-      prefix. Those tokens extend instead, one row per token, each attending over
-      its slot's whole cached history.
+    A *first* chunk (``num_computed_tokens == chunk``) runs as a padded grid
+    through the prefill kernel — nothing of the prompt is cached yet. A
+    *resumed* chunk cannot: the prefill kernel never reads the cache, so its
+    tokens would silently drop the prefix. Those extend instead, one row per
+    token, each attending over its slot's whole cached history.
     """
     pairs = list(zip(group, chunk_lens, strict=True))
     routes = (
@@ -156,13 +134,10 @@ def _prefill_work(group: list[Request], chunk_lens: list[int]) -> list[_Work]:
 def _decode_work(running: list[Request]) -> _Work:
     """Plan one decode token for every fully prefilled request.
 
-    The input token is the last one each request generated, taken from the host:
-    every step ends by synchronising to detokenise that token, so it is already
-    sitting in ``output_token_ids``, and shipping it costs one upload of a few
-    hundred bytes instead of a gather out of the generated-token grid.
+    The input token is the last one each request generated — already back on
+    the host from the previous step's synchronisation.
     """
-    # Cache length once this step's token is written: the request already counts
-    # the token it is about to feed in ``output_token_ids``.
+    # The request already counts the token it is about to feed.
     seq_lens = tuple(request.seq_len for request in running)
     return _Work(
         ModelInput(
@@ -183,32 +158,23 @@ def _decode_work(running: list[Request]) -> _Work:
 class ContinuousBatchingEngine:
     """Serves independently arriving requests as one continuously reshaped batch.
 
-    Drive it by calling :meth:`step` in a loop. Each call runs the scheduler's
-    plan for the step — prompt chunks for newly admitted or resumed requests, then
-    a decode token for everything running — and returns the requests that
-    produced a token, so a caller can stream text without knowing anything about
-    batching.
-
-    One synchronisation per step is unavoidable and deliberate: the sampled
-    tokens are read back to detokenise them and to decide who stopped. That is
-    what buys exact stop handling, and it is also what pays for itself, because a
-    request that stops is out of the batch on the next step rather than padding
-    it to the length cap.
+    Drive it by calling :meth:`step` in a loop: each call runs the scheduler's
+    plan (prompt chunks, then a decode token for everything running) and returns
+    the requests that produced a token. One host-device synchronisation per
+    step is deliberate — it reads sampled tokens back to detokenise and to
+    decide who stops, so a finished request leaves the batch on the next step.
 
     Args:
-        engine: A built :class:`~lite_llama.engine.llm_engine.LLMEngine`; this
-            object takes over its KV cache and must be the only user of it.
+        engine: A built :class:`~lite_llama.engine.llm_engine.LLMEngine`; takes
+            over its KV cache and must be the only user of it.
         config: Admission limits. Defaults derive ``max_seq_len`` from the engine.
         executor: Where passes run. Defaults to a
-            :class:`~lite_llama.executor.executor.UniProcExecutor` over ``engine``,
-            which is the single-GPU case; :meth:`from_pretrained` substitutes a
-            tensor-parallel one. Injecting it is also how a test drives the step
-            loop without a model.
+            :class:`~lite_llama.executor.executor.UniProcExecutor` (single GPU);
+            injecting a fake is how a test drives the step loop without a model.
 
     Raises:
-        NotImplementedError: The checkpoint is multimodal. Vision prefill needs
-            per-request processor outputs, which the batched prefill grid here
-            has no place for.
+        NotImplementedError: The checkpoint is multimodal — vision prefill
+            needs per-request processor outputs the batched grid has no place for.
     """
 
     def __init__(
@@ -247,10 +213,8 @@ class ContinuousBatchingEngine:
         self._request_ids = itertools.count()
         self._step_count = 0
 
-        # Observability (A7): metrics are a few float additions on the finish
-        # path; tracing is a span per request when a collector is configured.
-        # Both are cheap no-ops when disabled, so the hot loop never branches
-        # on them.
+        # Observability: metrics and tracing are cheap no-ops when disabled,
+        # so the hot loop never branches on them.
         self.metrics = EngineMetrics.from_env()
         self.tracer = Tracer.from_env()
         self._spans: dict[str, object] = {}
@@ -283,28 +247,23 @@ class ContinuousBatchingEngine:
             max_num_batched_tokens: Padded token budget for one prefill group.
             max_gpu_num_blocks: Manual KV-cache size in tokens; profiled when ``None``.
             device: Torch device string.
-            use_cuda_graph: Capture decode graphs. Worth keeping on: continuous
-                batching pads odd batch sizes onto the captured grid, so most
-                steps stay on the graph path. Ignored above
-                ``tensor_parallel_size`` 1, where a sharded layer's collectives
-                would be captured inside the graph.
-            quantization: Runtime weight quantisation, forwarded to the engine.
-                Orthogonal to batching -- it changes the linear layers, not the
-                KV cache or the schedule.
+            use_cuda_graph: Capture decode graphs. Continuous batching pads
+                odd batch sizes onto the captured grid, so most steps stay on
+                the graph path. Ignored above ``tensor_parallel_size`` 1, where
+                captured collectives would be unsafe.
+            quantization: Runtime weight quantisation, forwarded to the engine —
+                orthogonal to batching.
             tensor_parallel_size: GPUs this replica's weights are split over.
-                Above 1, ranks 1.. are spawned as follower processes and every
-                step's plan is broadcast to them; this process stays rank 0 and
-                keeps the scheduler. When the caller has *already* placed this
-                process in a TP group (the CLI, a DP controller), no process is
-                spawned and the existing group is used -- the value then only has
-                to agree with it.
+                Above 1, ranks 1.. spawn as followers and every step's plan is
+                broadcast to them; this process stays rank 0. If this process
+                already sits in a TP group (the CLI, a DP controller), that group
+                is reused and the value only has to agree with it.
             kv_cache_dtype: KV-cache element type, forwarded to the engine
                 (``"auto"`` for fp16, or an fp8 spelling to halve the cache).
-            enable_prefix_cache: Reuse the K/V of prompt prefixes already resident
-                in the cache instead of re-prefilling them. Off by default because
-                it only pays when prompts share a prefix -- a system prompt, a
-                few-shot preamble, a chat history -- and otherwise costs a hash per
-                block. See :mod:`lite_llama.engine.prefix_cache`.
+            enable_prefix_cache: Reuse the K/V of prompt prefixes already
+                resident in the cache. Off by default: it only pays when prompts
+                share a prefix, and otherwise costs a hash per block. See
+                :mod:`lite_llama.engine.prefix_cache`.
 
         Raises:
             NotImplementedError: The checkpoint is multimodal.
@@ -327,17 +286,15 @@ class ContinuousBatchingEngine:
             "tokenizer_path": tokenizer,
             "max_seq_len": max_seq_len,
             "max_gpu_num_blocks": max_gpu_num_blocks,
-            # A captured graph would replay the collectives a sharded layer
-            # issues, which is not safe, so tensor parallelism decodes eager --
-            # the same trade-off :class:`~lite_llama.engine.llm.LLM` makes.
+            # A captured graph would replay a sharded layer's collectives, so
+            # tensor parallelism decodes eager.
             "use_cuda_graph": use_cuda_graph and tensor_parallel_size == 1,
             "quantization": quantization,
             "kv_cache_dtype": kv_cache_dtype,
         }
 
-        # Followers must exist *before* this rank builds its engine: sharded
-        # layers read their width from the process group, and sizing the KV cache
-        # is itself a collective over it.
+        # Followers must exist before this rank builds its engine: sharded
+        # layers read their width from the process group.
         followers: tuple[BaseProcess, ...] = ()
         joined = get_tp_world_size()
         if joined > 1 and joined != tensor_parallel_size:
@@ -374,9 +331,8 @@ class ContinuousBatchingEngine:
     ) -> Request:
         """Queue a request and return the handle that tracks it.
 
-        The returned :class:`~lite_llama.engine.scheduler.Request` is updated in
-        place by :meth:`step`, so a caller can hold on to it and read ``delta``,
-        ``text`` and ``finish_reason`` as generation proceeds.
+        The handle is updated in place by :meth:`step`, so a caller can read
+        ``delta``, ``text`` and ``finish_reason`` as generation proceeds.
 
         Args:
             prompt: Prompt text, already chat-templated if the model wants that.
@@ -422,26 +378,20 @@ class ContinuousBatchingEngine:
     def step(self) -> list[Request]:
         """Run one engine step and return the requests it advanced.
 
-        The shape is fixed — schedule, plan, execute, harvest — and the middle two
-        stages are the only ones that know about batching at all.
-
         Returns:
-            The requests that produced a token this step, in pass order. Each
-            carries this step's text in ``delta``; those that stopped also carry
-            a ``finish_reason``. A request that stopped on a stop token is
-            included with an empty ``delta`` — the async front end learns a
-            request ended only from what this list hands back, so leaving it
-            out would strand its stream waiting on a final chunk that never
-            comes.
+            The requests that produced a token this step, in pass order. A
+            request that stopped on a stop token is included with an empty
+            ``delta`` — the async front end learns a request ended only from
+            this list, so leaving it out would strand its stream.
         """
         scheduled = self.scheduler.schedule()
         if scheduled.is_empty:
             return []
 
         self._step_count += 1
-        # Freshly admitted requests owe a queue-time observation; resumed chunks
-        # have num_computed beyond their chunk and are skipped. A re-admission
-        # after preemption counts again: the request really was waiting.
+        # Freshly admitted requests owe a queue-time observation (num_computed
+        # equals their first chunk); resumed chunks and preemption re-admissions
+        # are skipped or re-counted by the same test.
         for request, chunk in zip(scheduled.prefill, scheduled.prefill_chunk_lens, strict=True):
             if request.num_computed_tokens == chunk:
                 self.metrics.observe_queue_time(request)
@@ -451,11 +401,9 @@ class ContinuousBatchingEngine:
         if scheduled.decode:
             work.append(_decode_work(scheduled.decode))
 
-        # Execute every pass before reading any tokens back: a step's passes are
-        # slot-disjoint (a request prefilled this step decodes from the next),
-        # so the readback can be deferred to the end of the step. That keeps one
-        # host-device synchronisation per step — not per pass — and lets a later
-        # pass's input preparation ride the copy stream while an earlier pass's
+        # Execute every pass before reading any tokens back: a step's passes
+        # are slot-disjoint, so one synchronisation per step suffices, and a
+        # later pass's input prep rides the copy stream while an earlier pass's
         # forward is still on the GPU (the L1 overlap site).
         pending: list[tuple[_Work, torch.Tensor, PassLogprobs | None]] = []
         for work_item in work:
@@ -464,8 +412,7 @@ class ContinuousBatchingEngine:
 
         emitted: list[tuple[Request, int, PositionLogprobs | None]] = []
         for work_item, tokens, logprobs in pending:
-            # ``prompt`` is slot-parallel and uniformly None for a decode pass,
-            # which has no chunks to attribute records to; skip it there.
+            # ``prompt`` is uniformly None for a decode pass.
             if logprobs is not None and any(logprobs.prompt):
                 self._attribute_prompt_logprobs(work_item, logprobs.prompt)
             records = (
@@ -479,8 +426,6 @@ class ContinuousBatchingEngine:
                     zip(work_item.requests, tokens.tolist(), strict=True), records, strict=True
                 )
             ]
-        # The gauges read the occupancy once the step's finishes have landed,
-        # so a scrape never counts a request that this step already retired.
         # Counter properties, not len(running): those copy the lists.
         advanced = self._harvest(emitted)
         self.metrics.observe_load(self.scheduler.num_running, self.scheduler.num_waiting)
@@ -493,10 +438,9 @@ class ContinuousBatchingEngine:
     ) -> list[RequestOutput]:
         """Run a whole prompt set through the scheduler and return the completions.
 
-        Offline convenience wrapper: it submits every prompt at once and drives
-        :meth:`step` to exhaustion. The prompts still flow through the scheduler,
-        so a set that exceeds ``max_num_seqs`` is admitted in waves rather than
-        rejected, and short answers free their slots early.
+        Offline convenience wrapper: submits every prompt at once and drives
+        :meth:`step` to exhaustion. A set exceeding ``max_num_seqs`` is admitted
+        in waves, and short answers free their slots early.
 
         Returns:
             One :class:`~lite_llama.engine.outputs.RequestOutput` per prompt, in
@@ -534,9 +478,8 @@ class ContinuousBatchingEngine:
         """Place a chunk pass's prompt records on their requests, by position.
 
         Entry ``j`` of sequence ``i`` covers position ``seq_starts[i] + j + 1``.
-        Position 0 and prefix-cache hits stay ``None``: the rows that would
-        have predicted them never ran. The list is allocated at full prompt
-        length on first contact, so chunks may land in any pass order.
+        Position 0 and prefix-cache hits stay ``None``; the list is allocated
+        at full prompt length on first contact, so chunks may land in any order.
         """
         for request, start, records in zip(
             work.chunk_requests, work.plan.seq_starts, prompt, strict=True
@@ -553,11 +496,9 @@ class ContinuousBatchingEngine:
     ) -> list[Request]:
         """Read the step's tokens back, detokenise them, and retire whoever stopped.
 
-        The only host-device synchronisation in the loop. It is what makes stop
-        handling exact — a sequence that emits a stop token is out of the batch
-        on the next step, not at the next poll interval — and exactness is worth
-        more here than it is in the one-shot path, because the freed slot goes
-        straight to a queued request.
+        The only host-device synchronisation in the loop. It makes stop handling
+        exact — a stop token retires the request on the next step, and the freed
+        slot goes straight to a queued request.
         """
         now = time.monotonic()
         check_repeat = self._step_count % POLL_INTERVAL == 0
@@ -570,20 +511,16 @@ class ContinuousBatchingEngine:
             request.delta_logprobs = None
 
             if token_id in self.stop_token_ids:
-                # The stop token itself is model punctuation, not output; the
-                # one-shot path drops it too. The request still belongs in
-                # this step's return (see step()): its stream has to hear the
-                # finish reason, or an async consumer waits on a final chunk
-                # that never comes.
+                # The stop token is model punctuation, not output; the request
+                # still belongs in this step's return — its stream has to hear
+                # the finish reason (see step()).
                 self._finish(request, "eos")
                 advanced.append(request)
                 continue
 
             request.output_token_ids.append(token_id)
             if record is not None:
-                # Parallel to output_token_ids: one record per accepted token,
-                # and — like the token — none for the stop token, which is
-                # model punctuation rather than output.
+                # Parallel to output_token_ids: one record per accepted token.
                 if request.output_logprobs is None:
                     request.output_logprobs = []
                 request.output_logprobs.append(record)

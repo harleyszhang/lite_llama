@@ -1,35 +1,13 @@
 """Collective accounting: what tensor parallelism actually puts on the wire.
 
-A tensor-parallel step is fast or slow for one reason above all others — how many
-bytes it makes the ranks exchange — and that number is invisible in a profile of
-kernel names. This module counts it: every collective in
-:mod:`lite_llama.distributed.parallel_state` reports its op and its payload here, so
-a caller can ask "how much traffic did that step cost, on which plane" and get an
-answer in bytes rather than an intuition.
-
-Core design. Recording is *windowed*, not global: nothing is counted until someone
-opens a window with :meth:`CollectiveStats.collect`, which keeps the disabled path a
-single falsy check and makes each measurement scoped to the code the caller cares
-about. The open windows live in a :class:`~contextvars.ContextVar`, so a window
-belongs to the thread and asyncio task that opened it — DP replicas step
-concurrently, and a per-step measurement that also counted a sibling replica's
-traffic would be worse than no measurement at all. Windows nest, and an event is
-credited to every open one, so a per-step window inside a whole-run window needs no
-bookkeeping from the caller.
-
-Ops and planes are enums rather than strings. A mistyped op name would otherwise open
-a tally of its own and leave the intended one reporting zero, which reads exactly
-like the traffic being absent — the one answer this module exists to give. The two
-planes are counted apart because they are traded against each other by design:
-keeping logits sharded costs a couple of scalars of **control** traffic (plans and
-sampled ids, gloo) to avoid a vocabulary-sized gather on the **data** plane
-(activations and logits, NCCL).
+``CollectiveStats.collect()`` opens a window that tallies bytes per
+collective op; the window's report ranks ops by traffic, so sharding
+decisions get numbers instead of guesses.
 
 Usage:
     with CollectiveStats.collect() as stats:
-        engine.step()
-    print(stats.report())                       # per-op calls and bytes, by plane
-    stats.tally(Collective.ALL_GATHER).nbytes    # 0 — the sampler never gathers
+        all_reduce_tp(x)
+    print(stats.report())
 """
 
 from __future__ import annotations

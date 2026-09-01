@@ -1,10 +1,10 @@
 """Elementwise activation kernels (Triton): relu, leaky_relu, tanh, gelu, silu.
 
-Each is a thin pointwise Triton kernel over a flattened tensor — standalone and
-useful on their own, kept apart from the fused MLP/attention kernels.
+One Triton launch per element — no fused GEMM epilogue here; the fused
+variants live in :mod:`~lite_llama.kernels.ops.activation.swiglu`.
 
 Usage:
-    y = silu(x)
+    from lite_llama.kernels import silu, gelu
 """
 
 import math

@@ -1,20 +1,8 @@
-"""Fused SwiGLU MLP: silu(x @ w1) * (x @ w2) @ w3, three GEMMs and an epilogue.
+"""Fused SwiGLU MLP: silu(x @ w1) * (x @ w2) @ w3 — three GEMMs, one kernel.
 
-One Triton kernel serves both GEMM shapes via ``FUSE_SILU``: True folds the
-gate/up pair into a single launch with a silu-mul epilogue (two accumulators,
-two B operands per K step); False is the plain down-projection. The old file
-carried the two variants as near-duplicate kernels; only the accumulator and
-epilogue actually differ, and the constexpr branch compiles them apart with the
-pid mapping and K loop shared.
-
-The third GEMM chain the implementations disagree on is the down-projection:
-Triton launch versus ``torch.mm``. Running both quantifies what the fusion is
-worth against cuBLAS at these shapes.
-
-Timing follows ``microbench``: verify against ``torch_mlp`` first, then
-cold-L2 medians divided by the operation's theoretical work — ``6MNK`` FLOP
-(three GEMMs) and the read-each-input-once traffic — so implementations share a
-numerator and only the measured time differs.
+The Triton kernel fuses the up/gate GEMMs with the silu-multiply
+epilogue; ``_check`` diffs against the eager chain before anything is
+timed.
 
 Usage:
     python benchmarks/kernels/bench_fused_mlp_silu.py

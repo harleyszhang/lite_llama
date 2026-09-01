@@ -1,18 +1,11 @@
 """CUDA Graph regression tests.
 
-A captured graph replays a fixed sequence of kernels against fixed memory
-addresses. That makes two failure modes possible that eager execution simply
-cannot have:
+Three guarantees: graph replay matches eager outputs, repeat replays
+stay stable, and capture clamps batch sizes to the request table so a
+graph never launches with unshaped rows.
 
-* **Stale pointers.** If capture bakes in a tensor that is later reallocated,
-  replay reads whatever now occupies that address. The symptom is output that is
-  plausible-looking but wrong, and *different* on each call.
-* **Out-of-bounds capture.** Capturing a batch size larger than the request
-  table indexes past ``b_req_tokens_table``, corrupting the CUDA context with
-  delayed CUBLAS errors far from the real cause.
-
-Every test therefore pins graph output against eager output on the same
-checkpoint: eager is the oracle, and byte-identical greedy text is the contract.
+Usage:
+    pytest tests/compile/test_cuda_graph.py
 """
 
 from __future__ import annotations

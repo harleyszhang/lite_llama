@@ -1,9 +1,11 @@
-"""Tests for KernelSpec and its requirement dataclasses (ROADMAP foundation 2).
+"""Tests for :class:`KernelSpec` and its requirement dataclasses.
 
-Runs entirely on CPU: the specs are pure dataclasses. The cold-start test is
-the load-bearing one — the registry design only pays off if registering every
-implementation stays torch-free, so it asserts the import chain in a fresh
-interpreter.
+Shape constraints, shape and layout requirements, spec validation,
+membership predicates and torch-free registration — the declarative
+contract dispatch trusts.
+
+Usage:
+    pytest tests/ops/test_spec.py
 """
 
 from __future__ import annotations

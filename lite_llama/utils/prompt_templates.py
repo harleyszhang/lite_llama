@@ -1,19 +1,11 @@
-"""Chat prompt formatting: wrap a user turn with the checkpoint's own chat template.
+"""Chat prompt formatting: wrap a user turn with the checkpoint's chat template.
 
-The vLLM approach, and the only one kept: an instruct checkpoint ships its chat
-template inside the tokenizer, so formatting a turn is just
-``tokenizer.apply_chat_template(messages, add_generation_prompt=True)`` — always the
-model's official format, zero per-family maintenance, and identical to the
-multimodal path. Base (non-instruct) checkpoints carry no template and are sent
-verbatim by the caller, so they never reach this module.
+:func:`get_prompter` returns a :class:`ChatPrompter` when the tokenizer
+ships a chat template and None otherwise, so callers choose between
+chat formatting and raw prompts without template soup.
 
 Usage:
-    prompter = get_prompter(tokenizer)      # None when the checkpoint has no template
-    prompter.insert_prompt("hello")
-    text = prompter.model_input             # official-format prompt string
-
-    # Or let :class:`PrompterResolver` make the base-vs-instruct call too:
-    prompter = PrompterResolver.build(model_dir, tokenizer)  # None for base
+    prompter = get_prompter(tokenizer)
 """
 
 from __future__ import annotations

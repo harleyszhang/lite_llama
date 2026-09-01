@@ -1,30 +1,12 @@
 """One decoder layer, built and run on its own.
 
-A whole-model bring-up answers "does it generate text". It cannot answer "is layer 3
-right", and it cannot be run at all until a checkpoint that may be 671 B parameters has
-been downloaded and made to fit. This harness inverts that: it builds the model skeleton
-on the meta device (no allocation, no initialisation), materialises exactly one layer,
-and drives that layer's ``forward`` with hand-built KV bookkeeping. One layer of a large
-MoE is a single-GPU object, so MLA, a Lightning Indexer or a new expert routing scheme
-can be checked for correctness and timed on hardware that could never hold the model.
-
-Three things come out of a run, and they are the three questions a new layer raises:
-
-* **Is it right** — max/mean absolute difference against a second implementation of the
-  same layer, for the prefill *and* the decode shape. Both sides get the same weights
-  and the same ``(cos, sin)``, so a difference is the layer's, not RoPE's.
-* **What does it cost** — wall time per phase, a per-module breakdown from CUDA events,
-  and the peak device memory the layer needed.
-* **What actually ran** — the implementations :mod:`lite_llama.kernels.dispatcher`
-  selected during the run, read back from its decision cache rather than guessed.
-
-The layer is always addressed as layer 0 during a run: ``kv_buffer`` holds one tensor,
-whatever index the layer carries in the checkpoint.
+:class:`SingleLayerHarness` builds just layer ``i`` of a checkpoint,
+runs prefill and decode steps on it, times the dispatched kernels, and
+diffs the outputs against an HF reference — layer-local evidence
+without loading the whole model.
 
 Usage:
-    harness = SingleLayerHarness.from_pretrained("my_weight/Qwen3-0.6B", layer_index=3)
-    harness.load_checkpoint("my_weight/Qwen3-0.6B")
-    print(harness.run(batch=2, seq_len=128, decode_steps=8).render())
+    report = SingleLayerHarness(config, 0).run(batch=4)
 """
 
 from __future__ import annotations

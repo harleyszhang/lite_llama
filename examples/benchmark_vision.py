@@ -1,22 +1,11 @@
-"""
-Multimodal (vision-language) benchmark: lite_llama ``VisionGenerator`` vs HF
-transformers, for LLaVA and Qwen3-VL checkpoints.
+"""Vision benchmark: lite_llama vs HF transformers at a fixed image size.
 
-Shares the metric definitions of ``examples/benchmark.py`` (greedy decoding,
-natural EOS stop for both engines, output tokens counted by re-tokenising with
-the same tokenizer, ``torch.cuda.synchronize`` around every timed region,
-median over ``--iters``). One difference is structural: the multimodal path
-serves requests one at a time (lite_llama's processor path is single-request),
-so there is no batch dimension — each iteration walks ``--num-requests``
-(image, prompt) pairs serially and the numbers describe that loop.
+Both backends run the same image + question prompts with the generation
+length pinned, so the comparison isolates engine overhead from the
+vision encoder's cost.
 
-The image is resized to ``--image-size`` (square) before both engines see it.
-LLaVA's CLIP preprocessing re-scales to 336x336 regardless; Qwen3-VL is
-dynamic-resolution, and pinning the pixel count keeps its vision-token budget
-(and thus prefill length) comparable across engines and runs.
-
-Run from the repository root:
-    python examples/benchmark_vision.py --model my_weight/Qwen3-VL-4B-Instruct
+Usage:
+    python examples/benchmark_vision.py --model <ckpt> --image <jpg>
 """
 
 from __future__ import annotations

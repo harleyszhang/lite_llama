@@ -1,13 +1,11 @@
-"""端到端指标基线:lite_llama eager / CUDA Graph 的 TTFT / TPOT / TPS 分解。
+"""End-to-end metric baseline: TTFT / TPOT / TPS, eager vs CUDA Graph.
 
-指标口径见 benchmarks/common.py(对齐 vLLM/TensorRT-LLM)。多模态 checkpoint
-(llava / qwen3_vl)自动走 VisionBackend。--backend hf 跑 HF transformers 同口径
-对照;--verify 用短 prompt 隔离 decode,断言 graph capture 不改变贪心输出。
+``run_lite`` and ``run_hf`` drive the same prompts while ``verify``
+checks the graph path still answers exactly like eager — the numbers
+and the guarantee in one run.
 
-用法:
-    .venv/bin/python benchmarks/bench_e2e.py --greedy --json out.json
-    .venv/bin/python benchmarks/bench_e2e.py --model-dir my_weight/Qwen3-VL-4B-Instruct
-    .venv/bin/python benchmarks/bench_e2e.py --backend hf --greedy --model-dir my_weight/Qwen2.5-1.5B-Instruct
+Usage:
+    python benchmarks/bench_e2e.py --model-dir <ckpt> --verify
 """
 
 from __future__ import annotations

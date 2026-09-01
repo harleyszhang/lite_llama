@@ -1,17 +1,11 @@
-"""Render a model as an indented text tree: layer types, parameter counts, dtypes.
+"""Render a model as an indented text tree: layer types, params, dtypes.
 
-A checkpoint's shape is the first thing you need when a load fails or a shard looks
-wrong, and `print(model)` buries it under repr noise. This walks `named_children()`
-once and renders box-drawing branches, so sibling boundaries stay readable at depth.
-Every node carries only the parameters it owns directly (`recurse=False`), which is
-what makes the numbers add up instead of counting a subtree once per ancestor.
-
-Depth is budgeted rather than unlimited: past `max_depth` a node reports how many
-children it hid, so a 48-layer model stays one screen instead of ten thousand lines.
+:func:`export_structure_tree` walks the ``nn.Module`` tree once, counting
+each node's own parameters and naming dtypes; depth budgeting reports
+what it hid instead of silently dropping subtrees.
 
 Usage:
     print_structure_tree(model, max_depth=3)
-    tree = export_structure_tree(model)      # same text, as a string
 """
 
 from __future__ import annotations

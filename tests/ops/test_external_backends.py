@@ -1,19 +1,11 @@
 """Tests for the external-backend tier: probing, install metadata, optionality.
 
-The invariant under test is that a backend nobody installed costs nothing and
-breaks nothing. Three things have to hold for that, and all three are checked
-here on a CPU box with none of the five libraries present:
+``library_present`` semantics, every backend module's probe shape, the
+install metadata against pyproject extras, and the rule that external
+rows never make an op unusable when absent.
 
-1. The probe answers False for anything that does not import — including a
-   package that exists but blows up on import, which is what a compiled
-   backend built against the wrong CUDA looks like.
-2. Every backend module declares the metadata dispatch and the doctor need,
-   with the import name pinned (``deepgemm`` the distribution installs
-   ``deep_gemm`` the module — a typo there would silently disable a backend
-   that is in fact installed).
-3. Install metadata cannot promise a path that would fail: an extra is named
-   only when it exists in ``pyproject.toml``, and a backend with no extra must
-   carry a source recipe instead.
+Usage:
+    pytest tests/ops/test_external_backends.py
 """
 
 from __future__ import annotations

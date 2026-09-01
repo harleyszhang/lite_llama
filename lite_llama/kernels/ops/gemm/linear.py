@@ -1,19 +1,11 @@
 """Entry points of the ``linear`` logical op: one per quantisation scheme.
 
-The projection GEMM is the same operation in every model, but the numeric
-format decides which kernel runs it. That format is a *dispatch key*, not a
-runtime branch: :func:`~lite_llama.kernels.dispatcher` already knows the
-scheme when it picks a row, so each function below may assume its own format
-and map straight onto the Triton kernels in
-:mod:`lite_llama.kernels.ops.quantization` — no ``if scheme ==`` chain anywhere on
-the hot path. All of them share the
-:class:`~lite_llama.kernels.ops.interfaces.LinearOp` signature so a caller
-never has to know which one it got; scales it does not have are simply
-``None``.
+Each function shares the ``(x, weight)`` signature — the weight object
+knows its own quant format — so ``run_quant_linear`` can select on scheme
+and call the row without a conditional chain at the call site.
 
 Usage:
-    y = linear_torch(x, weight, bias=bias)                          # unquantised
-    y = linear_w8a16(x, qweight, weight_scale=scales, group_k=128)  # fp8/int8 weight
+    y = linear_torch(x, weight)
 """
 
 from __future__ import annotations

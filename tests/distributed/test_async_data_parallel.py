@@ -1,16 +1,8 @@
 """Tests for :mod:`lite_llama.engine.async_data_parallel`.
 
-The pump-thread bridge is the whole surface here: everything else the class does
-belongs to the parent coordinator and is tested next door. A fake process grid —
-the same trick ``test_data_parallel.py`` uses to test the coordinator without
-GPUs — stands in for the replicas, and each test plays a replica's part by
-putting well-formed messages onto the shared result queue. That pins down
-exactly the contract the pump offers coroutines: messages become chunks on the
-right stream, failures become exceptions in the right caller, and a replica
-that dies turns every open stream into an error instead of a hang.
-
-Nothing loads a checkpoint or touches a GPU; the event-loop plumbing is the code
-under test and it is pure bookkeeping.
+Fakes replace processes and queues (``_ChannelQueue``,
+``_FakeProcess``), so the asyncio surface — streamed chunks, replica
+spread, failure propagation — is tested without a real replica.
 
 Usage:
     pytest tests/distributed/test_async_data_parallel.py

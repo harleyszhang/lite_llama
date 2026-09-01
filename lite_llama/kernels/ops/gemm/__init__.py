@@ -1,19 +1,10 @@
 """GEMM domain: the linear projections, one row per quantisation scheme.
 
-The group's whole surface is the five native Triton/torch entry points of
-:mod:`~lite_llama.kernels.ops.gemm.linear` plus DeepGEMM's Hopper fp8 path.
-Splitting linear by scheme (rather than one row with branches) is what lets
-dispatch answer "which kernel for w8a16_fp8 on this shape?" without the kernel
-itself re-deriving the answer internally.
-
-DeepGEMM registers ``verified=False`` on purpose: its wrappers are written
-against the upstream API but have no hardware run on record yet (the CI box is
-an sm86 A10, DeepGEMM needs sm90+), so the golden gate keeps the row out of
-default dispatch until an H100 box produces a max-abs-diff — an explicit
-``backend="deepgemm"`` may still force it.
+Registers the spec rows and re-exports the entry points — ``linear_torch``
+plus one function per quant scheme (w8a16, w4a16, w8a8 int8/fp8).
 
 Usage:
-    from lite_llama.kernels.ops import gemm  # noqa: F401  (registers the rows)
+    from lite_llama.kernels import linear_torch, linear_w8a16
 """
 
 from lite_llama.kernels.backend.deepgemm import CUDA_SM90

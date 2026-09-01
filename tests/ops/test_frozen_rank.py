@@ -1,10 +1,11 @@
 """Frozen measured ranking: store -> provider -> dispatch rank (ROADMAP v0.10).
 
-CPU-only by design: the provider reads the GPU identity off the injected
-:class:`PlatformInfo` and the store is a ``tmp_path`` ConfigStore, so the whole
-frozen-rank path — freeze, look up, flip a dispatch decision, keep it stable —
-runs without hardware. The conftest pins ``LITE_LLAMA_FROZEN_RANK=0``; tests
-that exercise the lookup opt back in with the ``frozen_on`` fixture.
+A store with fabricated measurements is installed as the perf
+provider; dispatch must then rank by the frozen numbers, and
+uninstalling restores the default provider.
+
+Usage:
+    pytest tests/ops/test_frozen_rank.py
 """
 
 from __future__ import annotations

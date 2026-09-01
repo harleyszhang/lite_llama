@@ -1,35 +1,11 @@
 """Kernel microbenchmark harness: one timing discipline, one honest metric.
 
-A kernel number is worth keeping only if a reader can tell what it measured.
-This module fixes the three things every benchmark here would otherwise
-re-decide: how long to time (cold-L2 median through ``triton.testing.do_bench``),
-what to divide by (the *theoretical* work of the operation, never one
-implementation's actual traffic), and what to compare against (the device's own
-roofline, derived from CUDA properties instead of a spec sheet).
-
-Which timer to use is the one decision a caller must make consciously, and it is
-not a matter of taste. ``do_bench`` replays the callable back to back, valid only
-when a call leaves the world as it found it: a KV-cache scatter is idempotent and
-qualifies, a block allocator does not — its second call runs against a pool the
-first one consumed, so replay times a different operation each iteration and
-averages a staircase. :func:`bench_stateful` restores the precondition between
-timed intervals; :func:`bench_host` measures host wall time for operations whose
-cost *is* host-side stalling.
-
-One measured consequence of that choice, because it is easy to get backwards: a
-timing loop that calls ``torch.cuda.synchronize()`` once per iteration drains the
-launch queue, so the next iteration's Python and launch overhead lands *inside*
-the timed window. On this machine that puts a floor near 100 us under every
-result, which at decode shapes is several times the kernel itself. Every timer
-here therefore keeps the queue saturated and reads its events afterwards.
+``bench`` warms, L2-flushes and times with device sync;
+``bench_stateful`` / ``bench_host`` cover alloc-reset and host-side
+work. ``verify`` gates every result on numerical correctness first.
 
 Usage:
-    from microbench import Row, Work, bench, metadata, report, verify
-
-    print(metadata())
-    verify("flash_decoding", out, ref, rtol=1e-2, atol=1e-2)
-    us = bench(lambda: flash_decoding(*args))
-    report([Row("native/triton", "b8_s2048", us, Work(flops=f, moved=b))])
+    from benchmarks.kernels.microbench import bench
 """
 
 from __future__ import annotations

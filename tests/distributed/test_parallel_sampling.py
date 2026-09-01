@@ -1,25 +1,11 @@
 """Tests for sampling from a vocabulary that no single rank holds.
 
-The sharded head hands the sampler ``[batch, vocab / tp]``. Reconstructing the *global*
-decision from that without gathering logits is the original piece of this design, so the
-tests are equivalence tests against the unsharded computation rather than sanity checks:
-
-* :func:`vocab_logsumexp` must equal ``torch.logsumexp`` over the full row, which makes
-  ``local_logits - log_z`` **exactly** the global ``log_softmax`` restricted to this
-  rank's slice. That identity is the whole reason two scalars per row suffice, so it is
-  asserted element-wise on the concatenated slices, not sampled.
-* :func:`global_argmax` must equal ``full.argmax`` — and must break ties by lowest id, or
-  two ranks holding the same maximum would decode different tokens.
-* :func:`sharded_top_p` must draw from the true global nucleus. Driving ``top_p`` to zero
-  collapses the nucleus to one token, which turns a sampler into a deterministic function
-  and makes the candidate gather testable at all.
-
-Ranks are *not* asserted to draw the same token at ordinary ``top_p``: they legitimately
-do not, since each calls ``multinomial`` with its own RNG, and the engines broadcast the
-winner (``broadcast_tp``) rather than relying on synchronised randomness.
+Under TP each rank sees a vocab slice; the tests verify the offset
+arithmetic and the two-scalar log-softmax reconstruction that let ranks
+agree on one global sample without sharing full logits.
 
 Usage:
-    pytest tests/distributed/test_parallel_sampling.py     # needs 2+ CUDA devices
+    pytest tests/distributed/test_parallel_sampling.py
 """
 
 from __future__ import annotations

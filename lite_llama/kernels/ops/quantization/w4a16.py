@@ -1,25 +1,10 @@
 """W4A16 GEMM: 4-bit weights (AWQ/GPTQ), fp16 activations, fp32 accumulation.
 
-AWQ and GPTQ checkpoints pack 8 int4 values into each int32 word along the K
-dimension, with one fp32 scale (and zero point) per group of ``group_size``
-input channels. The kernel unpacks the int4 nibbles, applies the group-wise
-dequantisation, and multiplies by the fp16 activation — all inside the GEMM
-loop, so the weight never exists at fp16 in HBM.
-
-v0.5 rewrite: uses ``tl.dot`` for tensor-core acceleration (SM80+ fp16 HMMA).
-Each k-iteration processes one full group (group_size elements = BLOCK_K):
-  1. Load [BLOCK_N, group_size//8] packed int32 words
-  2. Unpack to [group_size, BLOCK_N] fp16 via bit shift
-  3. Apply dequant: (nibble - zero) * scale
-  4. ``tl.dot(a_tile, b_tile)`` accumulates on tensor cores
-
-Packing order (AWQ/GPTQ standard):
-    int32 word w contains values for K indices [8*i, 8*i+7]:
-        nibble_j = (w >> (4*j)) & 0xF,  j = 0..7
-    The dequantised value is: (nibble - zero) * scale.
+The kernel unpacks int4 pairs, scales per group and accumulates in fp32;
+zeros may fold into the scale table when the checkpoint layout allows.
 
 Usage:
-    y = w4a16_matmul(x, qweight, scales, zeros, group_size=128)
+    y = w4a16_matmul(x, qweight, scales, zeros)
 """
 
 from __future__ import annotations

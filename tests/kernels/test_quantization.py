@@ -1,9 +1,10 @@
 """Tests for the quantisation kernels: w8a16, w4a16, smoothquant.
 
-Each kernel is tested against a pure-torch reference that dequantises the weight
-explicitly and runs the matmul in fp32. The tolerance is loose enough to absorb
-the rounding noise of 8-bit (or 4-bit) storage but tight enough to catch a
-swapped scale or a mis-addressed tile.
+Each GEMM is diffed against a dequantised fp reference across shapes
+and group sizes; config parsing tests pin scheme strings to formats.
+
+Usage:
+    pytest tests/kernels/test_quantization.py
 """
 
 from __future__ import annotations

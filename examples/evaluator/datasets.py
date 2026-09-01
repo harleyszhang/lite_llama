@@ -1,3 +1,13 @@
+"""Benchmark datasets and scoring metrics for the evaluation example.
+
+Each dataset class (``HotpotQA``, ``HellaSwag``) normalises its raw data
+into one common shape via ``unify_data``; the free functions score
+predictions — exact match, penalised F1, Jaccard, embedding similarity.
+
+Usage:
+    score = exact_match(normalize_answer(pred), normalize_answer(gt))
+"""
+
 import random
 from typing import Optional, Any
 import string, re, json

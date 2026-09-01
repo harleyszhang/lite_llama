@@ -1,15 +1,11 @@
 """Activation domain: the SwiGLU pair, fused and split.
 
-Two rows because the two entry points are genuinely different contracts:
-``elementwise.swiglu`` consumes a pre-concatenated fused gate/up tensor while
-``elementwise.swiglu_split`` takes gate and up separately — a caller holding
-two tensors cannot serve the fused kernel and dispatch should say so, not have
-the kernel silently transpose around it. No external row yet: activation
-kernels are bandwidth-bound to the point where the win is in the surrounding
-fusion, not in the elementwise op itself.
+Registers the domain's spec rows and points at the implementations in
+:mod:`~lite_llama.kernels.ops.activation.swiglu`: the two-input
+``swiglu_forward`` and the fused single-input variant.
 
 Usage:
-    from lite_llama.kernels.ops import activation  # noqa: F401  (registers rows)
+    from lite_llama.kernels.ops.activation.swiglu import swiglu_forward
 """
 
 from lite_llama.kernels.dispatcher import NATIVE_BASELINE, KernelSpec, register

@@ -1,26 +1,11 @@
 """Offline execution layer shared by every benchmark in :mod:`tests.evals`.
 
-vLLM's harness gets three things from its server: batching, stop strings, and a
-usage report. lite_llama has no server, so this module supplies them on top of
-the offline :class:`~lite_llama.LLM` API.
+``build_llm`` + ``generate_completions`` run one model over one prompt
+set greedily and truncate at stop markers, returning :class:`EvalResult`
+rows that the benchmarks score.
 
-Two of those are worth spelling out.
-
-**Batching is explicit.** ``LLM.generate`` runs one lockstep batch: every
-sequence in the call is decoded together and the KV reservation is sized for the
-whole batch. A thousand-prompt benchmark therefore cannot be a single call, so
-:func:`generate_completions` slices the prompt list into fixed-size chunks. The
-chunk size is a memory knob, not a correctness one — the engine's golden tests
-already pin that batched output equals individual output.
-
-**The KV cache is sized, not profiled.** See :func:`kv_cache_tokens`.
-
-**Stop strings are applied after the fact.** :class:`~lite_llama.SamplingParams`
-has no ``stop`` field; a sequence ends on EOS, on the repetition breaker, or on
-``max_gen_len``. Few-shot benchmarks rely on stopping at the next question, so
-:func:`truncate_at_stop` cuts the text at the first marker instead. Scoring is
-identical to a server-side stop; only the wasted decode steps differ, which is
-what ``max_gen_len`` is there to bound.
+Usage:
+    llm = build_llm(model_dir); outs = generate_completions(llm, prompts)
 """
 
 from __future__ import annotations

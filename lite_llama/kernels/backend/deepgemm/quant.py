@@ -1,16 +1,11 @@
 """Per-token-group fp8 quantisation for the DeepGEMM GEMMs.
 
-DeepGEMM's kernels take fp8 operands with fp32 scales: activations are
-per-token-per-128-group (scales ``[m, k // 128]``), weights are 128x128
-blockwise (scales ``[n // 128, k // 128]``). The native w8a8 format is
-per-token x per-channel, whose scale shapes do not line up with either, so
-these helpers live in this backend package rather than in
-:mod:`lite_llama.kernels.ops.quantization`.
+:func:`per_token_group_quant_fp8` scales activations group-wise into
+e4m3; the block/NT helpers convert checkpoint weights to the layout
+DeepGEMM expects, and back again for reference checks.
 
-The whole backend is ``verified=False`` — no Hopper box has produced a
-max-abs-diff yet — so the granularities here follow what the upstream kernel
-requires; numerical equivalence with the native path gets checked when the
-golden comparison freezes.
+Usage:
+    qx, scale = per_token_group_quant_fp8(x)
 """
 
 from __future__ import annotations

@@ -1,9 +1,11 @@
 """AWQ config and method (mirrors sglang ``awq/awq.py``).
 
-AWQ checkpoints store group-wise int4 weights with an interleaved bit layout.
-The load stream converts to the canonical w4a16 layout (see
-:func:`lite_llama.modules.quantization.utils.adapt_int4_checkpoint`), then the shared int4
-kernel runs.
+:class:`AWQConfig` carries the checkpoint's group size;
+:class:`AWQLinearMethod` / :class:`AWQMoEMethod` create the packed int4
+weights and call the w4a16 kernel at run time.
+
+Usage:
+    quant = AWQConfig(group_size, ignored)
 """
 
 from __future__ import annotations

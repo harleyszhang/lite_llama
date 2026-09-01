@@ -1,17 +1,7 @@
 """The control plane: what a driver rank tells its tensor-parallel followers.
 
-A tensor-parallel step is decided once and run everywhere, so the decision has to
-travel intact. If it does not — a slot renumbered, a plan skipped, a stop signal
-one rank missed — the symptom is not a wrong answer but a hang, because the ranks
-stop calling the same collectives. That makes these the tests a wrong-looking
-number cannot substitute for.
-
-They run on a real ``gloo`` process grid and no GPU at all, which is the point: the
-control plane is pickled bytes over a CPU group, so it can be verified on any
-machine, and it is verified against the *same* functions the executor calls rather
-than a re-implementation of them. The follower loop appears here in the shape
-:func:`~lite_llama.executor.executor.run_follower` uses it — receive until
-``None`` — minus the model.
+Plan broadcast and follower liveness are tested with monkeypatched
+queues and processes — the protocol, not the transport.
 
 Usage:
     pytest tests/distributed/test_tp_control_plane.py

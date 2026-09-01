@@ -1,23 +1,12 @@
 #!/usr/bin/env python
-"""Benchmark data-parallel throughput scaling, and check the outputs stay sane.
+"""Data-parallel throughput scaling — and a sanity check on the outputs.
 
-DP adds replicas, so it can only add *throughput* — a replica runs the same kernels
-on the same shapes a single GPU would, and no individual token gets faster. Whether
-that materialises depends entirely on how loaded the one GPU already was. Two framings:
-
-* ``--scaling weak`` (default): **batch per replica fixed**, total grows with the
-  replica count — the serving question, and where DP earns its near-linear gain.
-* ``--scaling strong``: a **fixed total batch** split across replicas. Only pays when
-  decode step time depends on batch size, which a bandwidth-bound small model often
-  does not — a flat result here is a real measurement, not a bug.
-
-Either way the call ends when the *slowest* replica finishes, so an uneven split shows
-up as lost speedup. Baseline is ``DataParallelEngine`` with ``data_parallel_size=1``;
-an in-process ``LLM`` row alongside shows the coordinator's IPC cost.
+``--scaling weak`` grows the total batch with the replica count (the
+serving question, where DP earns near-linear gains); ``strong`` splits a
+fixed batch. Answers are diffed so speed never hides wrongness.
 
 Usage:
-    python benchmarks/bench_data_parallel.py --dp 2 --batch-size 16 --scaling weak
-    python benchmarks/bench_data_parallel.py --dp 2 --batch-size 256 --scaling strong
+    python benchmarks/bench_data_parallel.py --model <ckpt> --dp 2
 """
 
 from __future__ import annotations

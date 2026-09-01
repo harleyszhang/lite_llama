@@ -1,24 +1,12 @@
-"""Model worker: runs one :class:`ModelInput` — forward *and* sampling — on this rank.
+"""Model worker: runs one :class:`ModelInput` — forward *and* sampling — per rank.
 
-Core design
------------
-The seam between "decide what to run" and "run it" cannot sit between the forward
-pass and the sampler. With a vocabulary-parallel head the sampler is itself a
-collective (:mod:`lite_llama.engine.sampler` reduces and gathers to make the draw),
-so every tensor-parallel rank must execute it. The unit of work is therefore
-*forward + sample*, and what crosses the boundary is a :class:`ModelInput`: pure,
-picklable data describing the work, never a device tensor.
-
-Layout is *derived* here rather than shipped. Positions, grid width, graph padding
-and the logits row of each sampled sequence all follow from
-``(slots, seq_starts, seq_lens)``, identically on every rank — so the control plane
-stays a few hundred bytes, and exactly one place decides how a plan becomes tensors.
-That is what lets the single-process and multi-process executors share this class
-instead of growing two copies of the same arithmetic that can drift apart.
+:class:`ModelWorker` turns a plan into launch-ready rows (prefill grid,
+extend or padded decode), runs the forward pass, samples the new tokens,
+and applies the TP collectives so every rank agrees on the result.
 
 Usage:
-    worker = ModelWorker(llm_engine, max_num_seqs=32, max_seq_len=2048)
-    tokens = worker.execute(plan)  # [len(plan.sampled)] sampled ids, on device
+    worker = ModelWorker(engine, max_num_seqs, max_seq_len)
+    tokens, logprobs = worker.execute(model_input)
 """
 
 from __future__ import annotations
@@ -496,8 +484,7 @@ class ModelWorker:
         # not cache by object equality: the old key held the same objects, so an
         # in-place mutation compared equal to itself and left stale GPU knobs.
         key = tuple(
-            (p.temperature, p.top_p, p.repetition_penalty, p.is_greedy, p.logprobs)
-            for p in params
+            (p.temperature, p.top_p, p.repetition_penalty, p.is_greedy, p.logprobs) for p in params
         )
         if key != self._sampling_key:
             self._sampling = BatchedSamplingParams.build(params, self._device)

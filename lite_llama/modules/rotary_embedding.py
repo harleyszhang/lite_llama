@@ -1,15 +1,11 @@
-"""Rotary positional embeddings (RoPE) with support for the LLaMA-3 / YaRN rescaling.
+"""Rotary positional embeddings (RoPE), with LLaMA-3 / YaRN rescaling.
 
-The module produces the ``(cos, sin)`` tables consumed by
-:func:`lite_llama.kernels.ops.rope.rope_emb_forward`. Only the frequency computation differs
-between variants, so each variant is a plain function registered in
-:data:`ROPE_INIT_FUNCTIONS` and selected from the config's ``rope_type``.
+:class:`RotaryEmbedding` caches cos/sin tables per (position, head) grid;
+``compute_default_rope`` / ``compute_llama3_rope`` build the frequency
+bases, and :class:`MRotaryEmbedding` adds the multimodal t-axis.
 
-The config passed in is the flat mapping built by
-:attr:`lite_llama.models.config.ModelConfig.rope_config`, not a HF config object:
-transformers has moved these fields between ``rope_theta``, ``rope_scaling`` and
-``rope_parameters`` across versions, and normalising that once at the config layer
-keeps the frequency functions free of version checks.
+Usage:
+    rope = RotaryEmbedding(config, device)
 """
 
 from __future__ import annotations

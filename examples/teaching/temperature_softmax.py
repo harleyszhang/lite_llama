@@ -1,3 +1,13 @@
+"""Teaching demo: what temperature does to a softmax distribution.
+
+One logits vector is renormalised at several temperatures; printing the
+probabilities side by side shows low temperature sharpening toward the
+argmax and high temperature flattening the distribution.
+
+Usage:
+    python examples/teaching/temperature_softmax.py
+"""
+
 import matplotlib.pyplot as plt
 import numpy as np
 

@@ -1,9 +1,11 @@
 """Tests for chat prompt formatting via the tokenizer's own chat template.
 
-``get_prompter`` returns a :class:`ChatPrompter` that defers to
-``tokenizer.apply_chat_template`` when the checkpoint ships a template, or ``None``
-when it does not (base models, whose prompts are sent verbatim). The instruct-vs-base
-decision lives in ``cli.PrompterResolver``; here we pin the formatting contract.
+A fake tokenizer with and without ``chat_template`` decides whether
+:func:`get_prompter` returns a :class:`ChatPrompter` or None; insertion
+defers to the template and prepends the system message when set.
+
+Usage:
+    pytest tests/utils/test_prompt_templates.py
 """
 
 from __future__ import annotations

@@ -1,13 +1,11 @@
 """Scatter freshly computed K/V rows into the paged KV buffer.
 
-Writes each token's K and V into its allocated slot (``select_index``) in the
-global cache buffer, where K occupies the first ``num_kv_heads`` rows and V the
-second half. Taking the two projections as separate pointers — rather than a
-``torch.cat`` the caller would have to build per layer per step — keeps the
-decode hot path free of an allocation plus two copies per layer.
+One Triton launch writes the selected rows of this step's K and V to
+the cache positions ``select_index`` names — rows not selected are
+never touched.
 
 Usage:
-    update_kv_buffer(xk, xv, select_index, kv_buffer)
+    update_kv_buffer(k, v, select_index, kv_buffer)
 """
 
 import torch

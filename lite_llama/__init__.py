@@ -1,31 +1,11 @@
-"""Public API: :class:`LLM` (vLLM-style entry), :class:`LLMEngine`, sampling.
+"""Public API surface: lazy imports keep ``import lite_llama`` CUDA-free.
 
-Typical usage::
+Only the names in ``__all__`` — :class:`~lite_llama.engine.llm.LLM`, the
+engines, :class:`~lite_llama.engine.sampler.SamplingParams` — are exposed,
+and each resolves on first attribute access so the import stays cheap.
 
+Usage:
     from lite_llama import LLM, SamplingParams
-
-    llm = LLM(model="my_weight/Qwen2.5-0.5B")
-    outputs = llm.generate(
-        ["What is the capital of France?"], SamplingParams(temperature=0.0)
-    )
-    print(outputs[0].outputs[0].text)
-
-``TextGenerator`` / ``VisionGenerator`` remain as backward-compatible wrappers.
-
-For online serving, where requests arrive independently and should share a batch,
-use the continuous-batching engine instead::
-
-    from lite_llama import ContinuousBatchingEngine
-
-    engine = ContinuousBatchingEngine.from_pretrained("my_weight/Qwen2.5-0.5B")
-    print(engine.generate(["Hello", "Bonjour"], SamplingParams())[0].text)
-
-``AsyncLLMEngine`` is the asyncio wrapper behind ``lite-llama serve``.
-
-One GPU too few for the request rate? :class:`DataParallelEngine` takes the same
-arguments plus ``data_parallel_size`` and routes the prompts across that many whole-
-model replicas, one process per GPU. For serving, ``AsyncDataParallelEngine`` adds
-streaming on top — ``lite-llama serve --data-parallel-size N`` is it.
 """
 
 from __future__ import annotations
@@ -84,6 +64,7 @@ def __getattr__(name: str) -> Any:
 
 def __dir__() -> list[str]:
     return sorted(set(globals()) | _EXPORTS.keys())
+
 
 __version__ = "0.10.0"
 

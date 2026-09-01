@@ -1,9 +1,11 @@
-"""W8A8 fp8: true W8A8 with fp8-e4m3 weights + dynamic per-token fp8 activations.
+"""W8A8 fp8: fp8-e4m3 weights + dynamic per-token fp8 activations.
 
-The weight storage is identical to the Fp8Config (uint8 e4m3 bytes + scale),
-but ``apply`` quantises the activations per token and runs the fp8 GEMM
-instead of keeping them fp16. The weight is never dequantised to fp16.
-Mirrors sglang's ``w8a8_fp8.py``.
+:class:`W8A8Fp8Config` pairs block-quantised weights with dynamic
+per-token activation quant; the linear/MoE methods call the true W8A8
+fp8 GEMM — both operands really are fp8 at run time.
+
+Usage:
+    quant = W8A8Fp8Config(group_n, group_k, ignored)
 """
 
 from __future__ import annotations

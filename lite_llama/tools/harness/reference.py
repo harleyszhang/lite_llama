@@ -1,21 +1,11 @@
 """The same layer as HuggingFace builds it, for the harness to diff against.
 
-A single-layer harness is only as useful as what it can be checked against, and the
-honest reference is the implementation the checkpoint was published for. This module
-builds *one* ``transformers`` decoder layer — resolved from the config, so llama, qwen2,
-qwen3 and qwen3_moe all work without a table here — and drives it through the same two
-shapes the harness runs: a causal prefill and one decode step continuing it.
-
-Two choices keep the comparison about the layer and nothing else. The attention
-implementation is pinned to ``eager`` with an explicit additive causal mask, because
-sdpa and flash both round differently and would put a backend difference in a column
-labelled accuracy. And ``(cos, sin)`` arrives from the caller, so lite_llama's RoPE feeds
-both sides: a rotary discrepancy is a separate bug with its own test, and folding it in
-here would make every layer look wrong.
+:class:`HFLayerReference` instantiates the checkpoint's own decoder layer
+via :func:`hf_decoder_layer_class`, loads the matching weights, and runs
+the same inputs so a diff is meaningful.
 
 Usage:
-    reference = HFLayerReference(config, layer_index=3, device="cuda")
-    report = harness.run(batch=2, seq_len=64, reference=reference)
+    ref = HFLayerReference(config, layer_index)
 """
 
 from __future__ import annotations

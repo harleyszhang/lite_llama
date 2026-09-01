@@ -1,16 +1,11 @@
 """Tests for the fused vocabulary-parallel embedding kernel.
 
-The contract is small but load-bearing: an id this rank owns gathers its row
-verbatim, an id another rank owns yields an exact zero row — so the
-``all_reduce`` over ranks sums exactly one real embedding per token. A lookup
-that ignored ownership would feed an out-of-shard row into that sum; there is
-no downstream check to catch it, and every token outside the shard would come
-back as a well-formed embedding of the *wrong* token.
+Owned ids gather their rows verbatim, foreign ids contribute exact
+zeros, ownership is half-open on both ends, and mixed batches equal
+the eager chain.
 
-The eager chain the kernel replaces (subtract, compare, compare, and, clamp,
-gather, multiply — seven launches per lookup) is reimplemented here as the
-reference. Element-for-element agreement with it is the regression condition
-of the fusion: same numbers, one kernel instead of seven.
+Usage:
+    pytest tests/kernels/test_vocab_embedding.py
 """
 
 from __future__ import annotations

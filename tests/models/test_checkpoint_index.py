@@ -1,21 +1,11 @@
-"""Validate the weight mapping against real published checkpoints, without loading them.
+"""Validate the weight mapping against real published checkpoints, offline.
 
-``test_weight_parity.py`` proves the mapping is right for checkpoints written by the
-*installed* transformers. That leaves one gap: the checkpoints people actually
-download were written years and several transformers versions ago, and their key
-layouts differ (LLaVA-1.5 ships ``language_model.model.*``, Qwen3-MoE ships one
-matrix per expert plus FP8 scale tables, Qwen3-VL omits ``lm_head`` entirely).
+Index files (never weights) are read from locally available
+checkpoints; every checkpoint key must reach a parameter and every
+parameter be covered, including fp8 scale pairing.
 
-A sharded checkpoint carries ``model.safetensors.index.json``, which lists every
-key in the repository. That is enough to answer both mapping questions — does each
-key reach a real parameter, and is each parameter reached — for a 7B or 30B model
-in milliseconds, with the skeleton on the meta device and not one byte of weight
-read.
-
-The tests skip when no such checkpoint is present, so they cost nothing in CI while
-turning any local ``my_weight/`` checkout into mapping coverage. Point
-``LITE_LLAMA_INDEX_DIRS`` (colon-separated) at other checkpoint directories to add
-more.
+Usage:
+    pytest tests/models/test_checkpoint_index.py
 """
 
 from __future__ import annotations

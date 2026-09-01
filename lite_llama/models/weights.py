@@ -1,27 +1,13 @@
 """HuggingFace checkpoint keys -> lite_llama parameters.
 
-lite_llama loads HF checkpoints as-is; only a key translation is needed because three
-structural choices differ from HF: **fused QKV** (``q_proj``+``k_proj``+``v_proj``
-concatenated into ``qkv_proj.weight``, one GEMM per attention block), **fused gate/up**
-(the dense MLP's ``gate_proj``+``up_proj`` concatenated into ``gate_up_proj.weight`` so
-the forward pass is one GEMM) and **stacked MoE experts** (``3*num_experts`` matrices
-packed into three tensors for grouped-GEMM experts).
-The rest is naming (bare ``nn.Parameter`` vs ``nn.Linear``).
-
-The work splits in two, and the split is the design. *Renaming* stays here: one pure
-function maps a checkpoint key to ``(parameter name, shard id)``, where the shard id
-says which block of a packed parameter the tensor fills (``0/1/2`` for
-``[q | k | v]``, ``0/1`` for gate/up, ``(expert, projection)`` for stacked experts).
-*Placing* — which view of the parameter that block is, and which slice of the
-incoming tensor this tensor-parallel rank owns — belongs to the layer that owns the
-parameter, because that is where the head counts and the sharding rule already live.
-So every sharded parameter carries a ``weight_loader`` attribute (see
-:mod:`lite_llama.modules.linear`), and :func:`load_weights` is a small loop: rename,
-find the parameter, call its loader, then verify every parameter is covered exactly
-once so a missed key fails loudly instead of silently.
+:func:`translate_text_key` maps one HF key to a target parameter (fusing
+gate/up or q/k/v where the skeleton merged them); :func:`load_weights`
+streams ``(key, tensor)`` pairs through the translator and verifies every
+parameter was covered.
 
 Usage:
-    load_weights(model, hf_weights_iterator(path), model.translate_weight_key)
+    translate = partial(translate_text_key, packed=True)
+    load_weights(model, weights, translate, tied=False)
 """
 
 from __future__ import annotations

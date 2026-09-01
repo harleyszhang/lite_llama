@@ -1,19 +1,12 @@
 """Static GPU memory budget from config numbers alone — no GPU, no model load.
 
-Deciding a KV capacity or a max batch means knowing where the memory goes, and
-finding that out by launching the server and reading the OOM is a slow way to learn.
-Everything here is arithmetic over shape numbers, so it answers before the weights
-are downloaded.
-
-The shape numbers live in one dataclass and are validated there, which is what keeps
-the compute and render entry points from restating a twelve-field signature apiece.
-Two of the four rows are exact (weights, KV cache) and two are deliberate
-over-estimates (activations, graph workspace) — labelled as such, because a budget
-that under-promises is the only useful kind.
+:class:`ModelShape` captures the config-derived sizes,
+:func:`compute_memory_budget` turns them into a :class:`MemoryBudget`
+(weights, KV cache, activations, CUDA graphs), and the print/export
+helpers render the table.
 
 Usage:
-    print(export_memory_budget(num_layers=28, hidden_size=1024, ..., num_kv_blocks=147875))
-    budget = compute_memory_budget(ModelShape(num_layers=28, ...))
+    print_memory_budget()
 """
 
 from __future__ import annotations

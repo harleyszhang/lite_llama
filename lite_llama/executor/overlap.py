@@ -1,35 +1,12 @@
-"""Cross-stream overlap: the L1 scheduling abstraction, its stream pool and timeline.
+"""Cross-stream overlap: the L1 policy, its stream pool and its timeline.
 
-The ROADMAP's sixth section splits overlap into three ping-pong axes; this module
-is the **L1** rung — operator-level overlap built from ``torch.cuda.Stream`` plus
-events, with zero kernel changes. What it overlaps in the continuous engine is
-host→device input preparation: a step can hold a prefill pass and a decode pass,
-and pass *i+1*'s token/position uploads have no dependency on pass *i*'s forward,
-so they sail up a copy stream while the compute stream is still busy. Without a
-side stream those uploads are pageable ``torch.tensor(..., device=...)`` calls —
-each one a host-side stall serialised between kernel launches.
-
-Three pieces, each usable alone:
-
-* :class:`OverlapPolicy` — the on/off switch (``LITE_LLAMA_OVERLAP``), so every
-  overlap site answers to one flag and the on/off A/B the ROADMAP asks for is an
-  env var away.
-* :class:`StreamPool` — owns the copy stream and a ring of pinned staging
-  buffers. :meth:`StreamPool.upload_async` returns ``(device tensor, event)``;
-  the consumer stream waits the event instead of the host waiting the copy. A
-  staging buffer is reused only after its event reports completion, so the host
-  never overwrites bytes an in-flight copy is still reading.
-* :class:`Timeline` — ``LITE_LLAMA_OVERLAP_TIMELINE=1`` records CUDA events per
-  named region per stream against a shared device clock, which is what the L1
-  acceptance item ("overlap has a timeline as evidence") reads. Off by default;
-  disabled regions cost one attribute read.
+:class:`OverlapPolicy` (read from ``LITE_LLAMA_OVERLAP``) decides whether
+input uploads run on a copy stream; :class:`StreamPool` stages the async
+uploads and :class:`Timeline` records regions as timeline evidence.
 
 Usage:
     policy = OverlapPolicy.from_env()
-    pool = StreamPool("cuda", policy)
-    tensor, event = pool.upload_async([1, 2, 3], dtype=torch.long)
-    pool.consume(event)          # current stream waits; the host never blocks
-    ...                          # kernels using tensor launch normally
+    timeline = Timeline.from_env("cuda"); print(timeline.summary())
 """
 
 from __future__ import annotations
@@ -144,9 +121,7 @@ class StreamPool:
         self._staging.append((staging, event))
         return device_tensor, event
 
-    def consume(
-        self, event: torch.cuda.Event | None, *tensors: torch.Tensor | None
-    ) -> None:
+    def consume(self, event: torch.cuda.Event | None, *tensors: torch.Tensor | None) -> None:
         """Make the current stream wait for an :meth:`upload_async` event.
 
         The wait is stream-ordered, not host-side: the CPU keeps running and the

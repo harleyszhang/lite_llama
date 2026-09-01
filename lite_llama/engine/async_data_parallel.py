@@ -1,31 +1,12 @@
 """Asyncio front end for the data-parallel coordinator.
 
-:meth:`DataParallelEngine.generate <lite_llama.engine.data_parallel.DataParallelEngine.generate>`
-is synchronous and batch-shaped: it dispatches a whole prompt list, blocks until
-every replica answers, and returns complete texts. An HTTP server needs the
-opposite on all three counts — requests arrive one at a time, a response must
-start streaming long before the answer exists, and blocking the event loop
-stalls every other connection. This class is therefore to
-:class:`~lite_llama.engine.data_parallel.DataParallelEngine` what
-:class:`~lite_llama.engine.async_engine.AsyncLLMEngine` is to a single
-:class:`~lite_llama.engine.continuous_engine.ContinuousBatchingEngine`, and
-exposes the same ``generate`` / ``generate_text`` surface so the OpenAI layer
-serves from either without knowing which.
-
-The coordinator process stays free of CUDA and of the replicas' engines — the
-workers own those, as before. What is added is one *pump* thread: it drains the
-result queue (an ``mp.Queue`` whose blocking ``get`` no event loop can await)
-and schedules each message onto the stream of the loop that created it, which is
-exactly the role the worker thread's publish half plays in the single-engine
-front end. Coroutines never touch the queue; the pump never touches a loop
-directly.
+:class:`AsyncDataParallelEngine` adds a pump thread to the process-based
+:class:`~lite_llama.engine.data_parallel.DataParallelEngine`: the thread
+shuttles requests and results between worker queues and asyncio streams.
 
 Usage:
-    async with AsyncDataParallelEngine.from_pretrained(
-        "my_weight/Qwen2.5-0.5B", data_parallel_size=2
-    ) as engine:
-        async for chunk in engine.generate("Hello", SamplingParams()):
-            print(chunk.delta, end="")
+    engine = AsyncDataParallelEngine(model, data_parallel_size=2)
+    stream = await engine.generate(prompt)
 """
 
 from __future__ import annotations

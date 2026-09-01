@@ -1,14 +1,11 @@
 """Model configuration, backed by HuggingFace's ``AutoConfig``.
 
-Rather than redeclare each architecture (a duplicated schema that rotted —
-transformers 5.x moved ``rope_theta``/``mrope_section`` into ``rope_parameters``,
-silently breaking Qwen3-VL mrope), the schema, parsing and per-architecture
-defaults all come from ``AutoConfig``; only the modelling code is lite_llama's own.
-Note ``head_dim`` is *not* always ``hidden_size // num_heads`` (Qwen3-0.6B has
-wider attention projections) — use :attr:`ModelConfig.q_size` for the query width.
+``read_model_type`` sniffs a checkpoint's model_type;
+:class:`ModelConfig` wraps the HF config and derives the geometry
+(heads, head_dim, rope settings) the runtime needs.
 
 Usage:
-    cfg = ModelConfig(checkpoints_dir, max_seq_len=4096)
+    config = ModelConfig(hf_config, max_seq_len)
 """
 
 from __future__ import annotations

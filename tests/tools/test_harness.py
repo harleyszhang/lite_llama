@@ -1,15 +1,8 @@
-"""Tests for the single-layer harness: assembly, weight routing, bookkeeping, report.
+"""Tests for the single-layer harness: assembly, weight routing, bookkeeping.
 
-Most of the harness is decidable on the CPU, and those parts get exact assertions
-rather than smoke tests, because their failure mode is not a crash. A layer filter that
-is one character wrong still loads *something*; a KV table with the wrong row layout
-still runs and produces plausible numbers. So the checks here are about identity: which
-checkpoint key reached which parameter block, which cache row a given token was told to
-use, and whether a parameter went unwritten.
-
-The one thing that cannot be decided on the CPU is whether the layer computes the right
-answer — that needs the Triton kernels, hence a GPU. That test is marked and lives at
-the bottom.
+The harness builds only the requested layer (negative indices count
+from the end), routes MoE layers to the routed MLP, fuses QKV with
+block ids, and reports what it ran.
 
 Usage:
     pytest tests/tools/test_harness.py

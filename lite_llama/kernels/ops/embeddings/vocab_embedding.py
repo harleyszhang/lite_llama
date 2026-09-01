@@ -1,17 +1,8 @@
 """Vocabulary-parallel embedding lookup: gather this rank's rows, zero the rest.
 
-Under tensor parallelism the embedding table is split along the vocabulary, so a
-rank's contribution to a token's hidden vector is either its own row or exact
-zeros — the ``all_reduce`` over ranks then sums exactly one real embedding per
-token. This module is that contribution in a single kernel: the id->row mapping
-(subtract the shard start, range-check) is two scalar register ops inside the
-kernel, and the gather and the zeroing are one masked load/store pair.
-
-The fused form replaces the eager chain of seven kernels (subtract, compare,
-compare, and, clamp, gather, multiply) the lookup used to launch. Under TP there
-are no CUDA graphs to hide those launches behind, so every one of them was paid
-in full on every step; here the same arithmetic costs one launch plus the
-collective.
+One Triton kernel walks flat ids; ids owned by this shard gather their row,
+foreign ids write exact zeros, and the TP all-reduce over ranks then sums
+the partials into the full embedding.
 
 Usage:
     out = vocab_parallel_embedding(input_ids, weight, shard_start, local_vocab)

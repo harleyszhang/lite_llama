@@ -1,20 +1,11 @@
 """Assert what the collective stats claim: the bytes, not the calls.
 
-Recording exists to make one design decision measurable — vocabulary-parallel
-sampling exchanges a couple of scalars per row instead of gathering logits — so these
-tests are about *payloads*. They come in two halves. The bookkeeping half runs on
-plain CPU with no process group at all, because windowing, nesting and plane
-attribution are ordinary logic and deserve millisecond tests. The other half runs the
-real collectives over a two-rank **gloo** grid: bytes are what the wire sees, and only
-a real ``dist`` call can say what that was.
-
-The sharp assertion is the last one: sampling traffic must not change when the
-vocabulary grows eightfold. That is the difference between this sampler and one that
-all-gathers logits, and it is invisible in output text — a gathering sampler produces
-exactly the same tokens, just slower per step as the vocabulary grows.
+Recording starts only inside a window, bytes accumulate per op, ops
+that never ran report zero, nesting sees its own span, and a raising
+block still closes its window — plus report ordering.
 
 Usage:
-    pytest tests/tools/test_collective_stats.py      # no GPU needed
+    pytest tests/tools/test_collective_stats.py
 """
 
 from __future__ import annotations

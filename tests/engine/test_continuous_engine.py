@@ -1,16 +1,12 @@
 """Step-level tests for the continuous-batching engine, without a model.
 
-The engine's step loop is plan -> execute -> harvest, and the executor boundary
-is deliberately thin (pure data in, sampled tokens out), which lets a scripted
-executor drive the whole loop on CPU. What that buys is coverage of the
-harvest layer — stop handling, finish accounting, the step() return contract —
-without a checkpoint: a bug there hangs an async stream or loses a finish
-reason, and neither needs a GPU to reproduce.
+A scripted executor drives the plan -> execute -> harvest loop on CPU,
+covering the harvest layer — stop handling, finish accounting, the
+``step()`` return contract: a request stopping this step still appears
+in the return with its finish reason, or its stream strands forever.
 
-The contract under test: a request that stops this step still appears in
-step()'s return, carrying its finish_reason and an empty delta. The async
-front end learns a request ended only from what this list hands back, so a
-request missing from it strands its stream on a final chunk that never comes.
+Usage:
+    pytest tests/engine/test_continuous_engine.py
 """
 
 from __future__ import annotations

@@ -1,25 +1,11 @@
 """Canonical golden-regression cases, shared by the test and the update script.
 
-Kept in one module so ``tests/golden/test_token_parity.py`` and
-``scripts/golden_tokens.py`` cannot drift: if the script recorded a different
-set of prompts than the test replays, the committed baseline would be checked
-against cases it was never generated from.
+One row per (model, penalty, scheme) with fixed prompts and params, so
+``test_token_parity`` and the golden-update script always agree on
+what "the baseline" means.
 
-Each case is ``(name, prompts, max_gen_len)``. Between them they cover the
-layouts that have historically broken independently:
-
-* ``single`` -- no batching at all,
-* ``batch_uniform`` -- equal-length prompts, so padding is a no-op,
-* ``batch_mixed`` -- a very short prompt beside a long one, which is what the
-  packed-vs-padded prefill bug corrupted,
-* ``batch8`` -- eight sequences, enough to cross the CUDA-graph capture buckets.
-
-Extended coverage paths (exercised only when the matching capability is
-available; the test auto-skips individual cases when the engine lacks the
-required feature):
-
-* ``cb_*`` -- continuous-batching engine path,
-* ``quant_*`` -- runtime quantisation (int8 / fp8 / smoothquant).
+Usage:
+    from tests.golden.cases import case_key
 """
 
 from __future__ import annotations

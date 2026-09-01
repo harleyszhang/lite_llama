@@ -1,16 +1,10 @@
 """Rotary position embedding (RoPE) applied to q and k in a fused Triton kernel.
 
-Rotates each head's channel pairs by the per-position angle in place, consuming the
-``(cos, sin)`` tables built by :mod:`lite_llama.modules.rotary_embedding`.
-
-Each token is located through ``stride(0)`` alone, so q and k may be *column slices of
-a fused qkv buffer*: their heads still sit next to each other, only the distance from
-one token to the next is larger. Such a tensor is rotated where it lies instead of being
-copied out and back, which is what keeps the fused QKV projection
-(:class:`~lite_llama.modules.linear.QKVParallelLinear`) a net win.
+One launch rotates every (head, position) pair in place using the cos/sin
+tables; head padding keeps the block mask aligned for any head count.
 
 Usage:
-    q, k = rope_emb_forward(q, k, cos, sin)
+    rope_emb_forward(q, k, cos, sin)
 """
 
 import triton

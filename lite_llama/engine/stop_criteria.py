@@ -1,17 +1,12 @@
-"""Device-resident stop bookkeeping for a decode batch (mirrors vLLM's StopChecker).
+"""Device-resident stop bookkeeping for a decode batch (mirrors vLLM).
 
-Asking "did sequence i emit a stop token?" on the host every step reads a GPU
-tensor and synchronises (nine syncs/step at batch 8), so the CPU can never run
-ahead of the GPU. :class:`StopCriteria` keeps every flag on-device and mutates it
-with tensor ops; the host only polls a stop-everything answer every
-``POLL_INTERVAL`` steps, trading a few redundant steps for no per-step sync. Single
-source of truth for what ends a sequence: :func:`load_stop_token_ids` (EOS +
-``generation_config.json``), :class:`StopCriteria` (device matcher) and
-:func:`detect_repetition` (host-side degeneration breaker).
+:class:`StopCriteria` holds one writable flag per sequence plus the batch's
+stop-token rows, and after each step marks exactly the sequences whose new
+token is a stop id. :func:`detect_repetition` is the CPU-side loop breaker.
 
 Usage:
-    stop = StopCriteria(batch_size, stop_ids, vocab_size, device=dev)
-    stop.update(next_tokens, writable)
+    criteria = StopCriteria(batch_size, stop_ids, vocab_size)
+    detect_repetition(text, window, min_reps)
 """
 
 from __future__ import annotations

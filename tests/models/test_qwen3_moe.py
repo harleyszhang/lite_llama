@@ -1,15 +1,11 @@
 """Numeric parity tests for the Qwen3-MoE support.
 
-Three layers of verification:
+Block-fp8 dequantisation round-trips, fp8 scale-table consumption, and
+the HF-config plumbing that marks layers MoE vs dense — plus a decoder
+step against a hand-built tiny config.
 
-1. :func:`test_block_fp8_dequant` — the FP8 (e4m3, 128x128 block) dequantisation the
-   loader applies to Qwen FP8 checkpoints, checked against a manual blockwise
-   multiply, including matrices whose dims are not multiples of the block size.
-2. :func:`test_route_matches_hf` — the router's softmax-then-topk ordering.
-3. :func:`test_qwen3_moe_logits_parity` — a randomly initialised tiny
-   ``Qwen3MoeForCausalLM`` is written out as safetensors, loaded through the *real*
-   :meth:`Qwen3MoeModel.load_weights` path (which is where the per-expert matrices
-   get stacked), and compared against the fp32 HuggingFace forward.
+Usage:
+    pytest tests/models/test_qwen3_moe.py
 """
 
 from __future__ import annotations

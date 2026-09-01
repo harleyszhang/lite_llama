@@ -1,15 +1,11 @@
 """Tests for the OpenAI-compatible HTTP layer.
 
-The point of a wire protocol is that somebody else's client works against it, so
-what matters here is the shape of the JSON and the SSE framing -- not what the
-model says. A fake engine therefore stands in for the real one, which is what
-lets this whole file run on CPU with no checkpoint: protocol regressions are
-cheap to catch and should not need a GPU.
+A ``FakeEngine`` and FastAPI's test client drive every endpoint —
+health, metrics, completions, streaming SSE — so the HTTP contract is
+checked without a model or a port.
 
-The fake records what it was asked for, so the tests can also pin down the
-translation in the other direction: that ``max_tokens`` and friends actually
-reach :class:`~lite_llama.engine.sampler.SamplingParams`, and that chat messages
-go through the tokenizer's template.
+Usage:
+    pytest tests/entrypoints/test_api_server.py
 """
 
 from __future__ import annotations

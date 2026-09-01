@@ -1,14 +1,11 @@
 """LLaVA-1.5: CLIP vision tower + 2-layer MLP projector + LLaMA language model.
 
-The vision tower is HuggingFace's ``CLIPVisionModel`` (a faithful ViT is not what
-this project is about), while the language model is lite_llama's own Triton-kernel
-:class:`~lite_llama.models.llama.LlamaModel`.
+:class:`LlavaLlama` implements :class:`MultiModalCausalLM`: image features
+pass through the projector and splice into the token embeddings at the
+image-token placeholder positions.
 
-Parameter layout, and the HF checkpoint keys it is filled from::
-
-    vision_tower.*        <- vision_tower.vision_model.*   (CLIPVisionModel, HF names)
-    multi_modal_projector.linear_{1,2}.{weight,bias}       (unchanged)
-    language_model.*      <- language_model.model.*        (lite_llama names)
+Usage:
+    model = LlavaLlama(config)
 """
 
 from __future__ import annotations

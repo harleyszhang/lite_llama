@@ -1,4 +1,12 @@
-"""Public imports must not eagerly initialise the GPU execution stack."""
+"""Public imports must not eagerly initialise the GPU execution stack.
+
+Importing ``lite_llama.sampling`` (or engine / model components) must
+leave torch CUDA internals and Triton untouched, so lightweight
+consumers pay no GPU tax — asserted via the loaded-module diff.
+
+Usage:
+    pytest tests/test_imports.py
+"""
 
 from __future__ import annotations
 

@@ -1,12 +1,12 @@
 """Output containers for the user-facing :class:`~lite_llama.engine.llm.LLM` API.
 
-Mirrors ``vllm/outputs.py``: one request yields one :class:`RequestOutput` carrying
-one or more :class:`CompletionOutput` instances (n-best is a future extension; today
-``outputs`` always has one entry, ``index == 0``).
+:class:`RequestOutput` holds one request's prompt and its
+:class:`CompletionOutput` rows (text, token ids, finish reason) — plain
+dataclasses, the API's return shape and nothing more.
 
 Usage:
     out = llm.generate(prompts, params)[0]
-    text, reason = out.text, out.outputs[0].finish_reason
+    print(out.outputs[0].text)
 """
 
 from __future__ import annotations

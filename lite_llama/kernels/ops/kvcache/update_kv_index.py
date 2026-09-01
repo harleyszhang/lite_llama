@@ -1,7 +1,7 @@
 """Record where each sequence's newly written KV rows live.
 
-Updates the per-request token->cache-slot index table so attention can gather a
-sequence's KV history from the paged buffer.
+The kernel writes each request's row ids into the request->token table
+at ``seq_len - 1`` — the slot the decode kernel will read next step.
 
 Usage:
     update_kv_index(req_to_token_indexs, b_req_idx, b_seq_len, select_index)

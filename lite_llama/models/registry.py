@@ -1,14 +1,11 @@
 """Single source of truth mapping a HuggingFace ``model_type`` to its implementation.
 
-Replaces a mapping once duplicated across the runner, a config table and a
-forward-time ``if model_type in (...)`` branch. Each entry is two facts: the class
-(``"module.path:ClassName"``, imported lazily so a missing transformers model only
-fails when requested) and whether it consumes ``multi_modal_inputs`` (the executor
-must know before it holds a model — it decides CUDA-graph eligibility). Adding a
-model is one line in ``_SPECS`` plus the implementation module.
+Each :class:`ModelSpec` pairs a model_type with its implementation
+class (loaded lazily); :class:`ModelRegistry` resolves a checkpoint to
+its spec or lists the known alternatives in the error.
 
 Usage:
-    ModelRegistry maps a model_type to a ModelSpec (class path + multimodal flag).
+    from lite_llama.models.registry import ModelRegistry
 """
 
 from __future__ import annotations

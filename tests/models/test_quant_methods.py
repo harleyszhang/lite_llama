@@ -1,9 +1,11 @@
 """Tests for the quant-method strategies and the runtime quantisation schemes.
 
-The Triton kernels themselves are covered in ``tests/kernels/test_quantization.py``;
-what is tested here is everything around them, on CPU: the format -> method
-registry, the parameter layout each method allocates, and the fp16 -> low-bit
-conversion that backs ``--quantization <scheme>``.
+Registry lookups, checkpoint-method dispatch (int4 variants), weight
+creation shapes for every scheme, and rejection paths — the strategy
+layer without kernels.
+
+Usage:
+    pytest tests/models/test_quant_methods.py
 """
 
 from __future__ import annotations

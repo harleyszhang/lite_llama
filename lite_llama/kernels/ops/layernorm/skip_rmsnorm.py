@@ -1,10 +1,10 @@
 """Fused residual-add + RMSNorm ("skip rmsnorm") in Triton.
 
-Adds the residual and applies RMSNorm in a single pass, returning both the
-normalised output and the updated residual.
+``skip_rmsnorm`` returns the new residual (x + residual) and the normed
+output in one launch; passing a zero residual degrades to plain RMSNorm.
 
 Usage:
-    out, residual = skip_rmsnorm(x, residual, weight, eps=1e-5)
+    residual, y = skip_rmsnorm(x, residual, weight, eps)
 """
 
 import torch

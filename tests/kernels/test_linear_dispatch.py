@@ -1,10 +1,10 @@
-"""GPU tests: the ``linear`` scheme entry points forward to the right Triton kernel.
+"""GPU tests: the ``linear`` scheme entry points forward to the right kernel.
 
-The kernels themselves are covered in ``test_quantization.py``; these tests
-pin :mod:`lite_llama.kernels.ops.gemm.linear` — the per-scheme entry points behind the
-LinearOp signature must reproduce the direct kernel calls bit for bit (they are
-pure argument rewrites), and ``run_quant_linear`` must select and run the same
-path the quant methods use.
+Each adapter (w8a16 fp8/int8, w4a16, w8a8) is diffed against its Triton
+kernel called directly — the adapter layer adds dispatch, not maths.
+
+Usage:
+    pytest tests/kernels/test_linear_dispatch.py
 """
 
 from __future__ import annotations

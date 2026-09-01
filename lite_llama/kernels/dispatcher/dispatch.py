@@ -1,27 +1,13 @@
 """Deterministic dispatch: filter, rank, cache — and be able to say why.
 
-``dispatch(op, ...)`` answers "which implementation runs here?" in four fixed
-steps (ROADMAP foundation 2, pillar 5):
-
-1. **Filter** — availability probe, capability window, dtype, scheme, hard
-   shape constraints, layout tags, and the golden-accuracy gate. Every
-   rejection is recorded with its reason, verbatim.
-2. **Rank** — frozen perf measurements (``perf_key``, fastest first) beat
-   shape preferences, which beat static priority; the spec name is the final
-   tie-break so equal inputs always yield equal outputs.
-3. **Cache** — the decision for a full :class:`DispatchKey` is computed once.
-4. **Report** — ``explain`` renders the decision chain for humans;
-   ``LITE_LLAMA_KERNEL_TRACE=1`` emits one JSON line per decision for tools.
-
-An explicit ``backend=`` (or the ``LITE_LLAMA_*_BACKEND`` env vars) narrows the
-field to that family and bypasses only the golden gate — the user asked for the
-kernel by name, so accuracy evidence is their call, but a missing library or
-an unsupported dtype is physics and still excludes it.
+:func:`dispatch` builds a :class:`DispatchKey` from the call context,
+filters the registry's specs to feasible ones, ranks them (native floor
+unless a perf provider says better) and returns a :class:`Selected`
+whose ``explain()`` states the reason.
 
 Usage:
-    sel = dispatch("linear", dtype="bf16", scheme="w8a16_fp8", shape={"k": 4096})
-    fn = sel.load()      # imports the implementation lazily
-    print(sel.explain()) # why this one won
+    selected = dispatch("rmsnorm"); print(selected.explain())
+    kernel = selected.load()
 """
 
 from __future__ import annotations

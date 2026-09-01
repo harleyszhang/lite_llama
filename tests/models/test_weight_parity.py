@@ -1,20 +1,11 @@
-"""Round-trip parity: HuggingFace checkpoint in, identical lite_llama parameters out.
+"""Round-trip parity: HF checkpoint in, identical lite_llama parameters out.
 
-For each registered architecture a tiny HuggingFace model is randomly initialised,
-saved as a real ``model.safetensors``, and loaded through the production path
-(``ModelConfig`` -> registry -> ``materialise_parameters`` -> ``load_weights``).
-Every parameter is then compared element by element against the HF tensor it came
-from.
+Hand-built HF checkpoints are saved for every registered model family
+and loaded back; each parameter must land in the right place with the
+right values — the loader's end-to-end proof.
 
-Coverage accounting inside ``load_weights`` already guarantees that *something*
-wrote every parameter; what these tests add is that each tensor landed *where it
-belongs*. A K/V swap, an off-by-one expert index or a gate/up transposition would
-all satisfy the coverage check and silently corrupt the model, and none of them
-would be visible in a key-set comparison.
-
-Tiny configs keep the whole file on the CPU in a few seconds, which is what makes
-it affordable to cover LLaVA and Qwen3-VL here rather than only against a 7B
-checkpoint someone has to download.
+Usage:
+    pytest tests/models/test_weight_parity.py
 """
 
 from __future__ import annotations

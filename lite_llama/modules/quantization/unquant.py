@@ -1,4 +1,12 @@
-"""Unquantised (fp16) config and methods — the default for any un-quantised model."""
+"""Unquantised (fp16) config and methods — the default for every model.
+
+:class:`UnquantizedLinearMethod` and :class:`UnquantizedFusedMoEMethod`
+do plain matmuls; :class:`UnquantizedConfig` exists so the loader has a
+uniform "no quant" path rather than None branches.
+
+Usage:
+    from lite_llama.modules.quantization import UnquantizedConfig
+"""
 
 from __future__ import annotations
 

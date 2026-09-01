@@ -1,26 +1,11 @@
 """Paged attention: the KV-cache write plus the phase-appropriate kernel call.
 
-:class:`PagedAttention` is the lower half of an attention block. It owns
-everything that depends on *how K/V are stored* — the write into the paged
-buffer, the fp8 quantisation on the way in, the dequantisation scales the
-decode kernel needs, and the prefill/decode split — and nothing that depends on
-how q/k/v were produced. The projections, q/k norm and RoPE live one level up
-in :class:`~lite_llama.models.base.Attention`, so a model with a different
-composition (MLA) can reuse this half, and a different cache strategy can
-replace it without touching any projection.
-
-The three ops this module runs — ``kv_write``, ``attention.prefill``,
-``attention.decode`` — are dispatched once in ``__init__`` and loaded into
-plain attributes: the cache layout and the fp8-vs-plain distinction are fixed
-for this module's lifetime, so the hot path pays zero dispatch cost. Which
-*row* each op resolves to is declared as data in
-:mod:`lite_llama.kernels.ops` and answered by
-:mod:`lite_llama.kernels.dispatcher`; ``LITE_LLAMA_<OP>_BACKEND`` overrides at
-construction time.
+:class:`PagedAttention` owns no math: it scatters fresh K/V rows into the
+paged buffer, then dispatches prefill (varlen) or decode (paged) to the
+kernel layer using the step's :class:`AttentionMetadata`.
 
 Usage:
-    attn = PagedAttention(num_kv_heads, head_dim, kv_cache_dtype=torch.bfloat16)
-    out = attn(xq, xk, xv, atten_info, layer_index, is_prefill=True)
+    attn = PagedAttention(num_kv_heads, head_dim, kv_cache_dtype, dtype)
 """
 
 from __future__ import annotations

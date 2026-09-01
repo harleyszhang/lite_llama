@@ -1,20 +1,12 @@
 """Request-level metrics: a tiny in-process registry with a Prometheus rendering.
 
-The engine already keeps every timestamp a latency breakdown needs
-(``arrival_time`` / ``scheduled_time`` / ``first_token_time`` / ``finish_time``
-on :class:`~lite_llama.engine.scheduler.Request`); this module is where those
-timestamps become numbers worth charting — queue time, TTFT, TPOT — plus the
-counters and gauges a ``/metrics`` scrape expects.
-
-No dependencies: the Prometheus text format is a handful of lines per metric,
-and pulling in ``prometheus_client`` for that alone would cost every offline
-user an install. Export is opt-out (``LITE_LLAMA_METRICS=0``), because the
-collection itself is a few float additions on the finish path.
+:class:`Counter` / :class:`Gauge` / :class:`Histogram` are the primitives
+and :class:`EngineMetrics` wires them to the request lifecycle; every
+``render`` emits Prometheus text format with no server dependency.
 
 Usage:
     metrics = EngineMetrics.from_env()
-    metrics.observe_finish(request)          # in the engine's finish path
-    text = metrics.render_prometheus()       # in the /metrics handler
+    print(metrics.render_prometheus())
 """
 
 from __future__ import annotations

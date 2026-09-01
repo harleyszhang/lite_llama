@@ -1,10 +1,11 @@
 """Turns ``configs/*.yaml`` into one test case each.
 
-Same shape as vLLM's eval conftest: a ``--config-list-file`` names the configs
-to run, and every listed file becomes a parametrised ``config_filename``. The
-indirection exists so a machine can run the subset it has the weights and the
-time for — a 0.5B smoke config on a laptop GPU, the full sweep on a CI box —
-without editing test code.
+``pytest_generate_tests`` parametrises the correctness test over the
+resolved config list, so adding a model to the suite means adding one
+YAML file.
+
+Usage:
+    pytest tests/evals/
 """
 
 from __future__ import annotations

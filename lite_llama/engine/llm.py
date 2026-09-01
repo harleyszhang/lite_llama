@@ -1,15 +1,12 @@
 """User-facing ``LLM`` entry point — a vLLM-style facade over the engine.
 
-``LLM`` *is* an :class:`~lite_llama.engine.llm_engine.LLMEngine` (inheritance): it
-adds prompt normalisation, multimodal preparation and ``RequestOutput`` packaging,
-while the engine owns the prefill/decode loop and ``ModelRunner`` the single-device
-forward. One ``LLM`` == one engine; request routing (DP) and tensor parallel (TP)
-grow in the respective layers without touching this API.
+:class:`LLM` mirrors vLLM's offline API: construct with a checkpoint, call
+``generate`` with prompts plus :class:`SamplingParams`, and receive
+:class:`~lite_llama.engine.outputs.RequestOutput` objects.
 
 Usage:
-    llm = LLM(model="my_weight/Qwen2.5-0.5B")
-    out = llm.generate(["The capital of France is"], SamplingParams(temperature=0.0))
-    print(out[0].outputs[0].text)
+    llm = LLM(model_dir)
+    outs = llm.generate(prompts, sampling_params)
 """
 
 from __future__ import annotations

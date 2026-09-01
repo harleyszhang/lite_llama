@@ -1,7 +1,11 @@
 """Blockwise int8: weight-only int8 (per-channel or group-wise), fp16 activations.
 
-Mirrors sglang's ``blockwise_int8.py``. Covers ``--quantization int8`` and
-``--quantization int8-blockwise``.
+:class:`BlockInt8Config` carries the block shape;
+:class:`BlockInt8LinearMethod` dequantises weights in the kernel epilogue
+so activations never drop precision.
+
+Usage:
+    quant = BlockInt8Config(group_n, group_k, ignored)
 """
 
 from __future__ import annotations

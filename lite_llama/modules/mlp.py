@@ -1,4 +1,12 @@
-"""Feed-forward modules: the dense SwiGLU MLP shared by every decoder model."""
+"""Feed-forward modules: the dense SwiGLU MLP shared by every decoder model.
+
+:class:`FusedMLP` fuses the gate/up projections where the checkpoint packs
+them, applies SwiGLU, and projects back down — all through the same
+quant-aware linear layer the rest of the model uses.
+
+Usage:
+    mlp = FusedMLP(config, quant)
+"""
 
 from __future__ import annotations
 

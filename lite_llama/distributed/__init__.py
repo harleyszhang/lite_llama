@@ -1,8 +1,10 @@
 """Parallelism state: the DP x TP rank grid and the collectives TP needs.
 
-What those collectives cost is counted by
-:mod:`lite_llama.tools.observability.collective_stats`, which is where the reporting
-lives — this package runs the wire, it does not account for it.
+Re-exports :mod:`lite_llama.distributed.parallel_state` so that rank queries
+(``get_tp_rank``) and group setup (``init_parallel``) come from one import.
+
+Usage:
+    from lite_llama.distributed import get_tp_rank, init_parallel
 """
 
 from .parallel_state import (

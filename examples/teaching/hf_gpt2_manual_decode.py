@@ -1,12 +1,11 @@
-"""教学示例:用 HuggingFace 的 ``model.forward`` 手写逐 token 解码循环。
+"""Teaching demo: a hand-written token-by-token decode loop over GPT-2.
 
-展示 lite_llama 引擎内部替你做掉的那些步骤——维护 ``past_key_values``、
-每步只喂新 token、top-p 过滤后采样。与 ``lite_llama.engine`` 的实现对照阅读,
-可以看出后者省掉了哪些主机侧开销。
+``generate_text`` calls ``model.forward`` directly each step, applies
+temperature + top-p by hand, and feeds the sampled id back in — the
+loop a batching engine has to replace.
 
-用法::
-
-    python examples/teaching/hf_gpt2_manual_decode.py --model-dir /path/to/gpt2
+Usage:
+    python examples/teaching/hf_gpt2_manual_decode.py
 """
 
 import argparse

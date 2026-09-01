@@ -1,6 +1,11 @@
-"""W8A8 int8: SmoothQuant — per-channel int8 weights + dynamic per-token int8 activations.
+"""W8A8 int8: SmoothQuant — int8 weights + dynamic per-token int8 activations.
 
-Mirrors sglang's ``w8a8_int8.py``.
+:class:`W8A8Int8Config` keeps weights per-channel int8; the methods
+quantise activations per token and call the smoothquant GEMM with both
+scales applied in the epilogue.
+
+Usage:
+    quant = W8A8Int8Config(ignored)
 """
 
 from __future__ import annotations

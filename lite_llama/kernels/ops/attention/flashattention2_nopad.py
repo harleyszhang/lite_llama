@@ -1,15 +1,11 @@
 """FlashAttention-2 (Triton) for variable-length, unpadded prefill batches.
 
-Sequences are packed without padding and indexed by cumulative-length offsets.
-Uses the v2 work partition (parallelise over query blocks, rescale softmax once).
-
-``sm_scale`` is the plain ``1 / sqrt(head_dim)``: the inner loop evaluates
-``exp2`` rather than ``exp``, and folding ``log2(e)`` into the scale is this
-function's own business — the caller passes the same number every attention
-backend takes.
+One kernel iterates query blocks against KV blocks of each sequence,
+using the ``B_Start_Loc`` / ``B_Seqlen`` row tables to skip padding — so
+a ragged batch needs no tensor padding at all.
 
 Usage:
-    out = flash_attention2_no_pad(q, k, v, sm_scale, b_start_loc, b_seq_len, max_seq_len)
+    from lite_llama.kernels import flash_attention2_no_pad
 """
 
 import torch

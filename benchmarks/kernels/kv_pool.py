@@ -1,41 +1,11 @@
 """Paged KV-cache fixtures: the pool the production path actually hands a kernel.
 
-Four properties of the real pool differ from what a bare ``torch.randn`` builds,
-and this module is the one place that knows them, so a benchmark cannot quietly
-measure a cache lite_llama never allocates. How much each property is *worth* is
-a measurement, not an assumption — two of the four turned out to cost almost
-nothing at the production head geometry, and the notes below say so, because a
-fixture justified by a wrong reason gets deleted by the next reader.
-
-* **Combined layout.** :meth:`~lite_llama.executor.kv_cache_manager.KVCacheManager.init_kv_buffers`
-  allocates one tensor per layer, ``[max_tokens, 2 * num_kv_heads, head_dim]``,
-  K heads first and V heads second. ``lite_llama/modules/attention.py`` slices it
-  and hands ``flash_decoding`` two **views** whose row stride is
-  ``2 * num_kv_heads * head_dim``. Two separate allocations halve that stride,
-  and on an A10 that measured as no difference at all (8 heads x 128 dim fp16 =
-  2 KiB per side per row, already 16 cache lines, so halving the stride changes
-  no line's useful payload). Keep passing views anyway: the equality is a
-  property of *this* geometry, and a small-head or MQA cache brings the row down
-  toward a single line, where the stride does start to matter.
-* **Fragmentation.** A sequence owns contiguous rows only until the first request
-  finishes mid-flight; after that the allocator hands out whatever is free.
-  Measured at about 1% of decode time — a random 2 KiB read runs near streaming
-  speed on GDDR6 — so the contiguous row is worth printing as a bound, not
-  worth restructuring the allocator over.
-* **Working-set size.** This is the property that does move the number, and not
-  through cache: at a few MiB of attended KV the kernel is launch-latency-bound
-  and reports a small fraction of peak bandwidth no matter how it is written.
-  :func:`paged_pool` sizes the pool past L2 so a case cannot land there
-  unnoticed.
-* **fp8 container.** An fp8 cache is ``uint8`` bytes reinterpreted as e4m3 plus
-  caller-side scales: same shape, half the traffic, plus a dequant. It is a
-  separate case rather than a dtype column because the dequant, not the traffic,
-  is what limits it.
+:class:`PagedPool` builds a real row table, block table and buffers for
+arbitrary sequence lengths, so benchmarks measure the kernel's true
+input shapes — not a conveniently contiguous stand-in.
 
 Usage:
-    pool = paged_pool([2048] * 8, num_kv_heads=8, head_dim=128, layout="fragmented")
-    out = flash_decoding(q, pool.k, pool.v, scale, pool.table, pool.req_idx,
-                         pool.seq_lens, pool.max_seq_len)
+    pool = paged_pool(seq_lens=[17, 23, 5])
 """
 
 from __future__ import annotations

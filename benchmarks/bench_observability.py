@@ -1,26 +1,11 @@
-"""v0.10 两个新可观测面的热路径开销:logprobs 与 metrics/trace 各要多少。
+"""What observability costs: logprobs (GPU, costly) vs metrics/trace (host, cheap).
 
-两者都是"看见推理内部"的功能,但代价的性质完全不同,所以分开量:
+Each :class:`Variant` enables one observability surface and ``measure``
+times the same workload, so the per-token overhead of every knob is a
+row in one table.
 
-- logprobs / prompt_logprobs 在 **GPU 侧**:每步多一次 log_softmax、一次 topk,
-  以及把结果搬回 host。开销随 batch 与 vocab 走,是真花钱的那一类。
-  prompt_logprobs 更贵——它要给整个 prompt 的每个位置打分,prefill 的 logits
-  从"只留最后一行"变成"全留",显存与拷贝都按 prompt 长度放大。
-- metrics / trace 在 **host 侧**:每步几个 float 加法(占用 gauge)、每请求一次
-  直方图落桶和一个 span。理应淹没在步循环的噪声里,本脚本就是来证实这一点的。
-
-判据是"能不能从噪声里分辨出来",不是单跑一次看数字大小:同一配置两次测量本身
-就有百分之几的抖动,所以基线跑两遍,把它的自差当噪声下限印出来。小于噪声的差值
-只能说"测不出来",不能报成提速或变慢。
-
-同一个引擎跑完所有配置,只换 SamplingParams 与 engine.metrics/engine.tracer——
-重建引擎会换一份 KV 池和一次新的 autotune,那点差异比要测的量还大。
-
-口径同 benchmarks/common.py(TTFT/TPOT/TPS),离线推理:整批一起提交,不模拟到达。
-
-用法:
-    python benchmarks/bench_observability.py --model-dir my_weight/Qwen3-0.6B
-    python benchmarks/bench_observability.py --batch 16 --max-gen-len 128 --json out.json
+Usage:
+    python benchmarks/bench_observability.py --model-dir <ckpt>
 """
 
 from __future__ import annotations

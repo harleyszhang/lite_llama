@@ -1,9 +1,11 @@
-"""Tests for the ModelRegistry lookup and error handling.
+"""Tests for the :class:`~lite_llama.models.registry.ModelRegistry` lookup.
 
-The registry shrank to "``model_type`` -> implementation class + multimodal flag",
-so these tests pin the two things that can actually break: the table's contents
-(a model dropped from it becomes unservable) and the laziness of the import (a
-transformers build missing one architecture must not break the other five).
+Resolution per model type, multimodal flagging, case-insensitivity,
+helpful errors listing alternatives, and lazy ``load_class`` imports —
+the model-dispatch contract.
+
+Usage:
+    pytest tests/models/test_registry.py
 """
 
 from __future__ import annotations

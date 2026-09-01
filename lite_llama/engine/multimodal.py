@@ -1,13 +1,11 @@
-"""Multimodal prompt preparation (Strategy seam for the LLM entry point).
+"""Multimodal prompt preparation (strategy seam for the LLM entry point).
 
-:class:`MultimodalPreparer` turns ``(prompt, images)`` into engine-ready
-``(token_ids, multi_modal_inputs, position_ids)``: it runs the HF ``AutoProcessor``
-(expanding image placeholders), applies the Qwen3-VL chat template, and builds
-mrope 3D position ids via the vetted HF reference. Extracted from the legacy
-``VisionGenerator`` so both ``LLM`` and the wrappers share one implementation.
+:class:`MultimodalPreparer` inspects the engine's model type and produces
+what the forward pass needs — image tensors for LLaVA, mrope position
+ids for Qwen3-VL — keeping vision plumbing out of the engine itself.
 
 Usage:
-    token_ids, mm_inputs, position_ids = MultimodalPreparer(...).prepare(prompt, images)
+    ids, inputs, pos = preparer.prepare(prompt, images)
 """
 
 from __future__ import annotations

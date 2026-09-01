@@ -1,12 +1,13 @@
 """Batch text generation with :class:`~lite_llama.engine.generator.TextGenerator`.
 
-Two usage patterns over the same engine:
-  * ``stream`` — yields incremental text per decode step (interactive/chat UIs);
-  * ``generate`` — blocking call returning the full completion per prompt.
+A minimal CLI demo: build a :class:`TextGenerator` over the checkpoint
+named at the top, then generate for a fixed prompt batch (streaming or
+blocking) and print the texts.
 
-Run from the repository root:
-    python examples/example_chat.py
+Usage:
+    python examples/chat.py   # set ``checkpoints_dir`` first
 """
+
 from __future__ import annotations
 
 import torch

@@ -1,16 +1,11 @@
-"""Tests for the vLLM-style :class:`LLM` entry point.
+"""Tests for the vLLM-style :class:`~lite_llama.engine.llm.LLM` entry point.
 
-Covers the contract ``examples/basic.py`` relies on:
+Return shapes, single-string convenience, greedy determinism, finish
+reasons, and the rejected promises (images on a text model, legacy
+kwargs) — the public contract of the facade.
 
-* ``LLM(model=...)`` builds a working engine (disabling CUDA graphs for
-  multimodal checkpoints automatically),
-* ``generate`` takes a single string or a batch and returns one
-  :class:`RequestOutput` per prompt, with the prompt echoed and a finish reason,
-* passing ``images`` to a text-only model is a clear error rather than a crash
-  deep in the vision path,
-* the legacy ``TextGenerator`` wrapper keeps its old ``list[str]`` return type.
-
-The checkpoint comes from the ``model_dir`` fixture in ``tests/conftest.py``.
+Usage:
+    pytest tests/engine/test_llm_entrypoint.py
 """
 
 from __future__ import annotations

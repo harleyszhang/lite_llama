@@ -1,12 +1,8 @@
-"""Chunked prefill: what a step does when a prompt does not finish in one chunk.
+"""Chunked prefill: what a step does when a prompt does not fit one chunk.
 
-Chunking is the one place where the prefill group stops being homogeneous. A step
-can admit a short prompt that completes inside its first chunk *next to* a long
-one that is chunk-capped, and the two then disagree about everything that follows:
-who gets sampled, which grid row their logits live on, which kernel their next
-chunk runs through. Those disagreements are what these tests pin down — they are
-cheap to get wrong and, before the row-pairing fix, wrong in a way that either
-crashed on a shape mismatch or handed one request another's logits.
+A mixed batch of short and long prompts runs with a small chunk budget;
+only completed chunks may sample, and both requests must finish with
+their own text.
 
 Usage:
     pytest tests/engine/test_chunked_prefill.py

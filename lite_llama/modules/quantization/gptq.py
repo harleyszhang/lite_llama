@@ -1,11 +1,11 @@
 """GPTQ config and method (mirrors sglang ``gptq/gptq.py``).
 
-GPTQ checkpoints store group-wise int4 weights with biased packed zero points
-and a ``[K//8, N]`` word matrix. The load stream converts to the canonical
-w4a16 layout (see :mod:`lite_llama.modules.quantization.utils`), then the
-shared int4 kernel runs.
+:class:`GPTQConfig` carries group size and the checkpoint's method name;
+the linear/MoE methods unpack the packed int4 layout GPTQ produces and
+run the w4a16 kernel.
 
-Only ``desc_act=False`` checkpoints are accepted.
+Usage:
+    quant = GPTQConfig(group_size, ignored)
 """
 
 from __future__ import annotations

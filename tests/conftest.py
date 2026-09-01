@@ -1,24 +1,11 @@
 """Shared fixtures and collection policy for the lite_llama test suite.
 
-Three things live here so that no individual test file has to re-derive them:
+``pytest_ignore_collect`` drops GPU-only and golden directories when no
+checkpoint or device is available; fixtures expose the resolved model
+dir, reset torch state, and keep dispatch deterministic between tests.
 
-* **Checkpoint discovery.** Integration tests need a HuggingFace checkpoint
-  directory. Resolving its path per-file previously went wrong: the helper was
-  copy-pasted into three files as ``Path(__file__).parents[1] / "my_weight/..."``,
-  which pointed at ``tests/my_weight`` once the files moved into subdirectories.
-  Every weights-gated test then skipped even on a machine that had the weights,
-  so the whole integration tier was silently dead. It is computed once here,
-  relative to the repository root.
-
-* **Automatic marking.** Anything under ``tests/kernels/`` calls a Triton kernel
-  and therefore needs a GPU; the ``gpu`` mark is applied by directory instead of
-  by a ``pytestmark`` line that a new file can forget.
-
-* **Skip decisions.** ``gpu`` skips without CUDA, ``weights`` skips without a
-  checkpoint. For golden tests the policy is stricter: they must report
-  "UNVERIFIED" rather than appearing silently green, so CI dashboards cannot
-  mistake an untested tree for a passing one. Set
-  ``LITE_LLAMA_GOLDEN_STRICT=1`` to convert that into a hard FAIL.
+Usage:
+    pytest tests/   # collection policy from this file applies automatically
 """
 
 from __future__ import annotations

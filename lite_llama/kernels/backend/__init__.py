@@ -1,21 +1,10 @@
 """One package per external kernel backend: metadata, probe and wrappers.
 
-A backend package is pure data until its library is actually needed:
-:class:`~lite_llama.kernels.dispatcher.registry.OpRegistry` rows in the ops
-groups reference these packages' ``available()`` probes by string, and
-:func:`~lite_llama.kernels.dispatcher.dispatch` calls the probe before
-considering a row. What these packages export is three things — the install
-recipe (``INSTALL``), the probe, and the kernel wrappers the rows' ``target``
-strings resolve to (lazily, so importing this package never touches a
-third-party library).
-
-``native`` is deliberately not a backend package: the native implementations
-live beside their rows in :mod:`lite_llama.kernels.ops` and are the floor every
-op falls back to.
+``survey()`` answers "what can this machine run, and what is missing" for
+every backend at once; each subpackage keeps its own probe and wrappers.
 
 Usage:
-    from lite_llama.kernels.backend import flashinfer  # noqa: F401  (INSTALL)
-    from lite_llama.kernels.backend.probe import survey  # what is installed here
+    from lite_llama.kernels.backend import survey
 """
 
 from . import deepep as deepep

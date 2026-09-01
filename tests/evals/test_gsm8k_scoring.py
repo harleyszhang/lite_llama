@@ -1,20 +1,11 @@
 """CPU-tier tests for the parts of the eval harness that decide the score.
 
-The GPU tier can only tell you a number came out; it cannot tell you the number
-means anything. Everything asserted here is what stands between "the model
-solved it" and "the parser happened to agree":
+Answer extraction, stop-marker truncation, prompt shape — fixed inputs
+and expected strings, so a scoring change fails loudly before any GPU
+run.
 
-* answer extraction — a scorer that read the wrong number would rank a broken
-  engine as accurate, and no accuracy test would catch it;
-* stop truncation — without it a base model rolls into the next few-shot
-  question and the "last number" is that question's answer, not the model's;
-* prompt construction — a fixed prefix of the split, so two runs of one config
-  score the same questions and their accuracies are comparable;
-* the config wiring — a typo in a list file must fail loudly rather than
-  evaluate nothing and pass.
-
-No network, no GPU, no checkpoint: the data is synthetic and the engine is never
-built.
+Usage:
+    pytest tests/evals/test_gsm8k_scoring.py
 """
 
 from __future__ import annotations

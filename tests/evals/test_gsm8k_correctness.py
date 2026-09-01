@@ -1,20 +1,11 @@
 """GSM8K accuracy regression, one case per config file.
 
-The check is a floor, not an equality: greedy decoding is deterministic, so a
-repeat run on the same checkpoint reproduces the score exactly, but a *kernel*
-change that is numerically fine can still flip a handful of borderline
-questions. ``tolerance`` absorbs that; anything larger is a real regression.
+Each YAML config names a checkpoint and an expected accuracy floor; a
+run generates on the real model and asserts the score clears the bar —
+the tier that catches quality regressions end to end.
 
-``invalid_rate`` is asserted separately because the two failure modes need
-different fixes. A low accuracy with a low invalid rate means the model got the
-arithmetic wrong. A high invalid rate means the harness never saw an answer —
-``max_gen_len`` too small, or the prompt format broken — and the accuracy number
-carries no information about the model at all.
-
-Usage::
-
-    pytest -s -v tests/evals/test_gsm8k_correctness.py
-    pytest -s -v tests/evals/test_gsm8k_correctness.py --config-list-file=models-all.txt
+Usage:
+    pytest tests/evals/test_gsm8k_correctness.py
 """
 
 from __future__ import annotations

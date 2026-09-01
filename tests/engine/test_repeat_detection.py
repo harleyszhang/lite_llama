@@ -1,4 +1,12 @@
-"""CPU-only tests for the repetition circuit breaker and stop-token loading."""
+"""CPU-only tests for the repetition circuit breaker and stop-token loading.
+
+``detect_repetition`` is driven with counting loops, verbatim loops and
+honest prose; the stop-id tests merge tokenizer and generation configs
+from tmp dirs.
+
+Usage:
+    pytest tests/engine/test_repeat_detection.py
+"""
 
 from __future__ import annotations
 

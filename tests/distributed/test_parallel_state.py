@@ -1,20 +1,10 @@
 """Tests for the DP x TP rank grid in :mod:`lite_llama.distributed.parallel_state`.
 
-The grid is global mutable state that every layer reads at construction time, so
-these tests pin down two things:
+Pure CPU: initialise a grid and assert the coordinate maths — distinct
+cells, contiguous TP groups — plus rejection of out-of-range ranks.
 
-* **the coordinate arithmetic** — a global rank maps to exactly one
-  ``(dp_rank, tp_rank)`` pair, and the layout keeps a replica's TP ranks contiguous.
-  Getting this wrong does not crash; it silently gives two replicas the same shard of
-  the weights, which is why it is asserted rather than eyeballed.
-* **the world-of-one default** — every accessor and collective must be a no-op when
-  neither kind of parallelism is on, because that is the path single-GPU inference
-  takes and it must never branch.
-
-Multi-rank grids are exercised through :func:`grid_coordinates`, never through
-``init_parallel``: with ``tp_size > 1`` that function blocks in an NCCL rendezvous
-waiting for ranks a single-process test will never start. ``init_parallel`` itself is
-therefore only called with ``tp_size=1``, where it creates no process group.
+Usage:
+    pytest tests/distributed/test_parallel_state.py
 """
 
 from __future__ import annotations

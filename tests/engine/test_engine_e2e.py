@@ -1,14 +1,10 @@
 """End-to-end generation tests over a real converted checkpoint.
 
-These exercise the full stack — registry -> loader -> executor -> engine ->
-sampler -> detokenizer — which is the only place where an interaction bug
-between two correct-looking layers shows up. The checkpoint is supplied by the
-``model_dir`` fixture in ``tests/conftest.py``; the ``gpu``/``weights`` marks
-below let it skip cleanly when either is unavailable.
+Determinism, batch-vs-single equality, streaming agreement and KV-cache
+reuse without leaks — the behaviours every optimisation must preserve.
 
-The invariants asserted here are all *relational* (same input twice, batched vs
-individual, streamed vs blocking) rather than golden strings, so they hold for
-any checkpoint the fixture points at.
+Usage:
+    pytest tests/engine/test_engine_e2e.py
 """
 
 from __future__ import annotations

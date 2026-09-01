@@ -1,19 +1,12 @@
 """OpenAI-compatible HTTP server over :class:`AsyncLLMEngine`.
 
-Endpoints: ``/v1/models``, ``/v1/completions``, ``/v1/chat/completions`` (both
-streaming and not) and ``/health``. Being wire-compatible means the official
-``openai`` client, ``curl`` and anything built for vLLM's server work unchanged.
-
-The layer is deliberately thin. It translates JSON to
-:class:`~lite_llama.engine.sampler.SamplingParams`, applies the chat template, and
-turns the engine's chunks into SSE frames — no batching, queuing or scheduling
-logic lives here, because all of that is the engine's job and duplicating any of
-it would mean two policies to keep in agreement.
+:class:`OpenAIServer` implements ``/v1/completions``, ``/v1/chat/completions``
+(streaming via SSE) and ``/metrics``; ``build_app`` / ``run_server`` wire a
+FastAPI app around one engine, with heavy deps imported lazily.
 
 Usage:
-    lite-llama serve --model-dir my_weight/Qwen2.5-0.5B --port 8000
-    curl localhost:8000/v1/completions -H 'Content-Type: application/json' \\
-         -d '{"model":"qwen","prompt":"Hello","max_tokens":32}'
+    app = build_app(config, engine)
+    run_server(config, host, port)
 """
 
 from __future__ import annotations

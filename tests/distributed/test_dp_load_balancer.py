@@ -1,23 +1,11 @@
-"""Tests for the DP load-balancing policies in :mod:`lite_llama.engine.dp_load_balancer`.
+"""Tests for the DP load-balancing policies.
 
-These are pure objects — no GPU, no process, no checkpoint — so the whole file runs on
-CPU in milliseconds. Four things are pinned down:
+Every policy advertised by ``LOAD_BALANCERS`` is built and driven through
+the same harness: idle-pool filling, round-robin cycling, prefix-aware
+placement — policy behaviour without any engine at all.
 
-* **the tie-break** — every policy must emit 0,1,2,... on an idle pool, because that is
-  what makes a load-aware policy a safe drop-in for round-robin;
-* **what each policy counts** — ``total_requests`` reacts to completions,
-  ``total_tokens`` reacts to prompt *length*, and the difference has to be observable or
-  the second policy is just the first one under another name (which is the bug this
-  suite exists to prevent regressing);
-* **``cache_aware``'s two halves** — it must cluster a shared prefix onto one replica
-  *and* stop doing so once that replica is loaded. Either half alone is a worse policy
-  than the one it replaces: affinity without load lets a popular prefix monopolise a
-  replica, load without affinity is ``total_tokens``. The suite also pins the
-  degeneracy — with nothing indexed it must reproduce ``total_tokens`` exactly, which
-  is what licenses turning it on by default;
-* **the token contract** — ``needs_token_estimate`` and ``needs_token_ids`` must be true
-  exactly for the policies that read those arguments, since the router uses them to
-  decide whether to spend a tokenizer pass.
+Usage:
+    pytest tests/distributed/test_dp_load_balancer.py
 """
 
 from __future__ import annotations

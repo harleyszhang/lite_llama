@@ -1,28 +1,11 @@
-"""Quantisation sub-package: sglang-aligned architecture.
+"""Quantisation sub-package: config classes, method classes, layout adapters.
 
-Layout (mirrors sglang ``srt/layers/quantization/``)::
+``get_quantization_config`` builds a config from a HF config, and
+``for_runtime_scheme`` maps a runtime scheme name (``"w8a8_int8"``) to
+its config — the two doors the rest of the codebase uses.
 
-    quantization/
-    ├── __init__.py          # Registry + public API
-    ├── base_config.py       # QuantizeMethodBase / LinearMethodBase / FusedMoEMethodBase / QuantizationConfig ABC
-    ├── fp8.py               # Fp8Config (weight-only fp8, block-wise scales)
-    ├── w8a8_fp8.py          # W8A8Fp8Config (true W8A8: fp8 weights + per-token fp8 activations)
-    ├── w8a8_int8.py         # W8A8Int8Config (SmoothQuant: int8 W8A8)
-    ├── blockwise_int8.py    # BlockInt8Config (int8 weight-only, per-channel / group-wise)
-    ├── awq.py               # AWQConfig (int4 AWQ checkpoints)
-    ├── gptq.py              # GPTQConfig (int4 GPTQ checkpoints)
-    ├── unquant.py           # UnquantizedConfig / Methods (fp16 default)
-    ├── kv_cache.py          # BaseKVCacheMethod / Fp8KVCacheMethod
-    ├── parameter.py         # RawParameter (loader must not cast to fp16)
-    └── utils.py             # Quantise helpers + checkpoint layout adapters
-
-Public API:
-    from lite_llama.modules.quantization import (
-        QuantizationConfig, QuantizeMethodBase, LinearMethodBase, FusedMoEMethodBase,
-        BASE_QUANTIZATION_METHODS,
-        get_quantization_config, get_quant_config_from_hf, for_runtime_scheme,
-        RawParameter, adapt_int4_checkpoint,
-    )
+Usage:
+    quant = for_runtime_scheme("w8a8_int8")
 """
 
 from __future__ import annotations

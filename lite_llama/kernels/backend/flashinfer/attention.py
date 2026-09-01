@@ -1,31 +1,12 @@
 """FlashInfer attention wrappers: both phases behind the native signatures.
 
-The dispatch contract is the native kernels' signature, so these wrappers are
-where FlashInfer's plan/run model gets folded into the ragged-batch and
-paged-pool calling conventions lite_llama already uses:
+Prefill and decode share one lazily allocated workspace and one wrapper
+cache keyed by shape (cleared via ``_reset_cache``); the functions mirror
+the native kernels' signatures so dispatch can swap them in.
 
-* :func:`prefill_attention` mirrors
-  ``flash_attention2_no_pad``: packed ragged batch, causal, GQA from the
-  head-count ratio.
-* :func:`decode_attention` mirrors ``flash_decoding``: one token per sequence,
-  slot table (``b_req_tokens_table``/``b_req_idx``) into the paged buffer.
-
-Two API facts shape the decode wrapper. FlashInfer's plan takes the softmax
-scale (and the run call does not), so ``qk_scale`` lands in ``plan``; and the
-run call accepts the K and V pools as a *pair* of page tensors, which lets the
-module layer's half-views of the engine's joint
-``[max_tokens, 2 * num_kv_heads, head_dim]`` buffer pass through as plain
-zero-copy ``unsqueeze(1)`` views — page_size is 1 because the pool allocates
-per token, one cache row per page.
-
-The wrapper objects are cached per process with a shared workspace; ``plan``
-is cheap relative to the kernel and runs per call, which is what a batch whose
-geometry changes every step needs.
-
-Usage (from a spec row's ``target``):
-    from lite_llama.kernels.backend.flashinfer.attention import (
-        decode_attention, prefill_attention,
-    )
+Usage:
+    out = prefill_attention(q, k, v, sm_scale, b_start_loc, b_seq_len,
+                            max_seq_len)
 """
 
 from __future__ import annotations

@@ -1,11 +1,10 @@
-"""Tests for :func:`get_model_name_from_path`.
+"""Tests for :func:`~lite_llama.utils.path_utils.get_model_name_from_path`.
 
-Small helper, real consequence: ``LLMEngine`` derives the tokenizer's
-``use_fast`` flag from it (``"llava" not in name``), so a wrong answer loads the
-wrong tokenizer class for LLaVA checkpoints.
+Checkpoint directories keep their parent name and llava checkpoints
+still contain "llava" — the naming rule the registry keys on.
 
-The previous test for this function defined its own copy of the implementation
-inside the test file and ran nothing, so the shipped helper was untested.
+Usage:
+    pytest tests/utils/test_path_utils.py
 """
 
 from __future__ import annotations

@@ -1,31 +1,11 @@
 """Reported log-probabilities must be the ones HuggingFace computes.
 
-Everything else about logprobs can be checked without a reference: the records line
-up with the tokens, the top-k is sorted, the sampled id is in it. None of that
-notices a number that is *self-consistently* wrong — a normaliser summed over one
-rank's vocabulary slice, a temperature divided into a prompt score, an off-by-one
-between the row that predicts a position and the position itself. Every such bug
-produces a plausible, well-ordered, monotone set of logprobs that is simply not the
-model's distribution, and only the reference implementation settles it.
-
-So this compares against ``transformers`` running the same checkpoint over the same
-token sequence, teacher-forced: its ``log_softmax`` of its own logits *is* the
-definition. Two collection paths are checked, because they compute the same quantity
-from differently shaped forwards — the one-shot ``LLM`` scores the whole prompt from
-one padded prefill grid, while the continuous engine scores each prefill chunk as it
-runs and stitches the records back together, which is where an attribution off by a
-chunk would hide.
-
-Agreement is asserted twice over, on the maximum deviation and on the average, and
-both are needed. The weights are bf16 and the two implementations fuse differently,
-so a single position can legitimately be a couple of tenths of a nat out — measured
-on Qwen3-0.6B, a sampled token lands within 0.08, a prompt position within 0.14 (0.20
-when prefill was chunked) and the fifth-ranked alternative within 0.46. Any per-entry
-cap loose enough to admit that would also admit a small systematic bias, which the
-average would not: it comes in at 0.02 to 0.07 nats over two hundred comparisons.
+The same prompt runs one-shot and chunked; every reported logprob is
+compared against HF within tight absolute and mean drift budgets, so
+sampling changes cannot hide behind "close enough".
 
 Usage:
-    LITE_LLAMA_TEST_MODEL_DIR=my_weight/Qwen3-0.6B pytest tests/golden/test_logprob_parity.py
+    pytest tests/golden/test_logprob_parity.py
 """
 
 from __future__ import annotations

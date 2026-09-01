@@ -1,31 +1,11 @@
 """Latency/throughput benchmark: lite_llama vs HuggingFace transformers.
 
-Reports the metrics used by vLLM / SGLang serving benchmarks, per engine:
+``bench_lite_llama`` and ``bench_transformers`` time the same prompts on
+the same device, then ``_print_report`` diffs per-token latency and
+throughput — one table, not a wall of logs.
 
-* **TTFT** (time to first token, s) — prefill latency, measured as the wall-clock
-  time of a ``max_new_tokens=1`` generation over the batch (prefill + 1 token).
-* **TPOT** (time per output token, ms) — steady-state decode latency, defined
-  exactly as vLLM does: ``(latency - ttft) / (output_len - 1)``.
-* **TGS** (token generation speed, tokens/s) — aggregate output throughput,
-  ``total_output_tokens / latency``.
-
-Methodology notes (why earlier numbers were not trustworthy):
-
-* Both engines decode **greedily** (``temperature=0`` / ``do_sample=False``) and
-  stop **naturally at EOS** — identical stopping policy, unlike the old script,
-  which forced transformers to ignore EOS (``eos_token_id=None``) while lite_llama
-  stopped early, so the two never ran the same workload.
-* Output tokens are counted by re-tokenising the generated text with the *same*
-  tokenizer for both engines (this is exactly what vLLM's ``benchmark_serving``
-  does; it may inflate counts slightly but is consistent, hence fair).
-* Every timed region is wrapped in ``torch.cuda.synchronize()``; a warmup pass is
-  excluded; ``--iters`` runs are aggregated by median.
-
-Results (and the full config) are printed and saved to ``--log-dir`` as JSON.
-
-Run from the repository root:
-    python examples/benchmark.py --model my_weight/Qwen2.5-1.5B-Instruct \
-        --batch-size 8 --gen-len 128 --iters 2
+Usage:
+    python examples/benchmark.py --model <ckpt> --batch-size 16
 """
 
 from __future__ import annotations

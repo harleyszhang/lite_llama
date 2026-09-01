@@ -1,15 +1,10 @@
-"""Observability tools: measuring what the engine does, without changing what it does.
+"""Observability tools: measure what the engine does, without changing it.
 
-Instrumentation lives here rather than beside the code it measures, so a subsystem
-carries no reporting machinery of its own and the cost of not looking stays at zero.
-Today that is collective traffic; the shape generalises to anything a run wants to
-account for.
+Re-exports :class:`CollectiveStats` — the wire accounting for tensor
+parallelism — plus its enums and byte-formatting helpers.
 
 Usage:
-    from lite_llama.tools.observability import Collective, CollectiveStats
-    with CollectiveStats.collect() as stats:
-        engine.step()
-    print(stats.report())
+    from lite_llama.tools.observability import CollectiveStats
 """
 
 from .collective_stats import (

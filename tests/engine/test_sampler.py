@@ -1,4 +1,11 @@
-"""CPU-only tests for the Sampler + SamplingParams pair."""
+"""CPU-only tests for the Sampler + SamplingParams pair.
+
+Param validation, greedy argmax behaviour, nucleus-sampling bounds and
+the repetition penalty — logits are small tensors built inline.
+
+Usage:
+    pytest tests/engine/test_sampler.py
+"""
 
 from __future__ import annotations
 

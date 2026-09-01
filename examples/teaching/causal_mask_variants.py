@@ -1,5 +1,15 @@
 # 代码可直接运行，用于测试 masked-scores 的结果
 
+"""Teaching demo: three ways to build the prefill causal mask.
+
+Each ``apply_prefill_mask*`` function masks the same score matrix with a
+different formulation, and ``create_and_print_mask`` shows that all
+three agree on the result.
+
+Usage:
+    python examples/teaching/causal_mask_variants.py
+"""
+
 import time
 
 import torch

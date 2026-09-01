@@ -1,21 +1,11 @@
 """Tests for the ``no-hardcoded-weight-paths`` pre-commit hook.
 
-The hook exists because this repository really did ship entry points with the
-author's own checkpoint directory baked in (``model_path =
-"/gemini/code/Llama-3.2-1B-Instruct/"`` and five siblings, all removed in one
-commit). A regex guard against a recurring mistake is only worth having if the
-regex is pinned, so both halves are asserted here: what must fire, and what must
-*not* fire.
+Rejected forms — absolute paths and bare directory prefixes — produce a
+report naming file, line and path, while allowed forms pass. The hook
+script is loaded and run against tmp files.
 
-The two cases that motivated these tests:
-
-* a bare prefix with no trailing segment -- ``os.path.join("/root", "ckpt")`` is
-  the same bug as ``"/root/ckpt"``, but the original pattern required a ``/``
-  after the prefix and let it through;
-* a path inside a docstring -- the code only ever skipped ``#`` comments, while a
-  comment claimed docstrings were exempt too. Docstrings are deliberately *not*
-  exempt, because "usage example" text is how a personal path gets copied back
-  into working code, so the behaviour is pinned rather than the comment trusted.
+Usage:
+    pytest tests/tools/test_check_hardcoded_paths.py
 """
 
 from __future__ import annotations

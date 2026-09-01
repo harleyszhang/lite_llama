@@ -1,16 +1,11 @@
 """Persistent JSON config store for autotune results.
 
-Each kernel op gets its own JSON file under the cache directory. The store
-supports concurrent reads (lazy-loaded into memory) and append-style writes
-(load → merge → flush). Thread-safety within a single process is ensured by
-the GIL for the dict operations; cross-process safety relies on atomic rename.
+:class:`ConfigStore` reads and writes one JSON document per cache dir,
+merging measured configs under their :class:`TuneKey` — simple enough
+to inspect by hand, stable enough to commit.
 
-File layout::
-
-    ~/.cache/lite_llama/autotune/
-    ├── fused_moe.json
-    ├── flash_attn_nopad.json
-    └── w4a16_matmul.json
+Usage:
+    store = ConfigStore(cache_dir)
 """
 
 from __future__ import annotations

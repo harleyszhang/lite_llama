@@ -1,9 +1,11 @@
 """Quantisation utilities: quantize helpers and checkpoint layout adapters.
 
-Consolidates the parameter quantisation functions (fp8, int8, int4) and the
-AWQ/GPTQ checkpoint layout rearrangement into one flat module, matching the
-sglang convention of keeping implementation details private and the package
-surface flat.
+The ``quantize_*`` functions produce each kernel's expected payload
+(per-channel, per-token, group-wise int4/int8, fp8 blocks); the ``awq_*``
+and ``adapt_*`` helpers convert published checkpoint layouts.
+
+Usage:
+    q = quantize_fp8_per_token(x)
 """
 
 from __future__ import annotations

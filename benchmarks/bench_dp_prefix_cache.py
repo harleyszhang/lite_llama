@@ -1,39 +1,12 @@
 #!/usr/bin/env python
-"""Benchmark prefix caching *across* data-parallel replicas.
+"""Prefix caching across data-parallel replicas.
 
-Each replica owns its KV cache outright — there is no cross-replica transfer — so a
-prompt whose prefix was prefilled on replica 0 hits nothing on replica 1: round-robin
-scatters every prefix group over every replica and makes each one pay the prefill
-again. Prefix-affinity routing (``--load-balancer cache_aware``) turns the
-per-replica cache into a pool-wide one. Three configurations separate the effects:
-
-* **off / round_robin** — baseline: every prompt prefills in full.
-* **on / round_robin** — the cache alone: group members landing together share, but
-  each group is instantiated on all ``dp`` replicas.
-* **on / cache_aware** — cache + affinity, the configuration under test.
-
-The workload is deliberately prefill-heavy (long shared prefix, short generation):
-the saving is prefill work, and a long generation dilutes it. Measured on
-Qwen2.5-0.5B, 2x A10, ~980-token prefixes, ``--gen-len 4``::
-
-    groups x per-group    cache alone    + affinity
-     4 x 32                  2.75x          2.93x
-     8 x 16                  1.89x          1.87x
-    16 x  8                  1.38x          1.42x
-    32 x  8                  1.17x          1.34x
-    32 x  4                  1.06x          1.26x
-    64 x  4                  1.04x          1.14x
-
-Round-robin wastes ``(dp - 1) x groups`` extra prefills however many requests share
-each group, so the cache pays when a few prefixes are shared very widely and affinity
-pays when many prefixes are each shared narrowly — the multi-tenant regime where the
-cache alone is nearly worthless (1.04x). Below ~64 requests the wall clock is decided
-by admission waves, so affinity's ±1-request cost against an exactly even split can
-swamp the prefill it saves: a small-batch artefact, not the policy.
+Prompts share prefixes within a group; whether a cache-aware balancer
+keeps a group on one replica decides if the prefix cache ever hits. The
+benchmark measures both routing quality and the resulting KV savings.
 
 Usage:
-    python benchmarks/bench_dp_prefix_cache.py --dp 2 --groups 32 --per-group 4
-    python benchmarks/bench_dp_prefix_cache.py --dp 2 --groups 4 --per-group 32
+    python benchmarks/bench_dp_prefix_cache.py --model <ckpt> --dp 2
 """
 
 from __future__ import annotations

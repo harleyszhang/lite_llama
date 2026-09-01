@@ -1,25 +1,11 @@
-"""The dispatch tier: choose an implementation, once, and be able to say why.
+"""The dispatch tier: choose an implementation once, and be able to say why.
 
-Three questions, three tiers (ROADMAP foundation 2): the kernels themselves
-live in :mod:`lite_llama.kernels.ops` (grouped by operator domain, each group
-registering its rows as data), the external libraries live in
-:mod:`lite_llama.kernels.backend`, and *which implementation runs here* is
-answered by :func:`dispatch` in this package — deterministically, with the
-decision cached per :class:`DispatchKey` and the full rejection chain available
-through ``explain``.
-
-Importing this package never imports torch: a spec is strings and frozen
-dataclasses, implementations are referenced as ``"module:attr"`` strings and
-loaded only when first dispatched. :mod:`autotune` lives beside the mechanism
-because it is the perf half of the same decision — the frozen store it keeps
-is what the ranking step reads once wired in.
+Re-exports the registry (``REGISTRY``, ``register``), :class:`KernelSpec`,
+:class:`Selected` and :func:`dispatch` — the whole "pick a row" surface a
+call site needs in one import.
 
 Usage:
-    from lite_llama.kernels.dispatcher import KernelSpec, dispatch, register
-
-    register(KernelSpec(name="native/linear_torch", op="linear", ...))
-    sel = dispatch("linear", dtype="bf16")
-    fn = sel.load()
+    from lite_llama.kernels.dispatcher import dispatch, register
 """
 
 from .autotune import install_frozen_perf_provider

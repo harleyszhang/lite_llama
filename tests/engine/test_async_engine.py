@@ -1,16 +1,11 @@
 """Tests for the asyncio front end of the continuous-batching engine.
 
-Two layers get exercised separately. The queue plumbing -- submission, streaming,
-cancellation, error propagation, shutdown -- is tested against a stub engine on
-CPU, because none of it depends on a model. Only the last few tests need a real
-checkpoint, and they exist to prove the thing that a stub cannot: that requests
-from several coroutines really do share one batch.
+A ``StubEngine`` stands in for the real one, so the stream protocol is
+what gets tested: chunks until finish, the final chunk carrying whole
+text, abandoning a stream aborting the request.
 
-The bug this file guards against most directly is a lost wakeup. The worker
-thread hands results back with ``call_soon_threadsafe``, so a queue awaited on
-one event loop and a put scheduled onto another leaves the caller hanging
-forever -- a deadlock, not an error, which makes it invisible until a server
-stops responding.
+Usage:
+    pytest tests/engine/test_async_engine.py
 """
 
 from __future__ import annotations

@@ -1,21 +1,11 @@
 """Mixture-of-experts modules: top-k routed sparse FFN with stacked experts.
 
-:class:`SparseMoeBlock` mirrors vLLM's ``FusedMoE``: it holds the router and the
-stacked expert weights (three tensors, not ``3*num_experts``), and its forward is
-``route -> fused_moe``. Routing follows HF exactly — fp32 softmax over *all*
-experts, then top-k, then renormalise — an order that is not interchangeable.
-The expert FFN runs as two grouped GEMMs
-(:func:`lite_llama.kernels.ops.moe.fused_moe.fused_moe`), not a Python loop.
-
-The experts are where an A3B checkpoint's weight actually is (~29 of its 30B
-parameters), so this is also where the two features that make it servable on
-small cards apply: the stacked tensors stay 8-bit end to end, and their
-intermediate dimension is split across tensor-parallel ranks — the expert
-equivalent of the dense ``gate/up`` + ``down`` pairing, ending in the same
-single all-reduce.
+:class:`SparseMoeBlock` routes each token to its top-k experts, runs the
+fused grouped-GEMM kernel over the routed batch, and applies the routed
+normalisation the Qwen3-MoE configs expect.
 
 Usage:
-    block = SparseMoeBlock(config, quant)   # built by CausalLM._build_mlp
+    moe = SparseMoeBlock(config, quant)
 """
 
 from __future__ import annotations

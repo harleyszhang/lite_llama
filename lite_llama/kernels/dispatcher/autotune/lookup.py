@@ -1,13 +1,11 @@
 """High-level autotune lookup — the call sites' single entry point.
 
-Kernel launchers call :func:`get_best_config` before falling back to their
-heuristic ``_launch_config``. The function is intentionally cheap on miss
-(returns ``None`` immediately) so the hot path pays no extra cost when no
-tuned config has been collected yet.
+:func:`get_best_config` resolves the ambient store and GPU, builds the
+:class:`TuneKey`, and returns the stored best config or None; ``reset``
+clears the cached store handle between tests.
 
-The environment variable ``LITE_LLAMA_AUTOTUNE`` controls behaviour:
-    - ``"0"``: disabled — always returns ``None`` (forces heuristic fallback).
-    - ``"1"`` or unset: enabled — looks up the config store.
+Usage:
+    config = get_best_config("fused_moe", m, n, k, "fp16")
 """
 
 from __future__ import annotations

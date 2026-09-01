@@ -1,24 +1,11 @@
 """Tests for :mod:`lite_llama.engine.data_parallel`.
 
-The coordinator's whole job is bookkeeping — route each prompt to a replica, then put
-the completions back where the caller expects them — so that is what is asserted:
+Argument validation and the routing table run CPU-only through a
+``_RouteHarness``; only the end-to-end two-GPU test needs real
+devices.
 
-* **routing** buckets prompts per replica via the load balancer, total and disjoint
-  (``_route`` is exercised through a lightweight stub, so this tier needs no GPU);
-* **reassembly** returns completions in the caller's order, the failure that would be
-  hardest to notice: every answer is individually plausible, just attached to the
-  wrong prompt;
-* **the replica's engine loop** (:class:`_ReplicaLoop`) is asserted against a fake
-  engine and plain queues: admission while decoding, one message per batch, and what
-  a failure leaves behind. That tier is where the resident-engine behaviour lives and
-  it needs no GPU at all;
-* **parity with a single GPU** holds *per replica-batch*. It deliberately does not
-  compare against one run over the full prompt list: a replica batches a subset where
-  one GPU batched everything, and a different batch shape changes GEMM reduction order,
-  which can flip an fp16 greedy tie. Replaying the same sub-batches keeps the batch
-  composition identical, so any difference is a real routing bug, not float noise.
-
-The end-to-end tier needs two GPUs; it skips rather than fails on one.
+Usage:
+    pytest tests/distributed/test_data_parallel.py
 """
 
 from __future__ import annotations

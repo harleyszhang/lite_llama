@@ -26,11 +26,10 @@ def get_dtype_size(dtype: torch.dtype) -> int:
 class MemoryProfiler:
     """Estimates how many KV-cache tokens fit in the remaining GPU memory.
 
-    A short dummy forward pass measures the model's peak activation memory, and the
-    leftover budget (``total * utilization - peak``) is divided by the per-token KV
-    cache size. Replaces the old ``ComputeMaxAvailableBlocks`` + ``DummyInputGenerator``
-    pair, which needed a separate config lookup table to build its dummy inputs; here
-    the already-constructed model supplies every dimension.
+    A short dummy forward pass measures the model's peak activation memory; the
+    leftover budget (``total * utilization - peak``) is divided by the per-token
+    KV size. The already-constructed model supplies every dimension, so no
+    separate dummy-input configuration is needed.
 
     Args:
         num_layers: Decoder layer count.
@@ -136,13 +135,10 @@ class MemoryProfiler:
 class KVCacheManager:
     """Owns the paged KV buffers and hands out cache rows by reference count.
 
-    One row per token (``block_size=1``), so "block" and "token" are the same unit
-    here. ``kv_mem_use_state[i]`` is the reference count of row ``i``: a row is free
-    at zero, and :attr:`can_use_mem_size` tracks how many are.
-
-    :meth:`alloc_kvcache_index` is the entry point and picks between three
-    strategies, cheapest first: a bump cursor while the cache is append-only, then a
-    contiguous-run search, then any scattered free rows.
+    One row per token (``block_size=1``). ``kv_mem_use_state[i]`` is row ``i``'s
+    reference count — free at zero — and :attr:`can_use_mem_size` counts free
+    rows. :meth:`alloc_kvcache_index` picks the cheapest strategy that fits:
+    bump cursor, contiguous-run search, then any scattered rows.
 
     Args:
         num_layers: Decoder layer count.
@@ -181,7 +177,9 @@ class KVCacheManager:
         self._watermark_blocks = int(gpu_num_blocks * watermark)
         logger.info(
             "KV cache: %d blocks, watermark=%d blocks (%.0f%%)",
-            gpu_num_blocks, self._watermark_blocks, watermark * 100,
+            gpu_num_blocks,
+            self._watermark_blocks,
+            watermark * 100,
         )
 
         # Row indices to hand out, and the per-row reference count.
@@ -293,18 +291,12 @@ class KVCacheManager:
     def alloc_kvcache_index(self, need_size):
         """Reserve ``need_size`` cache rows, preferring a contiguous run.
 
-        A decode step reserves one row per sequence, so this runs on the hot
-        path. The search in :meth:`alloc_contiguous_kvcache` costs a
-        ``nonzero`` over the whole cache plus two ``.item()`` reads, i.e. three
-        device synchronisations per decode step, which stalls the launch
-        pipeline far longer than the allocation itself.
-
-        While the cache is only ever appended to — the state every
-        ``generate()`` call starts from, because it opens with
-        :meth:`free_all` — the answer that search returns is exactly the next
-        ``need_size`` rows after the previous allocation. The bump cursor below
-        returns those rows directly, with no device reads at all, and any
-        partial free falls back to the general search.
+        Runs on the decode hot path. The general search costs a ``nonzero`` plus
+        two ``.item()`` reads — three device synchronisations that stall the
+        launch pipeline. While the cache is append-only (the state every
+        ``generate()`` starts from, via :meth:`free_all`) the answer is exactly
+        the next ``need_size`` rows, so the bump cursor returns them with no
+        device reads; any partial free falls back to the search.
         """
         if self._bump_is_exact and self._bump_cursor + need_size <= self.max_num_tokens:
             start = self._bump_cursor
@@ -359,17 +351,13 @@ class KVCacheManager:
     def claim(self, num_rows: int) -> None:
         """Hand the first ``num_rows`` rows to an external owner, permanently.
 
-        Continuous batching manages its rows itself (see
-        :class:`~lite_llama.executor.slot_batch.SlotBatch`, which maps each
-        request slot onto a fixed contiguous region). Marking those rows used
-        keeps :attr:`can_use_mem_size` honest and stops this allocator from
-        handing the same row to a second owner; the bump cursor resumes just
-        past the claimed region so the two schemes can share one pool.
+        Continuous batching maps each slot onto a fixed contiguous region (see
+        :class:`~lite_llama.executor.slot_batch.SlotBatch`); marking those rows
+        used keeps :attr:`can_use_mem_size` honest, and the bump cursor resumes
+        just past the claimed region so both schemes share one pool.
         """
         if num_rows > self.can_use_mem_size:
-            raise ValueError(
-                f"cannot claim {num_rows} rows: only {self.can_use_mem_size} are free"
-            )
+            raise ValueError(f"cannot claim {num_rows} rows: only {self.can_use_mem_size} are free")
         self.kv_mem_use_state[:num_rows] += 1
         self.can_use_mem_size -= num_rows
         self._bump_cursor = max(self._bump_cursor, num_rows)
