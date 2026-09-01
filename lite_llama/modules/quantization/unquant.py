@@ -1,4 +1,4 @@
-"""Unquantised (fp16) config and methods — the default for every model.
+"""Unquantised config and methods — the default for every model.
 
 :class:`UnquantizedLinearMethod` and :class:`UnquantizedFusedMoEMethod`
 do plain matmuls; :class:`UnquantizedConfig` exists so the loader has a
@@ -27,9 +27,17 @@ from .base_config import (
 class UnquantizedLinearMethod(LinearMethodBase):
     """Plain weight projected via kernel dispatch (``F.linear`` floor row)."""
 
-    def create_weights(self, layer: nn.Module, input_size: int, output_size: int, **kw) -> None:
+    def create_weights(
+        self,
+        layer: nn.Module,
+        input_size: int,
+        output_size: int,
+        dtype: torch.dtype | None = None,
+        **kw,
+    ) -> None:
         layer.weight = nn.Parameter(
-            torch.empty(output_size, input_size, dtype=torch.float16), requires_grad=False
+            torch.empty(output_size, input_size, dtype=dtype or torch.float16),
+            requires_grad=False,
         )
 
     def apply(
@@ -39,16 +47,19 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
 
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
-    """Plain fp16 stacked experts; the grouped GEMM runs without scales."""
+    """Plain stacked experts; the grouped GEMM runs without scales."""
 
     def create_weights(self, block: nn.Module) -> dict[str, nn.Parameter]:
+        # ``block.dtype`` is the model's dtype; the getattr keeps bare stubs
+        # (tests) on the fp16 default.
+        dtype = getattr(block, "dtype", torch.float16)
         return {
             "gate_up_proj": nn.Parameter(
                 torch.empty(
                     block.num_experts,
                     2 * block.moe_intermediate_size,
                     block.hidden_size,
-                    dtype=torch.float16,
+                    dtype=dtype,
                 ),
                 requires_grad=False,
             ),
@@ -57,7 +68,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                     block.num_experts,
                     block.hidden_size,
                     block.moe_intermediate_size,
-                    dtype=torch.float16,
+                    dtype=dtype,
                 ),
                 requires_grad=False,
             ),

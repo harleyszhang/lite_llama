@@ -29,7 +29,10 @@ class LinearBase(nn.Module):
         input_size: Contracted (in-feature) width of the local weight.
         output_size: Output width of the local weight.
         bias: Whether to allocate a bias.
-        quant: Quantisation layout, or ``None`` for a plain fp16 weight.
+        quant: Quantisation layout, or ``None`` for an unquantised weight.
+        dtype: Storage dtype of an unquantised weight (the model's
+            ``config.dtype``); ignored by quantised methods, which own their
+            container dtype. ``None`` keeps the fp16 default.
     """
 
     def __init__(
@@ -39,6 +42,7 @@ class LinearBase(nn.Module):
         *,
         bias: bool = False,
         quant: QuantizationConfig | None = None,
+        dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         self.input_size = input_size
@@ -47,9 +51,11 @@ class LinearBase(nn.Module):
         self.quant_method = (
             quant.get_quant_method(self) if quant is not None else UnquantizedLinearMethod()
         )
-        self.quant_method.create_weights(self, input_size, output_size)
+        self.quant_method.create_weights(self, input_size, output_size, dtype=dtype)
         self.bias = (
-            nn.Parameter(torch.empty(output_size, dtype=torch.float16), requires_grad=False)
+            nn.Parameter(
+                torch.empty(output_size, dtype=dtype or torch.float16), requires_grad=False
+            )
             if bias
             else None
         )
@@ -130,6 +136,7 @@ class ColumnParallelLinear(LinearBase):
         output_size: Full output width, split ``world_size`` ways.
         bias: Whether to allocate a bias; sharded with the weight.
         quant: Quantisation layout, or ``None``.
+        dtype: Storage dtype of an unquantised weight.
         what: Name of the dimension being split, for the error message when it
             does not divide.
     """
@@ -141,12 +148,13 @@ class ColumnParallelLinear(LinearBase):
         *,
         bias: bool = False,
         quant: QuantizationConfig | None = None,
+        dtype: torch.dtype | None = None,
         what: str = "output features",
     ) -> None:
         world_size = get_tp_world_size()
         local_out = divide(output_size, world_size, what)
         _check_shard_alignment(quant, local_out, what)
-        super().__init__(input_size, local_out, bias=bias, quant=quant)
+        super().__init__(input_size, local_out, bias=bias, quant=quant, dtype=dtype)
         self.full_output_size = output_size
 
     def _weight_loader(self, param, loaded, shard_id=None):
@@ -192,7 +200,8 @@ class QKVParallelLinear(LinearBase):
         num_kv_heads: Total key/value heads, split ``tp`` ways.
         head_dim: Width of one head; never split.
         bias: Whether q/k/v carry a bias (Qwen2 does); sharded with the weight.
-        quant: Quantisation layout, or ``None`` for fp16.
+        quant: Quantisation layout, or ``None``.
+        dtype: Storage dtype of an unquantised weight.
 
     Raises:
         ValueError: If either head count does not divide across the ranks, or if a
@@ -208,6 +217,7 @@ class QKVParallelLinear(LinearBase):
         *,
         bias: bool = False,
         quant: QuantizationConfig | None = None,
+        dtype: torch.dtype | None = None,
     ) -> None:
         world_size = get_tp_world_size()
         local_heads = divide(num_heads, world_size, "attention heads")
@@ -218,7 +228,7 @@ class QKVParallelLinear(LinearBase):
         # scale blocks while the query block alone is not.
         _check_shard_alignment(quant, q_size, "query features")
         _check_shard_alignment(quant, kv_size, "key/value features")
-        super().__init__(hidden_size, q_size + 2 * kv_size, bias=bias, quant=quant)
+        super().__init__(hidden_size, q_size + 2 * kv_size, bias=bias, quant=quant, dtype=dtype)
         self.num_heads = local_heads
         self.num_kv_heads = local_kv_heads
         self.head_dim = head_dim
@@ -275,6 +285,7 @@ class RowParallelLinear(LinearBase):
         input_size: Full contracted width, split ``world_size`` ways.
         output_size: Full output width (not split).
         quant: Quantisation layout, or ``None``.
+        dtype: Storage dtype of an unquantised weight.
         what: Name of the dimension being split, for the error message.
     """
 
@@ -285,6 +296,7 @@ class RowParallelLinear(LinearBase):
         *,
         bias: bool = False,
         quant: QuantizationConfig | None = None,
+        dtype: torch.dtype | None = None,
         what: str = "input features",
     ) -> None:
         if bias:
@@ -294,7 +306,7 @@ class RowParallelLinear(LinearBase):
         world_size = get_tp_world_size()
         local_in = divide(input_size, world_size, what)
         _check_shard_alignment(quant, local_in, what)
-        super().__init__(local_in, output_size, quant=quant)
+        super().__init__(local_in, output_size, quant=quant, dtype=dtype)
         self.full_input_size = input_size
 
     def _weight_loader(self, param, loaded, shard_id=None):

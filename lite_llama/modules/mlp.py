@@ -46,9 +46,11 @@ class FusedMLP(nn.Module):
         local_inter = divide(inter, get_tp_world_size(), "MLP intermediate")
         _check_shard_alignment(quant, local_inter, "MLP intermediate")
         self.gate_up_proj = ColumnParallelLinear(
-            hidden, 2 * inter, quant=quant, what="MLP intermediate"
+            hidden, 2 * inter, quant=quant, dtype=config.dtype, what="MLP intermediate"
         )
-        self.down_proj = RowParallelLinear(inter, hidden, quant=quant, what="MLP intermediate")
+        self.down_proj = RowParallelLinear(
+            inter, hidden, quant=quant, dtype=config.dtype, what="MLP intermediate"
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.down_proj(swiglu_forward_fused(self.gate_up_proj(x)))
