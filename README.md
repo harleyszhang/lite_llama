@@ -38,6 +38,9 @@
 - **Prefix Caching** (v0.7): block-hash chained prefix reuse — shared system prompts are prefilled once and reused by later requests; LRU-evicted under capacity pressure (aligned with vLLM's `BlockPool`).
 - **Preemption** (v0.7): opt-in recompute-based eviction (`enable_preemption`) when the running set exceeds slot capacity; evicted requests re-queue with a progress quantum that prevents livelock.
 - **Backend Registry** (v0.8): declarative kernel-backend selection with probe + `explain_selection()`; environment-variable override and graceful degradation when a backend's dependency is missing.
+- **Declarative kernel dispatch** (v0.9): every kernel is a `KernelSpec` row (availability / capability / dtype+scheme / shape / layout / golden), selection is `filter → rank → cache` with a per-rejection reason, and a frozen measured ranking replaces hand-written priorities. One dispatch costs 27 µs at construction time and nothing per step.
+- **Token scores** (v0.10): `logprobs=k` reports the chosen token and its top-k alternatives, `prompt_logprobs=k` scores every prompt position — both out of the forward pass that was happening anyway, no rescoring run. Verified against `transformers` on every position.
+- **Metrics and tracing** (v0.10): Prometheus `/metrics` (queue time, TTFT, TPOT, token counters) with no `prometheus_client` dependency, plus one OTLP span per request when a collector is configured. Measured cost is below the 0.5% run-to-run noise.
 
 ## Setup and Installation
 
@@ -414,6 +417,76 @@ with DataParallelEngine(model="my_weight/Qwen2.5-1.5B-Instruct", data_parallel_s
 For serving, `lite-llama serve --data-parallel-size 2 --load-balancer total_tokens` swaps in `AsyncDataParallelEngine`, which streams each request's chunks from whichever replica the balancer picks and aborts a request whose connection drops.
 
 On 2× A10 (Qwen2.5-1.5B-Instruct): **weak scaling 2.00x** (100% linear, 1857 → 3716 tok/s) with byte-identical outputs, and **1.64x** on a fixed 256-prompt batch. Compose it with TP — `data_parallel_size=2, tensor_parallel_size=2` — on a 4-GPU box.
+
+## Observability and Debugging
+
+### Token Scores (`logprobs` / `prompt_logprobs`)
+
+A sampled token on its own tells you what the model said, not how close the call was. `logprobs=k` returns the drawn token's log-probability together with the `k` most likely alternatives it outranked; `prompt_logprobs=k` does the same for every position of the prompt, which is what perplexity scoring and prompt debugging need. Both come out of the forward pass the request was already paying for — there is no second scoring pass — and both are off by default.
+
+![logprobs and prompt_logprobs](./docs/images/logprobs.gif)
+
+The GIF is a real Qwen3-0.6B run (`python scripts/gen_logprobs_gif.py`): position 1 of the prompt shows `' capital'` at -12.8, and the last generated token is a near tie — `' Italy'` at -1.74 beat `' France'` at -1.86, exactly the case a mean-logprob filter is there to catch.
+
+```python
+from lite_llama import LLM, SamplingParams
+
+llm = LLM(model="my_weight/Qwen3-0.6B")
+output = llm.generate(["The capital of France is"], SamplingParams(logprobs=5, prompt_logprobs=5))[0]
+
+for record in output.outputs[0].logprobs:      # one per generated token
+    print(record.token_id, record.logprob, record.top_token_ids, record.top_logprobs)
+print(output.prompt_logprobs[0])               # None: nothing predicts position 0
+```
+
+Over the server, `/v1/completions` takes `logprobs` / `prompt_logprobs` directly, and `/v1/chat/completions` follows the OpenAI shape (`logprobs: true` plus `top_logprobs: 5`):
+
+```bash
+curl localhost:8000/v1/completions -H 'Content-Type: application/json' -d '{
+  "model": "Qwen3-0.6B", "prompt": "The capital of France is",
+  "max_tokens": 8, "logprobs": 5, "prompt_logprobs": 5}'
+```
+
+Cost, measured with `python benchmarks/bench_observability.py` (A10, Qwen3-0.6B, batch=16, gen=128): `logprobs=5` moves TPOT 4.75 → 5.35 ms (throughput -10.4%) because each step adds a `log_softmax` + `topk` + a device-to-host copy; `prompt_logprobs=5` moves TTFT 23.3 → 32.0 ms and costs -1.5% throughput, since it only touches prefill. Log: [`docs/benchmark_logs/observability_v0.10.json`](docs/benchmark_logs/observability_v0.10.json).
+
+### Metrics and Tracing
+
+`lite-llama serve` exposes a Prometheus endpoint — request counters, in-flight gauges, and the queue-time / TTFT / TPOT histograms on vLLM's bucket grid. The text format is a few lines per metric, so there is no `prometheus_client` dependency to install:
+
+```bash
+lite-llama serve --model-dir my_weight/Qwen3-0.6B &
+curl -s localhost:8000/metrics | grep -A2 time_to_first_token
+```
+
+```text
+# HELP lite_llama:time_to_first_token_seconds Arrival to first generated token.
+# TYPE lite_llama:time_to_first_token_seconds histogram
+lite_llama:time_to_first_token_seconds_bucket{le="0.5"} 0
+lite_llama:time_to_first_token_seconds_bucket{le="1"} 3
+lite_llama:time_to_first_token_seconds_sum 1.8414203859865665
+lite_llama:time_to_first_token_seconds_count 3
+```
+
+Collection is opt-out (`LITE_LLAMA_METRICS=0`) and tracing is opt-in: set `LITE_LLAMA_OTLP_ENDPOINT=http://localhost:4318` and each request becomes one span carrying its id, prompt and output token counts, and finish reason. Without the endpoint the tracer is a no-op object — nothing is imported, nothing is timed, and the OpenTelemetry SDK stays an optional install. Both together stay inside the 0.5% run-to-run noise of the same benchmark above, because the work is a handful of float additions per request rather than per token.
+
+### Single-Layer Harness
+
+A whole-network run is a bad place to find out that one decoder layer is wrong. The harness builds exactly one layer, on one GPU, and can mirror the matching `transformers` layer's weights to compare numerically — no checkpoint download needed, which is the point when the model is 671B and the change is one attention variant:
+
+```bash
+# timing + which kernel each op dispatched to, random weights
+python scripts/layer_harness.py --model-dir my_weight/Qwen3-0.6B --layer 0
+
+# numerical parity against transformers' own layer, as a gate
+python scripts/layer_harness.py --model-dir my_weight/Qwen3-0.6B \
+    --layer 3 --weights mirror --tolerance 2e-2
+
+# real weights under a decode-shaped load
+python scripts/layer_harness.py --model-dir my_weight/Qwen3-0.6B \
+    --layer 3 --weights checkpoint --batch 4 --seq-len 512 --decode-steps 32
+```
+
+`--tolerance` turns the comparison into a gate (non-zero exit above it), so the harness works as a pre-flight check in CI as well as by hand.
 
 ## Architecture
 

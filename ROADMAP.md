@@ -9,12 +9,12 @@
 
 | # | 亮点 | 状态 | 他们为何不做 |
 |---|---|---|---|
-| F1 | **任意模型任意单层的独立运行 harness**:单层跑 forward、对比 HF、测延迟/显存 | 待建 | 他们没有这个抽象;大模型验证靠整模型跑 + 8 卡 |
+| F1 | **任意模型任意单层的独立运行 harness**:单层跑 forward、对比 HF、测延迟/显存 | 已有(v0.10) | 他们没有这个抽象;大模型验证靠整模型跑 + 8 卡 |
 | F2 | 默认单卡路径全程单进程,`pdb` 可直达 kernel 调用点 | 已有 | v1 全量多进程隔离(pdb 进不了 EngineCore);这里多进程只在 TP/DP>1 时启用(地基 0 的 UniProc/Multiproc 双实现),单卡默认仍是单进程 |
 | F3 | 冷启动秒级(无 CUDA C++ 编译、无 torch.compile、graph 捕获可关) | 已有 | 他们为长驻服务优化,启动 30s–2min 不在乎 |
 | F4 | 后端缺失自动回退原生,永不硬失败 | 待建 | 他们缺库常直接报错退出 |
 | F5 | bf16 权重与 KV:参数与 cache dtype 脱离 fp16 硬编码(现散在 config/base/moe/attention 多处),由 checkpoint dtype 驱动 | 待建 | 他们早已全面支持;fp16-only 是我们刻意保持的最小精度面,补 bf16 需连带各量化 method 的 supported_dtypes 与 kernel cast 策略 |
-| F6 | **logprobs / prompt_logprobs**:采样时同步产出 top-k 对数概率,覆盖 prompt + 生成段 | 待建 | vLLM 需要独立的 `PromptLogprobsWorker` 二次前向;这里一次 forward 拿全 |
+| F6 | **logprobs / prompt_logprobs**:采样时同步产出 top-k 对数概率,覆盖 prompt + 生成段 | 已有(v0.10) | vLLM 需要独立的 `PromptLogprobsWorker` 二次前向;这里一次 forward 拿全 |
 | F7 | **结构化输出 / 约束生成(guided decoding)**:JSON Schema / 正则 / CFG / choice 约束,grammar bitmask 作用于采样 logits | 待建 | 对标 vLLM `StructuredOutputManager` + xgrammar(旧 API 即 guided_json/guided_regex/guided_choice);自有:Triton bitmask kernel 复用现有 sampler |
 | F8 | **Reasoning parser / Tool parser**:推理段(`think` 标签拆分)与工具调用(函数调用 JSON)在协议层流式拆分,OpenAI 兼容 `reasoning_content` / `tool_calls` 字段 | 待建 | 对标 vLLM `reasoning/`(DeepSeekR1/Qwen3 等 30+ parser)与 `tool_parsers/`(ToolParser ABC);自有:parser 与增量 detokenizer 协同,流式解析不等完整段 |
 
@@ -45,7 +45,7 @@
 | A4 | 模型定义薄:一个模型 = 一个类体十几行 + 一行注册 | 已有 | 他们的模型文件动辄上千行 |
 | A5 | 每个 Triton kernel 旁并排 PyTorch 参考实现,作为语义定义者 | 部分已有 | 他们参考实现散在测试里 |
 | A6 | **算子一等公民分发**:ABC 签名 + 声明式清单 + 确定性 dispatch,从现有 `registry.py` 雏形(probe+priority)升级到完整链路 | 待建(雏形已有) | 对标 sglang `KernelSpec`+selector;自有:实测排序自动选最快,sglang 甩给用户手选 |
-| A7 | **运行时可观测性内置**:metrics/tracing 是一等 API,非离线工具;每个 step 产出 per-request 延迟、KV 占用、后端选择、overlap 气泡 | 待建 | vLLM 的 metrics 面向运维仪表盘;这里面向开发者 debug,粒度到算子级 |
+| A7 | **运行时可观测性内置**:metrics/tracing 是一等 API,非离线工具;每个 step 产出 per-request 延迟、KV 占用、后端选择、overlap 气泡 | 已有(v0.10) | vLLM 的 metrics 面向运维仪表盘;这里面向开发者 debug,粒度到算子级 |
 | A8 | **前沿注意力可插拔**:MLA/DSA/SWA/HCA 作为 `attention.*` 逻辑算子的不同实现,共享 paged KV 接口 | 待建 | vLLM 的 MLA 是独立类(`MLAAttention`);这里走统一 dispatch,新增变体只注册不写新类 |
 | A10 | **多进程隔离引擎**(地基 0,对齐 vLLM/SGLang 进程模型):EngineCore(调度)与 Worker(GPU 执行)分离,调度决策只算一次、广播 SchedulerOutput;单卡默认仍单进程 | 待建 | vLLM `EngineCoreProc`+`MultiprocExecutor`/SGLang scheduler 进程网格是多年踩坑后的定论;当前 TP"镜像进程"/DP 一次性批处理是最大架构债(详见地基 0) |
 | A11 | **并行 module 补齐**:`QKVParallelLinear`(q_proj+kv_proj 合体一次 GEMM,按 head 对齐切) / `VocabParallelEmbedding` / `ParallelLMHead` 按 vocab 维切分,采样走"去中心化 log_softmax"(只规约 logsumexp 标量 + gather 局部 top-k,logits 永不物化全量) | 待建 | vLLM `QKVParallelLinear`/`VocabParallelEmbedding`/`ParallelLMHead` 参照;当前 q/kv 两次 GEMM、embed/lm_head 全量复制是 v0.7.0 遗留决策(按小 vocab 估 0.3GB/rank 不值),Qwen3 151K vocab 下 embed+lm_head ≈4.9GB/rank、decode lm_head GEMM 是算力大头,必须切(详见第四节) |
@@ -576,7 +576,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
 
 执行路径是工具而非人工:采集入口统一挂到 Makefile 的 `bench-*` 目标(`benchmarks/bench_*.py` + `examples/benchmark.py`),`perf.watchdog` 与上一版最优比对并标出劣化项,`acc.golden` 出精度门禁、`acc.bisect` 定位精度断层,最后由一个 release-bench agent 按固定模板汇总成发版文档。人只审两处:被标红的劣化项,和结论段的因果解释。工具链自身在 v0.4(watchdog 入库)与 v0.5(autotune collect)成型,所以 v0.4 那份报告的作用是立零点,没有上一版可比。
 
-当前状态:v0.4 - v0.9.0 已发版(发版文档与原始数据如上所述);v0.10 进行中;v0.11 起未动。
+当前状态:v0.4 - v0.10.0 已发版(发版文档与原始数据如上所述);v0.11 起未动。
 
 ## v0.4 可信基线(已发版)
 
@@ -693,7 +693,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - (已达成)L1 重叠有 timeline 作佐证
   - (已达成)Platform 可 mock 测试
 
-## v0.10 可观测性 + 算子分发(进行中)
+## v0.10 可观测性 + 算子分发(已发版)
 
 - **feat**
   - 地基 2 收尾:原计划"从雏形升级",但声明式 KernelSpec 清单、确定性 dispatch、registry 雏形与 `gen_backend_registry_gif.py` 的退场已随 v0.9 提前完成,本版只补两件
@@ -702,16 +702,29 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - F6 logprobs / prompt_logprobs
   - A7 运行时可观测性(observe.metrics + observe.trace)+ `/metrics` Prometheus 端点 + OTLP 追踪导出
 - **test**
-  - F1 单层 harness(MLA 侧已有 `MinimalMlaLayer` 作 benchmark 载体先行入库,正式 harness 待做)
+  - F1 单层 harness:`lite_llama/tools/harness/` + `scripts/layer_harness.py`——meta 骨架只给
+    指定层材料化存储,权重可来自 checkpoint(只读该层的 key)、transformers 同层镜像或随机;
+    prefill 与 decode 两形态各自对 HF 同层比 max-abs-diff,同时给逐模块 CUDA event 计时、
+    峰值显存与 dispatch 决策(MLA 侧 `MinimalMlaLayer` 继续作 benchmark 载体)
 - **benchmark**
-  - dispatch 开销:首次决策与缓存命中路径的单次调用耗时,以及冻结实测排序相对 v0.9 静态 priority 的端到端收益
-  - logprobs / prompt_logprobs 开启后的额外 TPOT
-  - metrics 与 trace 全开时的性能损耗,超阈值则要么降采样要么改实现
+  - (已达成)dispatch 开销:`benchmarks/kernels/bench_dispatch.py`——A10 上首次决策 761 ms
+    (一次性,全在后端探测的 import 上)、换 key 后的 filter+rank 27 us、命中缓存 15 us
+    (其中真正的缓存查找 0.5 us,余下是每次重取的平台快照);调用点在构造期决策一次并存成
+    属性,每步 forward 连这次查找都不做。冻结实测排序相对 v0.9 静态 priority 的端到端差值
+    在噪声内(见下),因为这张 GPU 上实测赢家与静态顺序的首选一致——排序换成实测的意义是
+    "外部后端真快时才翻盘",不是无条件提速
+  - (已达成)logprobs / prompt_logprobs 开启后的额外开销:`benchmarks/bench_observability.py`
+    ——Qwen3-0.6B batch16 gen128,TPOT 4.75 -> 5.35 ms、吞吐 -10.4%(logprobs=5);
+    prompt_logprobs=5 只压在 prefill 上,TTFT 23 -> 32 ms 而吞吐 -1.5%;两个都开 -12.7%。
+    默认关闭,按请求 opt-in
+  - (已达成)metrics 与 trace 全开时的性能损耗:同上脚本,两者都低于基线自身的 0.5% 抖动,
+    无需降采样
 - **验收**
-  - logprobs 与 HF 对齐
-  - 每 step 给出 per-request 的延迟分解
-  - dispatcher 按 shape / dtype 选实现,并能 explain 决策链(v0.9 已达成,此处作回归项)
-  - Prometheus 能抓到标准 metric
+  - (已达成)logprobs 与 HF 对齐:`tests/golden/test_logprob_parity.py` 对 transformers
+    teacher-forced 的 log_softmax 逐位置比对,一次性与 chunked prefill 两条采集路径各一遍
+  - (已达成)每 step 给出 per-request 的延迟分解(queue / TTFT / TPOT 三段)
+  - (已达成)dispatcher 按 shape / dtype 选实现,并能 explain 决策链(v0.9 已达成,此处作回归项)
+  - (已达成)Prometheus 能抓到标准 metric
 
 ## v0.11 前沿架构 + 结构化输出
 
