@@ -55,6 +55,29 @@ def expand_prompts(prompts: list[str], batch: int) -> list[str]:
     return (prompts * ((batch // len(prompts)) + 1))[:batch]
 
 
+def gpu_tag() -> str:
+    """Filename-safe GPU tag: ``NVIDIA H100 80GB HBM3`` -> ``h100``.
+
+    Vendor and memory words (``80gb``, ``hbm3``) are dropped, the rest is
+    lowercased and joined. ``cpu`` without CUDA, ``gpu`` if nothing survives.
+    """
+    if not torch.cuda.is_available():
+        return "cpu"
+
+    vendor_words = {"nvidia", "geforce", "tesla", "quadro"}
+
+    def is_model_word(word: str) -> bool:
+        return (
+            word not in vendor_words  # vendor / product line
+            and not word.endswith("gb")  # VRAM capacity, e.g. 80gb
+            and "hbm" not in word  # VRAM type, e.g. hbm3
+        )
+
+    # "-" is a separator too: "A100-SXM4-80GB" drops only its memory segment.
+    words = torch.cuda.get_device_name(0).lower().replace("-", " ").split()
+    return "".join(word for word in words if is_model_word(word)) or "gpu"
+
+
 def sampling_params(max_gen_len: int, greedy: bool = True):
     """基准口径的 ``SamplingParams``:greedy 走 :data:`GREEDY_PARAMS`,否则 :data:`SAMPLE_KW`。"""
     from lite_llama import SamplingParams

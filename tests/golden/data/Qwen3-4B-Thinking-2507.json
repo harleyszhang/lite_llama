@@ -1,0 +1,44 @@
+{
+ "single": [
+  " a topic of great interest and speculation. As AI continues to evolve, it is important to consider the potential risks and benefits. One of the key areas of concern is the potential for AI to become self-aware and to develop its own goals and"
+ ],
+ "single_rp1.1": [
+  " a topic of great interest and speculation. As AI continues to evolve, it is important to consider the potential risks and benefits that may arise from its development. One key area of concern is the possibility of AI systems becoming too powerful or autonomous,"
+ ],
+ "batch_uniform": [
+  " I'm a beginner.\n\nOkay, the user is asking how to learn Python as a beginner. Let me start by understanding their situation. They're probably new to",
+  " I'm a beginner. I need a step by step guide.\n\nOkay, the user is a complete beginner asking how to learn C++ step by step. That"
+ ],
+ "batch_uniform_rp1.1": [
+  " I'm a beginner.\n\nOkay, the user is asking how to learn Python as a beginner. Let me start by understanding their situation. They're probably new to",
+  " I'm a beginner. What is the best way to start?\n\nOkay, the user is asking how to learn C++ as a beginner and what's the best"
+ ],
+ "batch_mixed": [
+  " the world is a big place and we have a lot of different people. I want to know how to be a good person. I'm a 12",
+  " the Roman Empire was the largest empire in the world at its peak. The Roman Empire was established in 27 BC when Augustus became the first emperor,"
+ ],
+ "batch_mixed_rp1.1": [
+  " the world is a big place and we have to be careful with our words. I want to say something that's not too harsh but also not too soft,",
+  " the Roman Empire was a vast and powerful entity that influenced many aspects of life in Europe, the Middle East, and beyond. The Roman Empire's influence extended to"
+ ],
+ "batch8": [
+  " to be happy. But I'm not happy. What should I do? How can I become happy? What is the meaning of life if I'm not happy",
+  " but it is not suitable for real-time applications. Why?\n\nOkay, the user is asking why VGG is not suitable for real-time applications. Let me start",
+  " What were the main causes, key events, and outcomes? Also, what is the significance of the Emancipation Proclamation? How did the Civil War impact",
+  " The answer is George Washington. But the question is, who is the first president of the United States? The answer is George Washington. But the question is,",
+  " I'm a beginner.\n\nWe are going to cover the basics of C++ for a beginner.\n We'll start with:\n  1. Hello World\n ",
+  " I'm a beginner.\n\nWe are going to cover the basics of Python for beginners.\n We'll start with:\n  1. Printing to the console\n ",
+  " architecture and its components\n\nOkay, the user is asking how to learn LLMs and specifically wants an introduction to the Transformer architecture and its components. Hmm,",
+  ", inception, vgg, and other models\n\nOkay, the user is asking how to learn CNNs and specifically wants an introduction to ResNet, Inception"
+ ],
+ "batch8_rp1.1": [
+  " to be happy. But I'm not sure if this is the right way to look at it. What do you think? Also, how can we find happiness",
+  " but it is not suitable for real-time applications. Why?\n\nOkay, the user is asking why VGG isn't suitable for real-time applications despite being a very",
+  " What were the main causes, key events, and outcomes? Also, what is the significance of the Emancipation Proclamation?\n\nOkay, the user wants a",
+  " The answer is George Washington. But the question is, who was the first president of the United States? The answer is still George Washington. So why does this",
+  " I'm a beginner.\n\nWe are going to cover the basics of C++ for beginners.\n We'll start with:\n 1. Hello World\n 2.",
+  " I'm a beginner.\n\nWe are going to cover the basics of Python for beginners.\n We'll start with:\n 1. Printing to console\n 2.",
+  " architecture and its components\n\nOkay, the user is asking how to learn LLMs and specifically wants an introduction to transformer architecture and its components. Hmm, this",
+  ", inception, vgg, and other models\n\nOkay, the user is asking how to learn CNNs and specifically wants an introduction to ResNet, Inception"
+ ]
+}
