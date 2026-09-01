@@ -108,6 +108,9 @@ run Meta-Llama-3.1-8B-Instruct "8:128" --engine lite_llama --max-gpu-num-blocks 
 # 8B 级双卡 TP2:b16 档权重/KV 各半,双引擎对照(decode eager,HF 走 device_map=auto)。
 run_tp Qwen3-8B "16:128"
 run_tp Meta-Llama-3.1-8B-Instruct "16:128"
+# 30B MoE FP8:TP2 后每卡 15 GB 权重,放得进 22 GiB;transformers 基线反量化为 bf16
+# 需 ~60 GB,双卡 44 GB 放不下,只测 lite_llama 单侧(decode eager)。
+run_tp Qwen3-30B-A3B-Instruct-2507-FP8 "8:128 16:128" --engine lite_llama
 # AWQ:transformers 反量化需要 gptqmodel/autoawq(本机未装),只测 lite_llama 单侧;
 # b16 档单卡放得下(W4 权重 9.6 GiB + 1 GiB KV + graph 捕获工作区)。
 run Qwen3-14B-AWQ "8:128 16:128 16:256" --engine lite_llama

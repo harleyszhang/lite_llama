@@ -102,3 +102,46 @@ def test_fused_moe_routing_weight_folded():
 
     ref = _torch_moe_reference(x, w1, w2, weights, ids)
     torch.testing.assert_close(out.float(), ref, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize("act_dtype", [torch.float16, torch.bfloat16])
+def test_fused_moe_fp8_blockwise_matches_reference(act_dtype):
+    """fp8-e4m3 expert weights with 128x128 block scales, in either activation
+    dtype.
+
+    Regression: the dequantised operand used to be hardcoded fp16, so bf16
+    activations (Qwen3-30B-A3B-Instruct-2507-FP8) failed kernel compilation
+    with "Both operands must be same dtype. Got bf16 and fp16".
+    """
+    torch.manual_seed(0)
+    hidden, inter, num_experts, top_k = 256, 128, 8, 2
+    gn = gk = 128
+    x = torch.randn(7, hidden, device="cuda", dtype=act_dtype) / hidden**0.5
+    w1 = torch.randn(num_experts, 2 * inter, hidden, device="cuda", dtype=torch.float32) * 0.05
+    w2 = torch.randn(num_experts, hidden, inter, device="cuda", dtype=torch.float32) * 0.05
+    qw1 = w1.to(torch.float8_e4m3fn).view(torch.uint8)
+    qw2 = w2.to(torch.float8_e4m3fn).view(torch.uint8)
+    s1 = (
+        torch.rand(
+            (num_experts, (2 * inter + gn - 1) // gn, (hidden + gk - 1) // gk), device="cuda"
+        )
+        + 0.5
+    )
+    s2 = (
+        torch.rand((num_experts, (hidden + gn - 1) // gn, (inter + gk - 1) // gk), device="cuda")
+        + 0.5
+    )
+    ids = torch.randint(0, num_experts, (7, top_k), device="cuda")
+    weights = torch.softmax(torch.randn(7, top_k, device="cuda", dtype=torch.float32), dim=-1)
+
+    out = fused_moe(x, qw1, qw2, weights, ids, w1_scale=s1, w2_scale=s2, group_n=gn, group_k=gk)
+
+    # Reference: dequantise (the e4m3 values are exact in fp32) and matmul in fp32.
+    deq1 = qw1.view(torch.float8_e4m3fn).float() * s1.repeat_interleave(gn, 1).repeat_interleave(
+        gk, 2
+    )
+    deq2 = qw2.view(torch.float8_e4m3fn).float() * s2.repeat_interleave(gn, 1).repeat_interleave(
+        gk, 2
+    )
+    ref = _torch_moe_reference(x, deq1, deq2, weights.to(act_dtype), ids)
+    torch.testing.assert_close(out.float(), ref, rtol=2e-2, atol=2e-2)

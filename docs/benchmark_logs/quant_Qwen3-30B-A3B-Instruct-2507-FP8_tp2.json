@@ -1,0 +1,18 @@
+[
+  {
+    "model": "Qwen3-30B-A3B-Instruct-2507-FP8",
+    "config": "lite fp16",
+    "peak_mem_gb": 19.332242012023926,
+    "model_mem_gb": 29.057388305664062,
+    "kv_cache_tokens": 104528,
+    "token_match_rate": null,
+    "ttft_ms": 81.01397007703781,
+    "tpot_ms": 82.7716321699203,
+    "total_s": 5.295666757971048,
+    "steps": 64,
+    "batch": 4,
+    "gen_tokens": 256,
+    "tpot_p50_ms": 82.69572257995605,
+    "tps": 48.34141038324745
+  }
+]

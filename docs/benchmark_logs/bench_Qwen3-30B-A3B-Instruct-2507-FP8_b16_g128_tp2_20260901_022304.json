@@ -1,0 +1,22 @@
+{
+  "config": {
+    "model": "my_weight/Qwen3-30B-A3B-Instruct-2507-FP8",
+    "batch_size": 16,
+    "gen_len": 128,
+    "iters": 2,
+    "tensor_parallel_size": 2,
+    "gpu": "NVIDIA A10",
+    "timestamp": "2026-09-01T02:23:04"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "batch_size": 16,
+    "prompt_tokens": 213,
+    "output_tokens": 2048,
+    "ttft_s": 0.08375002257525921,
+    "tpot_ms": 84.2160037535382,
+    "tgs": 189.99585544987488,
+    "latency_s": 10.779182499274611
+  },
+  "transformers": null
+}
