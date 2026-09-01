@@ -1,0 +1,42 @@
+{
+  "dtype": "bf16",
+  "ops": {
+    "rmsnorm": {
+      "first_us": 760965.1759266853,
+      "cold_us": 27.047470211982727,
+      "warm_us": 15.16193151473999,
+      "winner": "native/skip_rmsnorm",
+      "feasible": 2,
+      "rejected": 0
+    },
+    "rope": {
+      "first_us": 36.1613929271698,
+      "cold_us": 26.827678084373474,
+      "warm_us": 15.236437320709229,
+      "winner": "native/rope_emb_forward",
+      "feasible": 2,
+      "rejected": 0
+    },
+    "attention.prefill": {
+      "first_us": 35.41633486747742,
+      "cold_us": 27.162954211235046,
+      "warm_us": 15.307217836380005,
+      "winner": "native/flash_attention2_no_pad",
+      "feasible": 2,
+      "rejected": 0
+    },
+    "attention.decode": {
+      "first_us": 34.067779779434204,
+      "cold_us": 27.086585760116577,
+      "warm_us": 15.31839370727539,
+      "winner": "native/flash_decoding",
+      "feasible": 2,
+      "rejected": 0
+    }
+  },
+  "warm_breakdown": {
+    "platform_detect_us": 9.950250387191772,
+    "env_lookup_us": 1.7173588275909424,
+    "cache_hit_us": 0.476837158203125
+  }
+}
