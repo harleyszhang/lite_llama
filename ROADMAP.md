@@ -31,7 +31,7 @@
 | P5 | **overlap 调度进 CUDA graph**:多 stream 的 计算+通信+拷贝 整体 capture | 待建 | 借 TRT-LLM overlap scheduler;replay 零 CPU 派发 | 多卡 decode CPU 侧 gap 归零 |
 | P6 | **自动调优 tile 配置落盘复用**(见工具 autotune 模块) | 待建 | 针对真实 shape 分布,自动生成而非手工 JSON | 高频 shape 命中最优 tile |
 | P7 | CUDA graph 惰性捕获:首遇 (batch, bucket) 组合再 capture,省启动时间与预留显存 | 待建 | 中途 capture 有运行中 OOM(KV profiler 的 workspace 按全网格预扣)与首步尾延迟风险,vLLM 同样是启动时全量 capture | 启动时间与显存预留双降 |
-| P8 | **DP/TP 与 CUDA Graph 同时生效**:TP all-reduce 可被 capture,DP 各副本独立 graph replay | 待建 | vLLM 显式禁用 TP+CUDAGraph(见 `gpu_model_runner`);此处做锁步 capture+replay | 多卡 decode CPU 侧 gap 归零,且 TP 不退化到 eager |
+| P8 | **DP/TP 与 CUDA Graph 同时生效**:TP all-reduce 可被 capture,DP 各副本独立 graph replay | 已落地 | vLLM 显式禁用 TP+CUDAGraph(见 `gpu_model_runner`);此处捕获后用跨 rank 指纹 + 数值闸确认结构对称再上线 | H100×2 实测 graph 与 eager 逐字节同答,logit 差 0.000e+00 |
 | P9 | **引擎级异步调度**(CPU-GPU overlap):调度器独立进程,ZMQ 收请求,最多 N 个 batch 同时在流水线上 | 待建 | 借 vLLM `EngineCoreProc`+ZMQ、SGLang `zmq_to_scheduler`;自有:N-batch 流水线 + 双缓冲 slot | decode 步 CPU 侧等待归零,GPU 利用率逼近 100% |
 | P10 | **DP 负载均衡策略族**:round-robin / 最小请求数 / 最小 token 数 / cache-aware(prefix 命中感知路由) | 待建 | 借 SGLang `LoadBalanceMethod` 四策略;自有:cache-aware 用各副本 prefix cache 命中估计打分,共享前缀请求聚到同 rank | DP 副本间负载倾斜 <10%,命中率同步提升 |
 
@@ -272,6 +272,8 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
 
 覆盖对象:`fused_moe`(`_launch_config` 替换)、`flashattention2_nopad`(把注释掉的 144 组配置启用为搜索空间)、量化 GEMM(`_launch_config`)。
 
+**当前覆盖度(2026-09 实测校正)**:「量化 GEMM」这一项目前只做到五分之一——dense 路径的五个量化 kernel 里只有 `w4a16_matmul` 会查 `ConfigStore`,fp8 W8A8、fp8/int8 W8A16、NVFP4 都是无条件算 launch config,搜到的配置无消费者。`benchmarks/kernels/bench_quant_gemm.py --tune` 对这四个如实报「no consumer」而不写死没人读的条目;要补齐,得先给它们加上和 `w4a16.py` 同样的 `get_best_config` 查询点。详见 `docs/quantization.md` 的「A second tile heuristic defect, in w4a16」节。
+
 # 四、并行与服务能力路线
 
 依赖关系(箭头 = 前置):
@@ -385,16 +387,16 @@ overlap 不止"TP 通信藏进计算"一件事。把所有重叠拆成三条正�
 
 > **轴 A(Host-Device)** 单独成节(第八节),因为它改的是引擎架构而非 kernel,层级最高。
 
-## DP/TP 与 CUDA Graph 同时生效(P8)
+## DP/TP 与 CUDA Graph 同时生效(P8,已落地)
 
-当前代码显式禁用 TP+CUDA Graph(见 `model_runner.enable_cuda_graph` 的 `get_tp_world_size() > 1` 守卫)。原因是:一个 captured graph 内的 NCCL all-reduce 要求所有 rank 在同一时刻 replay 同一个 collective,否则挂死。vLLM 的做法也是禁用——这是一个真实的设计空缺。
+难点从来不是捕获,而是证明各 rank 结构对称:captured graph 里的 all-reduce 要求每个 rank 每一步选同一个 graph,一个 rank 走 eager 而对端 replay,后果是**挂死**而非答案不同。vLLM 的做法是直接禁用。
 
-**解法分两层:**
+**两层各自的落法:**
 
-1. **TP + CUDA Graph(锁步 capture+replay)**:所有 TP rank 用同一 `torch.cuda.graph()` 上下文捕获,保证 capture 阶段 collective 的调用顺序在所有 rank 上一致;replay 时各 rank 在同一 stream 位置发起 all-reduce,NCCL 内部保证匹配。关键约束:capture 必须在 rendezvous barrier 之后、replay 前不能有 rank 先走。
-2. **DP + CUDA Graph(各副本独立)**:DP 副本互不通信,各自 capture 各自 replay,天然兼容。需要改的是 `DataParallelEngine`:每个 worker 进程独立 capture,不受其他副本状态影响——前提是 DP worker 换成常驻引擎循环(地基 0 落地顺序第 2 步),否则一次性 `LLM.generate()` 的 capture 毫无意义。
+1. **TP + CUDA Graph**:捕获前 `warmup_collectives()` 把 NCCL 通信器的惰性初始化挪出捕获区;捕获后各 rank 用 `all_ranks_agree()` 比对 `crc32` 网格指纹(指纹 `0`=什么都没捕获,即使全体一致也判失败),再各自跑一遍 graph-vs-eager 的 logit 比对并以 min 规约合并——任一 rank 超差则全体退回 eager。replay 判定只读广播来的 `ModelInput`,故不需要每步协商。详见 `docs/tensor_parallel.md` 的「TP × CUDA Graph」节。
+2. **DP + CUDA Graph**:DP 副本互不通信,各自 capture 各自 replay,随常驻引擎循环一同生效。
 
-**落地顺序**:先做 DP+CUDA Graph(无锁步约束,直接生效),再做 TP+CUDA Graph(需 capture 同步协议)。
+**实测**(H100×2,Qwen2.5-0.5B,`tests/distributed/test_tp_cuda_graph.py`):bf16 / fp8 / nvfp4 三方案各捕获 8 个 graph,graph 与 eager 的最坏 logit 差 **0.000e+00**,32 步 greedy 逐字节同答。`LITE_LLAMA_TP_CUDA_GRAPH=0` 是 kill-switch,`LITE_LLAMA_TP_GRAPH_CHECK=1` 每步校验两 rank 选中同一 graph。
 
 ## 支撑抽象与验证
 

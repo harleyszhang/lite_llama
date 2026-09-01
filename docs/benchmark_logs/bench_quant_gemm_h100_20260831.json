@@ -1,0 +1,2615 @@
+{
+ "meta": {
+  "header": "device    NVIDIA H100 80GB HBM3  (3352 GB/s peak, 989 TFLOP/s dense tc, 50 MiB L2)\nsoftware  torch 2.13.0+cu130, triton 3.7.1, python 3.14.7\ncommit    v0.8.0-32-g4f256d7-dirty\ncommand   benchmarks/kernels/bench_quant_gemm.py --json docs/benchmark_logs/bench_quant_gemm_h100_20260831.json\nenv       (none set)",
+  "device": "NVIDIA H100 80GB HBM3",
+  "peak_gbps": 3352.32,
+  "peak_tflops": 989.0,
+  "recorded": "2026-08-31T18:14:08",
+  "geometries": [
+   "qwen3-4b",
+   "qwen3-30b-a3b"
+  ],
+  "tokens": [
+   1,
+   8,
+   32,
+   128,
+   512,
+   2048
+  ]
+ },
+ "rows": [
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/qkv m1_n6144_k2560",
+   "us": 21.27999998629093,
+   "flops": 31457280,
+   "moved": 31474688,
+   "tflops": 1.4782556400500708,
+   "gbps": 1479.0736851633799
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/qkv m1_n6144_k2560",
+   "us": 28.031999245285988,
+   "flops": 31457280,
+   "moved": 15749888,
+   "tflops": 1.1221918110350273,
+   "gbps": 561.8538964055011
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/qkv m1_n6144_k2560",
+   "us": 24.351999163627625,
+   "flops": 31457280,
+   "moved": 15770624,
+   "tflops": 1.2917740259692885,
+   "gbps": 647.6110603500329
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/qkv m1_n6144_k2560",
+   "us": 23.104000836610794,
+   "flops": 31457280,
+   "moved": 15770624,
+   "tflops": 1.361551197234746,
+   "gbps": 682.5927730668074
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/qkv m1_n6144_k2560",
+   "us": 34.04799848794937,
+   "flops": 31457280,
+   "moved": 8864768,
+   "tflops": 0.9239098154663539,
+   "gbps": 260.3609138181063
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/qkv m1_n6144_k2560",
+   "us": 20.06400004029274,
+   "flops": 31457280,
+   "moved": 15770624,
+   "tflops": 1.5678468868035862,
+   "gbps": 786.0159473848317
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/qkv m8_n6144_k2560",
+   "us": 21.407999098300934,
+   "flops": 251658240,
+   "moved": 31596544,
+   "tflops": 11.755336818001506,
+   "gbps": 1475.922334213275
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/qkv m8_n6144_k2560",
+   "us": 28.16000021994114,
+   "flops": 251658240,
+   "moved": 15871744,
+   "tflops": 8.936727202927772,
+   "gbps": 563.6272683251128
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/qkv m8_n6144_k2560",
+   "us": 24.191999807953835,
+   "flops": 251658240,
+   "moved": 15892480,
+   "tflops": 10.402539765119373,
+   "gbps": 656.9312221462104
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/qkv m8_n6144_k2560",
+   "us": 23.231999948620796,
+   "flops": 251658240,
+   "moved": 15892480,
+   "tflops": 10.832396718171484,
+   "gbps": 684.0771364991107
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/qkv m8_n6144_k2560",
+   "us": 33.440001308918,
+   "flops": 251658240,
+   "moved": 8986624,
+   "tflops": 7.525664777198622,
+   "gbps": 268.73874546181275
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/qkv m8_n6144_k2560",
+   "us": 19.807999953627586,
+   "flops": 251658240,
+   "moved": 15892480,
+   "tflops": 12.704878866576934,
+   "gbps": 802.3263346731527
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/qkv m32_n6144_k2560",
+   "us": 21.663999184966087,
+   "flops": 1006632960,
+   "moved": 32014336,
+   "tflops": 46.465703372928544,
+   "gbps": 1477.766673025755
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/qkv m32_n6144_k2560",
+   "us": 28.543999418616295,
+   "flops": 1006632960,
+   "moved": 16289536,
+   "tflops": 35.26600968690735,
+   "gbps": 570.6816259734094
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/qkv m32_n6144_k2560",
+   "us": 25.536000728607178,
+   "flops": 1006632960,
+   "moved": 16310272,
+   "tflops": 39.4201492511825,
+   "gbps": 638.7167737557321
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/qkv m32_n6144_k2560",
+   "us": 24.73600022494793,
+   "flops": 1006632960,
+   "moved": 16310272,
+   "tflops": 40.695057844668945,
+   "gbps": 659.3738620502594
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/qkv m32_n6144_k2560",
+   "us": 37.82400116324425,
+   "flops": 1006632960,
+   "moved": 9404416,
+   "tflops": 26.613603242435467,
+   "gbps": 248.63620216728447
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/qkv m32_n6144_k2560",
+   "us": 20.735999569296837,
+   "flops": 1006632960,
+   "moved": 16310272,
+   "tflops": 48.5451861935072,
+   "gbps": 786.5679175722073
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/qkv m128_n6144_k2560",
+   "us": 21.568000316619873,
+   "flops": 4026531840,
+   "moved": 33685504,
+   "tflops": 186.69008628014691,
+   "gbps": 1561.8278702473228
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/qkv m128_n6144_k2560",
+   "us": 48.96000027656555,
+   "flops": 4026531840,
+   "moved": 17960704,
+   "tflops": 82.24125443739588,
+   "gbps": 366.8444423722113
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/qkv m128_n6144_k2560",
+   "us": 29.343999922275543,
+   "flops": 4026531840,
+   "moved": 17981440,
+   "tflops": 137.2182337331384,
+   "gbps": 612.7808086023738
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/qkv m128_n6144_k2560",
+   "us": 25.407999753952026,
+   "flops": 4026531840,
+   "moved": 17981440,
+   "tflops": 158.4749637512769,
+   "gbps": 707.7078154175879
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/qkv m128_n6144_k2560",
+   "us": 50.84799975156784,
+   "flops": 4026531840,
+   "moved": 11075584,
+   "tflops": 79.18761523900154,
+   "gbps": 217.81749634425879
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/qkv m128_n6144_k2560",
+   "us": 23.96799996495247,
+   "flops": 4026531840,
+   "moved": 17981440,
+   "tflops": 167.99615511881885,
+   "gbps": 750.2269703894193
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/qkv m512_n6144_k2560",
+   "us": 30.751999467611313,
+   "flops": 16106127360,
+   "moved": 40370176,
+   "tflops": 523.7424440307802,
+   "gbps": 1312.7658916136093
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/qkv m512_n6144_k2560",
+   "us": 124.95999783277512,
+   "flops": 16106127360,
+   "moved": 24645376,
+   "tflops": 128.89026599979346,
+   "gbps": 197.2261237790762
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/qkv m512_n6144_k2560",
+   "us": 66.84800237417221,
+   "flops": 16106127360,
+   "moved": 24666112,
+   "tflops": 240.93655439168154,
+   "gbps": 368.98801944648903
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/qkv m512_n6144_k2560",
+   "us": 43.5199998319149,
+   "flops": 16106127360,
+   "moved": 24666112,
+   "tflops": 370.0856484881866,
+   "gbps": 566.7764727772675
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/qkv m512_n6144_k2560",
+   "us": 90.91199934482574,
+   "flops": 16106127360,
+   "moved": 17760256,
+   "tflops": 177.16173306133192,
+   "gbps": 195.3565659978066
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/qkv m512_n6144_k2560",
+   "us": 62.192000448703766,
+   "flops": 16106127360,
+   "moved": 24666112,
+   "tflops": 258.9742610592564,
+   "gbps": 396.6122945401108
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/qkv m2048_n6144_k2560",
+   "us": 90.08000046014786,
+   "flops": 64424509440,
+   "moved": 67108864,
+   "tflops": 715.1921526521521,
+   "gbps": 744.9918256793251
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/qkv m2048_n6144_k2560",
+   "us": 369.56799030303955,
+   "flops": 64424509440,
+   "moved": 51384064,
+   "tflops": 174.32383520870675,
+   "gbps": 139.03818877242568
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/qkv m2048_n6144_k2560",
+   "us": 167.7279993891716,
+   "flops": 64424509440,
+   "moved": 51404800,
+   "tflops": 384.10110222872663,
+   "gbps": 306.47715460271957
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/qkv m2048_n6144_k2560",
+   "us": 106.08000308275223,
+   "flops": 64424509440,
+   "moved": 51404800,
+   "tflops": 607.3200185499893,
+   "gbps": 484.5852046205117
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/qkv m2048_n6144_k2560",
+   "us": 334.9120020866394,
+   "flops": 64424509440,
+   "moved": 44498944,
+   "tflops": 192.36249832376515,
+   "gbps": 132.86757035505832
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/qkv m2048_n6144_k2560",
+   "us": 162.4639928340912,
+   "flops": 64424509440,
+   "moved": 51404800,
+   "tflops": 396.54638739422427,
+   "gbps": 316.40734111770087
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/o m1_n2560_k4096",
+   "us": 17.839999869465828,
+   "flops": 20971520,
+   "moved": 20984832,
+   "tflops": 1.1755336408883021,
+   "gbps": 1176.2798292345692
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/o m1_n2560_k4096",
+   "us": 39.64800015091896,
+   "flops": 20971520,
+   "moved": 10501632,
+   "tflops": 0.5289426937089517,
+   "gbps": 264.87166969395287
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/o m1_n2560_k4096",
+   "us": 29.632000252604485,
+   "flops": 20971520,
+   "moved": 10509312,
+   "tflops": 0.7077321753922677,
+   "gbps": 354.66090410404513
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/o m1_n2560_k4096",
+   "us": 26.976000517606735,
+   "flops": 20971520,
+   "moved": 10509312,
+   "tflops": 0.7774139827107535,
+   "gbps": 389.58006369924135
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/o m1_n2560_k4096",
+   "us": 49.27999898791313,
+   "flops": 20971520,
+   "moved": 5911552,
+   "tflops": 0.42555845029833844,
+   "gbps": 119.95844402208535
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/o m1_n2560_k4096",
+   "us": 24.89599958062172,
+   "flops": 20971520,
+   "moved": 10509312,
+   "tflops": 0.8423650527502252,
+   "gbps": 422.12854181521294
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/o m8_n2560_k4096",
+   "us": 17.823999747633934,
+   "flops": 167772160,
+   "moved": 21078016,
+   "tflops": 9.412711084798522,
+   "gbps": 1182.5637510345018
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/o m8_n2560_k4096",
+   "us": 40.28800129890442,
+   "flops": 167772160,
+   "moved": 10594816,
+   "tflops": 4.164320755335221,
+   "gbps": 262.9769573674064
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/o m8_n2560_k4096",
+   "us": 29.503999277949333,
+   "flops": 167772160,
+   "moved": 10602496,
+   "tflops": 5.686420963458652,
+   "gbps": 359.35792636505664
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/o m8_n2560_k4096",
+   "us": 27.39199995994568,
+   "flops": 167772160,
+   "moved": 10602496,
+   "tflops": 6.124859822040271,
+   "gbps": 387.0654211267393
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/o m8_n2560_k4096",
+   "us": 49.47200044989586,
+   "flops": 167772160,
+   "moved": 6004736,
+   "tflops": 3.391254820389079,
+   "gbps": 121.37645426490208
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/o m8_n2560_k4096",
+   "us": 24.288000538945198,
+   "flops": 167772160,
+   "moved": 10602496,
+   "tflops": 6.907615129989048,
+   "gbps": 436.53226962833617
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/o m32_n2560_k4096",
+   "us": 18.36800016462803,
+   "flops": 671088640,
+   "moved": 21397504,
+   "tflops": 36.53574880145861,
+   "gbps": 1164.9337874683824
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/o m32_n2560_k4096",
+   "us": 40.89599847793579,
+   "flops": 671088640,
+   "moved": 10914304,
+   "tflops": 16.409640673330564,
+   "gbps": 266.8795091502286
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/o m32_n2560_k4096",
+   "us": 30.208000913262367,
+   "flops": 671088640,
+   "moved": 10921984,
+   "tflops": 22.215592548706812,
+   "gbps": 361.5593111030683
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/o m32_n2560_k4096",
+   "us": 28.144000098109245,
+   "flops": 671088640,
+   "moved": 10921984,
+   "tflops": 23.84482083785541,
+   "gbps": 388.075041285043
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/o m32_n2560_k4096",
+   "us": 47.68000170588493,
+   "flops": 671088640,
+   "moved": 6324224,
+   "tflops": 14.074845134017067,
+   "gbps": 132.63892142896944
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/o m32_n2560_k4096",
+   "us": 24.447999894618988,
+   "flops": 671088640,
+   "moved": 10921984,
+   "tflops": 27.4496336261727,
+   "gbps": 446.74345742303166
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/o m128_n2560_k4096",
+   "us": 17.920000478625298,
+   "flops": 2684354560,
+   "moved": 22675456,
+   "tflops": 149.79656742765476,
+   "gbps": 1265.3713947746228
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/o m128_n2560_k4096",
+   "us": 46.33599892258644,
+   "flops": 2684354560,
+   "moved": 12192256,
+   "tflops": 57.93237703766248,
+   "gbps": 263.1270779414857
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/o m128_n2560_k4096",
+   "us": 31.679999083280563,
+   "flops": 2684354560,
+   "moved": 12199936,
+   "tflops": 84.73341659333238,
+   "gbps": 385.0990010425423
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/o m128_n2560_k4096",
+   "us": 28.831999748945236,
+   "flops": 2684354560,
+   "moved": 12199936,
+   "tflops": 93.10330824687948,
+   "gbps": 423.1387384236611
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/o m128_n2560_k4096",
+   "us": 61.88800185918808,
+   "flops": 2684354560,
+   "moved": 7602176,
+   "tflops": 43.374393733176774,
+   "gbps": 122.83763850216079
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/o m128_n2560_k4096",
+   "us": 25.79200081527233,
+   "flops": 2684354560,
+   "moved": 12199936,
+   "tflops": 104.07701904268323,
+   "gbps": 473.01239199620363
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/o m512_n2560_k4096",
+   "us": 23.264000192284584,
+   "flops": 10737418240,
+   "moved": 27787264,
+   "tflops": 461.54651613014613,
+   "gbps": 1194.4319020946166
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/o m512_n2560_k4096",
+   "us": 98.9760011434555,
+   "flops": 10737418240,
+   "moved": 17304064,
+   "tflops": 108.48506825848844,
+   "gbps": 174.8309064832751
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/o m512_n2560_k4096",
+   "us": 55.93600124120712,
+   "flops": 10737418240,
+   "moved": 17311744,
+   "tflops": 191.95898887548512,
+   "gbps": 309.49198397912517
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/o m512_n2560_k4096",
+   "us": 35.999998450279236,
+   "flops": 10737418240,
+   "moved": 17311744,
+   "tflops": 298.2616306172845,
+   "gbps": 480.88179847868076
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/o m512_n2560_k4096",
+   "us": 80.28800040483475,
+   "flops": 10737418240,
+   "moved": 12713984,
+   "tflops": 133.7362767270191,
+   "gbps": 158.35472219874086
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/o m512_n2560_k4096",
+   "us": 48.928000032901764,
+   "flops": 10737418240,
+   "moved": 17311744,
+   "tflops": 219.45344654961565,
+   "gbps": 353.8207976692011
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/o m2048_n2560_k4096",
+   "us": 58.88000130653381,
+   "flops": 42949672960,
+   "moved": 48234496,
+   "tflops": 729.4441577268435,
+   "gbps": 819.1999818221386
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/o m2048_n2560_k4096",
+   "us": 287.00798749923706,
+   "flops": 42949672960,
+   "moved": 37751296,
+   "tflops": 149.64626362572633,
+   "gbps": 131.5339560021839
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/o m2048_n2560_k4096",
+   "us": 136.89599931240082,
+   "flops": 42949672960,
+   "moved": 37758976,
+   "tflops": 313.73943121586444,
+   "gbps": 275.822348276467
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/o m2048_n2560_k4096",
+   "us": 82.49600231647491,
+   "flops": 42949672960,
+   "moved": 37758976,
+   "tflops": 520.6273244033633,
+   "gbps": 457.70673656581926
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/o m2048_n2560_k4096",
+   "us": 246.848002076149,
+   "flops": 42949672960,
+   "moved": 33161216,
+   "tflops": 173.99238640283042,
+   "gbps": 134.3386040036502
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/o m2048_n2560_k4096",
+   "us": 127.93600559234619,
+   "flops": 42949672960,
+   "moved": 37758976,
+   "tflops": 335.7121614133737,
+   "gbps": 295.13955688373426
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/gate_up m1_n19456_k2560",
+   "us": 48.81599918007851,
+   "flops": 99614720,
+   "moved": 99658752,
+   "tflops": 2.0406162256871743,
+   "gbps": 2041.5182250468017
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/gate_up m1_n19456_k2560",
+   "us": 46.01600021123886,
+   "flops": 99614720,
+   "moved": 49863552,
+   "tflops": 2.164784412871901,
+   "gbps": 1083.6133469032238
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/gate_up m1_n19456_k2560",
+   "us": 36.159999668598175,
+   "flops": 99614720,
+   "moved": 49929216,
+   "tflops": 2.754831883654765,
+   "gbps": 1380.7858533626923
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/gate_up m1_n19456_k2560",
+   "us": 34.912001341581345,
+   "flops": 99614720,
+   "moved": 49929216,
+   "tflops": 2.853308781280195,
+   "gbps": 1430.1447663079875
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/gate_up m1_n19456_k2560",
+   "us": 55.743999779224396,
+   "flops": 99614720,
+   "moved": 28060672,
+   "tflops": 1.7870034513943522,
+   "gbps": 503.3846173782836
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/gate_up m1_n19456_k2560",
+   "us": 32.32000023126602,
+   "flops": 99614720,
+   "moved": 49929216,
+   "tflops": 3.0821385918071185,
+   "gbps": 1544.8395929062838
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/gate_up m8_n19456_k2560",
+   "us": 48.928000032901764,
+   "flops": 796917760,
+   "moved": 99966976,
+   "tflops": 16.287560486104287,
+   "gbps": 2043.144537540405
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/gate_up m8_n19456_k2560",
+   "us": 45.85599899291992,
+   "flops": 796917760,
+   "moved": 50171776,
+   "tflops": 17.378702405393952,
+   "gbps": 1094.1158649219794
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/gate_up m8_n19456_k2560",
+   "us": 36.57599911093712,
+   "flops": 796917760,
+   "moved": 50237440,
+   "tflops": 21.787997030044277,
+   "gbps": 1373.5083448473122
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/gate_up m8_n19456_k2560",
+   "us": 35.51999852061272,
+   "flops": 796917760,
+   "moved": 50237440,
+   "tflops": 22.435748682183593,
+   "gbps": 1414.3424012488786
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/gate_up m8_n19456_k2560",
+   "us": 48.73599857091904,
+   "flops": 796917760,
+   "moved": 28368896,
+   "tflops": 16.351727334371763,
+   "gbps": 582.0932541008369
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/gate_up m8_n19456_k2560",
+   "us": 32.287999987602234,
+   "flops": 796917760,
+   "moved": 50237440,
+   "tflops": 24.681546094709987,
+   "gbps": 1555.916749854122
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/gate_up m32_n19456_k2560",
+   "us": 50.783999264240265,
+   "flops": 3187671040,
+   "moved": 101023744,
+   "tflops": 62.7692006573537,
+   "gbps": 1989.2829525762897
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/gate_up m32_n19456_k2560",
+   "us": 65.24799764156342,
+   "flops": 3187671040,
+   "moved": 51228544,
+   "tflops": 48.85469524308332,
+   "gbps": 785.135879286617
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/gate_up m32_n19456_k2560",
+   "us": 38.84800150990486,
+   "flops": 3187671040,
+   "moved": 51294208,
+   "tflops": 82.05495562460933,
+   "gbps": 1320.3821562589726
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/gate_up m32_n19456_k2560",
+   "us": 37.856001406908035,
+   "flops": 3187671040,
+   "moved": 51294208,
+   "tflops": 84.20517015878777,
+   "gbps": 1354.982198163162
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/gate_up m32_n19456_k2560",
+   "us": 78.94399762153625,
+   "flops": 3187671040,
+   "moved": 29425664,
+   "tflops": 40.37889055583359,
+   "gbps": 372.74099217864483
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/gate_up m32_n19456_k2560",
+   "us": 34.4959981739521,
+   "flops": 3187671040,
+   "moved": 51294208,
+   "tflops": 92.40698077283085,
+   "gbps": 1486.961117673418
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/gate_up m128_n19456_k2560",
+   "us": 50.27199909090996,
+   "flops": 12750684160,
+   "moved": 105250816,
+   "tflops": 253.63391929058065,
+   "gbps": 2093.6270270388186
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/gate_up m128_n19456_k2560",
+   "us": 107.64800012111664,
+   "flops": 12750684160,
+   "moved": 55455616,
+   "tflops": 118.44794279182133,
+   "gbps": 515.1569554251441
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/gate_up m128_n19456_k2560",
+   "us": 54.1439987719059,
+   "flops": 12750684160,
+   "moved": 55521280,
+   "tflops": 235.49579730369015,
+   "gbps": 1025.4373755048314
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/gate_up m128_n19456_k2560",
+   "us": 41.18400067090988,
+   "flops": 12750684160,
+   "moved": 55521280,
+   "tflops": 309.60285431925956,
+   "gbps": 1348.1274061656954
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/gate_up m128_n19456_k2560",
+   "us": 153.98399531841278,
+   "flops": 12750684160,
+   "moved": 33652736,
+   "tflops": 82.80525605036905,
+   "gbps": 218.54697256303714
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/gate_up m128_n19456_k2560",
+   "us": 49.34399947524071,
+   "flops": 12750684160,
+   "moved": 55521280,
+   "tflops": 258.40394567930997,
+   "gbps": 1125.1880794109295
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/gate_up m512_n19456_k2560",
+   "us": 82.11199939250946,
+   "flops": 51002736640,
+   "moved": 122159104,
+   "tflops": 621.1362165984798,
+   "gbps": 1487.7131832591056
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/gate_up m512_n19456_k2560",
+   "us": 310.5599880218506,
+   "flops": 51002736640,
+   "moved": 72363904,
+   "tflops": 164.2282927844894,
+   "gbps": 233.01103423184242
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/gate_up m512_n19456_k2560",
+   "us": 145.28000354766846,
+   "flops": 51002736640,
+   "moved": 72429568,
+   "tflops": 351.06508393817097,
+   "gbps": 498.55152967582916
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/gate_up m512_n19456_k2560",
+   "us": 94.43199634552002,
+   "flops": 51002736640,
+   "moved": 72429568,
+   "tflops": 540.1001632262922,
+   "gbps": 767.0024017599428
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/gate_up m512_n19456_k2560",
+   "us": 272.0800042152405,
+   "flops": 51002736640,
+   "moved": 50561024,
+   "tflops": 187.45492447012796,
+   "gbps": 185.83145845587958
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/gate_up m512_n19456_k2560",
+   "us": 143.64799857139587,
+   "flops": 51002736640,
+   "moved": 72429568,
+   "tflops": 355.0535833929537,
+   "gbps": 504.2156432412881
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/gate_up m2048_n19456_k2560",
+   "us": 296.4160144329071,
+   "flops": 204010946560,
+   "moved": 189792256,
+   "tflops": 688.2588545369478,
+   "gbps": 640.2901555879293
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/gate_up m2048_n19456_k2560",
+   "us": 1127.6479959487915,
+   "flops": 204010946560,
+   "moved": 139997056,
+   "tflops": 180.91722531581965,
+   "gbps": 124.1496074155729
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/gate_up m2048_n19456_k2560",
+   "us": 510.19200682640076,
+   "flops": 204010946560,
+   "moved": 140062720,
+   "tflops": 399.8709188507873,
+   "gbps": 274.52942838373025
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/gate_up m2048_n19456_k2560",
+   "us": 312.9279911518097,
+   "flops": 204010946560,
+   "moved": 140062720,
+   "tflops": 651.9421474860294,
+   "gbps": 447.5877005584069
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/gate_up m2048_n19456_k2560",
+   "us": 1007.4559450149536,
+   "flops": 204010946560,
+   "moved": 118194176,
+   "tflops": 202.50110942267742,
+   "gbps": 117.3194486417425
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/gate_up m2048_n19456_k2560",
+   "us": 502.4479925632477,
+   "flops": 204010946560,
+   "moved": 140062720,
+   "tflops": 406.03395690613553,
+   "gbps": 278.7606320914279
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/down m1_n2560_k9728",
+   "us": 31.007999554276466,
+   "flops": 49807360,
+   "moved": 49831936,
+   "tflops": 1.606274532893265,
+   "gbps": 1607.0671025641004
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/down m1_n2560_k9728",
+   "us": 84.73599702119827,
+   "flops": 49807360,
+   "moved": 24934336,
+   "tflops": 0.5877945825968126,
+   "gbps": 294.2590737884658
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/down m1_n2560_k9728",
+   "us": 60.54399907588959,
+   "flops": 49807360,
+   "moved": 24938496,
+   "tflops": 0.8226638603368168,
+   "gbps": 411.90698303130836
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/down m1_n2560_k9728",
+   "us": 54.19199913740158,
+   "flops": 49807360,
+   "moved": 24938496,
+   "tflops": 0.9190906553145509,
+   "gbps": 460.18778411863843
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/down m1_n2560_k9728",
+   "us": 107.77600109577179,
+   "flops": 49807360,
+   "moved": 14032896,
+   "tflops": 0.4621377625222914,
+   "gbps": 130.204274210639
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/down m1_n2560_k9728",
+   "us": 51.16799846291542,
+   "flops": 49807360,
+   "moved": 24938496,
+   "tflops": 0.9734084094787965,
+   "gbps": 487.3846300256293
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/down m8_n2560_k9728",
+   "us": 30.592000111937523,
+   "flops": 398458880,
+   "moved": 50003968,
+   "tflops": 13.024937190834885,
+   "gbps": 1634.5439270735226
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/down m8_n2560_k9728",
+   "us": 86.14400029182434,
+   "flops": 398458880,
+   "moved": 25106368,
+   "tflops": 4.625497755504355,
+   "gbps": 291.44650718504846
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/down m8_n2560_k9728",
+   "us": 59.4559982419014,
+   "flops": 398458880,
+   "moved": 25110528,
+   "tflops": 6.701744008717821,
+   "gbps": 422.33801033557364
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/down m8_n2560_k9728",
+   "us": 54.59199845790863,
+   "flops": 398458880,
+   "moved": 25110528,
+   "tflops": 7.298851319891113,
+   "gbps": 459.967187670564
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/down m8_n2560_k9728",
+   "us": 108.64000022411346,
+   "flops": 398458880,
+   "moved": 14204928,
+   "tflops": 3.6676995506076873,
+   "gbps": 130.75228249904873
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/down m8_n2560_k9728",
+   "us": 49.79199916124344,
+   "flops": 398458880,
+   "moved": 25110528,
+   "tflops": 8.00246800112714,
+   "gbps": 504.3084917856695
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/down m32_n2560_k9728",
+   "us": 31.136000528931618,
+   "flops": 1593835520,
+   "moved": 50593792,
+   "tflops": 51.18947497829741,
+   "gbps": 1624.9290576992435
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/down m32_n2560_k9728",
+   "us": 85.50400286912918,
+   "flops": 1593835520,
+   "moved": 25696192,
+   "tflops": 18.64047841642566,
+   "gbps": 300.52618752048494
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/down m32_n2560_k9728",
+   "us": 61.055999249219894,
+   "flops": 1593835520,
+   "moved": 25700352,
+   "tflops": 26.104486694161576,
+   "gbps": 420.93082278607324
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/down m32_n2560_k9728",
+   "us": 56.41600117087364,
+   "flops": 1593835520,
+   "moved": 25700352,
+   "tflops": 28.251479844744168,
+   "gbps": 455.55075628558615
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/down m32_n2560_k9728",
+   "us": 104.86400127410889,
+   "flops": 1593835520,
+   "moved": 14794752,
+   "tflops": 15.199072137575595,
+   "gbps": 141.08513713230636
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/down m32_n2560_k9728",
+   "us": 51.32799968123436,
+   "flops": 1593835520,
+   "moved": 25700352,
+   "tflops": 31.05197026765705,
+   "gbps": 500.70823253601503
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/down m128_n2560_k9728",
+   "us": 33.952001482248306,
+   "flops": 6375342080,
+   "moved": 52953088,
+   "tflops": 187.77514731593445,
+   "gbps": 1559.645549252416
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/down m128_n2560_k9728",
+   "us": 99.39199686050415,
+   "flops": 6375342080,
+   "moved": 28055488,
+   "tflops": 64.14341477561558,
+   "gbps": 282.2710971324547
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/down m128_n2560_k9728",
+   "us": 64.54399973154068,
+   "flops": 6375342080,
+   "moved": 28059648,
+   "tflops": 98.77513179408008,
+   "gbps": 434.7367395375113
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/down m128_n2560_k9728",
+   "us": 58.240000158548355,
+   "flops": 6375342080,
+   "moved": 28059648,
+   "tflops": 109.466724976721,
+   "gbps": 481.79340528180717
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/down m128_n2560_k9728",
+   "us": 133.88800621032715,
+   "flops": 6375342080,
+   "moved": 17154048,
+   "tflops": 47.61697675880584,
+   "gbps": 128.1223649940114
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/down m128_n2560_k9728",
+   "us": 53.408000618219376,
+   "flops": 6375342080,
+   "moved": 28059648,
+   "tflops": 119.37054385490595,
+   "gbps": 525.3828579088927
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/down m512_n2560_k9728",
+   "us": 46.431999653577805,
+   "flops": 25501368320,
+   "moved": 62390272,
+   "tflops": 549.2196870749028,
+   "gbps": 1343.6912574406547
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/down m512_n2560_k9728",
+   "us": 225.24799406528473,
+   "flops": 25501368320,
+   "moved": 37492672,
+   "tflops": 113.21463006062915,
+   "gbps": 166.45063657762614
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/down m512_n2560_k9728",
+   "us": 117.0239970088005,
+   "flops": 25501368320,
+   "moved": 37496832,
+   "tflops": 217.91571790256174,
+   "gbps": 320.42002459700757
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/down m512_n2560_k9728",
+   "us": 71.58400118350983,
+   "flops": 25501368320,
+   "moved": 37496832,
+   "tflops": 356.24396371230677,
+   "gbps": 523.8158161049793
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/down m512_n2560_k9728",
+   "us": 180.51199615001678,
+   "flops": 25501368320,
+   "moved": 26591232,
+   "tflops": 141.2724298877442,
+   "gbps": 147.31005455117244
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/down m512_n2560_k9728",
+   "us": 103.16800326108932,
+   "flops": 25501368320,
+   "moved": 37496832,
+   "tflops": 247.1829202263727,
+   "gbps": 363.45408280420065
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-4b/down m2048_n2560_k9728",
+   "us": 134.0160071849823,
+   "flops": 102005473280,
+   "moved": 100139008,
+   "tflops": 761.1439515520101,
+   "gbps": 747.2167698727072
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-4b/down m2048_n2560_k9728",
+   "us": 673.6479997634888,
+   "flops": 102005473280,
+   "moved": 75241408,
+   "tflops": 151.42251341325607,
+   "gbps": 111.6924685093944
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-4b/down m2048_n2560_k9728",
+   "us": 328.575998544693,
+   "flops": 102005473280,
+   "moved": 75245568,
+   "tflops": 310.44712252810876,
+   "gbps": 229.0050652916606
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-4b/down m2048_n2560_k9728",
+   "us": 190.75199961662292,
+   "flops": 102005473280,
+   "moved": 75245568,
+   "tflops": 534.7544114085964,
+   "gbps": 394.46804306759566
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-4b/down m2048_n2560_k9728",
+   "us": 566.0160183906555,
+   "flops": 102005473280,
+   "moved": 64339968,
+   "tflops": 180.21658392289066,
+   "gbps": 113.67163809769346
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-4b/down m2048_n2560_k9728",
+   "us": 301.93600058555603,
+   "flops": 102005473280,
+   "moved": 75245568,
+   "tflops": 337.8380619806081,
+   "gbps": 249.21032223409395
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/qkv m1_n5120_k2048",
+   "us": 16.095999628305435,
+   "flops": 20971520,
+   "moved": 20985856,
+   "tflops": 1.302902614580133,
+   "gbps": 1303.7932706643187
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/qkv m1_n5120_k2048",
+   "us": 23.455999791622162,
+   "flops": 20971520,
+   "moved": 10502656,
+   "tflops": 0.894079134818651,
+   "gbps": 447.75989483727994
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/qkv m1_n5120_k2048",
+   "us": 20.255999639630318,
+   "flops": 20971520,
+   "moved": 10520576,
+   "tflops": 1.0353238730795487,
+   "gbps": 519.3807359384415
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/qkv m1_n5120_k2048",
+   "us": 19.039999693632126,
+   "flops": 20971520,
+   "moved": 10520576,
+   "tflops": 1.1014453958743426,
+   "gbps": 552.5512693951658
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/qkv m1_n5120_k2048",
+   "us": 27.871999889612198,
+   "flops": 20971520,
+   "moved": 5912576,
+   "tflops": 0.7524225058502535,
+   "gbps": 212.13318109274238
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/qkv m1_n5120_k2048",
+   "us": 16.767999157309532,
+   "flops": 20971520,
+   "moved": 10520576,
+   "tflops": 1.250687085755134,
+   "gbps": 627.4198788597777
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/qkv m8_n5120_k2048",
+   "us": 16.063999384641647,
+   "flops": 167772160,
+   "moved": 21086208,
+   "tflops": 10.44398446381929,
+   "gbps": 1312.6375004819752
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/qkv m8_n5120_k2048",
+   "us": 23.711999878287315,
+   "flops": 167772160,
+   "moved": 10603008,
+   "tflops": 7.075411642255708,
+   "gbps": 447.1578970320845
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/qkv m8_n5120_k2048",
+   "us": 20.128000527620316,
+   "flops": 167772160,
+   "moved": 10620928,
+   "tflops": 8.335262102650356,
+   "gbps": 527.6693025432709
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/qkv m8_n5120_k2048",
+   "us": 19.26399953663349,
+   "flops": 167772160,
+   "moved": 10620928,
+   "tflops": 8.709103199517584,
+   "gbps": 551.335561434304
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/qkv m8_n5120_k2048",
+   "us": 27.807999402284622,
+   "flops": 167772160,
+   "moved": 6012928,
+   "tflops": 6.033233731521741,
+   "gbps": 216.23015424496865
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/qkv m8_n5120_k2048",
+   "us": 16.51199907064438,
+   "flops": 167772160,
+   "moved": 10620928,
+   "tflops": 10.160620726915576,
+   "gbps": 643.224842404592
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/qkv m32_n5120_k2048",
+   "us": 16.35199971497059,
+   "flops": 671088640,
+   "moved": 21430272,
+   "tflops": 41.0401572711382,
+   "gbps": 1310.5597097326358
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/qkv m32_n5120_k2048",
+   "us": 23.840000852942467,
+   "flops": 671088640,
+   "moved": 10947072,
+   "tflops": 28.149690268034135,
+   "gbps": 459.189245316191
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/qkv m32_n5120_k2048",
+   "us": 20.576000213623047,
+   "flops": 671088640,
+   "moved": 10964992,
+   "tflops": 32.61511630213158,
+   "gbps": 532.9020162402726
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/qkv m32_n5120_k2048",
+   "us": 19.711999222636223,
+   "flops": 671088640,
+   "moved": 10964992,
+   "tflops": 34.044676667263516,
+   "gbps": 556.2597621964381
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/qkv m32_n5120_k2048",
+   "us": 30.880000442266464,
+   "flops": 671088640,
+   "moved": 6356992,
+   "tflops": 21.732144766470245,
+   "gbps": 205.86113694800915
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/qkv m32_n5120_k2048",
+   "us": 16.96000061929226,
+   "flops": 671088640,
+   "moved": 10964992,
+   "tflops": 39.568904215523816,
+   "gbps": 646.5207311093583
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/qkv m128_n5120_k2048",
+   "us": 16.543999314308167,
+   "flops": 2684354560,
+   "moved": 22806528,
+   "tflops": 162.2554806127453,
+   "gbps": 1378.5377747371913
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/qkv m128_n5120_k2048",
+   "us": 40.44799879193306,
+   "flops": 2684354560,
+   "moved": 12323328,
+   "tflops": 66.3655716024044,
+   "gbps": 304.67089517560413
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/qkv m128_n5120_k2048",
+   "us": 24.607999250292778,
+   "flops": 2684354560,
+   "moved": 12341248,
+   "tflops": 109.0846327121886,
+   "gbps": 501.51366937534215
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/qkv m128_n5120_k2048",
+   "us": 20.896000787615776,
+   "flops": 2684354560,
+   "moved": 12341248,
+   "tflops": 128.46259852703056,
+   "gbps": 590.6033468047227
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/qkv m128_n5120_k2048",
+   "us": 43.455999344587326,
+   "flops": 2684354560,
+   "moved": 7733248,
+   "tflops": 61.77178296405582,
+   "gbps": 177.95582006246548
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/qkv m128_n5120_k2048",
+   "us": 20.447999238967896,
+   "flops": 2684354560,
+   "moved": 12341248,
+   "tflops": 131.2771253866445,
+   "gbps": 603.5430584563597
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/qkv m512_n5120_k2048",
+   "us": 24.09599907696247,
+   "flops": 10737418240,
+   "moved": 28311552,
+   "tflops": 445.610003789623,
+   "gbps": 1174.9482521796701
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/qkv m512_n5120_k2048",
+   "us": 99.64799880981445,
+   "flops": 10737418240,
+   "moved": 17828352,
+   "tflops": 107.75347591769659,
+   "gbps": 178.91329693461003
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/qkv m512_n5120_k2048",
+   "us": 55.67999929189682,
+   "flops": 10737418240,
+   "moved": 17846272,
+   "tflops": 192.8415656708284,
+   "gbps": 320.5149466048429
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/qkv m512_n5120_k2048",
+   "us": 36.159999668598175,
+   "flops": 10737418240,
+   "moved": 17846272,
+   "tflops": 296.94187882762947,
+   "gbps": 493.53628770903833
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/qkv m512_n5120_k2048",
+   "us": 66.0799965262413,
+   "flops": 10737418240,
+   "moved": 13238272,
+   "tflops": 162.49120466790612,
+   "gbps": 200.33705653635886
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/qkv m512_n5120_k2048",
+   "us": 50.04800111055374,
+   "flops": 10737418240,
+   "moved": 17846272,
+   "tflops": 214.54239933142455,
+   "gbps": 356.5831122921054
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/qkv m2048_n5120_k2048",
+   "us": 62.111999839544296,
+   "flops": 42949672960,
+   "moved": 50331648,
+   "tflops": 691.4875236822694,
+   "gbps": 810.3369418151594
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/qkv m2048_n5120_k2048",
+   "us": 248.60799312591553,
+   "flops": 42949672960,
+   "moved": 39848448,
+   "tflops": 172.76062776568392,
+   "gbps": 160.28627036065356
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/qkv m2048_n5120_k2048",
+   "us": 115.52000045776367,
+   "flops": 42949672960,
+   "moved": 39866368,
+   "tflops": 371.79425891452644,
+   "gbps": 345.1035997405134
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/qkv m2048_n5120_k2048",
+   "us": 74.20799881219864,
+   "flops": 42949672960,
+   "moved": 39866368,
+   "tflops": 578.7741705404909,
+   "gbps": 537.2246744032476
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/qkv m2048_n5120_k2048",
+   "us": 232.5119972229004,
+   "flops": 42949672960,
+   "moved": 35258368,
+   "tflops": 184.720244430337,
+   "gbps": 151.64106979907427
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/qkv m2048_n5120_k2048",
+   "us": 111.26399785280228,
+   "flops": 42949672960,
+   "moved": 39866368,
+   "tflops": 386.01590621272356,
+   "gbps": 358.3042922180594
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/o m1_n2048_k4096",
+   "us": 15.904000028967857,
+   "flops": 16777216,
+   "moved": 16789504,
+   "tflops": 1.054905430674148,
+   "gbps": 1055.67806648763
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/o m1_n2048_k4096",
+   "us": 39.45599868893623,
+   "flops": 16777216,
+   "moved": 8402944,
+   "tflops": 0.4252133150213344,
+   "gbps": 212.9699989663739
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/o m1_n2048_k4096",
+   "us": 29.664000496268272,
+   "flops": 16777216,
+   "moved": 8409088,
+   "tflops": 0.5655749635694137,
+   "gbps": 283.4778809101578
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/o m1_n2048_k4096",
+   "us": 26.815999299287796,
+   "flops": 16777216,
+   "moved": 8409088,
+   "tflops": 0.6256420211215319,
+   "gbps": 313.58473373108035
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/o m1_n2048_k4096",
+   "us": 49.31199923157692,
+   "flops": 16777216,
+   "moved": 4730880,
+   "tflops": 0.3402258326865141,
+   "gbps": 95.93770428538178
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/o m1_n2048_k4096",
+   "us": 24.54400062561035,
+   "flops": 16777216,
+   "moved": 8409088,
+   "tflops": 0.6835566970485599,
+   "gbps": 342.6127683204818
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/o m8_n2048_k4096",
+   "us": 15.807999297976494,
+   "flops": 134217728,
+   "moved": 16875520,
+   "tflops": 8.490494304183109,
+   "gbps": 1067.5304117808353
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/o m8_n2048_k4096",
+   "us": 39.8080013692379,
+   "flops": 134217728,
+   "moved": 8488960,
+   "tflops": 3.37162689367566,
+   "gbps": 213.24758108956314
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/o m8_n2048_k4096",
+   "us": 29.24799919128418,
+   "flops": 134217728,
+   "moved": 8495104,
+   "tflops": 4.588954175025979,
+   "gbps": 290.4507738953821
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/o m8_n2048_k4096",
+   "us": 27.008000761270523,
+   "flops": 134217728,
+   "moved": 8495104,
+   "tflops": 4.969554362293571,
+   "gbps": 314.5402754942891
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/o m8_n2048_k4096",
+   "us": 49.56800118088722,
+   "flops": 134217728,
+   "moved": 4816896,
+   "tflops": 2.70774945130837,
+   "gbps": 97.17753157771737
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/o m8_n2048_k4096",
+   "us": 23.93599972128868,
+   "flops": 134217728,
+   "moved": 8495104,
+   "tflops": 5.607358354062259,
+   "gbps": 354.90909504166035
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/o m32_n2048_k4096",
+   "us": 16.063999384641647,
+   "flops": 536870912,
+   "moved": 17170432,
+   "tflops": 33.420750284221725,
+   "gbps": 1068.8765349690054
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/o m32_n2048_k4096",
+   "us": 39.872001856565475,
+   "flops": 536870912,
+   "moved": 8783872,
+   "tflops": 13.464859726163882,
+   "gbps": 220.301755392139
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/o m32_n2048_k4096",
+   "us": 29.21600081026554,
+   "flops": 536870912,
+   "moved": 8790016,
+   "tflops": 18.375920629471,
+   "gbps": 300.863080374487
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/o m32_n2048_k4096",
+   "us": 27.008000761270523,
+   "flops": 536870912,
+   "moved": 8790016,
+   "tflops": 19.878217449174283,
+   "gbps": 325.45970646612557
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/o m32_n2048_k4096",
+   "us": 47.32799902558327,
+   "flops": 536870912,
+   "moved": 5111808,
+   "tflops": 11.343621599336856,
+   "gbps": 108.00811581399839
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/o m32_n2048_k4096",
+   "us": 23.93599972128868,
+   "flops": 536870912,
+   "moved": 8790016,
+   "tflops": 22.429433416249037,
+   "gbps": 367.2299508000979
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/o m128_n2048_k4096",
+   "us": 16.896000131964684,
+   "flops": 2147483648,
+   "moved": 18350080,
+   "tflops": 127.10012021941719,
+   "gbps": 1086.0605975780277
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/o m128_n2048_k4096",
+   "us": 45.60000076889992,
+   "flops": 2147483648,
+   "moved": 9963520,
+   "tflops": 47.093938855032334,
+   "gbps": 218.49824192975262
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/o m128_n2048_k4096",
+   "us": 31.039999797940254,
+   "flops": 2147483648,
+   "moved": 9969664,
+   "tflops": 69.18439632665533,
+   "gbps": 321.1876309568006
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/o m128_n2048_k4096",
+   "us": 28.12799997627735,
+   "flops": 2147483648,
+   "moved": 9969664,
+   "tflops": 76.34683055358181,
+   "gbps": 354.4391356800425
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/o m128_n2048_k4096",
+   "us": 50.40000006556511,
+   "flops": 2147483648,
+   "moved": 6291456,
+   "tflops": 42.60880248425296,
+   "gbps": 124.83047602808485
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/o m128_n2048_k4096",
+   "us": 25.37599951028824,
+   "flops": 2147483648,
+   "moved": 9969664,
+   "tflops": 84.62656405432786,
+   "gbps": 392.8776872791939
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/o m512_n2048_k4096",
+   "us": 23.072000592947006,
+   "flops": 8589934592,
+   "moved": 23068672,
+   "tflops": 372.30991553571215,
+   "gbps": 999.8557301984456
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/o m512_n2048_k4096",
+   "us": 98.52799773216248,
+   "flops": 8589934592,
+   "moved": 14682112,
+   "tflops": 87.18267690114634,
+   "gbps": 149.01461856468154
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/o m512_n2048_k4096",
+   "us": 56.03199824690819,
+   "flops": 8589934592,
+   "moved": 14688256,
+   "tflops": 153.30409160401464,
+   "gbps": 262.1404993495924
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/o m512_n2048_k4096",
+   "us": 35.00799834728241,
+   "flops": 8589934592,
+   "moved": 14688256,
+   "tflops": 245.37062949978164,
+   "gbps": 419.5685755663953
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/o m512_n2048_k4096",
+   "us": 60.32000109553337,
+   "flops": 8589934592,
+   "moved": 11010048,
+   "tflops": 142.40607486719816,
+   "gbps": 182.52731763984139
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/o m512_n2048_k4096",
+   "us": 49.66399818658829,
+   "flops": 8589934592,
+   "moved": 14688256,
+   "tflops": 172.96099600615125,
+   "gbps": 295.752588118581
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/o m2048_n2048_k4096",
+   "us": 47.87199944257736,
+   "flops": 34359738368,
+   "moved": 41943040,
+   "tflops": 717.7418693199692,
+   "gbps": 876.1497428222281
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/o m2048_n2048_k4096",
+   "us": 188.25599551200867,
+   "flops": 34359738368,
+   "moved": 33556480,
+   "tflops": 182.5160376674868,
+   "gbps": 178.24919683824606
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/o m2048_n2048_k4096",
+   "us": 98.08000177145004,
+   "flops": 34359738368,
+   "moved": 33562624,
+   "tflops": 350.3235904100659,
+   "gbps": 342.1964049124813
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/o m2048_n2048_k4096",
+   "us": 62.94400244951248,
+   "flops": 34359738368,
+   "moved": 33562624,
+   "tflops": 545.8778760622987,
+   "gbps": 533.2140107696623
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/o m2048_n2048_k4096",
+   "us": 193.88799369335175,
+   "flops": 34359738368,
+   "moved": 29884416,
+   "tflops": 177.2143685304335,
+   "gbps": 154.1323700902513
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/o m2048_n2048_k4096",
+   "us": 90.2400016784668,
+   "flops": 34359738368,
+   "moved": 33562624,
+   "tflops": 380.759504974599,
+   "gbps": 371.9262342169123
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/gate_up m1_n1536_k2048",
+   "us": 10.623999871313572,
+   "flops": 6291456,
+   "moved": 6298624,
+   "tflops": 0.5921927782574523,
+   "gbps": 592.8674770608055
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/gate_up m1_n1536_k2048",
+   "us": 22.943999618291855,
+   "flops": 6291456,
+   "moved": 3153664,
+   "tflops": 0.2742092095828055,
+   "gbps": 137.45049043174564
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/gate_up m1_n1536_k2048",
+   "us": 18.880000337958336,
+   "flops": 6291456,
+   "moved": 3159040,
+   "tflops": 0.33323389234008627,
+   "gbps": 167.32203090318458
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/gate_up m1_n1536_k2048",
+   "us": 17.696000635623932,
+   "flops": 6291456,
+   "moved": 3159040,
+   "tflops": 0.3555298244810542,
+   "gbps": 178.51717261133663
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/gate_up m1_n1536_k2048",
+   "us": 27.295999228954315,
+   "flops": 6291456,
+   "moved": 1776640,
+   "tflops": 0.23049004168077197,
+   "gbps": 65.08792680926747
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/gate_up m1_n1536_k2048",
+   "us": 15.359999611973763,
+   "flops": 6291456,
+   "moved": 3159040,
+   "tflops": 0.4096000103473666,
+   "gbps": 205.66667186224382
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/gate_up m8_n1536_k2048",
+   "us": 10.751999914646149,
+   "flops": 50331648,
+   "moved": 6348800,
+   "tflops": 4.681142894303718,
+   "gbps": 590.4761951636362
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/gate_up m8_n1536_k2048",
+   "us": 23.19999970495701,
+   "flops": 50331648,
+   "moved": 3203840,
+   "tflops": 2.1694676137968196,
+   "gbps": 138.09655348036296
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/gate_up m8_n1536_k2048",
+   "us": 18.94400082528591,
+   "flops": 50331648,
+   "moved": 3209216,
+   "tflops": 2.6568647491198774,
+   "gbps": 169.40539802534374
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/gate_up m8_n1536_k2048",
+   "us": 17.823999747633934,
+   "flops": 50331648,
+   "moved": 3209216,
+   "tflops": 2.823813325439557,
+   "gbps": 180.05027184911236
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/gate_up m8_n1536_k2048",
+   "us": 27.39199995994568,
+   "flops": 50331648,
+   "moved": 1826816,
+   "tflops": 1.8374579466120813,
+   "gbps": 66.6915888825674
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/gate_up m8_n1536_k2048",
+   "us": 15.039999969303608,
+   "flops": 50331648,
+   "moved": 3209216,
+   "tflops": 3.3465191557663605,
+   "gbps": 213.37872383975778
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/gate_up m32_n1536_k2048",
+   "us": 10.879999957978725,
+   "flops": 201326592,
+   "moved": 6520832,
+   "tflops": 18.504282424409332,
+   "gbps": 599.3411787853934
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/gate_up m32_n1536_k2048",
+   "us": 23.135999217629433,
+   "flops": 201326592,
+   "moved": 3375872,
+   "tflops": 8.701875812936182,
+   "gbps": 145.91425113066285
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/gate_up m32_n1536_k2048",
+   "us": 18.880000337958336,
+   "flops": 201326592,
+   "moved": 3381248,
+   "tflops": 10.66348455488276,
+   "gbps": 179.09152221793047
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/gate_up m32_n1536_k2048",
+   "us": 17.855999991297722,
+   "flops": 201326592,
+   "moved": 3381248,
+   "tflops": 11.275010758183148,
+   "gbps": 189.36200726074603
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/gate_up m32_n1536_k2048",
+   "us": 26.75200067460537,
+   "flops": 201326592,
+   "moved": 1998848,
+   "tflops": 7.525664881995591,
+   "gbps": 74.7177014651255
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/gate_up m32_n1536_k2048",
+   "us": 15.168000012636185,
+   "flops": 201326592,
+   "moved": 3381248,
+   "tflops": 13.273113912993043,
+   "gbps": 222.91983103791824
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/gate_up m128_n1536_k2048",
+   "us": 11.008000001311302,
+   "flops": 805306368,
+   "moved": 7208960,
+   "tflops": 73.15646510756447,
+   "gbps": 654.883720852221
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/gate_up m128_n1536_k2048",
+   "us": 26.048000901937485,
+   "flops": 805306368,
+   "moved": 4064000,
+   "tflops": 30.916244629740483,
+   "gbps": 156.01965061732298
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/gate_up m128_n1536_k2048",
+   "us": 19.90400068461895,
+   "flops": 805306368,
+   "moved": 4069376,
+   "tflops": 40.45952272410792,
+   "gbps": 204.45015373942678
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/gate_up m128_n1536_k2048",
+   "us": 18.624000251293182,
+   "flops": 805306368,
+   "moved": 4069376,
+   "tflops": 43.240246839240804,
+   "gbps": 218.50171526482006
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/gate_up m128_n1536_k2048",
+   "us": 27.96800062060356,
+   "flops": 805306368,
+   "moved": 2686976,
+   "tflops": 28.793848331322767,
+   "gbps": 96.07322441277942
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/gate_up m128_n1536_k2048",
+   "us": 16.03199914097786,
+   "flops": 805306368,
+   "moved": 4069376,
+   "tflops": 50.231188320216,
+   "gbps": 253.82835691393328
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/gate_up m512_n1536_k2048",
+   "us": 12.83199992030859,
+   "flops": 3221225472,
+   "moved": 9961472,
+   "tflops": 251.03066490063807,
+   "gbps": 776.2992566914263
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/gate_up m512_n1536_k2048",
+   "us": 52.41600051522255,
+   "flops": 3221225472,
+   "moved": 6816512,
+   "tflops": 61.45500305893232,
+   "gbps": 130.04639676810828
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/gate_up m512_n1536_k2048",
+   "us": 33.08799862861633,
+   "flops": 3221225472,
+   "moved": 6821888,
+   "tflops": 97.35328836764717,
+   "gbps": 206.17408978311713
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/gate_up m512_n1536_k2048",
+   "us": 22.655999287962914,
+   "flops": 3221225472,
+   "moved": 6821888,
+   "tflops": 142.17980107862337,
+   "gbps": 301.1073540960277
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/gate_up m512_n1536_k2048",
+   "us": 32.92800113558769,
+   "flops": 3221225472,
+   "moved": 5439488,
+   "tflops": 97.82632898778016,
+   "gbps": 165.19338594534815
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/gate_up m512_n1536_k2048",
+   "us": 28.64000014960766,
+   "flops": 3221225472,
+   "moved": 6821888,
+   "tflops": 112.47295583705252,
+   "gbps": 238.19441216355767
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/gate_up m2048_n1536_k2048",
+   "us": 23.391999304294586,
+   "flops": 12884901888,
+   "moved": 20971520,
+   "tflops": 550.8251654929912,
+   "gbps": 896.5253344612487
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/gate_up m2048_n1536_k2048",
+   "us": 99.07200187444687,
+   "flops": 12884901888,
+   "moved": 17826560,
+   "tflops": 130.05593552383175,
+   "gbps": 179.93539711240973
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/gate_up m2048_n1536_k2048",
+   "us": 58.04799869656563,
+   "flops": 12884901888,
+   "moved": 17831936,
+   "tflops": 221.96978668210878,
+   "gbps": 307.19295066851316
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/gate_up m2048_n1536_k2048",
+   "us": 37.88800165057182,
+   "flops": 12884901888,
+   "moved": 17831936,
+   "tflops": 340.0786878873443,
+   "gbps": 470.6486281450759
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/gate_up m2048_n1536_k2048",
+   "us": 75.42400062084198,
+   "flops": 12884901888,
+   "moved": 16449536,
+   "tflops": 170.83291501298996,
+   "gbps": 218.09418573130534
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/gate_up m2048_n1536_k2048",
+   "us": 51.00800096988678,
+   "flops": 12884901888,
+   "moved": 17831936,
+   "tflops": 252.60550586185028,
+   "gbps": 349.59095947569693
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/down m1_n2048_k768",
+   "us": 8.86400043964386,
+   "flops": 3145728,
+   "moved": 3151360,
+   "tflops": 0.3548880690405731,
+   "gbps": 355.52344807043085
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/down m1_n2048_k768",
+   "us": 12.671999633312225,
+   "flops": 3145728,
+   "moved": 1578880,
+   "tflops": 0.24824243142577848,
+   "gbps": 124.5959632013744
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/down m1_n2048_k768",
+   "us": 15.776000916957855,
+   "flops": 3145728,
+   "moved": 1586688,
+   "tflops": 0.19939958273066596,
+   "gbps": 100.57605906287985
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/down m1_n2048_k768",
+   "us": 12.06399966031313,
+   "flops": 3145728,
+   "moved": 1586688,
+   "tflops": 0.26075332299191645,
+   "gbps": 131.52255012238754
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/down m1_n2048_k768",
+   "us": 13.856000266969204,
+   "flops": 3145728,
+   "moved": 890368,
+   "tflops": 0.22703001872040823,
+   "gbps": 64.25865926998534
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/down m1_n2048_k768",
+   "us": 10.080000385642052,
+   "flops": 3145728,
+   "moved": 1586688,
+   "tflops": 0.31207617853673636,
+   "gbps": 157.40951778732844
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/down m8_n2048_k768",
+   "us": 8.86400043964386,
+   "flops": 25165824,
+   "moved": 3190784,
+   "tflops": 2.8391045523245846,
+   "gbps": 359.9711012794354
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/down m8_n2048_k768",
+   "us": 12.736000120639801,
+   "flops": 25165824,
+   "moved": 1618304,
+   "tflops": 1.9759597802779998,
+   "gbps": 127.06532542955908
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/down m8_n2048_k768",
+   "us": 15.39199985563755,
+   "flops": 25165824,
+   "moved": 1626112,
+   "tflops": 1.6349937783284634,
+   "gbps": 105.64657063743488
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/down m8_n2048_k768",
+   "us": 12.35199999064207,
+   "flops": 25165824,
+   "moved": 1626112,
+   "tflops": 2.037388602579804,
+   "gbps": 131.64766849351923
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/down m8_n2048_k768",
+   "us": 13.98400031030178,
+   "flops": 25165824,
+   "moved": 929792,
+   "tflops": 1.799615520707673,
+   "gbps": 66.48970104177113
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/down m8_n2048_k768",
+   "us": 10.143999941647053,
+   "flops": 25165824,
+   "moved": 1626112,
+   "tflops": 2.480858058435073,
+   "gbps": 160.3028400388548
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/down m32_n2048_k768",
+   "us": 9.056000038981438,
+   "flops": 100663296,
+   "moved": 3325952,
+   "tflops": 11.11564659526238,
+   "gbps": 367.2650160869569
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/down m32_n2048_k768",
+   "us": 12.768000364303589,
+   "flops": 100663296,
+   "moved": 1753472,
+   "tflops": 7.8840298502365,
+   "gbps": 137.33332941486336
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/down m32_n2048_k768",
+   "us": 15.87199978530407,
+   "flops": 100663296,
+   "moved": 1761280,
+   "tflops": 6.342193634176106,
+   "gbps": 110.96774343651228
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/down m32_n2048_k768",
+   "us": 12.384000234305859,
+   "flops": 100663296,
+   "moved": 1761280,
+   "tflops": 8.128495970239484,
+   "gbps": 142.2222195313712
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/down m32_n2048_k768",
+   "us": 13.952000066637993,
+   "flops": 100663296,
+   "moved": 1064960,
+   "tflops": 7.214972442603836,
+   "gbps": 76.33027486478667
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/down m32_n2048_k768",
+   "us": 9.920000098645687,
+   "flops": 100663296,
+   "moved": 1761280,
+   "tflops": 10.147509576511284,
+   "gbps": 177.54838533121145
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/down m128_n2048_k768",
+   "us": 9.02399979531765,
+   "flops": 402653184,
+   "moved": 3866624,
+   "tflops": 44.620256331225505,
+   "gbps": 428.4822792223803
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/down m128_n2048_k768",
+   "us": 14.015999622642994,
+   "flops": 402653184,
+   "moved": 2294144,
+   "tflops": 28.728110362496697,
+   "gbps": 163.68036970361973
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/down m128_n2048_k768",
+   "us": 15.200000256299973,
+   "flops": 402653184,
+   "moved": 2301952,
+   "tflops": 26.490340605955687,
+   "gbps": 151.44420797268774
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/down m128_n2048_k768",
+   "us": 12.83199992030859,
+   "flops": 402653184,
+   "moved": 2301952,
+   "tflops": 31.37883311257976,
+   "gbps": 179.3915223110944
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/down m128_n2048_k768",
+   "us": 14.368000440299511,
+   "flops": 402653184,
+   "moved": 1605632,
+   "tflops": 28.024302036533513,
+   "gbps": 111.75055336833839
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/down m128_n2048_k768",
+   "us": 10.17600018531084,
+   "flops": 402653184,
+   "moved": 2301952,
+   "tflops": 39.56890493980473,
+   "gbps": 226.2138323585028
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/down m512_n2048_k768",
+   "us": 9.952000342309475,
+   "flops": 1610612736,
+   "moved": 6029312,
+   "tflops": 161.83809089643168,
+   "gbps": 605.8392074573452
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/down m512_n2048_k768",
+   "us": 24.383999407291412,
+   "flops": 1610612736,
+   "moved": 4456832,
+   "tflops": 66.0520331016079,
+   "gbps": 182.77690732994762
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/down m512_n2048_k768",
+   "us": 19.168000668287277,
+   "flops": 1610612736,
+   "moved": 4464640,
+   "tflops": 84.02612060968346,
+   "gbps": 232.92152777240747
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/down m512_n2048_k768",
+   "us": 15.424000099301338,
+   "flops": 1610612736,
+   "moved": 4464640,
+   "tflops": 104.42250555178329,
+   "gbps": 289.46057904928534
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/down m512_n2048_k768",
+   "us": 16.416000202298164,
+   "flops": 1610612736,
+   "moved": 3768320,
+   "tflops": 98.11237305994439,
+   "gbps": 229.55165409125985
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/down m512_n2048_k768",
+   "us": 15.584000386297703,
+   "flops": 1610612736,
+   "moved": 4464640,
+   "tflops": 103.35040400898205,
+   "gbps": 286.48869926399345
+  },
+  {
+   "impl": "native/linear_torch [unquantized]",
+   "case": "qwen3-30b-a3b/down m2048_n2048_k768",
+   "us": 16.51199907064438,
+   "flops": 6442450944,
+   "moved": 14680064,
+   "tflops": 390.1678359135581,
+   "gbps": 889.0543136051128
+  },
+  {
+   "impl": "native/linear_w8a16 [fp8]",
+   "case": "qwen3-30b-a3b/down m2048_n2048_k768",
+   "us": 44.863998889923096,
+   "flops": 6442450944,
+   "moved": 13107584,
+   "tflops": 143.59956988691525,
+   "gbps": 292.16263205070857
+  },
+  {
+   "impl": "native/linear_w8a8_fp8 [w8a8_fp8]",
+   "case": "qwen3-30b-a3b/down m2048_n2048_k768",
+   "us": 30.079999938607216,
+   "flops": 6442450944,
+   "moved": 13115392,
+   "tflops": 214.17722596904707,
+   "gbps": 436.0170221664993
+  },
+  {
+   "impl": "native/linear_w8a8_int8 [w8a8_int8]",
+   "case": "qwen3-30b-a3b/down m2048_n2048_k768",
+   "us": 23.520000278949738,
+   "flops": 6442450944,
+   "moved": 13115392,
+   "tflops": 273.9137273635985,
+   "gbps": 557.6272042708349
+  },
+  {
+   "impl": "native/linear_w4a16 [awq]",
+   "case": "qwen3-30b-a3b/down m2048_n2048_k768",
+   "us": 41.56799986958504,
+   "flops": 6442450944,
+   "moved": 12419072,
+   "tflops": 154.98582958555792,
+   "gbps": 298.76520494042177
+  },
+  {
+   "impl": "ablation: fp8_matmul only",
+   "case": "qwen3-30b-a3b/down m2048_n2048_k768",
+   "us": 25.728000327944756,
+   "flops": 6442450944,
+   "moved": 13115392,
+   "tflops": 250.4062057633939,
+   "gbps": 509.77113778075363
+  }
+ ]
+}

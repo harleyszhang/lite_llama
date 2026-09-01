@@ -1,0 +1,65 @@
+{
+  "meta": {
+    "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507",
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "gpu_count": 2,
+    "torch": "2.13.0+cu130",
+    "commit": "v0.8.0-32-g4f256d7-dirty",
+    "command": "benchmarks/bench_serving.py --model-dir /mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507 --schemes int4 --dp 2 --concurrency 1 8 32 --json /tmp/int4_serving_dp.json",
+    "max_tokens": 64,
+    "date": "2026-09-01"
+  },
+  "rows": [
+    {
+      "config": "int4+tp1+dp2+graph",
+      "model": "Qwen3-4B-Thinking-2507",
+      "concurrency": 1,
+      "ttft_mean_ms": 31.553972512483597,
+      "ttft_p99_ms": 31.553972512483597,
+      "tpot_ms": 6.659677077550441,
+      "throughput_tps": 141.7358067700614,
+      "wave_s": 0.45859971083700657,
+      "completed": 1,
+      "issued": 1,
+      "batch_prefix": 1.0,
+      "dup_prefix": null,
+      "offline_prefix": 1.0,
+      "dup_batch_prefix": 1.0,
+      "note": ""
+    },
+    {
+      "config": "int4+tp1+dp2+graph",
+      "model": "Qwen3-4B-Thinking-2507",
+      "concurrency": 8,
+      "ttft_mean_ms": 46.15070903673768,
+      "ttft_p99_ms": 49.518804997205734,
+      "tpot_ms": 7.115516458725324,
+      "throughput_tps": 1025.5311057845659,
+      "wave_s": 0.5070543419569731,
+      "completed": 8,
+      "issued": 8,
+      "batch_prefix": 1.0,
+      "dup_prefix": null,
+      "offline_prefix": 1.0,
+      "dup_batch_prefix": 1.0,
+      "note": ""
+    },
+    {
+      "config": "int4+tp1+dp2+graph",
+      "model": "Qwen3-4B-Thinking-2507",
+      "concurrency": 32,
+      "ttft_mean_ms": 130.58578356867656,
+      "ttft_p99_ms": 148.13572354614735,
+      "tpot_ms": 7.717726756709453,
+      "throughput_tps": 3226.114707778272,
+      "wave_s": 0.6447383891791105,
+      "completed": 32,
+      "issued": 32,
+      "batch_prefix": 1.0,
+      "dup_prefix": 1.0,
+      "offline_prefix": 1.0,
+      "dup_batch_prefix": 1.0,
+      "note": ""
+    }
+  ]
+}

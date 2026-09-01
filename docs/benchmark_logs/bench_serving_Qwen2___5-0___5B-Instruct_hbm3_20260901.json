@@ -1,0 +1,44 @@
+{
+  "meta": {
+    "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2___5-0___5B-Instruct",
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "gpu_count": 2,
+    "torch": "2.13.0+cu130",
+    "commit": "v0.8.0-32-g4f256d7-dirty",
+    "command": "benchmarks/bench_serving.py --model-dir /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2___5-0___5B-Instruct --schemes fp16 --concurrency 1 4 --max-tokens 32 --max-seq-len 512",
+    "max_tokens": 32,
+    "date": "2026-09-01"
+  },
+  "rows": [
+    {
+      "config": "bf16+tp1+graph",
+      "model": "Qwen2___5-0___5B-Instruct",
+      "concurrency": 1,
+      "ttft_mean_ms": 121.62782065570354,
+      "ttft_p99_ms": 121.62782065570354,
+      "tpot_ms": 1.5488130551192067,
+      "throughput_tps": 186.56440843716703,
+      "wave_s": 0.17152253352105618,
+      "completed": 1,
+      "issued": 1,
+      "batch_prefix": 1.0,
+      "offline_prefix": 1.0,
+      "note": ""
+    },
+    {
+      "config": "bf16+tp1+graph",
+      "model": "Qwen2___5-0___5B-Instruct",
+      "concurrency": 4,
+      "ttft_mean_ms": 48.61146956682205,
+      "ttft_p99_ms": 50.63915066421032,
+      "tpot_ms": 1.7768758980016555,
+      "throughput_tps": 1179.3680944314456,
+      "wave_s": 0.10853269696235657,
+      "completed": 4,
+      "issued": 4,
+      "batch_prefix": 1.0,
+      "offline_prefix": 1.0,
+      "note": ""
+    }
+  ]
+}
