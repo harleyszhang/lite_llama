@@ -23,6 +23,7 @@ from lite_llama.executor.overlap import (
 )
 from lite_llama.executor.slot_batch import SlotBatch, flatten_extend_rows
 
+
 # --------------------------------------------------------------------------- #
 # Policy parsing (CPU)
 # --------------------------------------------------------------------------- #
@@ -174,3 +175,54 @@ def test_the_timeline_sees_the_copy_region():
     assert [r.name for r in records] == ["upload.test"]
     assert records[0].stream == "copy"
     assert records[0].duration_ms >= 0.0
+
+
+@pytest.mark.gpu
+def test_readback_lands_the_values_and_the_shape():
+    pool = StreamPool("cuda", OverlapPolicy(enabled=True))
+    device = torch.arange(6, device="cuda", dtype=torch.long).view(2, 3)
+    host, event = pool.readback_async(device, label="readback.test")
+    assert host.shape == (2, 3)
+    event.synchronize()
+    assert host.tolist() == [[0, 1, 2], [3, 4, 5]]
+
+
+@pytest.mark.gpu
+def test_readbacks_in_flight_never_overwrite_each_other():
+    """The spill ring must grow rather than recycle a buffer a copy needs.
+
+    A long-running kernel queue sits ahead of every readback's copy (the copy
+    is ordered after the current compute stream), so each buffer is provably
+    still busy — its event incomplete — when the next readback acquires. A
+    forced reuse would overwrite bytes the caller still holds.
+    """
+    pool = StreamPool("cuda", OverlapPolicy(enabled=True))
+    # Warm up every first-call cost first (the _sleep module load, the pool's
+    # pinned allocation): the stall below must still be running when the later
+    # readbacks acquire, or a finished event lets the ring legally recycle.
+    torch.cuda._sleep(1)
+    _warm, warm_event = pool.readback_async(torch.zeros(8, device="cuda", dtype=torch.long))
+    warm_event.synchronize()
+    torch.cuda.synchronize()
+
+    # A spin kernel the readbacks' copies queue behind: it outlives the host
+    # issuing all four readbacks, so every buffer is still busy when the next
+    # one acquires.
+    torch.cuda._sleep(20_000_000)
+    views = [
+        pool.readback_async(torch.full((1024,), i, device="cuda", dtype=torch.long))
+        for i in range(4)
+    ]
+    torch.cuda.synchronize()
+    for i, (host, event) in enumerate(views):
+        event.synchronize()
+        assert host.tolist() == [i] * 1024
+
+
+@pytest.mark.gpu
+def test_a_disabled_pool_falls_back_to_a_blocking_readback():
+    pool = StreamPool("cuda", OverlapPolicy(enabled=False))
+    device = torch.tensor([7, 8, 9], device="cuda", dtype=torch.long)
+    host, event = pool.readback_async(device)
+    assert event is None
+    assert host.tolist() == [7, 8, 9]

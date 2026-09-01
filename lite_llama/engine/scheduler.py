@@ -83,6 +83,12 @@ class Request:
         delta_logprobs: Per-step scratch like ``delta``: the record of the token
             this step produced, drained by the streaming layer. ``None`` on
             steps with no new token, and for requests that did not ask.
+        pending_tokens: Tokens whose pass has launched but whose harvest has
+            not run — the optimistic half of the launch/harvest pipeline. Zero
+            forever in the synchronous engine; one while the pipeline is full,
+            which is exactly the gap between what the device has and what the
+            host has harvested, and what the next decode plan adds back to the
+            request's bookkeeping to keep writing the right cache rows.
     """
 
     request_id: str
@@ -106,6 +112,7 @@ class Request:
     prompt_logprobs: list[PositionLogprobs | None] | None = None
     output_logprobs: list[PositionLogprobs] | None = None
     delta_logprobs: PositionLogprobs | None = None
+    pending_tokens: int = 0
 
     @property
     def prompt_len(self) -> int:
@@ -552,6 +559,11 @@ class Scheduler:
         request.num_computed_tokens = 0
         request.num_cached_tokens = 0
         request.prefix_copies = ()
+        # The optimistic ledger follows the real one: re-admission replays the
+        # prompt through prefill, so nothing is launched-and-unharvested any
+        # more. (The engine refuses pipeline + preemption together; this line
+        # is the belt to that braces.)
+        request.pending_tokens = 0
         # The prompt changes underneath the logprob records (generated tokens
         # move into it), so both spans restart empty for re-admission.
         request.prompt_logprobs = None

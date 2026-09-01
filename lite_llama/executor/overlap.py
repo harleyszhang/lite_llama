@@ -2,7 +2,8 @@
 
 :class:`OverlapPolicy` (read from ``LITE_LLAMA_OVERLAP``) decides whether
 input uploads run on a copy stream; :class:`StreamPool` stages the async
-uploads and :class:`Timeline` records regions as timeline evidence.
+uploads — and, in the opposite direction, reads results back into pinned
+host memory — while :class:`Timeline` records regions as timeline evidence.
 
 Usage:
     policy = OverlapPolicy.from_env()
@@ -50,21 +51,35 @@ class OverlapPolicy:
 
 
 class StreamPool:
-    """The copy stream and the pinned staging ring an overlap site uploads through.
+    """The copy stream and the pinned staging rings overlap traffic rides on.
 
-    Staging buffers are pinned host memory reused through a freelist. A buffer
-    goes back into rotation only once the event recorded after its last H2D copy
+    Staging buffers are pinned host memory reused through freelists. A buffer
+    goes back into rotation only once the event recorded after its last copy
     reports completion; if nothing free fits, a fresh buffer is allocated — the
     ring grows to the high-water mark of passes in flight (two for the
     continuous engine) and stays there. A busy buffer is never force-reused:
     overwriting bytes a copy engine is still reading is the classic
     pinned-memory race.
 
+    Two rings share one copy stream and one discipline, one per direction:
+
+    * **Upload** (:meth:`upload_async`): host values go out on H2D, and the
+      compute stream waits on the event before its kernels read them.
+    * **Readback** (:meth:`readback_async`): device results come back on D2H,
+      and the *host* waits on the event — one step later, when it wants the
+      values — before reading the pinned buffer. The copy itself is ordered
+      after the compute stream's queue at issue time, so it observes whatever
+      kernels produced the tensor without any host-side sync. The caller that
+      holds the returned view must finish reading it before the pool is asked
+      for the next readback; the engine's launch/harvest split guarantees that
+      by harvesting step N-1's buffer before launching step N's readback.
+
     Args:
         device: Device string (``"cuda"`` / ``"cuda:1"``) the streams belong to.
         policy: The shared switch; a disabled policy makes :meth:`upload_async`
-            fall back to a plain blocking upload and return no event, so call
-            sites read the same either way.
+            fall back to a plain blocking upload and :meth:`readback_async` to
+            a plain blocking ``.cpu()``, both returning no event, so call sites
+            read the same either way.
         timeline: Where the copy regions are recorded; disabled timelines make
             the recording a no-op.
     """
@@ -78,11 +93,14 @@ class StreamPool:
         self._copy_stream: torch.cuda.Stream | None = None
         # (flat pinned buffer, event recording its copy's completion); the event
         # is None only for a buffer that has never carried a copy, hence free.
+        # One deque per direction: a token upload and a token readback would
+        # otherwise contend for the same buffers at crossed lifetimes.
         self._staging: deque[tuple[torch.Tensor, torch.cuda.Event | None]] = deque()
+        self._spill: deque[tuple[torch.Tensor, torch.cuda.Event | None]] = deque()
 
     @property
     def copy_stream(self) -> torch.cuda.Stream:
-        """The side stream uploads are issued on, created on first use."""
+        """The side stream copies are issued on, created on first use."""
         if self._copy_stream is None:
             self._copy_stream = torch.cuda.Stream(device=self._device)
         return self._copy_stream
@@ -109,7 +127,7 @@ class StreamPool:
         if not self._policy.enabled:
             return host.to(self._device), None
 
-        staging = self._acquire(dtype, flat.numel())
+        staging = self._acquire(self._staging, dtype, flat.numel())
         staging[: flat.numel()].copy_(flat)
         with torch.cuda.stream(self.copy_stream), self._timeline.region(label, "copy"):
             device_tensor = staging[: flat.numel()].to(self._device, non_blocking=True)
@@ -120,6 +138,48 @@ class StreamPool:
         # buffer is busy again until *this* copy lands.
         self._staging.append((staging, event))
         return device_tensor, event
+
+    def readback_async(
+        self, device_tensor: torch.Tensor, *, label: str = "readback"
+    ) -> tuple[torch.Tensor, torch.cuda.Event | None]:
+        """Copy device results into pinned host memory; ``(host view, event)``.
+
+        The D2H copy rides the copy stream, ordered after the compute stream's
+        queue *at the moment of issue* — which is exactly the kernels that
+        produced ``device_tensor`` when the caller asks right after a pass. The
+        host does not wait: it reads the returned view later, after
+        ``event.synchronize()``, by which point the copy has long since landed
+        under the next pass's compute. With the policy off this is a plain
+        blocking ``.cpu()`` and the event is ``None`` — a no-CUDA pool returns
+        the tensor itself.
+
+        The returned view aliases a ring buffer. Whoever holds it must be done
+        reading before the pool issues a readback that recycles the buffer;
+        the ring's event check only covers the copy engine, not the host's own
+        reads. The engine's pipeline (harvest N-1 strictly before launch N's
+        readback) is that guarantee.
+        """
+        if not self._policy.enabled:
+            return device_tensor.cpu(), None
+        flat = device_tensor.reshape(-1)
+        pinned = self._acquire(self._spill, flat.dtype, flat.numel())
+        # Grabbed before entering the copy-stream context: inside it, the
+        # "current" stream is the copy stream, and waiting on ourselves would
+        # order nothing.
+        compute = torch.cuda.current_stream(self._device)
+        with torch.cuda.stream(self.copy_stream), self._timeline.region(label, "copy"):
+            self.copy_stream.wait_stream(compute)
+            pinned[: flat.numel()].copy_(flat, non_blocking=True)
+            event = torch.cuda.Event()
+            event.record(self.copy_stream)
+            # The source block is read on the copy stream while the caller
+            # may already have dropped its last reference: without this, the
+            # caching allocator can hand the block to the next allocation and
+            # the copy reads whatever that wrote — the mirror image of the
+            # upload path's record_stream in consume().
+            flat.record_stream(self.copy_stream)
+        self._spill.append((pinned, event))
+        return pinned[: flat.numel()].view(device_tensor.shape), event
 
     def consume(self, event: torch.cuda.Event | None, *tensors: torch.Tensor | None) -> None:
         """Make the current stream wait for an :meth:`upload_async` event.
@@ -142,8 +202,13 @@ class StreamPool:
             if tensor is not None:
                 tensor.record_stream(stream)
 
-    def _acquire(self, dtype: torch.dtype, numel: int) -> torch.Tensor:
-        """Find a free staging buffer holding ``numel`` elements of ``dtype``.
+    def _acquire(
+        self,
+        ring: deque[tuple[torch.Tensor, torch.cuda.Event | None]],
+        dtype: torch.dtype,
+        numel: int,
+    ) -> torch.Tensor:
+        """Find a free buffer of ``ring`` holding ``numel`` elements of ``dtype``.
 
         "Free" means the event recorded after its last copy has completed.
         Buffers still busy stay in the ring; a fresh allocation is cheaper than
@@ -151,10 +216,10 @@ class StreamPool:
         time the next pass asks. Buffers of the wrong dtype or too small are
         retired rather than kept around.
         """
-        for _ in range(len(self._staging)):
-            buffer, event = self._staging.popleft()
+        for _ in range(len(ring)):
+            buffer, event = ring.popleft()
             if event is not None and not event.query():
-                self._staging.append((buffer, event))  # still in flight
+                ring.append((buffer, event))  # still in flight
                 continue
             if buffer.dtype == dtype and buffer.numel() >= numel:
                 return buffer
@@ -162,8 +227,13 @@ class StreamPool:
         return torch.empty(numel, dtype=dtype, pin_memory=True)
 
     def pending(self) -> int:
-        """How many staging buffers have copies in flight right now (test hook)."""
-        return sum(1 for _, event in self._staging if event is not None and not event.query())
+        """How many copies are in flight right now, either direction (test hook)."""
+        return sum(
+            1
+            for ring in (self._staging, self._spill)
+            for _, event in ring
+            if event is not None and not event.query()
+        )
 
 
 @dataclass
