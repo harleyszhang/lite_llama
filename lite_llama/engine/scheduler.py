@@ -27,8 +27,7 @@ Usage:
 from __future__ import annotations
 
 import time
-from collections import deque
-from collections.abc import MutableSequence
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -48,7 +47,7 @@ class RequestStatus(StrEnum):
     FINISHED = "finished"
 
 
-@dataclass
+@dataclass(slots=True)
 class Request:
     """One generation request, from arrival to completion.
 
@@ -80,6 +79,24 @@ class Request:
         finish_reason: ``"eos"``, ``"length"``, ``"repeat"`` or ``"abort"``.
         first_token_time: When the first token became visible (for TTFT).
         finish_time: When the request finished.
+        num_cached_tokens: Leading prompt tokens this request reused from the
+            prefix cache instead of prefilling: their K/V was copied into this
+            slot before the first chunk ran, so ``num_computed_tokens`` starts
+            here rather than at 0.
+        prefix_copies: Per-step scratch, set only on the step this request is
+            admitted: ``(src_slot, start_token, num_tokens)`` runs of prefix K/V
+            to copy into this request's slot before its first chunk runs. Empty
+            on a miss, and on every later chunk.
+        prompt_logprobs: Per-position records for the prompt, ``prompt_len``
+            long once prefill completes; position 0 and prefix-cache hits stay
+            ``None`` (their predictor never ran). Built chunk by chunk; ``None``
+            until the first chunk of a request that asked arrives, ``None``
+            forever when it did not.
+        output_logprobs: Per-token records for the generated span, parallel to
+            ``output_token_ids``; ``None`` when the request did not ask.
+        delta_logprobs: Per-step scratch like ``delta``: the record of the token
+            this step produced, drained by the streaming layer. ``None`` on
+            steps with no new token, and for requests that did not ask.
     """
 
     request_id: str
@@ -98,26 +115,10 @@ class Request:
     finish_reason: str | None = None
     first_token_time: float | None = None
     finish_time: float | None = None
-    #: Leading prompt tokens this request reused from the prefix cache instead of
-    #: prefilling: their K/V was copied into this slot before the first chunk ran,
-    #: so ``num_computed_tokens`` starts here rather than at 0.
     num_cached_tokens: int = 0
-    #: Per-step scratch, set only on the step this request is admitted:
-    #: ``(src_slot, start_token, num_tokens)`` runs of prefix K/V to copy into
-    #: this request's slot before its first chunk runs. Empty on a miss, and on
-    #: every later chunk.
     prefix_copies: tuple[tuple[int, int, int], ...] = ()
-    #: Per-position records for the prompt, ``prompt_len`` long once prefill
-    #: completes; position 0 and prefix-cache hits stay ``None`` (their
-    #: predictor never ran). Built chunk by chunk; ``None`` until the first
-    #: chunk of a request that asked arrives, ``None`` forever when it did not.
     prompt_logprobs: list[PositionLogprobs | None] | None = None
-    #: Per-token records for the generated span, parallel to
-    #: ``output_token_ids``; ``None`` when the request did not ask.
     output_logprobs: list[PositionLogprobs] | None = None
-    #: Per-step scratch like ``delta``: the record of the token this step
-    #: produced, drained by the streaming layer. ``None`` on steps with no new
-    #: token, and for requests that did not ask.
     delta_logprobs: PositionLogprobs | None = None
 
     @property
@@ -148,7 +149,7 @@ DEFAULT_MAX_NUM_SEQS = 32
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SchedulerConfig:
     """Limits the admission policy enforces.
 
@@ -181,8 +182,25 @@ class SchedulerConfig:
     prefix_cache_blocks: int | None = None
     enable_preemption: bool = False
 
+    def __post_init__(self) -> None:
+        if self.max_seq_len < 2:
+            raise ValueError(f"max_seq_len must be >= 2, got {self.max_seq_len}")
+        if self.max_num_seqs < 1:
+            raise ValueError(f"max_num_seqs must be >= 1, got {self.max_num_seqs}")
+        if self.max_num_batched_tokens < 1:
+            raise ValueError(
+                "max_num_batched_tokens must be >= 1, "
+                f"got {self.max_num_batched_tokens}"
+            )
+        if self.max_chunk_size < 0:
+            raise ValueError(f"max_chunk_size must be >= 0, got {self.max_chunk_size}")
+        if self.prefix_cache_blocks is not None and self.prefix_cache_blocks < 1:
+            raise ValueError(
+                f"prefix_cache_blocks must be >= 1 or None, got {self.prefix_cache_blocks}"
+            )
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, slots=True)
 class SchedulerOutput:
     """What one engine step should run.
 
@@ -216,12 +234,6 @@ class _NullPrefixCache:
     ``if cache is None`` branches used to compute.
     """
 
-    def query(self, token_ids: list[int]) -> int:
-        return 0
-
-    def register(self, token_ids: list[int]) -> int:
-        return 0
-
     def admit(self, token_ids: list[int]) -> PrefixMatch:
         return PrefixMatch()
 
@@ -237,21 +249,6 @@ class _NullPrefixCache:
     @property
     def hit_rate(self) -> float:
         return 0.0
-
-
-def _discard(requests: MutableSequence[Request], request: Request) -> None:
-    """Remove ``request`` from ``requests`` by identity, preserving order.
-
-    :class:`Request` is a value-equal dataclass, so ``list.remove`` could drop a
-    *different* request whose fields happen to match; identity is the only safe
-    key once two live requests can carry equal prompts. Works on any mutable
-    sequence — ``list`` and ``deque`` alike — because ``_admit`` must dequeue a
-    candidate that a preemption just pushed off the head of the waiting deque.
-    """
-    for index, candidate in enumerate(requests):
-        if candidate is request:
-            del requests[index]
-            return
 
 
 class Scheduler:
@@ -279,11 +276,15 @@ class Scheduler:
             config.max_num_seqs if config.enable_preemption else min(config.max_num_seqs, num_slots)
         )
 
-        self._waiting: deque[Request] = deque()
+        # Ordered map = FCFS iteration plus constant-time cancellation. Serving
+        # queues can be much deeper than the running batch, so a deque scan on
+        # every disconnected client becomes measurable under overload.
+        self._waiting: OrderedDict[str, Request] = OrderedDict()
         self._running: list[Request] = []
+
+        self._requests: dict[str, Request] = {}
         self._free_slots: list[int] = list(reversed(range(num_slots)))
-        # Null Object when disabled, so the hot path pays no branches for the
-        # feature being off.
+
         self._prefix_cache: PrefixCache | _NullPrefixCache = (
             PrefixCache(
                 block_size=PREFIX_CACHE_BLOCK_SIZE,
@@ -292,8 +293,7 @@ class Scheduler:
             if config.enable_prefix_cache
             else _NullPrefixCache()
         )
-        # Requests whose prefill was *planned* but whose K/V only exists once the
-        # engine has run the step; see :meth:`_promote_pending_owners`.
+
         self._pending_owners: list[tuple[Request, int, int]] = []
         self.num_preemptions: int = 0
 
@@ -317,6 +317,11 @@ class Scheduler:
         Raises:
             ValueError: The prompt is empty, or leaves no room to generate.
         """
+        if request.request_id in self._requests:
+            raise ValueError(f"request id {request.request_id!r} is already active")
+        if request.status is not RequestStatus.WAITING or request.slot is not None:
+            raise ValueError("only a fresh waiting request can be submitted")
+
         limit = self.config.max_seq_len
         if request.prompt_len == 0:
             raise ValueError(f"request {request.request_id} has an empty prompt")
@@ -329,8 +334,8 @@ class Scheduler:
         room = limit - request.prompt_len
         requested = request.params.max_gen_len
         request.max_new_tokens = min(requested, room) if requested else room
-        request.status = RequestStatus.WAITING
-        self._waiting.append(request)
+        self._requests[request.request_id] = request
+        self._waiting[request.request_id] = request
 
     def abort(self, request_id: str) -> Request | None:
         """Drop a request wherever it is; returns it, or ``None`` if unknown.
@@ -338,20 +343,18 @@ class Scheduler:
         A running request releases its slot immediately, so an abandoned HTTP
         connection frees capacity on the next step rather than at its length cap.
         """
-        for request in self._waiting:
-            if request.request_id == request_id:
-                # By identity: Request is a value-equal dataclass, so
-                # ``deque.remove`` would drop whichever queued request compares
-                # equal first -- not necessarily this one.
-                _discard(self._waiting, request)
-                request.status = RequestStatus.FINISHED
-                request.finish_reason = "abort"
-                return request
-        for request in self._running:
-            if request.request_id == request_id:
-                self.finish(request, "abort")
-                return request
-        return None
+        request = self._requests.get(request_id)
+        if request is None:
+            return None
+        if request.status is RequestStatus.WAITING:
+            self._waiting.pop(request_id, None)
+            request.status = RequestStatus.FINISHED
+            request.finish_reason = "abort"
+            request.finish_time = time.monotonic()
+            self._requests.pop(request_id, None)
+        else:
+            self.finish(request, "abort")
+        return request
 
     # -------------------------------------------------------------- scheduling #
     def schedule(self) -> SchedulerOutput:
@@ -391,12 +394,14 @@ class Scheduler:
         # Stage 3: the decode batch is every running request that finished
         # prefill before this step. Requests whose prefill completes *this*
         # step produce their first token in the prefill pass and join decode
-        # on the next one; partial prefills produce nothing yet.
-        in_prefill = {id(request) for request in prefill}
+        # on the next one; partial prefills produce nothing yet — and partial
+        # prefills cannot pass the ``prefill_done`` gate anyway, so only the
+        # just-completed ones need excluding from decode.
+        just_prefilled = {id(request) for request in prefill if request.prefill_done}
         decode = [
             request
             for request in self._running
-            if request.prefill_done and id(request) not in in_prefill
+            if request.prefill_done and id(request) not in just_prefilled
         ]
 
         return SchedulerOutput(
@@ -420,7 +425,7 @@ class Scheduler:
             capacity = self.max_num_seqs - len(self._running)
             if capacity <= 0:
                 break
-            candidate = self._waiting[0]
+            candidate = next(iter(self._waiting.values()))
 
             # The grid cost of adding this request is its chunk, not its whole
             # prompt: with chunking, a 4K prompt occupies one chunk column per
@@ -434,17 +439,15 @@ class Scheduler:
 
             preempted_here = False
             if not self._free_slots:
-                preempted_victim = self._maybe_preempt(candidate, prefill)
+                preempted_victim = self._maybe_preempt(prefill)
                 if preempted_victim is None:
                     break
                 preempted.append(preempted_victim)
                 preempted_here = True
 
-            # The victim ``_preempt`` just re-queued sits at the head now, so the
-            # candidate must leave by identity: ``popleft`` would dequeue the
-            # victim into limbo (in neither queue, never scheduled again) and
-            # leave the candidate queued for a second admission with two slots.
-            _discard(self._waiting, candidate)
+            # A preempted victim may just have been inserted at the head, so
+            # remove the original candidate by id rather than popping the head.
+            self._waiting.pop(candidate.request_id)
             candidate.slot = self._free_slots.pop()
             candidate.status = RequestStatus.RUNNING
             candidate.scheduled_time = time.monotonic()
@@ -504,7 +507,11 @@ class Scheduler:
         """Next chunk for a request whose prefill is already under way."""
         remaining = request.prompt_len - request.num_computed_tokens
         size = self.config.max_chunk_size
-        return remaining if size <= 0 else min(remaining, size)
+        if size <= 0:
+            return remaining
+        # vLLM's chunked prefill consumes at most the iteration token budget.
+        # Without this cap, one long request violates the advertised ceiling.
+        return min(remaining, size, self.config.max_num_batched_tokens)
 
     def _first_chunk_of(self, request: Request) -> int:
         """Chunk estimate for pricing a fresh admission against the token budget.
@@ -517,7 +524,9 @@ class Scheduler:
         overflows ``max_num_batched_tokens``.
         """
         size = self.config.max_chunk_size
-        return request.prompt_len if size <= 0 else min(request.prompt_len, size)
+        if size <= 0:
+            return request.prompt_len
+        return min(request.prompt_len, size, self.config.max_num_batched_tokens)
 
     def _promote_pending_owners(self) -> None:
         """Hand prefix ownership to the slots that now really hold the K/V.
@@ -561,10 +570,13 @@ class Scheduler:
         exists for: the request that first pays for a shared prompt typically
         finishes before the ones that would inherit it arrive.
         """
+        kept: list[tuple[Request, int, int]] = []
         for candidate, slot, upto in self._pending_owners:
             if candidate is request:
                 self._claim_prefix(request, slot, upto)
-        self._drop_pending_owner(request)
+            else:
+                kept.append((candidate, slot, upto))
+        self._pending_owners = kept
 
     def _drop_pending_owner(self, request: Request) -> None:
         """Cancel a queued ownership claim, by identity.
@@ -576,36 +588,25 @@ class Scheduler:
         """
         self._pending_owners = [entry for entry in self._pending_owners if entry[0] is not request]
 
-    def _maybe_preempt(self, newcomer: Request, prefill: list[Request]) -> Request | None:
-        """Free a slot for ``newcomer`` by evicting a running request, if allowed.
+    def _maybe_preempt(self, prefill: list[Request]) -> Request | None:
+        """Free a slot for a newcomer by evicting a running request, if allowed.
 
         The victim is the youngest running request eligible for preemption;
-        ``None`` means nobody may be evicted and admission stops. Fixing the
-        intended newcomer before any preemption (as the caller does by peeking
-        the queue head) keeps a re-queued victim from jumping ahead of it.
+        ``None`` means nobody may be evicted and admission stops. Eligible =
+        past prefill (evicting a partial prefill would discard real KV work),
+        not part of this step's prefill group, and past the progress quantum
+        (>=1 output token). The quantum stops a just-recomputed request from
+        being evicted again before it makes progress, so the recompute cycle
+        cannot livelock.
         """
         if not self.config.enable_preemption:
             return None
-        victim = self._pick_preemption_victim(prefill)
-        if victim is None:
-            return None
-        self._preempt(victim)
-        return victim
-
-    def _pick_preemption_victim(self, prefill: list[Request]) -> Request | None:
-        """Youngest running request eligible for preemption, or None.
-
-        Eligible = past prefill (evicting a partial prefill would discard real
-        KV work), not part of this step's prefill group, and past the progress
-        quantum (>=1 output token). The quantum stops a just-recomputed
-        request from being evicted again before it makes progress, so the
-        recompute cycle cannot livelock.
-        """
         scheduled = {id(request) for request in prefill}
         for request in reversed(self._running):
             if not request.prefill_done or id(request) in scheduled:
                 continue
-            if len(request.output_token_ids) >= 1:
+            if request.output_token_ids:
+                self._preempt(request)
                 return request
         return None
 
@@ -646,28 +647,47 @@ class Scheduler:
         request.output_token_ids.clear()
         request.max_new_tokens -= moved
         self._discard_running(request)
-        self._waiting.appendleft(request)  # re-queue at front, keeps FCFS age
+        self._waiting[request.request_id] = request
+        self._waiting.move_to_end(request.request_id, last=False)
         self.num_preemptions += 1
 
     def finish(self, request: Request, reason: str) -> None:
-        """Retire a running request and return its slot to the pool."""
+        """Retire a request and release whatever resources it holds."""
         if request.status is RequestStatus.FINISHED:
             return
+        was_running = request.status is RequestStatus.RUNNING
         request.status = RequestStatus.FINISHED
         request.finish_reason = reason
         request.finish_time = time.monotonic()
         if request.slot is not None:
             self._free_slots.append(request.slot)
             request.slot = None
-        self._discard_running(request)
-        self._settle_pending_owner(request)
-        # Drop this request's hold on its cached prefix blocks. A shared prefix
-        # survives as long as any other live request still references it.
-        self._prefix_cache.release(request.prompt_token_ids)
+        if was_running:
+            self._discard_running(request)
+            self._settle_pending_owner(request)
+            # Drop this request's hold on its cached prefix blocks. A shared
+            # prefix survives as long as another live request references it.
+            self._prefix_cache.release(request.prompt_token_ids)
+        else:
+            # Public callers may retire a queued request directly. It has not
+            # registered cache blocks, so releasing them here would decrement a
+            # different request's references when the prompts match.
+            self._waiting.pop(request.request_id, None)
+        if self._requests.get(request.request_id) is request:
+            self._requests.pop(request.request_id)
 
     def _discard_running(self, request: Request) -> None:
-        """Remove ``request`` from the running list by identity."""
-        _discard(self._running, request)
+        """Remove ``request`` from the running list by identity.
+
+        :class:`Request` is value-equal, so ``list.remove`` could drop a
+        *different* request whose fields happen to match; identity is the only
+        safe key once two live requests can carry equal prompts. The running
+        batch is deliberately a small ordered list, capped by ``max_num_seqs``.
+        """
+        for index, candidate in enumerate(self._running):
+            if candidate is request:
+                del self._running[index]
+                return
 
     @property
     def prefix_cache_hit_rate(self) -> float:
@@ -683,7 +703,7 @@ class Scheduler:
     @property
     def waiting(self) -> list[Request]:
         """Queued requests, in arrival order."""
-        return list(self._waiting)
+        return list(self._waiting.values())
 
     @property
     def num_waiting(self) -> int:
