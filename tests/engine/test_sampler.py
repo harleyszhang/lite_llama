@@ -29,6 +29,12 @@ def test_sampling_params_rejects_top_p_outside_range():
         SamplingParams(top_p=1.5)
 
 
+@pytest.mark.parametrize("value", [0, -1])
+def test_sampling_params_rejects_non_positive_generation_caps(value):
+    with pytest.raises(ValueError, match="max_gen_len"):
+        SamplingParams(max_gen_len=value)
+
+
 def test_greedy_flag():
     assert SamplingParams(temperature=0.0).is_greedy
     assert not SamplingParams(temperature=0.7).is_greedy
@@ -112,6 +118,21 @@ def test_top_p_accepts_per_row_thresholds():
     assert tokens.shape == (2, 1)
     assert tokens[0].item() == 0  # nucleus of one: the dominant token
     assert 0 <= tokens[1].item() < 3  # nucleus covers the whole row
+
+
+def test_top_p_one_samples_the_full_distribution_without_sorting(monkeypatch):
+    """top_p=1 is exact categorical sampling, not a top-1024 approximation."""
+    seen_widths: list[int] = []
+
+    def fake_multinomial(probs, num_samples):
+        seen_widths.append(probs.shape[-1])
+        return torch.full((probs.shape[0], num_samples), probs.shape[-1] - 1)
+
+    monkeypatch.setattr(torch, "multinomial", fake_multinomial)
+    token = sample_top_p(torch.full((1, 2048), 1 / 2048), top_p=1.0)
+
+    assert seen_widths == [2048]
+    assert token.item() == 2047
 
 
 def test_sampled_temperature_stays_within_vocab():

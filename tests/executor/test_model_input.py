@@ -25,7 +25,7 @@ import pytest
 from lite_llama.engine.continuous_engine import _chunk_work, _decode_work, _prefill_work
 from lite_llama.engine.sampler import SamplingParams
 from lite_llama.engine.scheduler import Request
-from lite_llama.executor.worker import ModelInput, PassKind
+from lite_llama.executor.worker import ModelInput, ModelWorker, PassKind
 
 GREEDY = SamplingParams(temperature=0.0, max_gen_len=8, repetition_penalty=1.0)
 PENALISED = SamplingParams(temperature=0.8, repetition_penalty=1.1)
@@ -117,6 +117,23 @@ class TestModelInputInvariants:
         """Tensor parallelism broadcasts plans as objects; equality must hold."""
         plan = a_plan()
         assert pickle.loads(pickle.dumps(plan)) == plan
+
+
+def test_sampling_tensor_cache_detects_mutated_params() -> None:
+    """A mutable public SamplingParams object must not leave stale device knobs."""
+    worker = object.__new__(ModelWorker)
+    worker._device = "cpu"
+    worker._sampling_key = None
+    worker._sampling = None
+    params = SamplingParams(temperature=0.8)
+
+    first = worker._batched_sampling((params,))
+    params.temperature = 0.0
+    second = worker._batched_sampling((params,))
+
+    assert first is not second
+    assert not first.all_greedy
+    assert second.all_greedy
 
 
 class TestFirstChunkPlans:
