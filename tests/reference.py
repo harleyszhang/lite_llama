@@ -10,6 +10,8 @@ Usage:
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import torch
 import torch.nn.functional as F
 
@@ -155,6 +157,127 @@ def swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     reference does too — an fp16 sigmoid drifts enough to mask real errors.
     """
     return (F.silu(gate.float()) * up.float()).to(gate.dtype)
+
+
+def fused_moe_reference(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    *,
+    act_quant: Callable[[torch.Tensor], torch.Tensor] | None = None,
+) -> torch.Tensor:
+    """Reference for :func:`fused_moe`: gather per expert, matmul, scatter-add.
+
+    The kernel reaches the same result by sorting token slots into per-expert runs
+    and padding each run to a row-block, so this loop is what that machinery is
+    allowed to be equivalent to. Everything is fp32 and the expert loop is
+    explicit; the point is that the routing is legible, not that it is fast.
+
+    Quantised weights are *not* handled here. Pass the dequantised weights and
+    keep the dequant in the caller, where it can be written with plain torch ops
+    that do not share code with the kernel under test — a reference that called
+    the kernel's own unpacking would certify it against itself.
+
+    Args:
+        hidden_states: ``[num_tokens, hidden]`` activations.
+        w1: ``[E, 2 * intermediate, hidden]`` fused gate/up weights, float.
+        w2: ``[E, hidden, intermediate]`` down weights, float.
+        topk_weights: ``[num_tokens, top_k]`` routing weights.
+        topk_ids: ``[num_tokens, top_k]`` expert indices.
+        act_quant: Round-trip applied to each GEMM's *activation* operand, for
+            ``fused_moe_w8a8_fp8`` where the activation is quantised too. It is a
+            round trip (quantise then dequantise) rather than a byte tensor
+            because the reference multiplies in fp32 throughout: what has to be
+            reproduced is the rounding, not the storage. ``None``, the
+            weight-only default, leaves the activations exact.
+
+            Applying it to the whole ``[num_tokens, hidden]`` input before the
+            gather is equivalent to applying it per gathered row, which is what
+            the kernel does: the round trip is per row, and a gather copies rows
+            without changing their amax.
+
+    Returns:
+        ``[num_tokens, hidden]`` fp32 output, summed over the ``top_k`` slots.
+    """
+    x = hidden_states.float()
+    if act_quant is not None:
+        x = act_quant(x)
+    inter = w1.shape[1] // 2
+    out = torch.zeros_like(x)
+
+    flat_ids = topk_ids.reshape(-1)
+    flat_weights = topk_weights.reshape(-1).float()
+    # Slot i belongs to token i // top_k, the same mapping the kernel applies as
+    # ``offs_token // top_k``.
+    token_of_slot = torch.arange(x.shape[0], device=x.device).repeat_interleave(topk_ids.shape[1])
+
+    for e in flat_ids.unique():
+        sel = flat_ids == e
+        rows = token_of_slot[sel]
+        gate_up = x[rows] @ w1[e].float().T
+        h = F.silu(gate_up[:, :inter]) * gate_up[:, inter:]
+        if act_quant is not None:
+            # The kernel quantises the silu output per slot row before GEMM2, so
+            # the second rounding has to be modelled too, or the reference would
+            # be tighter than anything the kernel can achieve.
+            h = act_quant(h)
+        # index_add_ rather than indexed assignment: a token routed to top_k
+        # experts accumulates one contribution per expert.
+        out.index_add_(0, rows, (h @ w2[e].float().T) * flat_weights[sel, None])
+    return out
+
+
+#: The eight e2m1 magnitudes, indexed by the code's low three bits ``ee.m``.
+#: ``ee == 0`` is the subnormal row (``{0, 0.5}``); above it the value is
+#: ``2**(ee-1) * (1 + m/2)``.
+_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+
+
+def nvfp4_dequant(
+    packed: torch.Tensor,
+    block_scale: torch.Tensor,
+    global_scale: torch.Tensor,
+    block: int = 16,
+) -> torch.Tensor:
+    """Reference reconstruction of an NVFP4 weight, for :func:`nvfp4_matmul`.
+
+    Deliberately shares nothing with the kernel: the nibble becomes a value by
+    indexing an explicit eight-entry table, where the kernel assembles an fp32
+    bit pattern, and the block scale is widened by ``view(float8_e4m3fn)``, where
+    the kernel uses a shift-based bit trick plus a compensating factor of 256.
+    Two independent decoders agreeing is the evidence; one decoder checked
+    against itself is not.
+
+    ``.view(torch.float4_e2m1fn_x2)`` looks like it would shorten this and must
+    not be used: torch 2.13 accepts the view but ``.to(torch.float32)`` on the
+    result raises a device-side assert, so it cannot serve as a reference.
+
+    Args:
+        packed: ``[N, K // 2]`` uint8, two e2m1 nibbles per byte, low nibble at
+            the even k index.
+        block_scale: ``[N, K // block]`` uint8 e4m3 bit patterns.
+        global_scale: One-element fp32 tensor.
+        block: Weight elements per block scale.
+
+    Returns:
+        ``[N, K]`` fp32 reconstruction.
+    """
+    values = torch.tensor(_E2M1_VALUES, dtype=torch.float32, device=packed.device)
+
+    low = packed & 0xF
+    high = (packed >> 4) & 0xF
+    # Interleave back to k order: stacking on a new trailing axis and flattening
+    # it puts low at even k, high at odd, which is the packing convention.
+    codes = torch.stack([low, high], dim=-1).flatten(-2).long()
+
+    magnitude = values[codes & 0x7]
+    w = torch.where(codes & 0x8 != 0, -magnitude, magnitude)
+
+    n, k = w.shape
+    scales = block_scale.view(torch.float8_e4m3fn).float() * global_scale.float().reshape(())
+    return (w.unflatten(-1, (k // block, block)) * scales.unsqueeze(-1)).reshape(n, k)
 
 
 def rope_half_split(

@@ -104,7 +104,15 @@ class W8A8Fp8LinearMethod(LinearMethodBase):
 
 
 class W8A8Fp8MoEMethod(FusedMoEMethodBase):
-    """W8A8 fp8 stacked experts: fp8 weights + per-token fp8 activations through grouped GEMM."""
+    """W8A8 fp8 stacked experts: fp8 weights + per-token fp8 activations through grouped GEMM.
+
+    The entry point is what separates this from :class:`~.fp8.Fp8MoEMethod`, whose
+    weights are byte-identical: ``fused_moe_w8a8_fp8`` quantises the activation
+    and runs the fp8 tensor cores, ``fused_moe`` widens the expert tile to bf16
+    and leaves the activation alone. The two methods used to call the same
+    function with the same arguments, which made the ``w8a8_fp8`` name a claim the
+    code did not honour.
+    """
 
     def create_weights(self, block: nn.Module) -> dict[str, nn.Parameter]:
         config: W8A8Fp8Config = block.quant  # type: ignore[assignment]
@@ -132,9 +140,9 @@ class W8A8Fp8MoEMethod(FusedMoEMethodBase):
         }
 
     def apply(self, block, x, topk_weights, topk_ids) -> torch.Tensor:
-        from ...kernels import fused_moe
+        from ...kernels import fused_moe_w8a8_fp8
 
-        return fused_moe(
+        return fused_moe_w8a8_fp8(
             x,
             block.experts["gate_up_proj"],
             block.experts["down_proj"],

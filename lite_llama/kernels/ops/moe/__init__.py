@@ -1,8 +1,23 @@
 """MoE domain: the fused expert GEMMs, one row per implementation.
 
 Registers the domain's spec rows and re-exports the grouped-GEMM entry
-point :func:`~lite_llama.kernels.ops.moe.fused_moe.fused_moe` plus its
+points :func:`~lite_llama.kernels.ops.moe.fused_moe.fused_moe` and
+:func:`~lite_llama.kernels.ops.moe.fused_moe.fused_moe_w8a8_fp8` plus the
 alignment helper.
+
+The first native row covers every *weight-only* scheme on purpose: ``fused_moe``
+derives the expert format from ``w1.dtype`` (uint8 fp8-e4m3 / int8 / packed
+int32) rather than from a flag, so splitting that row per scheme would be one
+spec claim per branch of the same dispatch the kernel already does internally.
+
+``w8a8_fp8`` is the exception and therefore its own row: it quantises the
+activation too, and no dtype can say so — weight-only fp8 and W8A8 fp8 both
+store ``uint8`` experts. The scheme is the only thing that distinguishes them, so
+the scheme has to pick the row, or dispatching ``w8a8_fp8`` would quietly return
+the weight-only kernel.
+
+DeepGEMM's grouped variant is the sm90+ contender — same grouped-contiguous
+semantics, Hopper tensor cores, unverified until it runs on real hardware.
 
 Usage:
     from lite_llama.kernels import fused_moe
@@ -27,12 +42,25 @@ register(
         schemes=(
             "unquantized",
             "fp8",
-            "w8a8_fp8",
             "w8a8_int8",
             "blockwise_int8",
             "awq",
             "gptq",
         ),
+        golden=NATIVE_BASELINE,
+    )
+)
+register(
+    KernelSpec(
+        name="native/fused_moe_w8a8_fp8",
+        op="moe",
+        backend="native",
+        target="lite_llama.kernels.ops.moe.fused_moe:fused_moe_w8a8_fp8",
+        # No capability floor, matching ``native/linear_w8a8_fp8``: sm89+ takes
+        # the fp8 MMA and everything below widens both operands by bit trick, so
+        # the row is correct everywhere and only its speed depends on the device.
+        dtypes=("bf16", "fp16"),
+        schemes=("w8a8_fp8",),
         golden=NATIVE_BASELINE,
     )
 )

@@ -5,7 +5,8 @@ weights per block — and the kernel multiplies in fp8 with fp32
 accumulation, applying scales in the epilogue.
 
 Usage:
-    y = fp8_matmul(qx, x_scale, qweight, weight_scale_inv)
+    qx, x_scale = fp8_quantize_per_token(x)
+    y = fp8_matmul(qx, x_scale, qweight, weight_scale_inv, group_n=1, group_k=K)
 """
 
 from __future__ import annotations
@@ -19,6 +20,130 @@ from .w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
 #: Exponent correction when *both* operands went through the e4m3 -> fp16 bit
 #: trick: each is short a factor of 256, so the product is short 256**2.
 _FP8_BIT_TRICK_SCALE_SQ = FP8_E4M3_BIT_TRICK_SCALE * FP8_E4M3_BIT_TRICK_SCALE
+
+#: Largest finite magnitude of e4m3. Mirrors
+#: ``lite_llama.modules.quantization.utils.FP8_E4M3_MAX``; the two must agree,
+#: which ``tests/kernels/test_quantization.py`` checks by comparing the two
+#: quantisers' scales, which are exactly ``amax / FP8_E4M3_MAX``.
+FP8_E4M3_MAX = 448.0
+
+#: Elements one program of :func:`_quantize_fp8_per_token_kernel` handles per
+#: pass. A row is walked in tiles rather than loaded whole so that a 9728-wide
+#: FFN row does not need 38 KB of registers per program.
+_QUANT_BLOCK_K = 1024
+
+
+# --------------------------------------------------------------------------- #
+# Per-token activation quantisation
+# --------------------------------------------------------------------------- #
+@triton.jit
+def _quantize_fp8_per_token_kernel(
+    x_ptr,
+    q_ptr,
+    s_ptr,
+    K,
+    stride_xm,
+    stride_qm,
+    FP8_MAX: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Quantise one row of ``x`` to e4m3 bytes with its own scale.
+
+    Two passes over the row, both inside one program: the amax must be known
+    before any element can be scaled, and keeping both passes here is what makes
+    the scale a register rather than a round trip through HBM. The row is
+    re-read from L2 on the second pass, which is why the traffic is counted as
+    one read even though the kernel issues two.
+    """
+    row = tl.program_id(0)
+    x_row = x_ptr + row * stride_xm
+
+    amax = 0.0
+    for k0 in range(0, K, BLOCK_K):
+        offs = k0 + tl.arange(0, BLOCK_K)
+        x = tl.load(x_row + offs, mask=offs < K, other=0.0).to(tl.float32)
+        amax = tl.maximum(amax, tl.max(tl.abs(x)))
+
+    # An all-zero row would divide by zero; 1.0 leaves it exactly zero instead.
+    scale = tl.where(amax > 0.0, amax / FP8_MAX, 1.0)
+    tl.store(s_ptr + row, scale)
+
+    q_row = q_ptr + row * stride_qm
+    for k0 in range(0, K, BLOCK_K):
+        offs = k0 + tl.arange(0, BLOCK_K)
+        mask = offs < K
+        x = tl.load(x_row + offs, mask=mask, other=0.0).to(tl.float32)
+        q = x / scale
+        # The bytes match the torch quantiser everywhere except on an exact tie
+        # (a quotient of 84.0, halfway between the e4m3 codes 80 and 88): the
+        # hardware cvt takes it the other way from torch's software cast — one
+        # code, about one element in 30k. Not slack in ``/``: forcing correctly
+        # rounded division (``tl.fdiv(..., ieee_rounding=True)``) changed zero
+        # bytes and zero microseconds, so the tie is genuine.
+        # ``test_fp8_quantize_per_token_matches_torch_helper`` gates that bound.
+        #
+        # amax/FP8_MAX makes the clamp a no-op mathematically; it stays as the
+        # guard against a non-finite input turning into a NaN byte pattern.
+        q = tl.minimum(tl.maximum(q, -FP8_MAX), FP8_MAX)
+        tl.store(q_row + offs, q.to(tl.float8e4nv).to(tl.uint8, bitcast=True), mask=mask)
+
+
+def fp8_quantize_per_token(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantise activations to e4m3 bytes, one scale per row, in one launch.
+
+    The torch spelling of this (``modules.quantization.utils.quantize_fp8_per_token``)
+    is a chain of about eight elementwise ops, and at decode shapes the chain's
+    launch overhead *is* the cost: measured at a shape-independent 45-55 us on an
+    H100, against a 20-32 us fp8 GEMM. That made the whole ``w8a8_fp8`` scheme
+    slower than bf16 cuBLAS at ``m=1`` for reasons that had nothing to do with
+    fp8. One kernel removes it (see ``benchmarks/kernels/bench_quant_gemm.py``,
+    whose ``ablation: fp8_matmul only`` row is where that decomposition came
+    from).
+
+    Contract-identical to the torch helper, so either can serve the other's
+    callers (bytes agree except on exact e4m3 ties, see the kernel), and no host
+    synchronisation anywhere — a MoE layer holding this on its critical path must
+    stay capturable into a CUDA graph.
+
+    Args:
+        x: ``[..., K]`` float activations. Leading dims are flattened to rows.
+
+    Returns:
+        ``(qx, scales)`` with ``qx`` the ``uint8`` e4m3 bit pattern shaped like
+        ``x`` and ``scales`` ``[..., 1]`` fp32.
+    """
+    if torch.cuda.get_device_capability(x.device) < (8, 9):
+        # Triton cannot emit an e4m3 cast below sm89, and there is no cheap bit
+        # trick in this direction (rounding and subnormals both need handling),
+        # so pre-Hopper keeps the torch path. It is the slow one, but fp8 W8A8
+        # has no native MMA there either — the format is not the fast choice on
+        # that hardware to begin with.
+        from ....modules.quantization.utils import quantize_fp8_per_token
+
+        return quantize_fp8_per_token(x)
+
+    k = x.shape[-1]
+    flat = x.reshape(-1, k)
+    if flat.stride(-1) != 1:
+        flat = flat.contiguous()
+    m = flat.shape[0]
+
+    qx = torch.empty_like(flat, dtype=torch.uint8)
+    scale = torch.empty(m, dtype=torch.float32, device=x.device)
+    _quantize_fp8_per_token_kernel[(m,)](
+        flat,
+        qx,
+        scale,
+        k,
+        flat.stride(0),
+        qx.stride(0),
+        # Passed in rather than read from the module: a @triton.jit body can only
+        # close over constexpr globals, and one definition of the range limit is
+        # worth more here than saving an argument.
+        FP8_MAX=FP8_E4M3_MAX,
+        BLOCK_K=min(triton.next_power_of_2(k), _QUANT_BLOCK_K),
+    )
+    return qx.reshape(x.shape), scale.reshape(*x.shape[:-1], 1)
 
 
 # --------------------------------------------------------------------------- #
