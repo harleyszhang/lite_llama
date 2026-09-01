@@ -86,6 +86,17 @@ class OpRegistry:
         """Every registered spec (``explain``/tooling surface)."""
         return tuple(self._by_name.values())
 
+    def decisions(self) -> tuple:
+        """Decisions dispatch() has taken so far, in first-use order.
+
+        The read side of the cache :meth:`notify_change` invalidates. A tool that
+        drove one layer's forward pass can then report which implementations that
+        layer actually reached for, rather than re-deriving the ranking and hoping
+        it asks with the same key — the shape and dtype are part of the key, so
+        guessing them is how a report ends up naming a kernel that never ran.
+        """
+        return tuple(self._decisions.values())
+
     def native_floor(self, op: str) -> KernelSpec | None:
         """The first native row for ``op`` — the never-failing baseline."""
         return next((s for s in self._by_op.get(op, ()) if s.backend == "native"), None)
