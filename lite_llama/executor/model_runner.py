@@ -10,12 +10,18 @@ Usage:
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import torch
 import torch.nn as nn
 
-from ..distributed.parallel_state import all_reduce_min, divide, get_tp_world_size
+from ..distributed.parallel_state import (
+    all_ranks_agree,
+    all_reduce_min,
+    divide,
+    get_tp_world_size,
+)
 from ..kernels import update_kv_index
 from ..models.config import ModelConfig
 from ..models.registry import ModelRegistry, ModelSpec
@@ -24,6 +30,7 @@ from .attention_metadata import AttentionMetadata
 from .cuda_graph import (
     DEFAULT_BATCH_SIZES,
     DEFAULT_SEQ_LEN_BUCKETS,
+    TP_GRAPH_PARITY_ATOL,
     CUDAGraphManager,
     estimate_capture_workspace,
 )
@@ -32,6 +39,12 @@ from .loader import DefaultModelLoader, ModelLoader
 from .slot_batch import SlotBatch
 
 logger = get_logger(__name__)
+
+#: Set to ``0`` to keep the pre-TP-graph behaviour: eager decode whenever
+#: ``tp_size > 1``. A kill-switch rather than a config field because the failure it
+#: guards against is a hang, and somebody meeting one needs a way out that does not
+#: involve editing code.
+_TP_GRAPH_ENV = "LITE_LLAMA_TP_CUDA_GRAPH"
 
 
 class ModelRunner:
@@ -311,16 +324,28 @@ class ModelRunner:
         the workload may never produce. The KV profiler must have reserved
         with ``cuda_graph_lazy`` too, or on-demand captures fight the cache for
         the workspace that eager startup would have withheld.
+
+        Under tensor parallelism the captured region contains the blocks'
+        all-reduce, so the graphs are only installed once they pass the checks in
+        :meth:`_tp_graphs_are_safe`. Everything below the kill-switch runs on every
+        rank, and the collectives are reached from decisions every rank computes
+        identically — the grid is derived from ``max_seq_len`` and from a
+        ``max_request_num`` that came out of an all-reduce, and the capture result
+        is folded into the fingerprint rather than being allowed to return early.
+        A rank that took the early exit its peers did not would leave them waiting
+        in a consensus collective, which is the exact failure these gates exist to
+        prevent.
         """
-        if get_tp_world_size() > 1:
-            # A captured graph would have to replay the block's NCCL all-reduce,
-            # which only works if every rank captures the identical sequence and
-            # replays it in lockstep; a mismatch hangs in the collective instead of
-            # raising. Eager decode under TP is the safe default.
-            logger.warning("CUDA Graph is disabled under tensor parallelism; running eager.")
-            return
         if self._graph_manager is not None:
             return  # idempotent
+
+        tp_size = get_tp_world_size()
+        if tp_size > 1 and os.environ.get(_TP_GRAPH_ENV, "1") == "0":
+            logger.warning(
+                "%s=0: CUDA Graph disabled under tensor parallelism; running eager.",
+                _TP_GRAPH_ENV,
+            )
+            return
 
         seq_len_buckets = tuple(b for b in seq_len_buckets if b <= self.max_seq_len)
         if not seq_len_buckets:
@@ -354,6 +379,7 @@ class ModelRunner:
             device=self.device,
             lazy=lazy,
         )
+        captured = True
         try:
             if lazy:
                 manager.capture_seed()
@@ -361,10 +387,70 @@ class ModelRunner:
                 manager.capture_all()
         except torch.cuda.OutOfMemoryError:
             # A failed capture may leave a half-open graph; dropping the manager
-            # is safe because replay state is only installed on success.
+            # is safe because replay state is only installed on success. Under TP
+            # this cannot simply return: the peers are on their way to a
+            # collective, so the failure has to be *reported* into it instead.
             logger.warning("CUDA graph capture ran out of memory; falling back to eager decode")
+            captured = False
+
+        if tp_size > 1 and not self._tp_graphs_are_safe(manager, captured):
+            manager.discard()
+            return
+        if not captured:
             return
         self._graph_manager = manager
+
+    def _tp_graphs_are_safe(self, manager: CUDAGraphManager, captured: bool) -> bool:
+        """Whether this rank's captured graphs may serve traffic. Same answer everywhere.
+
+        Two checks, in this order because the first is what makes the second
+        well-defined:
+
+        1. **Grid agreement.** Every rank contributes a fingerprint of what it
+           captured, or ``0`` if it captured nothing. Ranks that disagree all
+           return ``False`` together — an asymmetric grid means one rank replays
+           where another runs eager, and the replayed all-reduce then waits
+           forever. A grid of ``0`` fails even when unanimous, so passing this
+           establishes that every rank *has* graphs and the parity check below is
+           entered by all of them or none.
+        2. **Numerical parity.** Each rank compares every captured graph against
+           an eager step on the same synthetic input and keeps the graphs only if
+           all ranks are within :data:`TP_GRAPH_PARITY_ATOL`. Reduced with a
+           minimum so one rank's failure retires the graphs everywhere; a group
+           where half the ranks replay is the hang again.
+
+        Both results are functions of a collective's output, which is why every
+        rank branches the same way without a second round of agreement.
+        """
+        fingerprint = manager.grid_fingerprint() if captured else 0
+        if not all_ranks_agree(fingerprint) or fingerprint == 0:
+            logger.warning(
+                "tensor-parallel ranks captured different CUDA graph grids "
+                "(this rank: %d); dropping graphs on every rank and decoding eager",
+                fingerprint,
+            )
+            return False
+
+        error = manager.max_parity_error(self.vocab_size)
+        # Phrased as ``error <= tol`` rather than ``not error > tol`` so that a NaN
+        # difference — the signature of a graph reading freed memory — fails the
+        # gate instead of slipping through a negated comparison.
+        local_ok = error <= TP_GRAPH_PARITY_ATOL
+        if all_reduce_min(int(local_ok)) != 1:
+            logger.warning(
+                "CUDA graph replay disagrees with eager decode by %.3e (tolerance %.1e) "
+                "on at least one rank; dropping graphs and decoding eager",
+                error,
+                TP_GRAPH_PARITY_ATOL,
+            )
+            return False
+
+        logger.info(
+            "TP CUDA graphs verified: worst graph-vs-eager logit difference %.3e (tolerance %.1e)",
+            error,
+            TP_GRAPH_PARITY_ATOL,
+        )
+        return True
 
     def forward(
         self,

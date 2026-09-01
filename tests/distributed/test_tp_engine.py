@@ -113,9 +113,11 @@ def _probe(spec: dict[str, Any], results: mp.Queue) -> None:
             max_seq_len=_MAX_SEQ_LEN,
             max_gpu_num_blocks=_KV_TOKENS,
             max_num_seqs=_MAX_NUM_SEQS,
-            # Eager on both sides: TP decodes eager anyway (a captured graph would
-            # replay collectives), and comparing eager against a graph would fold
-            # a second variable into a difference. tests/golden owns that one.
+            # Eager on both sides. Not because a two-rank capture is unsafe --
+            # tests/distributed/test_tp_cuda_graph.py asserts that it is not -- but
+            # because this file is measuring one variable, the shards, and holding
+            # a graph engine against an eager one would fold a second one into
+            # every difference.
             use_cuda_graph=False,
             tensor_parallel_size=spec["tp_size"],
         )

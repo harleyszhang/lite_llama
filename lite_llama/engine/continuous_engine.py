@@ -336,12 +336,16 @@ class ContinuousBatchingEngine:
             max_num_batched_tokens: Padded token budget for one prefill group.
             max_gpu_num_blocks: Manual KV-cache size in tokens; profiled when ``None``.
             device: Torch device string.
-            use_cuda_graph: Capture decode graphs. Continuous batching pads
-                odd batch sizes onto the captured grid, so most steps stay on
-                the graph path. Ignored above ``tensor_parallel_size`` 1, where
-                captured collectives would be unsafe.
-            quantization: Runtime weight quantisation, forwarded to the engine —
-                orthogonal to batching.
+            use_cuda_graph: Capture decode graphs. Worth keeping on: continuous
+                batching pads odd batch sizes onto the captured grid, so most
+                steps stay on the graph path. Also honoured above
+                ``tensor_parallel_size`` 1, where the capture takes the sharded
+                layers' all-reduce with it — see
+                :meth:`~lite_llama.executor.model_runner.ModelRunner.enable_cuda_graph`
+                for the checks that decide whether those graphs are kept.
+            quantization: Runtime weight quantisation, forwarded to the engine.
+                Orthogonal to batching -- it changes the linear layers, not the
+                KV cache or the schedule.
             tensor_parallel_size: GPUs this replica's weights are split over.
                 Above 1, ranks 1.. spawn as followers and every step's plan is
                 broadcast to them; this process stays rank 0. If this process
@@ -398,9 +402,9 @@ class ContinuousBatchingEngine:
             "tokenizer_path": tokenizer,
             "max_seq_len": max_seq_len,
             "max_gpu_num_blocks": max_gpu_num_blocks,
-            # A captured graph would replay a sharded layer's collectives, so
-            # tensor parallelism decodes eager.
-            "use_cuda_graph": use_cuda_graph and tensor_parallel_size == 1,
+            # Above tensor_parallel_size 1 the captured all-reduce is only
+            # replayed once the startup gates in ``ModelRunner`` accept it.
+            "use_cuda_graph": use_cuda_graph,
             "quantization": quantization,
             "kv_cache_dtype": kv_cache_dtype,
             "cuda_graph_lazy": cuda_graph_lazy,

@@ -106,6 +106,14 @@ def init_parallel(
     world_size = tp_size * dp_size
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", str(master_port))
+    # Decode replays a CUDA graph while prefill stays eager, so captured and
+    # non-captured collectives share one communicator for the life of the process.
+    # NCCL only supports that mix when this is 1 — with it off, a graph-captured
+    # all-reduce and an eager one can end up using the same internal buffers and
+    # the result is corrupt activations or a hang, not an error. 1 is NCCL's own
+    # default; the line is here so the requirement is stated where the group is
+    # built, and ``setdefault`` leaves a deliberate override alone.
+    os.environ.setdefault("NCCL_GRAPH_MIXING_SUPPORT", "1")
     if not dist.is_initialized():
         dist.init_process_group(backend=backend, rank=global_rank, world_size=world_size)
     # Every rank must create every group, in the same order, even the ones it is not
@@ -439,3 +447,61 @@ def all_reduce_min(value: int) -> int:
     dist.all_reduce(tensor, op=dist.ReduceOp.MIN, group=_TP_GROUP)
     CollectiveStats.record(Collective.ALL_REDUCE_MIN, _payload(tensor))
     return int(tensor.item())
+
+
+def all_ranks_agree(value: int) -> bool:
+    """Whether every TP rank passed the same ``value``. ``True`` when TP is off.
+
+    A consensus primitive rather than a reduction, for decisions that must come
+    out the same on every rank *or not be taken at all*. Whether to keep a set of
+    captured CUDA graphs is one: the graphs contain collectives, so ranks that
+    disagree about which graph to replay do not produce different answers — they
+    stop, one of them waiting in an all-reduce its peer never issues. A caller can
+    therefore branch on this result and know its peers branch with it.
+
+    Both extremes come back from one collective: reducing ``[value, -value]`` with
+    MIN yields ``min`` and ``-max``, which are equal exactly when every rank
+    contributed the same number.
+    """
+    if _TP_WORLD_SIZE <= 1:
+        return True
+    on_gpu = torch.cuda.is_available()
+    device = torch.device("cuda", torch.cuda.current_device()) if on_gpu else None
+    tensor = torch.tensor([value, -value], dtype=torch.int64, device=device)
+    dist.all_reduce(tensor, op=dist.ReduceOp.MIN, group=_TP_GROUP)
+    CollectiveStats.record(Collective.ALL_REDUCE_MIN, _payload(tensor))
+    low, negated_high = tensor.tolist()
+    return low == -negated_high
+
+
+def warmup_collectives() -> None:
+    """Force this rank's communicator into existence. No-op when TP is off.
+
+    NCCL builds a communicator's device resources on its first collective, and a
+    CUDA graph capture cannot allocate — so the first all-reduce inside a capture
+    region is the one that fails, or worse, hangs while one rank allocates and the
+    others wait. Issuing one throwaway all-reduce beforehand moves that
+    initialisation outside every capture.
+
+    The value is checked rather than discarded: a reduction over ones must come
+    back as the rank count. That makes this a cheap assertion that the group about
+    to be baked into a graph is the group this rank thinks it is — a mismatch
+    found here raises, whereas the same mismatch found during capture surfaces as
+    a hang with no message.
+
+    Not reported to :class:`CollectiveStats`: every other collective here is
+    traffic a *step* pays, and folding a one-off initialisation into that total
+    would overstate the per-step cost by a constant.
+    """
+    if _TP_WORLD_SIZE <= 1:
+        return
+    on_gpu = torch.cuda.is_available()
+    device = torch.device("cuda", torch.cuda.current_device()) if on_gpu else None
+    probe = torch.ones(1, dtype=torch.float32, device=device)
+    dist.all_reduce(probe, op=dist.ReduceOp.SUM, group=_TP_GROUP)
+    total = int(probe.item())
+    if total != _TP_WORLD_SIZE:
+        raise RuntimeError(
+            f"collective warmup summed {total} over a group of {_TP_WORLD_SIZE} ranks; "
+            "the process group does not span the ranks this process believes it does"
+        )

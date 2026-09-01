@@ -167,14 +167,37 @@ GIF 由 `scripts/gen_collective_gif.py` 生成，驱动的是真实 tp=2 引擎�
 | `tests/distributed/test_vocab_parallel.py` | 13 | CPU + GPU（vocab 分片；2 个需 4 卡） |
 | `tests/distributed/test_qkv_parallel.py` | 17 | CPU（段级切分与权重映射） |
 | `tests/distributed/test_tp_engine.py` | 9 | GPU（需 2 卡，端到端） |
+| `tests/distributed/test_tp_cuda_graph.py` | 11 | GPU（需 2 卡，TP × CUDA graph × 量化） |
 
 端到端那 9 个测试由**两个 spawn 出的 probe 进程**测量，每个宽度一个：父进程从不 `import` CUDA 也不碰 parallel_state，所以一个崩掉的 rank 不会把一个半初始化的 TP 组泄漏给同一 session 里其余测试。加载 checkpoint 和 rendezvous 是唯一昂贵的部分，所以一个 probe 一次采集全部事实（两种分组的答案、executor 类型、子进程数、embedding 字节数、tie 关系），断言只从 report 里读。
 
 其中一个测试专门跑**在线服务**路径：`AsyncLLMEngine(tensor_parallel_size=2)` 并发处理两条请求。它是唯一从**后台线程**发起集合通信的路径（`step()` 由 worker 线程驱动），实测不失步，且答案与离线 tp=2 逐字节一致。
 
+## TP × CUDA Graph
+
+decode graph 在单卡上录的是一串 kernel；在两卡上还把分片层的 all-reduce 一起录进去。这带来一条额外规则：**每个 rank 每一步必须选同一个 graph**。一个 rank 走 eager 而对端 replay，后果不是答案不同，而是**卡死**——对端在等一个永远不会发出的集合通信。所以启用它的代价不在捕获，而在证明各 rank 结构对称。
+
+三件事让它成立：
+
+1. **通信器先于捕获存在。** NCCL 在首次集合通信时才建设备资源，而捕获区内不能分配。`warmup_collectives()` 在每次 capture 前发一次 all-reduce 把这步挪到捕获之外，并顺手校验规约结果等于 rank 数——同一处不匹配若留到捕获中发现，表现是无消息的挂死。`init_parallel` 另外 `setdefault` 了 `NCCL_GRAPH_MIXING_SUPPORT=1`（prefill 永远 eager、decode 走 graph，两类集合通信共用一个通信器）；1 本就是 NCCL 默认值，这行的作用是把要求写在建组的地方。
+2. **网格在上线前对齐。** `ModelRunner.enable_cuda_graph` 捕获完成后，各 rank 用 `all_ranks_agree()` 比对一个 `crc32` 网格指纹；不一致就**全体一起丢弃** graph 回落 eager。指纹为 `0`（=什么都没捕获，含 OOM）即使全体一致也判失败，所以这道闸通过就意味着每个 rank 都**有** graph。OOM 分支不能直接 return——对端正走向同一个集合通信，失败必须**报进去**而不是绕开。
+3. **replay 判定不读任何本地状态。** `_select()` 只看 `input_ids.shape` 与 `atten_info.max_actual_seq_len`，两者都由 driver 广播的同一份 `ModelInput` 推出，因此各 rank 结构对称，不需要每步协商。
+
+之后还有一道**数值闸**：每个已捕获的 `(batch, bucket)` 都跑一次 graph-vs-eager 的合成 decode 比对，取最大 logit 差，用 min 规约合并——任一 rank 超差则全体退回 eager。容差 `TP_GRAPH_PARITY_ATOL = 1e-2` 给 all-reduce 的求和顺序留了余量，但 H100×2 上 bf16 / fp8 / nvfp4 三种方案实测都是 **0.000e+00**：replay 发的是与捕获完全相同的 kernel 序列，逐位一致。写成 `error <= tol` 而不是 `not error > tol`，是为了让 NaN（graph 读到已释放内存的特征）落到失败一侧。
+
+两个开关：
+
+| 环境变量 | 默认 | 作用 |
+|---|---|---|
+| `LITE_LLAMA_TP_CUDA_GRAPH=0` | 未设 | kill-switch，TP 下强制 eager decode，不改代码不重新部署 |
+| `LITE_LLAMA_TP_GRAPH_CHECK=1` | 未设 | 每步 all-reduce 各 rank 选中的 graph（`None` 也有自己的指纹），不一致就抛异常而不是挂死。默认关闭，因为它给 decode 热路径加了一次集合通信，而 graph 存在的目的正是缩短这条路径 |
+
+实测（Qwen2.5-0.5B、H100×2、`max_seq_len=512` → 8 个 graph）：bf16 / fp8 / nvfp4 三种方案下 graph 引擎与 eager 引擎 32 步 greedy **逐字节一致**（单请求与 3 条 padding 到 batch-4 两种分组都比过）。这里要求逐字节，而 `test_tp_engine.py` 只要求共享前缀，差别是真实的：那边是 1 卡对 2 卡，行并行 GEMM + all-reduce 改变了求和顺序，greedy 平局会翻；这边是 2 卡对同样的 2 卡，只有 launch 来自 Python 还是来自 replay 的区别。
+
+`int4`（AWQ）在 TP 下另有约束：group size 128 必须整除分片后的 `in_features`，0.5B 的 896 两分变 448 就不满足。这是 checkpoint 几何的限制，与 graph 无关，int4 × TP × graph 在更宽的模型上由 `benchmarks/bench_quant.py` 覆盖。
+
 ## 当前边界
 
-- **TP 下 decode 走 eager。** 被捕获的 CUDA graph 会连带 replay 分片层发出的 NCCL all-reduce，而那只在"每个 rank 捕获完全相同的序列并锁步 replay"时才成立；不一致的后果是**卡死在集合通信里**而不是抛异常。所以 `tensor_parallel_size > 1` 时 `use_cuda_graph` 被主动关掉（`continuous_engine.py`），而不是留给用户去踩。
 - **`vl-chat` 是单卡的。** 视觉路径还跑在一次性批处理的引擎上，`--tensor-parallel-size > 1` 会直接报错退出——旧的"镜像进程假装 TP"正是这一版删掉的东西，不会为了让参数看起来能用而留着。
 - **vocab 与两个 head 数都必须能被 `tp` 整除**，否则 `divide()` 在构造时就报错（而不是在某个 kernel 里给出错的形状）。
 - **单机。** rendezvous 走 `127.0.0.1`；跨节点需要真正的 `MASTER_ADDR` 与 rank 分配。

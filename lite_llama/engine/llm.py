@@ -15,6 +15,7 @@ from collections.abc import Iterator
 
 from PIL import Image
 
+from ..distributed.parallel_state import get_tp_world_size
 from ..models.config import read_model_type
 from ..models.registry import ModelRegistry, ModelSpec
 from .llm_engine import LLMEngine
@@ -45,10 +46,21 @@ class LLM(LLMEngine):
         use_cuda_graph: Capture decode CUDA graphs. ``None`` (default) enables
             them — the graph only replays decode steps, which are multimodal-free
             (vision tokens already live in the KV cache), so vision towers and
-            DeepStack hooks never appear inside a capture.
+            DeepStack hooks never appear inside a capture. Tensor parallelism is
+            included: a captured region then contains the blocks' all-reduce, and
+            the graphs are only installed after the startup checks in
+            :meth:`~lite_llama.executor.model_runner.ModelRunner.enable_cuda_graph`
+            pass on every rank. Set ``LITE_LLAMA_TP_CUDA_GRAPH=0`` to force eager
+            decoding there instead.
         quantization: Runtime weight quantisation (``"int8"``); ``None`` keeps
             the checkpoint's native format (fp16 or auto-detected fp8).
         tensor_parallel_size: Number of GPUs this replica's weights are split over.
+            Above 1, this process must *already* be a rank of the group (a CLI
+            worker, a DP replica, a test harness): ``LLM`` drives the model with a
+            lockstep batch loop that has no way to hand a follower rank its work,
+            so it cannot start a group of its own. Use
+            :meth:`~lite_llama.engine.continuous_engine.ContinuousBatchingEngine.from_pretrained`,
+            whose executor broadcasts each step's plan, to spawn one.
         data_parallel_size: Accepted only as ``1``. DP replicates the whole model
             across processes, which cannot be done from inside one of them; use
             :class:`~lite_llama.engine.data_parallel.DataParallelEngine`, which owns
@@ -86,12 +98,23 @@ class LLM(LLMEngine):
                 f"instead — it spawns one LLM per replica and routes requests to them"
             )
 
+        # A group this process did not join is a group it cannot drive: the
+        # followers wait for broadcast plans, and this class's generate loop never
+        # sends any. Left unchecked the argument was silently ignored and the run
+        # went single-GPU — which reads as a working TP configuration in a
+        # benchmark table, so it has to be an error rather than a warning.
+        if tensor_parallel_size > 1 and get_tp_world_size() == 1:
+            raise ValueError(
+                f"LLM cannot start a tensor-parallel group: its generate loop does not "
+                f"broadcast plans to follower ranks. Use "
+                f"ContinuousBatchingEngine.from_pretrained(model=..., "
+                f"tensor_parallel_size={tensor_parallel_size}) instead, or construct LLM "
+                f"inside a process that has already joined the group"
+            )
+
         spec = _resolve_spec(model)
         if use_cuda_graph is None:
             use_cuda_graph = True
-        # CUDA graphs are incompatible with TP (NCCL collectives inside the graph)
-        if tensor_parallel_size > 1:
-            use_cuda_graph = False
 
         super().__init__(
             checkpoints_dir=model,
