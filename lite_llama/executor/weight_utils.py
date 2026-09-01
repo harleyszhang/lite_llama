@@ -20,7 +20,7 @@ Usage:
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import torch
@@ -78,6 +78,7 @@ def hf_weights_iterator(
     device: str | torch.device = "cpu",
     dequantize_fp8: bool = True,
     dequant_dtype: torch.dtype = torch.bfloat16,
+    key_filter: Callable[[str], bool] | None = None,
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Stream ``(key, tensor)`` pairs from a checkpoint, tensors already on ``device``.
 
@@ -91,6 +92,12 @@ def hf_weights_iterator(
             scales, or hand both through untouched for a w8a16 model.
         dequant_dtype: Element type widened FP8 weights land in; matches the
             parameters the loader is about to copy into.
+        key_filter: Optional predicate applied to the key *before* the tensor is
+            read. A caller that wants one layer out of a sharded checkpoint
+            (:mod:`lite_llama.tools.harness`) then pays for that layer rather
+            than for the whole model, because the shards are memory-mapped and an
+            unread tensor never leaves the file. Filtering afterwards would not:
+            the read and the host-to-device copy have already happened by then.
 
     Yields:
         Pairs in shard order.
@@ -99,13 +106,17 @@ def hf_weights_iterator(
     logger.info("Loading weights from %d file(s) in %s", len(files), checkpoints_dir)
     for path in files:
         if path.suffix == ".safetensors":
-            yield from _iter_safetensors(path, device, dequantize_fp8, dequant_dtype)
+            yield from _iter_safetensors(path, device, dequantize_fp8, dequant_dtype, key_filter)
         else:
-            yield from _iter_torch_bin(path, device, dequantize_fp8, dequant_dtype)
+            yield from _iter_torch_bin(path, device, dequantize_fp8, dequant_dtype, key_filter)
 
 
 def _iter_safetensors(
-    path: Path, device: str | torch.device, dequantize_fp8: bool, dequant_dtype: torch.dtype
+    path: Path,
+    device: str | torch.device,
+    dequantize_fp8: bool,
+    dequant_dtype: torch.dtype,
+    key_filter: Callable[[str], bool] | None = None,
 ) -> Iterator[tuple[str, torch.Tensor]]:
     from safetensors import safe_open
 
@@ -113,6 +124,8 @@ def _iter_safetensors(
         # safetensors >= 0.6 dropped iteration on the handle; keys() works everywhere.
         keys = set(shard.keys())
         for key in sorted(keys):
+            if key_filter is not None and not key_filter(key):
+                continue
             if key.endswith(_SCALE_SUFFIX):
                 if dequantize_fp8:
                     continue  # consumed alongside its weight below
@@ -135,13 +148,19 @@ def _iter_safetensors(
 
 
 def _iter_torch_bin(
-    path: Path, device: str | torch.device, dequantize_fp8: bool, dequant_dtype: torch.dtype
+    path: Path,
+    device: str | torch.device,
+    dequantize_fp8: bool,
+    dequant_dtype: torch.dtype,
+    key_filter: Callable[[str], bool] | None = None,
 ) -> Iterator[tuple[str, torch.Tensor]]:
     # mmap keeps the shard out of the process's resident set; weights_only rejects
     # the arbitrary-code-execution pickle payloads a downloaded .bin could carry.
     state = torch.load(path, map_location="cpu", mmap=True, weights_only=True)
     scales = {k: v for k, v in state.items() if k.endswith(_SCALE_SUFFIX)}
     for key, tensor in state.items():
+        if key_filter is not None and not key_filter(key):
+            continue
         if key.endswith(_SCALE_SUFFIX):
             if not dequantize_fp8:
                 yield key, tensor.to(device)
