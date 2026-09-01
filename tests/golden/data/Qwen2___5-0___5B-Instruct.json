@@ -1,0 +1,44 @@
+{
+ "single": [
+  " bright, but it also brings new challenges. One of the biggest challenges is the ethical implications of AI. The use of AI in healthcare, for example, raises questions about privacy, data security, and the potential for bias in algorithms. It"
+ ],
+ "single_rp1.1": [
+  " bright, but it also brings new challenges. One of the biggest is that we are not yet ready to fully understand and control our own AI systems. This means that there may be unintended consequences if we don’t take steps to mitigate them.\n"
+ ],
+ "batch_uniform": [
+  " I have a basic knowledge of java and C++. I want to learn python. What should I do? I have a basic knowledge of java and C++. I",
+  " I have a basic understanding of C++ and I want to learn C++ programming. I have a basic understanding of C++ and I want to learn C++"
+ ],
+ "batch_uniform_rp1.1": [
+  " I have a basic knowledge of java and C++. What should I do to learn python? Should I start with the basics or should I go for more advanced topics",
+  " I have a basic understanding of C++ and want to learn more advanced stuff. What are some good resources for learning C++? I'm looking for books,"
+ ],
+ "batch_mixed": [
+  "\n\nI am trying to create a simple program that will take a string and return the number of times the string appears in the string. I have tried using the",
+  " the city of Rome is one of the most important and iconic landmarks in the world. The city has been a center of power, culture, and politics for over"
+ ],
+ "batch_mixed_rp1.1": [
+  "\n\nI am trying to create a simple program that will take in a string and print out the number of vowels in it. I have tried using the following code",
+  " the city of Rome is one of the most important and iconic landmarks in the world. The city has been a center of power, culture, and politics for over"
+ ],
+ "batch8": [
+  " to be happy. I believe that happiness is a feeling of contentment, fulfillment, and pleasure. I believe that happiness is a feeling of being in a good",
+  " it is a very popular model in the field of computer vision. The architecture of VGG is very simple, it consists of 3 convolutional layers, each",
+  " The American Civil War was a conflict that took place from 1861 to 1865, during which the United States was divided into two",
+  " The first president of the United States was George Washington. He served from 1789 to 1797. Washington was a military leader and",
+  " I want to learn C++ and I want to learn it from the ground up. I want to learn it from the ground up. I want to learn it",
+  " Sure, I can help you learn Python! Here are some code examples to get you started:\n\n1. **Introduction to Python:**\n   - **Syntax:**",
+  " model, and explain the key differences between transformer and RNN, and how they are used in natural language processing? Please provide a detailed explanation of the key components",
+  ", and how to use it in python\n\nSure! Let's start with the basics of CNNs (Convolutional Neural Networks) and then move on to"
+ ],
+ "batch8_rp1.1": [
+  " to be happy. I believe that happiness is a feeling of contentment, fulfillment and satisfaction. I believe that the meaning of life is to live my life with",
+  " it is a very popular model in the field of computer vision. The architecture consists of several convolutional layers, each with different kernel sizes and stride lengths. In",
+  " The American Civil War was a conflict that took place from 1861 to 1865, during which the United States of America was divided",
+  " The first president of the United States was George Washington. He served from 1789 to 1797 and is widely considered one of the",
+  " I want to learn C++ and have a good understanding of the language. What are some resources you would recommend? Learning C++ can be challenging, but with",
+  " Sure, I can help you learn Python! Here are some code examples to get you started:\n\n1. **Introduction to Python:**\n   - [Python Basics",
+  " model, and explain the key differences between transformer models and other deep learning architectures like RNNs and LSTMs. Additionally, provide a brief comparison of their",
+  ", and how to use it in python\n\nSure! Let's start with the basics of CNNs (Convolutional Neural Networks) and then move on to"
+ ]
+}

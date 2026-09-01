@@ -118,6 +118,8 @@ def evaluate_gsm8k(
     use_cuda_graph: bool | None = None,
     device: str = "cuda",
     progress: bool = True,
+    quantization: str | None = None,
+    kv_cache_dtype: str = "auto",
 ) -> EvalResult:
     """Load the checkpoint, run GSM8K against it and score the completions.
 
@@ -138,6 +140,10 @@ def evaluate_gsm8k(
         use_cuda_graph: Passed through to the engine; ``None`` keeps its default.
         device: Torch device string.
         progress: Show a progress bar.
+        quantization: Runtime weight quantisation, or ``None`` for the
+            checkpoint's own format. Recorded in ``extra`` so a score cannot be
+            reported without the configuration that produced it.
+        kv_cache_dtype: ``"auto"`` or an fp8 spelling. Also recorded in ``extra``.
     """
     train, test = dataset.load_gsm8k()
     prompts, labels = build_prompts(train, test, num_questions=num_questions, num_shots=num_shots)
@@ -149,6 +155,8 @@ def evaluate_gsm8k(
         max_gpu_num_blocks=max_gpu_num_blocks or kv_cache_tokens(batch_size, max_seq_len),
         use_cuda_graph=use_cuda_graph,
         device=device,
+        quantization=quantization,
+        kv_cache_dtype=kv_cache_dtype,
     ) as llm:
         if use_chat_template:
             prompts = [as_user_turn(llm, p) for p in prompts]
@@ -172,7 +180,12 @@ def evaluate_gsm8k(
         invalid_rate=invalid_rate,
         latency_s=run.latency_s,
         generated_tokens=run.generated_tokens,
-        extra={"benchmark": "gsm8k", "chat_template": str(use_chat_template)},
+        extra={
+            "benchmark": "gsm8k",
+            "chat_template": str(use_chat_template),
+            "quantization": quantization or "none",
+            "kv_cache_dtype": kv_cache_dtype,
+        },
     )
 
 
@@ -195,6 +208,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="wrap prompts as a user turn (instruction-tuned checkpoints)",
     )
     ap.add_argument("--device", default="cuda")
+    ap.add_argument(
+        "--quantization",
+        help="runtime weight quantisation (fp8 / int8 / int4 / nvfp4 / smoothquant)",
+    )
+    ap.add_argument(
+        "--kv-cache-dtype",
+        default="auto",
+        help="KV-cache element type: auto (fp16) or fp8_e4m3",
+    )
     ap.add_argument("--save-results", help="append the run to this JSON lines file")
     args = ap.parse_args(argv)
 
@@ -208,6 +230,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_gpu_num_blocks=args.max_gpu_num_blocks,
         use_chat_template=args.chat_template,
         device=args.device,
+        quantization=args.quantization,
+        kv_cache_dtype=args.kv_cache_dtype,
     )
 
     print(f"\nGSM8K — {args.model_dir}")

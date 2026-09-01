@@ -135,6 +135,8 @@ def build_llm(
     max_gpu_num_blocks: int | None = None,
     use_cuda_graph: bool | None = None,
     device: str = "cuda",
+    quantization: str | None = None,
+    kv_cache_dtype: str = "auto",
 ) -> Iterator[LLM]:
     """Build an :class:`~lite_llama.LLM` and free the device on the way out.
 
@@ -142,6 +144,11 @@ def build_llm(
     last name is not enough to release the weights; without the explicit
     collection a second checkpoint built in the same process profiles a KV cache
     against memory the first one still holds.
+
+    ``quantization`` and ``kv_cache_dtype`` default to the unquantised path, so a
+    benchmark that does not name them scores the same configuration it always
+    did. They exist because a task score is the only evidence that separates a
+    quantisation that is numerically defensible from one that merely runs.
     """
     llm = LLM(
         model=str(model_dir),
@@ -149,6 +156,8 @@ def build_llm(
         max_gpu_num_blocks=max_gpu_num_blocks,
         use_cuda_graph=use_cuda_graph,
         device=device,
+        quantization=quantization,
+        kv_cache_dtype=kv_cache_dtype,
     )
     try:
         yield llm
