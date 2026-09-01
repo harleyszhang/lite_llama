@@ -1,8 +1,9 @@
 """Numeric parity tests for the Qwen3-MoE support.
 
-Block-fp8 dequantisation round-trips, fp8 scale-table consumption, and
-the HF-config plumbing that marks layers MoE vs dense — plus a decoder
-step against a hand-built tiny config.
+Block-fp8 dequantisation round-trips, fp8 scale-table consumption, the
+HF-config plumbing that marks layers MoE vs dense, a decoder step
+against a hand-built tiny config, and a model-level fp8 MoE forward
+through the runtime ``--quantization fp8`` scheme.
 
 Usage:
     pytest tests/models/test_qwen3_moe.py
@@ -186,6 +187,27 @@ def test_route_matches_hf(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+def _prefill_metadata(seq_len: int):
+    """A single-sequence prefill batch over a freshly zeroed cache.
+
+    Prefill does not read the cache, so the buffer's contents do not enter the
+    result; it exists because the layers write into it.
+    """
+    from lite_llama.executor.model_runner import AttentionMetadata
+
+    num_kv_heads, head_dim = _TINY_HF_CONFIG["num_key_value_heads"], _TINY_HF_CONFIG["head_dim"]
+    return AttentionMetadata(
+        kv_buffer=[
+            torch.zeros(seq_len, 2 * num_kv_heads, head_dim, dtype=torch.float16, device="cuda")
+            for _ in range(_TINY_HF_CONFIG["num_hidden_layers"])
+        ],
+        cur_select_index=torch.arange(seq_len, dtype=torch.int32, device="cuda"),
+        b_start_loc=torch.zeros(1, dtype=torch.int32, device="cuda"),
+        b_seq_len=torch.tensor([seq_len], dtype=torch.int32, device="cuda"),
+        max_actual_seq_len=seq_len,
+    )
+
+
 @pytest.mark.usefixtures("cuda_available")
 def test_qwen3_moe_logits_parity(tmp_path):
     from safetensors.torch import save_file
@@ -193,7 +215,6 @@ def test_qwen3_moe_logits_parity(tmp_path):
     from transformers import Qwen3MoeForCausalLM
 
     from lite_llama.executor.loader import materialise_parameters
-    from lite_llama.executor.model_runner import AttentionMetadata
     from lite_llama.models.qwen3_moe import Qwen3MoeModel
 
     torch.manual_seed(42)
@@ -211,17 +232,7 @@ def test_qwen3_moe_logits_parity(tmp_path):
     with torch.no_grad():
         ref_logits = hf_model(input_ids=input_ids).logits.float()  # [1, T, V]
 
-    num_kv_heads, head_dim = _TINY_HF_CONFIG["num_key_value_heads"], _TINY_HF_CONFIG["head_dim"]
-    atten_info = AttentionMetadata(
-        kv_buffer=[
-            torch.zeros(seq_len, 2 * num_kv_heads, head_dim, dtype=torch.float16, device="cuda")
-            for _ in range(_TINY_HF_CONFIG["num_hidden_layers"])
-        ],
-        cur_select_index=torch.arange(seq_len, dtype=torch.int32, device="cuda"),
-        b_start_loc=torch.zeros(1, dtype=torch.int32, device="cuda"),
-        b_seq_len=torch.tensor([seq_len], dtype=torch.int32, device="cuda"),
-        max_actual_seq_len=seq_len,
-    )
+    atten_info = _prefill_metadata(seq_len)
     position_ids = torch.arange(seq_len, dtype=torch.int32, device="cuda").unsqueeze(0)
     with torch.no_grad():
         lite_logits = lite_model(input_ids.cuda(), position_ids, atten_info).float().cpu()
@@ -247,3 +258,78 @@ def test_qwen3_moe_logits_parity(tmp_path):
     max_diff = (lite_logits - ref_logits).abs().max().item()
     scale = ref_logits.abs().max().item()
     assert max_diff < 0.2 * max(scale, 1.0), f"max abs diff {max_diff:.5f} (scale {scale:.2f})"
+
+
+# --------------------------------------------------------------------------- #
+# Runtime fp8 quantisation of the experts
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.usefixtures("cuda_available")
+def test_qwen3_moe_fp8_forward(tmp_path):
+    """``--quantization fp8`` on an MoE model: experts become e4m3 and still run.
+
+    ``RUNTIME_SCHEMES["fp8"]`` is :class:`W8A8Fp8Config`, so this is the only
+    model-level path that reaches ``fused_moe_w8a8_fp8`` — where the *activation*
+    is quantised too. The weights of the two fp8 MoE methods are byte-identical,
+    so which one ran cannot be read off a state dict; the assertion on
+    :class:`W8A8Fp8MoEMethod` is what pins the entry point, and the forward is
+    what proves the kernel accepts what the method built.
+
+    The output is compared against the fp16 forward of the *same* weights rather
+    than against HuggingFace: that isolates the quantisation error from the
+    engine-vs-HF difference the parity test above already covers.
+    """
+    from safetensors.torch import save_file
+    from transformers import Qwen3MoeConfig as HfConfig
+    from transformers import Qwen3MoeForCausalLM
+
+    from lite_llama.executor.loader import materialise_parameters
+    from lite_llama.models.qwen3_moe import Qwen3MoeModel
+    from lite_llama.modules.moe import SparseMoeBlock
+    from lite_llama.modules.quantization import for_runtime_scheme
+    from lite_llama.modules.quantization.w8a8_fp8 import W8A8Fp8Config, W8A8Fp8MoEMethod
+
+    torch.manual_seed(42)
+    hf_model = Qwen3MoeForCausalLM(HfConfig(**_TINY_HF_CONFIG)).eval()
+    save_file(hf_model.state_dict(), str(tmp_path / "model.safetensors"))
+
+    model = Qwen3MoeModel(_model_config(tmp_path))
+    materialise_parameters(model, "cuda")
+    model.load_weights(hf_weights_iterator(tmp_path, "cuda"))
+    model.to("cuda").eval()
+
+    seq_len = 12
+    input_ids = torch.randint(0, _TINY_HF_CONFIG["vocab_size"], (1, seq_len), device="cuda")
+    position_ids = torch.arange(seq_len, dtype=torch.int32, device="cuda").unsqueeze(0)
+
+    with torch.no_grad():
+        ref = model(input_ids, position_ids, _prefill_metadata(seq_len)).float().cpu()
+
+    quant = for_runtime_scheme("fp8")
+    assert isinstance(quant, W8A8Fp8Config), "--quantization fp8 must select the W8A8 config"
+    model.quantize_(quant)
+
+    blocks = [m for m in model.modules() if isinstance(m, SparseMoeBlock)]
+    assert len(blocks) == _TINY_HF_CONFIG["num_hidden_layers"]
+    for block in blocks:
+        assert isinstance(block.quant_method, W8A8Fp8MoEMethod)
+        for name in ("gate_up_proj", "down_proj"):
+            assert block.experts[name].dtype == torch.uint8
+            assert block.experts[f"{name}_scale_inv"].dtype == torch.float32
+
+    with torch.no_grad():
+        out = model(input_ids, position_ids, _prefill_metadata(seq_len)).float().cpu()
+
+    assert out.shape == ref.shape
+    assert torch.isfinite(out).all()
+    # A no-op ``quantize_`` would satisfy everything above, so require that the
+    # numbers actually moved.
+    assert not torch.equal(out, ref)
+    # Not a tolerance on the kernel: ``quantize_`` converts every dense
+    # projection too, so this is the whole model's fp8 error (measured: RMS
+    # relative 6.4e-2, min cosine 0.997). A tiny random-weight model has
+    # near-degenerate logits, where absolute diffs say little and cosine is the
+    # stable statistic; 0.99 sits far above the ~0 of an unrelated direction.
+    cos = torch.nn.functional.cosine_similarity(out, ref, dim=-1)
+    assert cos.min() > 0.99, f"min cosine {cos.min().item():.6f}"
