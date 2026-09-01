@@ -10,6 +10,22 @@ config:
   no-bare-urls: false
   # The first line does not have to be a top-level heading (docs use front matter).
   first-line-heading: false
+  # The Chinese docs use "一、二、…" section numbering as multiple h1s and
+  # "**bold**" lines as sub-headings — both are deliberate typography, and the
+  # rules' autofix rewrites CJK text around a stray "*" (e.g. "viz.* 全套" ->
+  # "viz.*全套"), which is why this hook must also run without --fix below.
+  single-title: false
+  no-emphasis-as-heading: false
+  # Fenced blocks in the release notes are terminal transcripts, not code.
+  fenced-code-language: false
+  # Table pipes are not aligned to the header width; CJK cell contents make
+  # that alignment meaningless, and realigning rewrites every committed table.
+  table-column-style: false
+  # Anchor fragments target the rendered README, where headings are translated.
+  link-fragments: false
+  # A "*" after CJK punctuation is ordinary text (e.g. "viz.* 全套"), not an
+  # emphasis marker; this rule cannot be satisfied by the Chinese docs.
+  no-space-in-emphasis: false
 globs:
   - "**/*.md"
 ignores:

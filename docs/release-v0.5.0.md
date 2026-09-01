@@ -66,6 +66,7 @@ if config is None:
 **修复前 (旧实现):** 逐 nibble 标量 outer-product，无法走 tensor core。
 
 **修复后 (v0.5):** per-group `tl.dot` — 每次迭代处理一个 GROUP_SIZE 块：
+
 1. 加载 `[BLOCK_N, GROUP_SIZE//8]` packed int32
 2. Unpack 为 `[GROUP_SIZE, BLOCK_N]` fp16
 3. 乘 scale 减 zero (dequant)

@@ -29,7 +29,7 @@ python -m lite_llama.cli chat --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype 
 
 > KV 容量提升 **1.91x**，throughput 仅降 9%（fp8 dequant 额外开销）。
 > 对长序列场景（4K+ context），fp8 KV 是纯收益：原本 OOM 的序列现在能服务。
-
+>
 > Benchmark 日志: [`docs/benchmark_logs/bench_kv_cache_fp8_v06.json`](benchmark_logs/bench_kv_cache_fp8_v06.json)
 
 ## 2. Feature: viz.structure (模型结构树)
@@ -42,6 +42,7 @@ tree = export_structure_tree(model, max_depth=3)
 ```
 
 输出示例:
+
 ```
 model: Qwen3Model
 ├── embed_tokens: Embedding [155,648,000 params, float16]
@@ -78,6 +79,7 @@ table = export_memory_budget(
 ## 4. Feature: KV Cache Watermark 准入控制
 
 `KVCacheManager` 新增:
+
 - `watermark` 参数 (默认 0.1): 当空闲 blocks 低于 `total * watermark` 时拒绝新请求。
 - `can_admit(need_blocks)` 方法: 纯读判断,调度器用于准入决策。
 - `utilization` 属性: 返回当前使用率 (0.0~1.0)。

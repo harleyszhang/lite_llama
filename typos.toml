@@ -5,7 +5,15 @@ extend-exclude = ["images/", "my_weight/", "*.svg", "docs/benchmark*.md"]
 # Domain terms and intentional abbreviations used throughout the codebase.
 nd = "nd"
 arange = "arange"
+# External project name: https://github.com/ELS-RD/kernl
+kernl = "kernl"
 kv = "kv"
+# fused_moe scale-stride abbreviations: b_s[cale] per e[xpert] / n[group].
+bse = "bse"
+bsn = "bsn"
+# Real parameter key in every LLaVA checkpoint (upstream typo, frozen in the
+# weights); the model-dump docs must keep it verbatim.
+layrnorm = "layrnorm"
 Ot = "Ot"
 
 [default.extend-identifiers]

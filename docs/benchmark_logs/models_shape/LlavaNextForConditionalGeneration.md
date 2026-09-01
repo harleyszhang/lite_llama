@@ -3,6 +3,7 @@
 ### 模型结构
 
 模型总参数量: 8355.28 M 模型 id: llama3-llava-next-8b-hf
+
 ```bash
 LlavaNextForConditionalGeneration(
   (vision_tower): CLIPVisionModel(

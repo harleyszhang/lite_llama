@@ -131,6 +131,7 @@ print(f"total preemptions: {sched.num_preemptions}")
 ## 4. Feature: SchedulerOutput 增强
 
 `SchedulerOutput` 新增字段支持 chunked prefill 与抢占：
+
 - `prefill_chunk_lens: list[int]` — 每个 prefill 请求本步处理的 token 数
 - `preempted: list[Request]` — 本步被抢占的请求（用于日志/监控）
 - prefill + decode 可同时非空（v0.6 两者互斥）

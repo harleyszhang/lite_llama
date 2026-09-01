@@ -67,6 +67,7 @@ LlavaForConditionalGeneration(
   )
 )
 ```
+
 ### llava-1.5-7b-hf 模型参数信息
 
 ```bash
