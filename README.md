@@ -47,7 +47,7 @@
 
 ## Setup and Installation
 
-> If you don't have a physical server, you can try using [virtal cloud remote server](https://growthdata.virtaicloud.com/t/hK).
+> If you don't have a physical server, you can try using [VirtAI Cloud remote server](https://growthdata.virtaicloud.com/t/hK).
 
 Requires Python 3.13+, CUDA-capable PyTorch 2.13.0+ and Triton 3.7.1+.
 
@@ -194,10 +194,6 @@ After `cli_llava.py` runs successfully, the terminal displays the interface as s
 
 For performance test, after changing your model weight path, run `lite_llama/examples/benchmark.py` file directly, it will output the latency and throughput performance comparison between lite_llama and transformers libraries, the result of the first run is not very accurate, so we suggest you to take the second run as a reference. For example, for the Llama-3.2-3B model with `prompt_len = 25`, `batch_size = 12`, and `max_gen_len = 1900`, the result of benchmark:
 
-
-
-
-
 ```bash
 lite_llama inference time: 31.3463 s
 Transformers inference time: 69.1433 s
@@ -314,7 +310,7 @@ The GIF is rendered from the engine's own CUDA-event timeline (`LITE_LLAMA_OVERL
 
 ### Quantization
 
-l ite_llam a  supports  m ultiple  w eight quanti z ation schemes ( architecture aligned with [sglang](https://github.com/sgl-project/sglang)). See [docs/quantization.md](docs/quantization.md) for the full design and API.
+lite_llama supports multiple weight quantization schemes (architecture aligned with [sglang](https://github.com/sgl-project/sglang)). See [docs/quantization.md](docs/quantization.md) for the full design and API.
 
 |  Scheme  |  CLI Flag  |  Weight  |  Activation  |  Speedup vs HF  |
 | -------- | ---------- | -------- | ------------ | --------------- |
@@ -372,13 +368,13 @@ python -m lite_llama.cli vl-chat \
     --image photo.jpg --quantization int8
 ```
 
-> `vl-chat` is single-GPU tensor parallelism runs through the continuous-batching
-> engine, which hosts tex checkpoints only, so `--tensor-parallel-size > 1` exits with
-> that message rather tha pretending.
+> `vl-chat` is single-GPU: tensor parallelism runs through the continuous-batching
+> engine, which hosts text checkpoints only, so `--tensor-parallel-size > 1` exits with
+> that message rather than pretending.
 
 #### Qwen3-0.6B Benchmark
 
-Envirnment: (A10, batch=4, greedy)
+Environment: (A10, batch=4, greedy)
 
 How to run Benchmarks:
 
@@ -391,7 +387,7 @@ python benchmarks/bench_quant.py --model-dir /data/shared/llm_weights/Qwen3-0.6B
 python benchmarks/bench_quant.py --all
 ```
 
-Q uantizat i on Benchmar k  Result (A10,   Qwen3-0.6B,   batch = 4, seq_len=2 5, gen_len=64, greedy):
+Quantization Benchmark Result (A10, Qwen3-0.6B, batch=4, seq_len=25, gen_len=64, greedy):
 
 |  Config  |  Model Mem  |  KV Capacity  |  TPOT (ms)  |  TPS  |  vs HF fp16  |
 | -------- | ----------- | ------------- | ----------- | ----- | ------------ |
@@ -411,7 +407,7 @@ Quantization benchmark visualization (Qwen3-0.6B, A10, all schemes vs HF fp16):
 
 #### Qwen3-VL-4B-Instruct Benchmark
 
-A 10, batc h =4, seq_len = 25, gen_len=6 4 , greedy be n chmar k result:
+A10, batch=4, seq_len=25, gen_len=64, greedy benchmark result:
 
 |  Config  |  Model Mem  |  KV Capacity  |  TPOT (ms)  |  TPS  |
 | -------- | ----------- | ------------- | ----------- | ----- |

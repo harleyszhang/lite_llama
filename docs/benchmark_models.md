@@ -67,6 +67,7 @@ print(triton.testing.do_bench(lambda: w8a16_matmul(x, qw, sc, group_n=128, group
 ## 二 模型 e2e benchmark 汇总
 
 两节都是**离线推理（offline inference）口径**：全部 prompt 一次性提交、跑完收工，没有 serving 层的请求排队与连续到达。端到端性能从两个互补视角评估：
+
 1. lite_llama 与 HF transformers 同口径对照，回答"比裸 transformers 快多少"；
 2. lite_llama 自己关/开 CUDA graph 对照，回答"graph 优化本身值多少"。
 
@@ -140,6 +141,7 @@ print(triton.testing.do_bench(lambda: w8a16_matmul(x, qw, sc, group_n=128, group
 | Qwen3-VL-4B-Instruct | A10 | serial | 128 | transformers | 0.1442 | 33.47 | 29.0 | — |
 
 结论（2026-08-31 重测，torch 2.11.0+cu129 / transformers 5.8.0 / Python 3.12，覆盖受支持的全部架构含多模态）：
+
 - lite_llama 的 **decode 全面更快** — TPOT 加速比在 **1.15×～7.1×** 之间，模型越大比值越低（0.6B 档 ~6-7×，3B 档收敛到 ~1.6-1.9×，多模态 7B 档 1.15×；模型越大 decode 越偏 compute-bound，两端都吃满算力）；多模态 4B 档（Qwen3-VL）拿到 **1.72×**—decode 步与纯文本同构，CUDA graph 的收益直接兑现；
 - 8B 级 TP2 双卡档同样领先（Qwen3-8B 1.24×、Llama-3.1-8B 1.46×，两端都在同样的两张卡上），说明 TP 切分 + eager decode 在通信开销下仍保住优势；
 - 聚合吞吐 TGS 同步放大。每组配置两端输出 token 数一致，工作量对等
@@ -224,7 +226,7 @@ prompts: List[str] = [
     """A brief message congratulating the team on the launch:
 
     Hi everyone,
-    
+
     I just """,
     # Few shot prompt (providing a few examples before asking model to complete more);
     "Roosevelt was the first president of the United States, he has",
@@ -503,6 +505,7 @@ prompts: List[str] = [
 ```
 
 `max_gen_len = 2000` 时, benchmark 性能测试运行结果:
+
 ```bash
 lite_llama inference time: 34.9293 s
 Transformers inference time: 31.6787 s
@@ -565,6 +568,7 @@ Transformers per token latency: 5.807474 ms/token
 ```
 
 `batch_size = 16` 时的提示词
+
 ```bash
 prompts: List[str] = [
     "I believe the meaning of life is to find happiness in the simple things. but how to achieve the meaning of life?",

@@ -205,6 +205,7 @@ DP:                    Frontend ── Router(P10) ── EngineCore 进程 × d
 **形参名也是契约的一部分**:因为支柱③ 刻意不写适配层,dispatch 把 kernel 函数本身交给调用方,所以"形参顺序对得上但名字不对"会无声通过。`tests/ops/test_native_specs.py::TestTargetsMatchTheirContract` 逐名比对 target 与 ABC——正是它抓出 `update_kv_buffer(K_Values, ...)` 与 `skip_rmsnorm(X, ...)` 两处漂移。
 
 **③ N 份实现(不新增目录层,只多一张声明清单)**:三个正交的位置回答三个问题——
+
 ```
 kernels/
   ops/            # 谁来算 + 注册行:九个算子域组,模型层按名字直调组内 native 实现
@@ -216,6 +217,7 @@ kernels/
     flashinfer/  deepgemm/  flashmla/  deepep/   # adapter 按 ABC 契约签名写
     availability.py # 真 import 检测 + 安装配方(BackendInstall),survey() 打印
 ```
+
 **刻意不做的事**:不建 `impls/` 这类中间目录,也不写转发适配器。KernelSpec 的 `target` 是 `"module:attr"` 字符串,直接指向真实 kernel 函数,所以 `modules/attention.py` 里读到的仍是 `flash_attention2_no_pad` / `flash_decoding` 这种一眼可辨的算子名,而不是某个包装层。代价是 kernel 的公开签名必须干净——例如 `flash_attention2_no_pad` 原先要求调用方自己乘 `log2(e)`,这个 kernel 私有约定已下沉到 wrapper 内部,契约统一成 plain `1/sqrt(d)`。
 
 迁移已落地:实现本体随算子域进 `ops/<group>/`,native 行与外部后端的行同写在各组 `__init__.py`,`benchmarks/kernels/` 下两个 legacy attention 文件已删。
@@ -233,6 +235,7 @@ kernels/
 | `perf_key`(gpu, op, shape_bucket, dtype) | 指向冻结的实测记录 | 本项目新增,见支柱⑤ |
 
 **⑤ 一条确定性分发规则(sglang 的确定性 + 实测排序)**:
+
 ```
 select(op, key=(arch, dtype, shape_bucket)) -> impl:
   1. 过滤:available ∧ capability匹配 ∧ dtype支持 ∧ shape.hard满足 ∧ layout可获得 ∧ golden.verified
@@ -240,6 +243,7 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
   3. 取 top;native 保底行保证非空
   4. 结果按 key 缓存(lru_cache)+ 记录决策链供 explain
 ```
+
 **确定性来源**:第 2 步的"实测最优"来自 autotune/profiling **预先冻结**的记录(存盘,见地基 3),不是运行时现测——同一 key 永远选同一实现,benchmark/golden/bug 全部可复现。这正是对 sglang selector(多后端可用时甩给用户显式指定)的超越:**lite_llama 用实测记录自动选最快,选完仍确定**。
 
 ### 两个必须做对的地方
