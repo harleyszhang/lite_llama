@@ -72,24 +72,21 @@ def test_images_rejected_on_text_model(llm: LLM):
 
 
 def test_parallel_size_contract(model_dir: Path):
-    """TP grows inside one ``LLM``; DP does not fit inside one, and says so.
+    """Neither TP nor DP fits inside one ``LLM``, and each error names the class that does.
 
-    ``LLM`` is a single replica, so ``data_parallel_size>1`` cannot be honoured here —
-    the error has to name the class that can
-    (:class:`~lite_llama.engine.data_parallel.DataParallelEngine`), otherwise the
-    caller is told only that their argument was wrong.
+    ``LLM`` is a single replica driven by a lockstep batch loop, so
+    ``data_parallel_size>1`` needs
+    :class:`~lite_llama.engine.data_parallel.DataParallelEngine` and
+    ``tensor_parallel_size>1`` needs
+    :class:`~lite_llama.engine.continuous_engine.ContinuousBatchingEngine` — the only
+    path whose executor broadcasts each step's plan to follower ranks.
+
+    The TP half is a regression guard. The argument used to be accepted and then
+    ignored: no group was started, the run went single-GPU, and the caller's TP
+    measurement was really a TP=1 measurement wearing its label.
     """
-    # tensor_parallel_size=2 must not be rejected outright (TP is supported).
-    # On a single-GPU machine it may still fail for NCCL reasons, so only the
-    # "not implemented" class of failure is ruled out.
-    try:
-        llm = LLM(model=str(model_dir), tensor_parallel_size=2, max_seq_len=512, max_gpu_num_blocks=_KV_TOKENS)
-        del llm
-        torch.cuda.empty_cache()
-    except NotImplementedError:
-        pytest.fail("tensor_parallel_size=2 should not raise NotImplementedError")
-    except Exception:
-        pass  # NCCL/network errors are acceptable in test environments
+    with pytest.raises(ValueError, match="ContinuousBatchingEngine"):
+        LLM(model=str(model_dir), tensor_parallel_size=2, max_seq_len=512)
 
     with pytest.raises(ValueError, match="DataParallelEngine"):
         LLM(model=str(model_dir), data_parallel_size=2)

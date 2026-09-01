@@ -442,8 +442,9 @@ class DataParallelEngine:
         if self._engine_kwargs.get("use_cuda_graph") is None:
             # ``LLM`` reads None as "decide from the architecture"; a replica's
             # engine takes a bool, and the text-only default is to capture. Each
-            # replica captures its own graphs -- DP replicas share no collectives,
-            # so unlike TP there is nothing unsafe to record.
+            # replica captures its own graphs, and DP replicas share no
+            # collectives, so a replica's grid is nobody else's business -- the
+            # cross-rank agreement a TP group needs is confined to its own group.
             self._engine_kwargs.pop("use_cuda_graph", None)
         self._tokenizer = None
         self._next_batch_id = 0
