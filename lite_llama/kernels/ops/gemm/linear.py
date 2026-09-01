@@ -21,6 +21,7 @@ def linear_torch(
     bias: torch.Tensor | None = None,
     weight_scale: torch.Tensor | None = None,
     weight_zeros: torch.Tensor | None = None,
+    weight_global_scale: torch.Tensor | None = None,
     group_n: int = 0,
     group_k: int = 0,
 ) -> torch.Tensor:
@@ -31,7 +32,7 @@ def linear_torch(
     tile would be the optimisation. A quantised scheme reaching this function
     fails loudly instead of silently running a plain GEMM on packed bytes.
     """
-    if weight_scale is not None or weight_zeros is not None:
+    if weight_scale is not None or weight_zeros is not None or weight_global_scale is not None:
         raise ValueError(
             "native/linear_torch serves the unquantised floor; a quantised "
             "scheme reached it, which is a dispatch or registration bug"
@@ -46,6 +47,7 @@ def linear_w8a16(
     bias: torch.Tensor | None = None,
     weight_scale: torch.Tensor | None = None,
     weight_zeros: torch.Tensor | None = None,
+    weight_global_scale: torch.Tensor | None = None,
     group_n: int = 0,
     group_k: int = 0,
 ) -> torch.Tensor:
@@ -64,6 +66,7 @@ def linear_w4a16(
     bias: torch.Tensor | None = None,
     weight_scale: torch.Tensor | None = None,
     weight_zeros: torch.Tensor | None = None,
+    weight_global_scale: torch.Tensor | None = None,
     group_n: int = 0,
     group_k: int = 0,
 ) -> torch.Tensor:
@@ -83,6 +86,7 @@ def linear_w8a8_int8(
     bias: torch.Tensor | None = None,
     weight_scale: torch.Tensor | None = None,
     weight_zeros: torch.Tensor | None = None,
+    weight_global_scale: torch.Tensor | None = None,
     group_n: int = 0,
     group_k: int = 0,
 ) -> torch.Tensor:
@@ -101,6 +105,7 @@ def linear_w8a8_fp8(
     bias: torch.Tensor | None = None,
     weight_scale: torch.Tensor | None = None,
     weight_zeros: torch.Tensor | None = None,
+    weight_global_scale: torch.Tensor | None = None,
     group_n: int = 0,
     group_k: int = 0,
 ) -> torch.Tensor:
@@ -109,16 +114,20 @@ def linear_w8a8_fp8(
     Quantising the activations is part of running this format, so it happens
     here rather than in the caller — the same way the SmoothQuant kernel
     quantises its own activations internally.
+
+    The quantiser is the fused Triton one rather than the torch helper: the torch
+    chain costs a shape-independent 45-55 us on an H100, which at decode sizes is
+    two to three times the GEMM it feeds and made this whole scheme lose to bf16
+    cuBLAS for reasons unrelated to fp8. ``benchmarks/kernels/bench_quant_gemm.py``
+    carries the ablation row that isolated it.
     """
-    # Imported lazily: the helper lives with the quantisation *methods*, and
-    # this module is itself loaded lazily by dispatch, so nothing pays for it
-    # unless an fp8 checkpoint is actually served.
-    from ....modules.quantization.utils import quantize_fp8_per_token
-    from ..quantization import fp8_matmul
+    # Imported lazily: this module is itself loaded lazily by dispatch, so
+    # nothing pays for the quantisation kernels unless a checkpoint is served.
+    from ..quantization import fp8_matmul, fp8_quantize_per_token
 
     if weight_scale is None:
         raise ValueError("linear_w8a8_fp8 needs weight_scale (block-wise fp8)")
-    qx, x_scale = quantize_fp8_per_token(x)
+    qx, x_scale = fp8_quantize_per_token(x)
     return fp8_matmul(
         qx,
         x_scale,
@@ -129,3 +138,31 @@ def linear_w8a8_fp8(
         bias=bias,
         out_dtype=x.dtype,
     )
+
+
+def linear_nvfp4(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    *,
+    bias: torch.Tensor | None = None,
+    weight_scale: torch.Tensor | None = None,
+    weight_zeros: torch.Tensor | None = None,
+    weight_global_scale: torch.Tensor | None = None,
+    group_n: int = 0,
+    group_k: int = 0,
+) -> torch.Tensor:
+    """NVFP4 weight-only GEMM: e2m1 nibbles, e4m3 block scales, fp32 global scale.
+
+    The only row that needs ``weight_global_scale``, and the reason the parameter
+    is in :class:`~lite_llama.kernels.ops.interfaces.LinearOp` at all: NVFP4's
+    block scales are themselves quantised, so reconstructing a weight takes two
+    multiplies and the second one has nowhere else to travel.
+
+    ``group_n``/``group_k`` are ignored — the 16-element block is fixed by the
+    format, not configured by the checkpoint, so there is nothing for them to say.
+    """
+    from ..quantization import nvfp4_matmul
+
+    if weight_scale is None or weight_global_scale is None:
+        raise ValueError("linear_nvfp4 needs weight_scale (block) and weight_global_scale (tensor)")
+    return nvfp4_matmul(x, weight, weight_scale, weight_global_scale, bias=bias)

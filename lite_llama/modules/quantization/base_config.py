@@ -230,6 +230,7 @@ def run_quant_linear(
     bias: torch.Tensor | None = None,
     weight_scale: torch.Tensor | None = None,
     weight_zeros: torch.Tensor | None = None,
+    weight_global_scale: torch.Tensor | None = None,
     group_n: int = 0,
     group_k: int = 0,
 ) -> torch.Tensor:
@@ -243,6 +244,10 @@ def run_quant_linear(
     """
     from lite_llama.kernels.dispatcher import dispatch, dtype_label
 
+    # For a sub-byte format this ``k`` is the *storage* width, not the logical
+    # one (nvfp4 stores two elements per byte). It only feeds the perf-lookup
+    # key, which needs to be consistent rather than semantic, and a scheme's
+    # keys never mix with another's.
     n, k = weight.shape[-2:]
     m = x.numel() // x.shape[-1]
     selected = dispatch(
@@ -257,6 +262,7 @@ def run_quant_linear(
         bias=bias,
         weight_scale=weight_scale,
         weight_zeros=weight_zeros,
+        weight_global_scale=weight_global_scale,
         group_n=group_n,
         group_k=group_k,
     )

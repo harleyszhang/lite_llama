@@ -1,7 +1,7 @@
 """GEMM domain: the linear projections, one row per quantisation scheme.
 
 Registers the spec rows and re-exports the entry points — ``linear_torch``
-plus one function per quant scheme (w8a16, w4a16, w8a8 int8/fp8).
+plus one function per quant scheme (w8a16, w4a16, w8a8 int8/fp8, nvfp4).
 
 Usage:
     from lite_llama.kernels import linear_torch, linear_w8a16
@@ -71,6 +71,20 @@ register(
         target="lite_llama.kernels.ops.gemm.linear:linear_w8a8_fp8",
         dtypes=("bf16", "fp16"),
         schemes=("w8a8_fp8",),
+        golden=NATIVE_BASELINE,
+    )
+)
+register(
+    KernelSpec(
+        name="native/linear_nvfp4",
+        op="linear",
+        backend="native",
+        target="lite_llama.kernels.ops.gemm.linear:linear_nvfp4",
+        # Weight-only, so the activation dtype is the model's and the row serves
+        # both. No capability floor beyond what the fp8 *scale* decode needs:
+        # there is no fp4 MMA involved on any device, which is the whole point.
+        dtypes=("bf16", "fp16"),
+        schemes=("nvfp4",),
         golden=NATIVE_BASELINE,
     )
 )

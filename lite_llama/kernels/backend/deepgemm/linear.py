@@ -43,6 +43,7 @@ def fp8_gemm_nt(
     bias: torch.Tensor | None = None,
     weight_scale: torch.Tensor | None = None,
     weight_zeros: torch.Tensor | None = None,
+    weight_global_scale: torch.Tensor | None = None,
     group_n: int = 0,
     group_k: int = 0,
 ) -> torch.Tensor:
@@ -55,6 +56,10 @@ def fp8_gemm_nt(
         bias: Optional ``[out_features]`` additive bias.
         weight_scale: Native block scales; ``None`` only for bf16 weights.
         weight_zeros: Ignored — fp8 is symmetric.
+        weight_global_scale: Ignored — fp8 block scales are stored in fp32, so
+            there is no second level to undo. Present because
+            :class:`~lite_llama.kernels.ops.interfaces.LinearOp` is the superset
+            signature every row implements.
         group_n: Rows per weight-scale block (``0`` = per-tensor).
         group_k: Columns per weight-scale block (``0`` = per-tensor).
 

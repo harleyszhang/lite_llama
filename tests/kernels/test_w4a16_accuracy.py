@@ -76,11 +76,16 @@ def test_w4a16_matches_reference(w4a16_problem):
 
     got = w4a16_matmul(x, qweight, scales, zeros, group_size=group_size)
 
-    # Tolerance: fp16 has ~5e-4 relative error, int4 dequant adds noise
+    # Tolerance: fp16 has ~5e-4 relative error, int4 dequant adds noise. The
+    # absolute bound must scale with the output magnitude: at K=2048 the largest
+    # outputs reach ~140, where one fp16 ULP is already 0.125 — a single output
+    # rounding would exceed a flat 0.1.
     max_diff = (ref.float() - got.float()).abs().max().item()
     rel_err = max_diff / (ref.float().abs().max().item() + 1e-6)
-
-    assert max_diff < 1e-1, f"max abs diff {max_diff:.4e} exceeds 0.1"
+    ref_max = ref.float().abs().max().item()
+    assert max_diff < max(1e-1, 2 * ref_max * 2**-10), (
+        f"max abs diff {max_diff:.4e} exceeds 2 fp16 ULP at |ref|={ref_max:.1f}"
+    )
     assert rel_err < 1e-2, f"relative error {rel_err:.4e} exceeds 1%"
 
 

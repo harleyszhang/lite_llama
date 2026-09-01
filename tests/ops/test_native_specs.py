@@ -41,7 +41,15 @@ SCHEME_TO_ROW = {
     "gptq": "native/linear_w4a16",
     "w8a8_int8": "native/linear_w8a8_int8",
     "w8a8_fp8": "native/linear_w8a8_fp8",
+    "nvfp4": "native/linear_nvfp4",
 }
+
+#: Schemes with a linear row but deliberately no MoE row. ``fused_moe`` infers
+#: the expert format from ``w1.dtype``, which cannot distinguish nvfp4's packed
+#: uint8 from fp8's uint8 — the two-level unpacking would need its own kernel,
+#: and NVFP4 MoE is out of scope. Named here so the gap is an assertion rather
+#: than a silently skipped scheme.
+SCHEMES_WITHOUT_MOE = {"nvfp4"}
 
 #: native rows only — the floor every op falls back to. External rows sit at
 #: priority ``UNMEASURED`` (below the native floor) until a golden run on the
@@ -52,6 +60,7 @@ LINEAR_NATIVE_ROWS = {
     "native/linear_w4a16",
     "native/linear_w8a8_int8",
     "native/linear_w8a8_fp8",
+    "native/linear_nvfp4",
 }
 
 #: the external linear contender, gated on sm90 and on a golden run.
@@ -92,6 +101,13 @@ GLUE_NATIVE_ROWS = {
     "elementwise.swiglu": "native/swiglu_forward_fused",
     "elementwise.swiglu_split": "native/swiglu_forward",
 }
+
+#: Native rows beyond the floor. Only ``moe`` has one, and only for one scheme:
+#: ``fused_moe`` infers the expert format from ``w1.dtype``, which cannot tell
+#: weight-only fp8 from W8A8 fp8 -- both are ``uint8`` e4m3 experts. The
+#: difference is whether the *activation* is quantised, which no dtype records,
+#: so the choice has to be the entry point and therefore the row.
+GLUE_EXTRA_NATIVE_ROWS = {"moe": {"native/fused_moe_w8a8_fp8"}}
 
 #: ``op -> external rows`` for the same domains.
 GLUE_EXTERNAL_ROWS = {
@@ -139,7 +155,7 @@ NON_GROUP_DIRS = {"quantization"}
 
 
 class TestLinearCatalogue:
-    def test_linear_has_the_five_native_rows_plus_deepgemm(self) -> None:
+    def test_linear_has_the_six_native_rows_plus_deepgemm(self) -> None:
         names = {s.name for s in REGISTRY.implementations("linear")}
         assert names == LINEAR_NATIVE_ROWS | LINEAR_EXTERNAL_ROWS
 
@@ -233,7 +249,8 @@ class TestGlueCatalogue:
     @pytest.mark.parametrize("op,row", sorted(GLUE_NATIVE_ROWS.items()))
     def test_each_has_one_native_row(self, op: str, row: str) -> None:
         native = {s.name for s in REGISTRY.implementations(op) if s.backend == "native"}
-        assert native == {row}
+        assert native == {row} | GLUE_EXTRA_NATIVE_ROWS.get(op, set())
+        # Extra rows are scheme-gated, so the floor is still the unqualified one.
         assert REGISTRY.native_floor(op).name == row
 
     @pytest.mark.parametrize("op,rows", sorted(GLUE_EXTERNAL_ROWS.items()))
@@ -256,13 +273,26 @@ class TestGlueCatalogue:
         with pytest.raises(LookupError, match="dtype"):
             dispatch(op, dtype="fp32")
 
-    def test_one_moe_row_serves_every_scheme(self) -> None:
+    def test_one_moe_row_serves_every_scheme_but_w8a8_fp8(self) -> None:
         # fused_moe reads the expert format off ``w1.dtype`` (uint8 -> fp8,
-        # int8, int32 -> int4), so the scheme is not a choice between rows;
-        # splitting them would write several specs for one internal branch.
+        # int8, int32 -> int4), so for those the scheme is not a choice between
+        # rows; splitting them would write several specs for one internal branch.
+        # w8a8_fp8 is the exception because its bytes are indistinguishable from
+        # weight-only fp8's: see ``GLUE_EXTRA_NATIVE_ROWS``.
         row = REGISTRY.native_floor("moe")
-        for scheme in SCHEME_TO_ROW:
+        served_by_floor = SCHEME_TO_ROW.keys() - SCHEMES_WITHOUT_MOE - {"w8a8_fp8"}
+        for scheme in served_by_floor:
             assert dispatch("moe", dtype="bf16", scheme=scheme).spec.name == row.name
+        sel = dispatch("moe", dtype="bf16", scheme="w8a8_fp8")
+        assert sel.spec.name == "native/fused_moe_w8a8_fp8"
+
+    @pytest.mark.parametrize("scheme", sorted(SCHEMES_WITHOUT_MOE))
+    def test_schemes_without_a_moe_kernel_fail_loudly(self, scheme: str) -> None:
+        # The complement of the test above, asserted rather than assumed: a
+        # scheme the MoE kernel cannot run must be refused at dispatch, not
+        # routed to a row that would misread its packed bytes.
+        with pytest.raises(LookupError, match="scheme"):
+            dispatch("moe", dtype="bf16", scheme=scheme)
 
 
 class TestContractCoverage:

@@ -23,6 +23,7 @@ from .blockwise_int8 import BlockInt8Config
 from .fp8 import FP8_BLOCK, Fp8Config
 from .gptq import GPTQConfig
 from .kv_cache import BaseKVCacheMethod, Fp8KVCacheMethod, get_kv_cache_method
+from .nvfp4 import NVFP4Config
 from .parameter import RawParameter
 from .unquant import UnquantizedConfig, UnquantizedFusedMoEMethod, UnquantizedLinearMethod
 from .utils import adapt_int4_checkpoint
@@ -46,9 +47,12 @@ BASE_QUANTIZATION_METHODS: dict[str, type[QuantizationConfig]] = {
     "blockwise_int8": BlockInt8Config,
     "awq": AWQConfig,
     "gptq": GPTQConfig,
+    "nvfp4": NVFP4Config,
     # Aliases
     "int8": BlockInt8Config,
     "smoothquant": W8A8Int8Config,
+    # NVIDIA ModelOpt writes this into config.json for NVFP4 checkpoints.
+    "modelopt_fp4": NVFP4Config,
 }
 
 #: Runtime quantisation schemes accepted by ``--quantization``.
@@ -57,6 +61,7 @@ RUNTIME_SCHEMES: dict[str, type[QuantizationConfig]] = {
     "int8-blockwise": BlockInt8Config,
     "fp8": W8A8Fp8Config,
     "int4": AWQConfig,
+    "nvfp4": NVFP4Config,
     "smoothquant": W8A8Int8Config,
 }
 
@@ -113,6 +118,8 @@ def for_runtime_scheme(name: str) -> QuantizationConfig:
         return W8A8Int8Config()
     if cls is AWQConfig:
         return AWQConfig()
+    if cls is NVFP4Config:
+        return NVFP4Config()
     # Fallback (shouldn't reach here).
     return cls.from_config({})
 
@@ -132,6 +139,7 @@ __all__ = [  # noqa: RUF022
     "BlockInt8Config",
     "AWQConfig",
     "GPTQConfig",
+    "NVFP4Config",
     "UnquantizedConfig",
     # KV cache
     "BaseKVCacheMethod",
