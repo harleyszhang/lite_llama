@@ -18,9 +18,20 @@ the sum of exponentials — are all that must cross the wire. Candidates then co
 local top-k, because the union of per-rank top-k provably contains the global top-k, so
 the gather is ``O(k * tp)`` and independent of the vocabulary size.
 
+Logprob reporting (ROADMAP F6) rides the same pass: ``sample_with_logprobs``
+returns, beside the ids, one :class:`PositionLogprobs` per row — the sampled
+token's own logprob plus the ``k`` best alternatives — computed from the very
+distribution the draw came from (post-penalty, temperature-scaled; the greedy
+rows' temperature is clamped to 1.0, so their records describe the raw model
+distribution, exactly what HuggingFace reports under ``do_sample=False``).
+:func:`rows_logprobs` is the same arithmetic for a block of positions at once,
+which is what prompt-logprob reporting during prefill uses — on the *raw*
+logits there, since temperature and penalties are sampling-time notions.
+
 Usage:
     next_ids = Sampler().sample(logits, SamplingParams(temperature=0.0))
     next_ids = Sampler().sample_batched(logits, BatchedSamplingParams.build(...))
+    ids, records = Sampler().sample_with_logprobs(logits, SamplingParams(logprobs=5))
 """
 
 from __future__ import annotations
@@ -34,6 +45,7 @@ from ..distributed.parallel_state import (
     all_gather_tp,
     all_reduce_max_tp,
     all_reduce_tp,
+    broadcast_tp,
     get_tp_rank,
     get_tp_world_size,
 )
@@ -70,6 +82,15 @@ class SamplingParams:
             own implementation loops on the same prompts).
         stop_on_repeat: Circuit breaker in the engine — stop a sequence whose
             generated text degenerates into a repeating template.
+        logprobs: Report the ``k`` most likely tokens' log-probabilities per
+            generated token (the sampled token's own logprob always comes
+            along; ``0`` reports it alone). ``None`` — the default — skips the
+            work entirely: the top-k over the vocabulary is the only part of
+            sampling whose cost scales with the vocabulary.
+        prompt_logprobs: Same reporting for the prompt positions, computed
+            during prefill from the same forward pass. Position 0 has no
+            predictor and is reported as ``None``, and so is any position
+            served from the prefix cache, whose forward never ran.
     """
 
     temperature: float = 0.6
@@ -77,6 +98,8 @@ class SamplingParams:
     max_gen_len: int | None = None
     repetition_penalty: float = 1.1
     stop_on_repeat: bool = True
+    logprobs: int | None = None
+    prompt_logprobs: int | None = None
 
     def __post_init__(self) -> None:
         if self.temperature < 0:
@@ -85,6 +108,12 @@ class SamplingParams:
             raise ValueError(f"top_p must be in (0, 1], got {self.top_p}")
         if self.repetition_penalty <= 0:
             raise ValueError(f"repetition_penalty must be > 0, got {self.repetition_penalty}")
+        for field, value in (
+            ("logprobs", self.logprobs),
+            ("prompt_logprobs", self.prompt_logprobs),
+        ):
+            if value is not None and value < 0:
+                raise ValueError(f"{field} must be >= 0, got {value}")
 
     @property
     def is_greedy(self) -> bool:
@@ -103,6 +132,26 @@ class GeneratedSpan:
 
     token_ids: torch.Tensor
     mask: torch.Tensor
+
+
+@dataclass(frozen=True)
+class PositionLogprobs:
+    """One position's logprob record: the token there, and the best alternatives.
+
+    Attributes:
+        token_id: The token actually at this position (sampled, or the prompt's
+            own token for prompt logprobs).
+        logprob: Its log-probability under the distribution this position
+            produced. Not guaranteed to appear in the top-k lists: a sampled
+            token is not necessarily one of the ``k`` most likely.
+        top_token_ids: The ``k`` most likely token ids, descending.
+        top_logprobs: Their log-probabilities, parallel to ``top_token_ids``.
+    """
+
+    token_id: int
+    logprob: float
+    top_token_ids: tuple[int, ...]
+    top_logprobs: tuple[float, ...]
 
 
 def apply_repetition_penalty(
@@ -286,6 +335,109 @@ def sharded_top_p(
     return _draw_from_nucleus(top_probs, pool_ids.gather(-1, order), top_p)
 
 
+def _distribution_records(
+    scaled: torch.Tensor, ids: torch.Tensor, offset: int | None, k: int
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """Chosen-token logprobs and the top-k of the distribution, TP-aware.
+
+    Args:
+        scaled: ``[rows, vocab]`` (or this rank's slice) logits, already in
+            their final form — penalty applied, temperature divided through.
+        ids: ``[rows, 1]`` global ids whose logprobs are wanted alongside the
+            top-k (the tokens actually sitting at these positions).
+        offset: This rank's first global token id, ``None`` when TP is off.
+        k: Top-k width; ``0`` skips the top-k entirely.
+
+    Returns:
+        ``(chosen_logprobs [rows, 1], top_values [rows, k] | None,
+        top_ids [rows, k] | None)`` — identical on every rank, because the
+        normaliser is the two-scalar ``vocab_logsumexp`` reduction and the
+        chosen-token gather is a masked sum: the rank owning the id contributes
+        its logit, every other rank contributes zero.
+    """
+    if offset is None:
+        log_z = torch.logsumexp(scaled, dim=-1, keepdim=True)
+        logprobs = scaled - log_z
+        chosen = logprobs.gather(-1, ids)
+        if k <= 0:
+            return chosen, None, None
+        top_values, top_ids = logprobs.topk(min(k, scaled.shape[-1]), dim=-1)
+        return chosen, top_values, top_ids
+
+    log_z = vocab_logsumexp(scaled)
+    width = scaled.shape[-1]
+    local = ids - offset
+    valid = (local >= 0) & (local < width)
+    gathered = scaled.gather(-1, local.clamp(0, width - 1))
+    chosen = all_reduce_tp(torch.where(valid, gathered, torch.zeros_like(gathered))) - log_z
+    if k <= 0:
+        return chosen, None, None
+    local_values, local_ids = (scaled - log_z).topk(min(k, width), dim=-1)
+    pool_values = all_gather_tp(local_values)
+    pool_ids = all_gather_tp(local_ids + offset)
+    top_values, order = pool_values.topk(min(k, pool_values.shape[-1]), dim=-1)
+    return chosen, top_values, pool_ids.gather(-1, order)
+
+
+def _to_records(
+    ids: torch.Tensor,
+    ks: Sequence[int | None],
+    chosen: torch.Tensor,
+    top_values: torch.Tensor | None,
+    top_ids: torch.Tensor | None,
+) -> list[PositionLogprobs | None] | None:
+    """Turn the device tensors into per-row host records; ``None`` where unasked.
+
+    One readback covers the whole batch — the decode step synchronises once for
+    detokenisation anyway, so the records ride that same sync rather than
+    adding one of their own.
+    """
+    if all(k is None for k in ks):
+        return None
+    ids_l = ids.reshape(-1).tolist()
+    chosen_l = chosen.reshape(-1).tolist()
+    top_ids_l = top_ids.tolist() if top_ids is not None else None
+    top_values_l = top_values.tolist() if top_values is not None else None
+    records: list[PositionLogprobs | None] = []
+    for row, k in enumerate(ks):
+        if k is None:
+            records.append(None)
+            continue
+        width = 0 if top_ids_l is None else min(k, len(top_ids_l[row]))
+        records.append(
+            PositionLogprobs(
+                token_id=ids_l[row],
+                logprob=chosen_l[row],
+                top_token_ids=tuple(top_ids_l[row][:width]) if top_ids_l else (),
+                top_logprobs=tuple(top_values_l[row][:width]) if top_values_l else (),
+            )
+        )
+    return records
+
+
+def rows_logprobs(logits: torch.Tensor, target_ids: torch.Tensor, k: int) -> list[PositionLogprobs]:
+    """One :class:`PositionLogprobs` per row: the target token's, plus the top-k.
+
+    This is the prompt-logprobs arithmetic — a block of positions whose
+    *target* tokens are already known (the prompt's own), so there is no draw,
+    only the distribution. Computed on the raw logits: temperature and
+    penalties are sampling-time notions and do not apply to scoring a prompt.
+
+    Args:
+        logits: ``[rows, vocab]`` — this rank's slice under TP.
+        target_ids: ``[rows]`` global ids the rows' distributions are scored on.
+        k: Top-k width.
+    """
+    offset = local_vocab_offset(logits.shape[-1])
+    chosen, top_values, top_ids = _distribution_records(
+        logits.float(), target_ids.view(-1, 1), offset, k
+    )
+    records = _to_records(
+        target_ids.view(-1, 1), [k] * logits.shape[0], chosen, top_values, top_ids
+    )
+    return records  # type: ignore[return-value]
+
+
 @dataclass(frozen=True)
 class BatchedSamplingParams:
     """One row of sampling knobs per sequence, as device tensors.
@@ -310,6 +462,9 @@ class BatchedSamplingParams:
             softmax and the sort entirely.
         any_penalty: Whether any row has a penalty other than ``1.0``; when not,
             the generated-span gather can be skipped.
+        logprobs_ks: Per-row top-k widths for logprob reporting, ``None`` for a
+            row that opted out. Host-side: it is control flow (how wide a
+            top-k to run), not a kernel input, so it never becomes a tensor.
     """
 
     temperature: torch.Tensor
@@ -318,6 +473,7 @@ class BatchedSamplingParams:
     greedy: torch.Tensor
     all_greedy: bool
     any_penalty: bool
+    logprobs_ks: tuple[int | None, ...] = ()
 
     @classmethod
     def build(
@@ -342,6 +498,7 @@ class BatchedSamplingParams:
             greedy=torch.tensor(greedy_flags, dtype=torch.bool, device=device).unsqueeze(-1),
             all_greedy=all(greedy_flags),
             any_penalty=any(p.repetition_penalty != 1.0 for p in params),
+            logprobs_ks=tuple(p.logprobs for p in params),
         )
 
 
@@ -374,6 +531,28 @@ class Sampler:
         Returns:
             ``[batch, 1]`` next-token ids.
         """
+        ids, _ = self.sample_with_logprobs(logits, params, generated)
+        return ids
+
+    @torch.inference_mode()
+    def sample_with_logprobs(
+        self,
+        logits: torch.Tensor,
+        params: SamplingParams,
+        generated: GeneratedSpan | None = None,
+    ) -> tuple[torch.Tensor, list[PositionLogprobs | None] | None]:
+        """:meth:`sample` plus per-row logprob records when ``params.logprobs`` is set.
+
+        The records describe the distribution actually drawn from: penalised
+        logits divided by the temperature. Greedy rows divide by the clamped
+        1.0, i.e. they report the raw model distribution — the same numbers
+        HuggingFace's ``compute_transition_scores`` produces under
+        ``do_sample=False``.
+
+        Returns:
+            ``(ids [batch, 1], records)``; ``records`` is ``None`` when
+            ``params.logprobs`` is ``None``, which costs nothing extra.
+        """
         return self._draw(
             logits,
             generated,
@@ -382,6 +561,7 @@ class Sampler:
             top_p=params.top_p,
             all_greedy=params.is_greedy,
             greedy=None,
+            logprobs_ks=params.logprobs,
         )
 
     @torch.inference_mode()
@@ -409,6 +589,22 @@ class Sampler:
         Returns:
             ``[batch, 1]`` next-token ids.
         """
+        ids, _ = self.sample_batched_with_logprobs(logits, params, generated)
+        return ids
+
+    @torch.inference_mode()
+    def sample_batched_with_logprobs(
+        self,
+        logits: torch.Tensor,
+        params: BatchedSamplingParams,
+        generated: GeneratedSpan | None = None,
+    ) -> tuple[torch.Tensor, list[PositionLogprobs | None] | None]:
+        """:meth:`sample_batched` plus per-row logprob records.
+
+        Rows are independent: those whose :class:`SamplingParams` set
+        ``logprobs`` get a record, the others get ``None`` entries, and when no
+        row asked the whole computation is skipped (``records is None``).
+        """
         return self._draw(
             logits,
             generated,
@@ -417,6 +613,7 @@ class Sampler:
             top_p=params.top_p,
             all_greedy=params.all_greedy,
             greedy=params.greedy,
+            logprobs_ks=params.logprobs_ks or None,
         )
 
     def _draw(
@@ -429,12 +626,14 @@ class Sampler:
         top_p: float | torch.Tensor,
         all_greedy: bool,
         greedy: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """Shared body of :meth:`sample` and :meth:`sample_batched`.
+        logprobs_ks: int | Sequence[int | None] | None = None,
+    ) -> tuple[torch.Tensor, list[PositionLogprobs | None] | None]:
+        """Shared body of the four public sampling methods.
 
         ``greedy`` is ``None`` when the whole batch shares one configuration, in which
         case ``all_greedy`` already decided which branch to take and no select is
-        needed.
+        needed. ``logprobs_ks`` is a per-row top-k width, or one scalar for the
+        whole batch; ``None`` skips the logprob arithmetic entirely.
         """
         if logits.dim() == 3:
             logits = logits[:, -1, :]
@@ -443,17 +642,41 @@ class Sampler:
         if penalty is not None and generated is not None:
             logits = apply_repetition_penalty(logits, generated, penalty, offset or 0)
 
+        sampled_ids = None
         if offset is None:
             greedy_ids = torch.argmax(logits, dim=-1, keepdim=True)
-            if all_greedy:
-                return greedy_ids
-            sampled_ids = sample_top_p(torch.softmax(logits / temperature, dim=-1), top_p)
+            if not all_greedy:
+                sampled_ids = sample_top_p(torch.softmax(logits / temperature, dim=-1), top_p)
         else:
             greedy_ids = global_argmax(logits, offset)
-            if all_greedy:
-                return greedy_ids
-            sampled_ids = sharded_top_p(logits, temperature, top_p, offset)
+            if not all_greedy:
+                sampled_ids = sharded_top_p(logits, temperature, top_p, offset)
 
-        if greedy is None:
-            return sampled_ids
-        return torch.where(greedy, greedy_ids, sampled_ids)
+        if sampled_ids is None:
+            ids = greedy_ids
+        elif greedy is None:
+            ids = sampled_ids
+        else:
+            ids = torch.where(greedy, greedy_ids, sampled_ids)
+
+        if logprobs_ks is None:
+            return ids, None
+        ks = [logprobs_ks] * logits.shape[0] if isinstance(logprobs_ks, int) else list(logprobs_ks)
+        k_max = max((k for k in ks if k is not None), default=None)
+        if k_max is None:
+            return ids, None
+        # TP: a non-greedy draw is per-rank (each rank's own RNG) until the
+        # worker broadcasts the winner. A record must describe the token the
+        # caller will actually see, so synchronise first; the worker's own
+        # broadcast of the returned ids is then an idempotent no-op.
+        if offset is not None and not all_greedy:
+            ids = broadcast_tp(ids)
+        # A greedy whole-batch call arrives with temperature == 0.0, which the
+        # draw itself never divides by. The records must describe the raw
+        # distribution, so substitute the clamp BatchedSamplingParams applies.
+        safe_temperature = temperature
+        if not isinstance(temperature, torch.Tensor) and all_greedy:
+            safe_temperature = 1.0
+        scaled = logits.float() / safe_temperature
+        chosen, top_values, top_ids = _distribution_records(scaled, ids, offset, k_max)
+        return ids, _to_records(ids, ks, chosen, top_values, top_ids)

@@ -26,7 +26,7 @@ from typing import Any
 
 from ..engine.async_data_parallel import AsyncDataParallelEngine
 from ..engine.async_engine import AsyncLLMEngine, StreamedOutput
-from ..engine.sampler import SamplingParams
+from ..engine.sampler import PositionLogprobs, SamplingParams
 from ..utils.logger import get_logger
 from ..utils.prompt_templates import get_prompter
 from .protocol import (
@@ -34,11 +34,15 @@ from .protocol import (
     ChatCompletionChunk,
     ChatCompletionChunkChoice,
     ChatCompletionDelta,
+    ChatCompletionLogprobs,
     ChatCompletionMessage,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatTokenLogprob,
+    ChatTopLogprob,
     CompletionChoice,
     CompletionChunk,
+    CompletionLogprobs,
     CompletionRequest,
     CompletionResponse,
     ModelCard,
@@ -124,6 +128,84 @@ class ServerConfig:
         return self.served_model_name or Path(self.model_dir).name
 
 
+class _LogprobsCollector:
+    """Accumulate streamed :class:`PositionLogprobs` into OpenAI-shaped blocks.
+
+    Owns the running UTF-8 byte offset, which is why it lives for the whole
+    request: a token's ``text_offset`` depends on every token before it. Token
+    text comes from decoding each id alone — re-encoding text would not
+    round-trip at BPE boundaries.
+    """
+
+    def __init__(self, tokenizer) -> None:
+        self._tokenizer = tokenizer
+        self._entries: list[tuple[PositionLogprobs, str, int]] = []
+        self._offset = 0
+
+    def _token_text(self, token_id: int) -> str:
+        return self._tokenizer.decode([token_id])
+
+    def add(self, record: PositionLogprobs) -> None:
+        text = self._token_text(record.token_id)
+        self._entries.append((record, text, self._offset))
+        self._offset += len(text.encode())
+
+    def completion_block(self, *, last_only: bool = False) -> CompletionLogprobs:
+        entries = self._entries[-1:] if last_only else self._entries
+        return CompletionLogprobs(
+            tokens=[text for _, text, _ in entries],
+            token_logprobs=[record.logprob for record, _, _ in entries],
+            top_logprobs=[
+                {
+                    self._token_text(t): lp
+                    for t, lp in zip(record.top_token_ids, record.top_logprobs, strict=True)
+                }
+                for record, _, _ in entries
+            ],
+            text_offset=[offset for _, _, offset in entries],
+        )
+
+    def chat_block(self, *, last_only: bool = False) -> ChatCompletionLogprobs:
+        entries = self._entries[-1:] if last_only else self._entries
+        content = []
+        for record, text, _ in entries:
+            tops = []
+            for t, lp in zip(record.top_token_ids, record.top_logprobs, strict=True):
+                top_text = self._token_text(t)
+                tops.append(
+                    ChatTopLogprob(token=top_text, logprob=lp, bytes=list(top_text.encode()))
+                )
+            content.append(
+                ChatTokenLogprob(
+                    token=text,
+                    logprob=record.logprob,
+                    bytes=list(text.encode()),
+                    top_logprobs=tops,
+                )
+            )
+        return ChatCompletionLogprobs(content=content)
+
+
+def _prompt_logprobs_block(tokenizer, records) -> list[dict | None]:
+    """Serialise prompt-position records; ``None`` stays ``None`` (position 0,
+    prefix-cache hits) so the client sees exactly which positions were scored.
+    """
+    return [
+        None
+        if record is None
+        else {
+            "token": tokenizer.decode([record.token_id]),
+            "token_id": record.token_id,
+            "logprob": record.logprob,
+            "top_logprobs": [
+                {"token": tokenizer.decode([t]), "token_id": t, "logprob": lp}
+                for t, lp in zip(record.top_token_ids, record.top_logprobs, strict=True)
+            ],
+        }
+        for record in records
+    ]
+
+
 class OpenAIServer:
     """Wire-protocol adapter: OpenAI JSON in, engine calls out.
 
@@ -151,6 +233,16 @@ class OpenAIServer:
     def list_models(self) -> ModelList:
         return ModelList(data=[ModelCard(id=self.model_name)])
 
+    def metrics_text(self) -> str:
+        """The engine's registry in Prometheus exposition format.
+
+        A front end without a registry of its own (the data-parallel
+        coordinator, whose replicas each serve their own) renders empty rather
+        than failing the scrape.
+        """
+        registry = getattr(self.engine, "metrics", None)
+        return registry.render_prometheus() if registry is not None else ""
+
     # ------------------------------------------------------------ completions #
     async def completions(self, body: CompletionRequest):
         params = body.to_sampling_params()
@@ -159,20 +251,51 @@ class OpenAIServer:
         return await self._full_completion(body.prompt, params)
 
     async def _full_completion(self, prompt: str, params: SamplingParams):
-        final = await self.engine.generate_text(prompt, params)
+        collector = (
+            _LogprobsCollector(self.engine.tokenizer) if params.logprobs is not None else None
+        )
+        final: StreamedOutput | None = None
+        async for chunk in self.engine.generate(prompt, params):
+            final = chunk
+            if collector is not None and chunk.logprobs is not None:
+                collector.add(chunk.logprobs)
+        if final is None:
+            raise RuntimeError("request produced no output")
         return CompletionResponse(
             model=self.model_name,
-            choices=[CompletionChoice(text=final.text, finish_reason=final.finish_reason)],
+            choices=[
+                CompletionChoice(
+                    text=final.text,
+                    finish_reason=final.finish_reason,
+                    logprobs=collector.completion_block() if collector is not None else None,
+                )
+            ],
             usage=self._usage(final),
+            prompt_logprobs=(
+                _prompt_logprobs_block(self.engine.tokenizer, final.prompt_logprobs)
+                if final.prompt_logprobs is not None
+                else None
+            ),
         )
 
     async def _stream_completion(self, prompt: str, params: SamplingParams) -> AsyncIterator[str]:
         response_id = _request_id("cmpl")
+        collector = (
+            _LogprobsCollector(self.engine.tokenizer) if params.logprobs is not None else None
+        )
         async for chunk in self.engine.generate(prompt, params):
+            block = None
+            if collector is not None and chunk.logprobs is not None:
+                collector.add(chunk.logprobs)
+                block = collector.completion_block(last_only=True)
             frame = CompletionChunk(
                 id=response_id,
                 model=self.model_name,
-                choices=[CompletionChoice(text=chunk.delta, finish_reason=chunk.finish_reason)],
+                choices=[
+                    CompletionChoice(
+                        text=chunk.delta, finish_reason=chunk.finish_reason, logprobs=block
+                    )
+                ],
             )
             yield f"data: {frame.model_dump_json()}\n\n"
         yield _SSE_DONE
@@ -186,13 +309,23 @@ class OpenAIServer:
         return await self._full_chat(prompt, params)
 
     async def _full_chat(self, prompt: str, params: SamplingParams):
-        final = await self.engine.generate_text(prompt, params)
+        collector = (
+            _LogprobsCollector(self.engine.tokenizer) if params.logprobs is not None else None
+        )
+        final: StreamedOutput | None = None
+        async for chunk in self.engine.generate(prompt, params):
+            final = chunk
+            if collector is not None and chunk.logprobs is not None:
+                collector.add(chunk.logprobs)
+        if final is None:
+            raise RuntimeError("request produced no output")
         return ChatCompletionResponse(
             model=self.model_name,
             choices=[
                 ChatCompletionChoice(
                     message=ChatCompletionMessage(content=final.text),
                     finish_reason=final.finish_reason,
+                    logprobs=collector.chat_block() if collector is not None else None,
                 )
             ],
             usage=self._usage(final),
@@ -201,18 +334,32 @@ class OpenAIServer:
     async def _stream_chat(self, prompt: str, params: SamplingParams) -> AsyncIterator[str]:
         response_id = _request_id("chatcmpl")
 
-        def frame(delta: ChatCompletionDelta, reason: str | None) -> str:
+        def frame(
+            delta: ChatCompletionDelta,
+            reason: str | None,
+            logprobs: ChatCompletionLogprobs | None = None,
+        ) -> str:
             chunk = ChatCompletionChunk(
                 id=response_id,
                 model=self.model_name,
-                choices=[ChatCompletionChunkChoice(delta=delta, finish_reason=reason)],
+                choices=[
+                    ChatCompletionChunkChoice(delta=delta, finish_reason=reason, logprobs=logprobs)
+                ],
             )
             return f"data: {chunk.model_dump_json()}\n\n"
+
+        collector = (
+            _LogprobsCollector(self.engine.tokenizer) if params.logprobs is not None else None
+        )
 
         # OpenAI opens with a role-only delta, before any text exists.
         yield frame(ChatCompletionDelta(role="assistant"), None)
         async for chunk in self.engine.generate(prompt, params):
-            yield frame(ChatCompletionDelta(content=chunk.delta), chunk.finish_reason)
+            block = None
+            if collector is not None and chunk.logprobs is not None:
+                collector.add(chunk.logprobs)
+                block = collector.chat_block(last_only=True)
+            yield frame(ChatCompletionDelta(content=chunk.delta), chunk.finish_reason, block)
         yield _SSE_DONE
 
     def _render_chat(self, body: ChatCompletionRequest) -> str:
@@ -251,12 +398,13 @@ def build_app(config: ServerConfig, engine: AsyncLLMEngine | AsyncDataParallelEn
             what lets the protocol layer be tested without a GPU or a checkpoint.
     """
     fastapi = _require_fastapi()
-    from fastapi.responses import JSONResponse, StreamingResponse
+    from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
     owns_engine = engine is None
-    state: dict[
-        str, AsyncLLMEngine | AsyncDataParallelEngine | OpenAIServer | None
-    ] = {"engine": engine, "server": None}
+    state: dict[str, AsyncLLMEngine | AsyncDataParallelEngine | OpenAIServer | None] = {
+        "engine": engine,
+        "server": None,
+    }
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -313,6 +461,11 @@ def build_app(config: ServerConfig, engine: AsyncLLMEngine | AsyncDataParallelEn
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/metrics")
+    async def metrics():
+        # Prometheus' own content type; the version token is part of the spec.
+        return PlainTextResponse(server().metrics_text(), media_type="text/plain; version=0.0.4")
 
     @app.get("/v1/models", response_model=ModelList)
     async def models() -> ModelList:

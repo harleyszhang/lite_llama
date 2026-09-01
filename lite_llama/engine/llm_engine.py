@@ -20,7 +20,7 @@ from ..distributed.parallel_state import broadcast_tp, get_tp_world_size
 from ..executor.model_runner import ModelRunner
 from ..utils.path_utils import get_model_name_from_path
 from .detokenizer import IncrementalDetokenizer
-from .sampler import GeneratedSpan, Sampler, SamplingParams
+from .sampler import GeneratedSpan, PositionLogprobs, Sampler, SamplingParams, rows_logprobs
 from .stop_criteria import (
     POLL_INTERVAL,
     StopCriteria,
@@ -108,10 +108,19 @@ class _DecodeSession:
         )
         self._detokenizer = IncrementalDetokenizer(engine.tokenizer, self.batch_size)
         self.completions = [""] * self.batch_size
+        # F6: per-sequence logprob records, collected only when asked for. The
+        # records live on the host (sampler syncs them), so with logprobs on
+        # every step synchronises — that is the feature's inherent cost.
+        self.output_logprobs: list[list[PositionLogprobs]] | None = (
+            [[] for _ in range(self.batch_size)] if params.logprobs is not None else None
+        )
+        self.prompt_logprobs: list[list[PositionLogprobs | None]] | None = None
 
         self._allocated = [
             engine.model_runner.prefill_alloc_kv_cache(
-                self._max_prompt_len, prompt_len_tensor, torch.arange(self.batch_size, device=device)
+                self._max_prompt_len,
+                prompt_len_tensor,
+                torch.arange(self.batch_size, device=device),
             )
         ]
         self._position_deltas = self._mrope_position_deltas()
@@ -158,6 +167,7 @@ class _DecodeSession:
             input_ids = self._tokens[:, prev_pos:cur_pos]
             step_positions = self._step_positions(input_ids, prev_pos, is_prefill)
 
+            wants_prompt = is_prefill and params.prompt_logprobs is not None
             logits = engine.model_runner.forward(
                 input_ids,
                 step_positions,
@@ -165,8 +175,18 @@ class _DecodeSession:
                 # Each sequence's next-token logits sit at its own last real
                 # prompt position; asking the model to gather them before the
                 # lm_head GEMM keeps the projection to one row per sequence.
-                logits_positions=self._prompt_lens_gpu.view(-1) - 1 if is_prefill else None,
+                # Prompt-logprob requests score every prompt position instead:
+                # skip the gather and take the full grid from the same pass.
+                logits_positions=(
+                    None
+                    if wants_prompt
+                    else (self._prompt_lens_gpu.view(-1) - 1 if is_prefill else None)
+                ),
             )
+            if wants_prompt:
+                self._collect_prompt_logprobs(logits)
+                rows = torch.arange(self.batch_size, device=logits.device)
+                logits = logits[rows, self._prompt_lens_gpu.view(-1) - 1]
             self._allocated.append(engine.model_runner.decode_alloc_kv_cache(self.batch_size))
 
             generated = None
@@ -174,21 +194,34 @@ class _DecodeSession:
                 generated = GeneratedSpan(
                     self._tokens[:, :cur_pos], self._is_generated[:, :cur_pos]
                 )
-            next_token = engine.sampler.sample(logits, params, generated).reshape(-1)
+            step_records = None
+            if params.logprobs is not None:
+                next_token, step_records = engine.sampler.sample_with_logprobs(
+                    logits, params, generated
+                )
+                next_token = next_token.reshape(-1)
+            else:
+                next_token = engine.sampler.sample(logits, params, generated).reshape(-1)
             # TP synchronisation: rank 0 samples, then broadcasts the token ids
             # to all other TP ranks. Without this, non-greedy sampling would
-            # diverge across ranks (each has an independent RNG state).
+            # diverge across ranks (each has an independent RNG state). The
+            # sampler already broadcasts before computing records, so this is
+            # a no-op for them.
             if get_tp_world_size() > 1:
                 next_token = broadcast_tp(next_token)
 
             # Only fill positions that are not part of the original prompt.
             writable = ~self._prompt_mask[:, cur_pos]
-            self._tokens[:, cur_pos] = torch.where(
-                writable, next_token, self._tokens[:, cur_pos]
-            )
+            self._tokens[:, cur_pos] = torch.where(writable, next_token, self._tokens[:, cur_pos])
             # Device-side only: no synchronisation happens here.
             self._stop.update(next_token, writable)
             self._accepted[:, cur_pos] = writable & ~self._stop.finished
+            if step_records is not None:
+                # A record accompanies every accepted token; the eos token (and
+                # anything past a stop) is dropped, matching the text path.
+                for i, keep in enumerate(self._accepted[:, cur_pos].tolist()):
+                    if keep and step_records[i] is not None:
+                        self.output_logprobs[i].append(step_records[i])
 
             step += 1
             prev_pos = cur_pos
@@ -214,6 +247,27 @@ class _DecodeSession:
         # Release every cache row reserved across prefill + decode.
         engine.model_runner.kv_cache_manager.release_ref(torch.cat(self._allocated).long())
         engine.last_stop_reasons = self._stop.reasons()
+        engine.last_output_logprobs = self.output_logprobs
+        engine.last_prompt_logprobs = self.prompt_logprobs
+
+    def _collect_prompt_logprobs(self, logits: torch.Tensor) -> None:
+        """Score every prompt position from the full-grid prefill logits.
+
+        Row ``j`` of sequence ``i`` predicts position ``j + 1``, so position 0
+        has no predictor and is reported as ``None`` — the same contract the
+        continuous engine uses for chunked prefill.
+        """
+        k = self._params.prompt_logprobs
+        assert k is not None
+        collected: list[list[PositionLogprobs | None]] = []
+        for i in range(self.batch_size):
+            plen = self._prompt_lens[i]
+            records: list[PositionLogprobs | None] = [None]
+            if plen > 1:
+                targets = self._tokens[i, 1:plen]
+                records.extend(rows_logprobs(logits[i, : plen - 1], targets, k))
+            collected.append(records)
+        self.prompt_logprobs = collected
 
     def _flush(self, start: int, end: int, check_repeat: bool) -> list[str]:
         """Read back columns ``[start, end)`` and turn them into text deltas.
@@ -225,9 +279,7 @@ class _DecodeSession:
         """
         if start >= end:
             return [""] * self.batch_size
-        columns = torch.where(
-            self._accepted[:, start:end], self._tokens[:, start:end], -1
-        ).tolist()
+        columns = torch.where(self._accepted[:, start:end], self._tokens[:, start:end], -1).tolist()
 
         deltas = [""] * self.batch_size
         check = check_repeat and self._params.stop_on_repeat
@@ -336,6 +388,8 @@ class LLMEngine:
 
         self.stop_token_ids = load_stop_token_ids(checkpoints_dir, self.tokenizer)
         self.last_stop_reasons: list[str] | None = None
+        self.last_output_logprobs: list[list[PositionLogprobs]] | None = None
+        self.last_prompt_logprobs: list[list[PositionLogprobs | None]] | None = None
 
     @staticmethod
     def _load_tokenizer(path: str) -> AutoTokenizer:

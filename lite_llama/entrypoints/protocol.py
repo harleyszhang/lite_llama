@@ -63,6 +63,9 @@ class CompletionRequest(_GenerationOptions):
     """Body of ``POST /v1/completions``."""
 
     prompt: str
+    logprobs: int | None = Field(default=None, ge=0, le=20)
+    # Not part of OpenAI's schema; vLLM-compatible extension, honoured by name.
+    prompt_logprobs: int | None = Field(default=None, ge=0, le=20)
 
     @field_validator("prompt")
     @classmethod
@@ -70,6 +73,12 @@ class CompletionRequest(_GenerationOptions):
         if not value:
             raise ValueError("prompt must not be empty")
         return value
+
+    def to_sampling_params(self) -> SamplingParams:
+        params = super().to_sampling_params()
+        params.logprobs = self.logprobs
+        params.prompt_logprobs = self.prompt_logprobs
+        return params
 
 
 class ChatMessage(BaseModel):
@@ -83,6 +92,22 @@ class ChatCompletionRequest(_GenerationOptions):
     """Body of ``POST /v1/chat/completions``."""
 
     messages: list[ChatMessage] = Field(min_length=1)
+    logprobs: bool = False
+    top_logprobs: int | None = Field(default=None, ge=0, le=20)
+
+    @field_validator("top_logprobs")
+    @classmethod
+    def _top_logprobs_need_logprobs(cls, value: int | None, info) -> int | None:
+        if value is not None and not info.data.get("logprobs", False):
+            raise ValueError("top_logprobs requires logprobs to be true")
+        return value
+
+    def to_sampling_params(self) -> SamplingParams:
+        params = super().to_sampling_params()
+        # OpenAI reports the sampled token alone when only the switch is on;
+        # k alternatives widen the record. k == 0 means the sampled token only.
+        params.logprobs = (self.top_logprobs or 0) if self.logprobs else None
+        return params
 
 
 class UsageInfo(BaseModel):
@@ -93,10 +118,20 @@ class UsageInfo(BaseModel):
     total_tokens: int = 0
 
 
+class CompletionLogprobs(BaseModel):
+    """OpenAI's per-token logprob block: four parallel arrays."""
+
+    tokens: list[str]
+    token_logprobs: list[float]
+    top_logprobs: list[dict[str, float]]
+    text_offset: list[int]
+
+
 class CompletionChoice(BaseModel):
     index: int = 0
     text: str = ""
     finish_reason: str | None = None
+    logprobs: CompletionLogprobs | None = None
 
 
 class CompletionResponse(BaseModel):
@@ -108,6 +143,8 @@ class CompletionResponse(BaseModel):
     model: str
     choices: list[CompletionChoice]
     usage: UsageInfo = Field(default_factory=UsageInfo)
+    # vLLM-style extension: per-prompt-position records (position 0 is None).
+    prompt_logprobs: list[dict | None] | None = None
 
 
 class ChatCompletionMessage(BaseModel):
@@ -115,10 +152,25 @@ class ChatCompletionMessage(BaseModel):
     content: str = ""
 
 
+class ChatTopLogprob(BaseModel):
+    token: str
+    logprob: float
+    bytes: list[int] | None = None
+
+
+class ChatTokenLogprob(ChatTopLogprob):
+    top_logprobs: list[ChatTopLogprob] = Field(default_factory=list)
+
+
+class ChatCompletionLogprobs(BaseModel):
+    content: list[ChatTokenLogprob]
+
+
 class ChatCompletionChoice(BaseModel):
     index: int = 0
     message: ChatCompletionMessage
     finish_reason: str | None = None
+    logprobs: ChatCompletionLogprobs | None = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -147,6 +199,7 @@ class ChatCompletionChunkChoice(BaseModel):
     index: int = 0
     delta: ChatCompletionDelta
     finish_reason: str | None = None
+    logprobs: ChatCompletionLogprobs | None = None
 
 
 class ChatCompletionChunk(BaseModel):

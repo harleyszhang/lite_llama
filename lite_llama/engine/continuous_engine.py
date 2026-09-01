@@ -54,13 +54,14 @@ from ..executor.executor import (
     UniProcExecutor,
     launch_tensor_parallel,
 )
-from ..executor.worker import ModelInput, PassKind
+from ..executor.worker import ModelInput, PassKind, PassLogprobs
 from ..models.config import read_model_type
 from ..models.registry import ModelRegistry
+from ..observe import EngineMetrics, Tracer
 from .detokenizer import IncrementalDetokenizer
 from .llm_engine import LLMEngine
 from .outputs import CompletionOutput, RequestOutput
-from .sampler import SamplingParams
+from .sampler import PositionLogprobs, SamplingParams
 from .scheduler import (
     DEFAULT_MAX_NUM_BATCHED_TOKENS,
     DEFAULT_MAX_NUM_SEQS,
@@ -76,10 +77,15 @@ class _Work(NamedTuple):
 
     The plan is anonymous by design — it names slots, not requests — so the step
     keeps the request objects alongside it to attribute the sampled tokens.
+
+    ``requests`` is parallel to ``plan.sampled``; ``chunk_requests`` is parallel
+    to ``plan.slots`` and exists only on chunk passes, to attribute the prompt
+    logprob records of sequences that owe no token this pass.
     """
 
     plan: ModelInput
     requests: list[Request]
+    chunk_requests: tuple[Request, ...] = ()
 
 
 def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
@@ -93,13 +99,23 @@ def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
     """
     slots, starts, lens, tokens = [], [], [], []
     sampled, requests = [], []
+    prompt_logprobs, prompt_targets = [], []
     copies: list[tuple[int, int, int, int]] = []
     for row, (request, chunk) in enumerate(chunks):
         start = request.num_computed_tokens - chunk
+        end = request.num_computed_tokens
         slots.append(request.slot)
         starts.append(start)
-        lens.append(request.num_computed_tokens)
-        tokens.extend(request.prompt_token_ids[start : request.num_computed_tokens])
+        lens.append(end)
+        tokens.extend(request.prompt_token_ids[start:end])
+        prompt_logprobs.append(request.params.prompt_logprobs)
+        # Row j of the chunk is scored against the token at start+j+1, which
+        # sits inside the plan's own tokens — except a partial chunk's last
+        # row, whose target is the *next* chunk's first token, and a final
+        # chunk's last row, which is the sampled row and has no target yet.
+        # Both tails are padded with 0; the worker never reads the final one.
+        targets = request.prompt_token_ids[start + 1 : end + 1]
+        prompt_targets.extend(targets + [0] * (chunk - len(targets)))
         # The scheduler names the source slot and offset; the destination is this
         # request's own slot, which only the plan knows about.
         copies += [
@@ -114,6 +130,7 @@ def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
             sampled.append(row)
             requests.append(request)
 
+    wants_prompt = any(k is not None for k in prompt_logprobs)
     return _Work(
         ModelInput(
             kind=kind,
@@ -127,8 +144,11 @@ def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
             # penalty is a no-op here whatever the request configured.
             gen_counts=(0,) * len(requests),
             prefix_copies=tuple(copies),
+            prompt_logprobs=tuple(prompt_logprobs) if wants_prompt else (),
+            prompt_targets=tuple(prompt_targets) if wants_prompt else (),
         ),
         requests,
+        tuple(request for request, _ in chunks),
     )
 
 
@@ -246,6 +266,14 @@ class ContinuousBatchingEngine:
         self._detokenizers: dict[str, IncrementalDetokenizer] = {}
         self._request_ids = itertools.count()
         self._step_count = 0
+
+        # Observability (A7): metrics are a few float additions on the finish
+        # path; tracing is a span per request when a collector is configured.
+        # Both are cheap no-ops when disabled, so the hot loop never branches
+        # on them.
+        self.metrics = EngineMetrics.from_env()
+        self.tracer = Tracer.from_env()
+        self._spans: dict[str, object] = {}
 
     # ------------------------------------------------------------------ build #
     @classmethod
@@ -384,12 +412,17 @@ class ContinuousBatchingEngine:
         )
         self.scheduler.add_request(request)
         self._detokenizers[request.request_id] = IncrementalDetokenizer(self.tokenizer, 1)
+        self._spans[request.request_id] = self.tracer.start_span(
+            "request", request_id=request.request_id, prompt_tokens=request.prompt_len
+        )
         return request
 
     def abort(self, request_id: str) -> Request | None:
         """Cancel a request; its slot is free for the next step."""
         request = self.scheduler.abort(request_id)
         if request is not None:
+            self.metrics.finished.inc(finish_reason="abort")
+            self.tracer.end_span(self._spans.pop(request.request_id, None), finish_reason="abort")
             self._retire(request)
         return request
 
@@ -418,6 +451,12 @@ class ContinuousBatchingEngine:
             return []
 
         self._step_count += 1
+        # Freshly admitted requests owe a queue-time observation; resumed chunks
+        # have num_computed beyond their chunk and are skipped. A re-admission
+        # after preemption counts again: the request really was waiting.
+        for request, chunk in zip(scheduled.prefill, scheduled.prefill_chunk_lens, strict=True):
+            if request.num_computed_tokens == chunk:
+                self.metrics.observe_queue_time(request)
         work: list[_Work] = []
         if scheduled.prefill:
             work += _prefill_work(scheduled.prefill, scheduled.prefill_chunk_lens)
@@ -430,14 +469,33 @@ class ContinuousBatchingEngine:
         # host-device synchronisation per step — not per pass — and lets a later
         # pass's input preparation ride the copy stream while an earlier pass's
         # forward is still on the GPU (the L1 overlap site).
-        pending: list[tuple[list[Request], torch.Tensor]] = []
-        for plan, requests in work:
-            pending.append((requests, self._executor.execute(plan)))
+        pending: list[tuple[_Work, torch.Tensor, PassLogprobs | None]] = []
+        for work_item in work:
+            tokens, logprobs = self._executor.execute(work_item.plan)
+            pending.append((work_item, tokens, logprobs))
 
-        emitted: list[tuple[Request, int]] = []
-        for requests, tokens in pending:
-            emitted += zip(requests, tokens.tolist(), strict=True)
-        return self._harvest(emitted)
+        emitted: list[tuple[Request, int, PositionLogprobs | None]] = []
+        for work_item, tokens, logprobs in pending:
+            # ``prompt`` is slot-parallel and uniformly None for a decode pass,
+            # which has no chunks to attribute records to; skip it there.
+            if logprobs is not None and any(logprobs.prompt):
+                self._attribute_prompt_logprobs(work_item, logprobs.prompt)
+            records = (
+                logprobs.sampled
+                if logprobs is not None and logprobs.sampled
+                else (None,) * len(work_item.requests)
+            )
+            emitted += [
+                (request, token, record)
+                for (request, token), record in zip(
+                    zip(work_item.requests, tokens.tolist(), strict=True), records, strict=True
+                )
+            ]
+        # The gauges read the occupancy once the step's finishes have landed,
+        # so a scrape never counts a request that this step already retired.
+        advanced = self._harvest(emitted)
+        self.metrics.observe_load(len(self.scheduler.running), len(self.scheduler.waiting))
+        return advanced
 
     def generate(
         self,
@@ -462,7 +520,12 @@ class ContinuousBatchingEngine:
         return [
             RequestOutput(
                 prompt=request.prompt,
-                outputs=[CompletionOutput(0, request.text, request.finish_reason)],
+                outputs=[
+                    CompletionOutput(
+                        0, request.text, request.finish_reason, logprobs=request.output_logprobs
+                    )
+                ],
+                prompt_logprobs=request.prompt_logprobs,
             )
             for request in requests
         ]
@@ -471,8 +534,34 @@ class ContinuousBatchingEngine:
         """Release the executor. The engine cannot serve any more steps after this."""
         self._executor.shutdown()
 
+    def timeline_summary(self) -> str:
+        """Stream region table of the steps run so far; empty unless tracing is on."""
+        return self._executor.timeline_summary()
+
     # ---------------------------------------------------------------- harvest #
-    def _harvest(self, emitted: list[tuple[Request, int]]) -> list[Request]:
+    def _attribute_prompt_logprobs(
+        self, work: _Work, prompt: tuple[tuple[PositionLogprobs, ...] | None, ...]
+    ) -> None:
+        """Place a chunk pass's prompt records on their requests, by position.
+
+        Entry ``j`` of sequence ``i`` covers position ``seq_starts[i] + j + 1``.
+        Position 0 and prefix-cache hits stay ``None``: the rows that would
+        have predicted them never ran. The list is allocated at full prompt
+        length on first contact, so chunks may land in any pass order.
+        """
+        for request, start, records in zip(
+            work.chunk_requests, work.plan.seq_starts, prompt, strict=True
+        ):
+            if records is None:
+                continue
+            if request.prompt_logprobs is None:
+                request.prompt_logprobs = [None] * request.prompt_len
+            for j, record in enumerate(records):
+                request.prompt_logprobs[start + j + 1] = record
+
+    def _harvest(
+        self, emitted: list[tuple[Request, int, PositionLogprobs | None]]
+    ) -> list[Request]:
         """Read the step's tokens back, detokenise them, and retire whoever stopped.
 
         The only host-device synchronisation in the loop. It is what makes stop
@@ -485,10 +574,11 @@ class ContinuousBatchingEngine:
         check_repeat = self._step_count % POLL_INTERVAL == 0
         advanced: list[Request] = []
 
-        for request, token_id in emitted:
+        for request, token_id, record in emitted:
             if request.first_token_time is None:
                 request.first_token_time = now
             request.delta = ""
+            request.delta_logprobs = None
 
             if token_id in self.stop_token_ids:
                 # The stop token itself is model punctuation, not output; the
@@ -501,6 +591,14 @@ class ContinuousBatchingEngine:
                 continue
 
             request.output_token_ids.append(token_id)
+            if record is not None:
+                # Parallel to output_token_ids: one record per accepted token,
+                # and — like the token — none for the stop token, which is
+                # model punctuation rather than output.
+                if request.output_logprobs is None:
+                    request.output_logprobs = []
+                request.output_logprobs.append(record)
+                request.delta_logprobs = record
             request.delta = self._detokenizers[request.request_id].append(0, token_id)
             request.text += request.delta
             advanced.append(request)
@@ -514,6 +612,12 @@ class ContinuousBatchingEngine:
 
     def _finish(self, request: Request, reason: str) -> None:
         self.scheduler.finish(request, reason)
+        self.metrics.observe_finish(request)
+        self.tracer.end_span(
+            self._spans.pop(request.request_id, None),
+            finish_reason=reason,
+            output_tokens=len(request.output_token_ids),
+        )
         self._retire(request)
 
     def _retire(self, request: Request) -> None:
