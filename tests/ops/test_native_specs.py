@@ -10,6 +10,7 @@ live in ``tests/kernels/test_linear_dispatch.py``).
 from __future__ import annotations
 
 import ast
+import importlib.util
 import inspect
 from pathlib import Path
 from typing import ClassVar
@@ -25,6 +26,10 @@ from lite_llama.kernels.dispatcher.dispatch import resolve_target
 from lite_llama.kernels.ops import LOGICAL_OPS
 from lite_llama.kernels.ops.gemm.linear import linear_torch
 from lite_llama.modules.quantization.unquant import UnquantizedLinearMethod
+
+#: resolve_target imports the native Triton modules to prove they are callable;
+#: on a machine without Triton there is nothing to resolve.
+TRITON_AVAILABLE = importlib.util.find_spec("triton") is not None
 
 #: scheme key -> spec name, the routing every quant method relies on.
 SCHEME_TO_ROW = {
@@ -332,6 +337,7 @@ class TestRegistryStaysTorchFree:
                     assert module.startswith("lite_llama.kernels.backend."), spec.name
                 assert attr.isidentifier()
 
+    @pytest.mark.skipif(not TRITON_AVAILABLE, reason="resolving GPU targets requires Triton")
     def test_every_row_resolves_to_a_callable(self) -> None:
         for op in REGISTRY.ops():
             for spec in REGISTRY.implementations(op):

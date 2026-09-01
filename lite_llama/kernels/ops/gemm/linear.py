@@ -12,7 +12,7 @@ never has to know which one it got; scales it does not have are simply
 ``None``.
 
 Usage:
-    y = linear_torch(x, weight, bias=bias)                       # unquantised
+    y = linear_torch(x, weight, bias=bias)                          # unquantised
     y = linear_w8a16(x, qweight, weight_scale=scales, group_k=128)  # fp8/int8 weight
 """
 
@@ -20,8 +20,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-
-from ..quantization import fp8_matmul, smoothquant_matmul, w4a16_matmul, w8a16_matmul
 
 
 def linear_torch(
@@ -60,6 +58,8 @@ def linear_w8a16(
     group_k: int = 0,
 ) -> torch.Tensor:
     """8-bit weight-only GEMM (fp8-e4m3 ``uint8`` or symmetric ``int8``)."""
+    from ..quantization import w8a16_matmul
+
     if weight_scale is None:
         raise ValueError("linear_w8a16 needs weight_scale (fp8 or blockwise-int8 row)")
     return w8a16_matmul(x, weight, weight_scale, group_n=group_n or 1, group_k=group_k, bias=bias)
@@ -76,6 +76,8 @@ def linear_w4a16(
     group_k: int = 0,
 ) -> torch.Tensor:
     """4-bit weight-only GEMM (AWQ/GPTQ packed ``int32``, asymmetric zero points)."""
+    from ..quantization import w4a16_matmul
+
     if weight_scale is None or weight_zeros is None:
         raise ValueError("linear_w4a16 needs weight_scale and weight_zeros (awq/gptq row)")
     # group_size is the k-axis block of the int4 groups; group_n has no analogue.
@@ -93,6 +95,8 @@ def linear_w8a8_int8(
     group_k: int = 0,
 ) -> torch.Tensor:
     """SmoothQuant W8A8: int8 weights, per-token int8 activations in-kernel."""
+    from ..quantization import smoothquant_matmul
+
     if weight_scale is None:
         raise ValueError("linear_w8a8_int8 needs weight_scale (smoothquant per-channel)")
     return smoothquant_matmul(x, weight, weight_scale, bias=bias)
@@ -118,6 +122,7 @@ def linear_w8a8_fp8(
     # this module is itself loaded lazily by dispatch, so nothing pays for it
     # unless an fp8 checkpoint is actually served.
     from ....modules.quantization.utils import quantize_fp8_per_token
+    from ..quantization import fp8_matmul
 
     if weight_scale is None:
         raise ValueError("linear_w8a8_fp8 needs weight_scale (block-wise fp8)")

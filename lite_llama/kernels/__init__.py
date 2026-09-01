@@ -23,6 +23,11 @@ Usage:
     fn = sel.load()
 """
 
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
+
 from . import backend as backend
 from . import dispatcher as dispatcher
 from . import ops as ops
@@ -31,25 +36,49 @@ from . import ops as ops
 from .dispatcher import Selected, dispatch, explain, invalidate_cache, op_backend_env
 from .dispatcher.autotune import install_frozen_perf_provider
 
-# The kernels the model/engine layers call directly.
-from .ops.activation.activations import gelu, leaky_relu, relu, silu, tanh
-from .ops.activation.swiglu import swiglu_forward, swiglu_forward_fused
-from .ops.attention.flashattention2_nopad import flash_attention2_no_pad
-from .ops.attention.flashdecoding import flash_decoding
-from .ops.embeddings.vocab_embedding import vocab_parallel_embedding
-from .ops.gemm.linear import (
-    linear_torch,
-    linear_w4a16,
-    linear_w8a8_fp8,
-    linear_w8a8_int8,
-    linear_w8a16,
-)
-from .ops.kvcache.update_kv_buffer import update_kv_buffer
-from .ops.kvcache.update_kv_index import update_kv_index
-from .ops.layernorm.skip_rmsnorm import skip_rmsnorm
-from .ops.moe.fused_moe import fused_moe, moe_align_block_size
-from .ops.quantization import smoothquant_matmul, w4a16_matmul, w8a16_matmul
-from .ops.rope.rope_emb import rope_emb_forward
+# The kernels the model/engine layers call directly, resolved on first use:
+# importing an implementation module pulls in Triton, while callers such as
+# modules/attention only need ``dispatch`` from the torch-free machinery above.
+_EXPORTS: dict[str, tuple[str, str]] = {
+    "gelu": (".ops.activation.activations", "gelu"),
+    "leaky_relu": (".ops.activation.activations", "leaky_relu"),
+    "relu": (".ops.activation.activations", "relu"),
+    "silu": (".ops.activation.activations", "silu"),
+    "tanh": (".ops.activation.activations", "tanh"),
+    "swiglu_forward": (".ops.activation.swiglu", "swiglu_forward"),
+    "swiglu_forward_fused": (".ops.activation.swiglu", "swiglu_forward_fused"),
+    "flash_attention2_no_pad": (".ops.attention.flashattention2_nopad", "flash_attention2_no_pad"),
+    "flash_decoding": (".ops.attention.flashdecoding", "flash_decoding"),
+    "vocab_parallel_embedding": (".ops.embeddings.vocab_embedding", "vocab_parallel_embedding"),
+    "linear_torch": (".ops.gemm.linear", "linear_torch"),
+    "linear_w4a16": (".ops.gemm.linear", "linear_w4a16"),
+    "linear_w8a8_fp8": (".ops.gemm.linear", "linear_w8a8_fp8"),
+    "linear_w8a8_int8": (".ops.gemm.linear", "linear_w8a8_int8"),
+    "linear_w8a16": (".ops.gemm.linear", "linear_w8a16"),
+    "update_kv_buffer": (".ops.kvcache.update_kv_buffer", "update_kv_buffer"),
+    "update_kv_index": (".ops.kvcache.update_kv_index", "update_kv_index"),
+    "skip_rmsnorm": (".ops.layernorm.skip_rmsnorm", "skip_rmsnorm"),
+    "fused_moe": (".ops.moe.fused_moe", "fused_moe"),
+    "moe_align_block_size": (".ops.moe.fused_moe", "moe_align_block_size"),
+    "smoothquant_matmul": (".ops.quantization", "smoothquant_matmul"),
+    "w4a16_matmul": (".ops.quantization", "w4a16_matmul"),
+    "w8a16_matmul": (".ops.quantization", "w8a16_matmul"),
+    "rope_emb_forward": (".ops.rope.rope_emb", "rope_emb_forward"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    try:
+        module_name, attribute = _EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+    value = getattr(import_module(module_name, __name__), attribute)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | _EXPORTS.keys())
 
 # Frozen measured ranking (ROADMAP v0.10): records under the autotune cache's
 # frozen/ dir become the rank step's perf input. Nothing is read until the

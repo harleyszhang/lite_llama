@@ -7,7 +7,6 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from ...kernels import fused_moe
 from .base_config import (
     FusedMoEMethodBase,
     LinearMethodBase,
@@ -57,6 +56,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
         }
 
     def apply(self, block, x, topk_weights, topk_ids) -> torch.Tensor:
+        from ...kernels import fused_moe
+
         return fused_moe(
             x,
             block.experts["gate_up_proj"],
