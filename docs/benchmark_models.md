@@ -73,7 +73,7 @@ print(triton.testing.do_bench(lambda: w8a16_matmul(x, qw, sc, group_n=128, group
 
 测试 1：lite_llama 默认启用 CUDA graph（TextGenerator 和 VisionGenerator 的 use_cuda_graph 均为 True—多模态的 decode 步骤与纯文本结构相同，视觉 token 在 prefill 之后也只是一行普通的 KV cache）。所以两表的 lite_llama 数字同源—只是 gen_len 与 TPOT 统计方式不同（整体摊销中位数 vs 逐步间隔均值），数字接近而不相等，各按原口径保留。
 
-两节的测试矩阵相同：单卡 A10 22 GiB 放得下的全部 checkpoint，纯文本（四种架构 × bf16/FP8/AWQ）以 batch 并行口径测，多模态（llava / qwen3_vl）以逐请求串行口径测（表一末尾 batch=serial 的行）；单卡放不下的 8B b16 档用 `--tensor-parallel-size 2` 开双卡 TP 测（表一中 GPU=A10×2 的行，decode 走 eager—NCCL 集合通信不能进 graph 捕获）。未包含：**Qwen2.5-0.5B**（本机无权重，历史数字见 git 历史）、**Qwen-1_8B**（第一代 `qwen` model_type，不在支持列表，加载即被 registry 拒绝）、**Qwen3-30B-A3B 的 b16 checkpoint 与 Qwen3-Next-80B**（双卡放不下，需 4 卡级 TP；30B-A3B 的 FP8 版 30.5 GB 已用 TP2 补测，见上表）、**Qwen3-MoE-Tiny**（2 层 4 专家的玩具 checkpoint，fp32 存储 547 MB，数字仅证明 qwen3_moe 架构与 fused_moe kernel 在三层 dispatch 下端到端可用，不代表 MoE 吞吐量级）。
+两节的测试矩阵相同：单卡 A10 22 GiB 放得下的全部 checkpoint，纯文本（四种架构 × bf16/FP8/AWQ）以 batch 并行口径测，多模态（llava / qwen3_vl）以逐请求串行口径测（表一末尾 batch=serial 的行）；单卡放不下的 8B b16 档用 `--tensor-parallel-size 2` 开双卡 TP 测（表一中 GPU=A10×2 的行，decode 走 eager——当时 TP 路径尚不能捕获 graph；连续批处理引擎的 TP-safe 捕获落地后该限制已解除，见下文 H100 补测）。未包含：**Qwen2.5-0.5B**（本机无权重，历史数字见 git 历史）、**Qwen-1_8B**（第一代 `qwen` model_type，不在支持列表，加载即被 registry 拒绝）、**Qwen3-30B-A3B 的 b16 checkpoint 与 Qwen3-Next-80B**（双卡放不下，需 4 卡级 TP；30B-A3B 的 FP8 版 30.5 GB 已用 TP2 补测，见上表）、**Qwen3-MoE-Tiny**（2 层 4 专家的玩具 checkpoint，fp32 存储 547 MB，数字仅证明 qwen3_moe 架构与 fused_moe kernel 在三层 dispatch 下端到端可用，不代表 MoE 吞吐量级）。
 
 ### lite_llama vs HF transformers（examples/benchmark.py）
 
@@ -146,7 +146,7 @@ print(triton.testing.do_bench(lambda: w8a16_matmul(x, qw, sc, group_n=128, group
 - 8B 级 TP2 双卡档同样领先（Qwen3-8B 1.24×、Llama-3.1-8B 1.46×，两端都在同样的两张卡上），说明 TP 切分 + eager decode 在通信开销下仍保住优势；
 - 聚合吞吐 TGS 同步放大。每组配置两端输出 token 数一致，工作量对等
 - **TTFT** 绝对值小（纯文本 6～50 ms），lite_llama 普遍略优但 run-to-run 抖动明显，不逐行解读；多模态 TTFT（129～200 ms）含视觉塔前向，lite_llama 优 1.11×～1.22×。原始日志见 `docs/benchmark_logs/bench_*.json`（每份含完整 config）。
-- 30B 级 MoE（Qwen3-30B-A3B-FP8，TP2 eager decode）：TPOT ~84 ms 与 batch 8/16 无关（~3B 激活参数 + top-8 专家权重读取，A10 带宽主导），batch 8→16 吞吐线性放大（95→190 tok/s）说明带宽还有余量；权重 29.06 GB 分两卡后每卡仍有 ~6 GB KV（104,528 token/卡）。transformers 侧无法对照（fp8 反量化为 bf16 需 ~60 GB，双卡 44 GB 放不下），同 14B-AWQ 一样记 lite_llama 单侧。
+- 30B 级 MoE（Qwen3-30B-A3B-FP8，TP2 eager decode）：TPOT ~84 ms 与 batch 8/16 无关（~3B 激活参数 + top-8 专家权重读取，A10 带宽主导），batch 8→16 吞吐线性放大（95→190 tok/s）说明带宽还有余量；权重 29.06 GB 分两卡后每卡仍有 ~6 GB KV（104,528 token/卡）。transformers 侧无法对照（fp8 反量化为 bf16 需 ~60 GB，双卡 44 GB 放不下），同 14B-AWQ 一样记 lite_llama 单侧。2026-09-01 在 2×H100 80GB 上用同一 checkpoint 重测（TP1/TP2 均开 graph）：TPOT 13.16 ms、TPS 285.9（单卡），是 A10×2 eager 口径的 5.9×——完整矩阵（KV fp8、DP2、golden 精度列）见 [quantization.md](quantization.md#qwen3-30b-a3b-instruct-2507-fp8-moe-2h100) 与 [`benchmark_logs/bench_quant_Qwen3-30B-A3B-FP8_20260901.json`](benchmark_logs/bench_quant_Qwen3-30B-A3B-FP8_20260901.json)。
 
 > 本节表中未出现的组合：**8B 级 b16 单卡档**的 KV 预算（16×2048 token ≈ 4.8 GiB + 16 GiB 权重）超出 22 GiB—已用 `--tensor-parallel-size 2` 双卡 TP 补上（GPU=A10×2 行）；**8B 级 b8 档的 transformers 侧**因 transformers 5.8 的 `caching_allocator_warmup` 需要约双倍模型显存，单卡放不下（b16 双卡档已补测，b8 不再用双卡测以保持与 lite_llama 单卡 graph 行的硬件口径一致）；**14B-AWQ 的 transformers 侧**因 AWQ 反量化需要 gptqmodel/autoawq（未安装）标为 lite_llama 单侧。
 
