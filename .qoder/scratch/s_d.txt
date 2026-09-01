@@ -1,0 +1,679 @@
+### lite_llama/models/base.py | total=427 | doc=16L/886c | usage=True
+DOC| Layer/model skeleton shared by the decoder-only models.
+DOC| 
+DOC| LLaMA, Qwen2 and Qwen3 differ only in a few knobs — q/k/v bias, per-head q/k
+DOC| RMSNorm, and how wide the attention projections are versus the residual stream.
+DOC| Everything else (the attention composition — fused-QKV projection, q/k norm,
+DOC| RoPE — the KV-cache write, the prefill/decode kernel split, SwiGLU MLP,
+DOC| pre-norm residual wiring, the forward skeleton) is assembled here once in
+DOC| :class:`DecoderLayer` / :class:`CausalLM` from the building blocks in
+DOC| :mod:`lite_llama.modules`; concrete models only declare their differences.
+DOC| Q, K and V are stored fused as ``qkv_proj.weight`` so each block runs one
+DOC| projection GEMM instead of three (:mod:`lite_llama.models.weights` owns the key
+DOC| translation that folds the checkpoint's three tensors into it).
+DOC| 
+DOC| Usage:
+DOC|     class LlamaModel(CausalLM): ...   # built via ModelRegistry + ModelLoader
+CLASS Attention(Module) :: Fused-QKV self-attention with RoPE and optional per-head q/k normalisation.
+  - __init__(config)
+  - _project_qkv(x, position_embeddings)
+  - forward(x, atten_info, layer_index, position_embeddings)
+CLASS DecoderLayer(Module) :: Pre-norm transformer block with a fused add-and-normalise.
+  - __init__(config)
+  - forward(hidden_states, atten_info, layer_index, position_embeddings, residual)
+CLASS CausalLM(Module) :: Forward skeleton shared by every decoder-only text model.
+  - __init__(config)
+  - _layer_quant(layer_index)
+  - _build_attention(config, layer_index)
+  - _build_mlp(config, layer_index)
+  - translate_weight_key(key)
+  - load_weights(checkpoint)
+  - quantize_(quant)
+  - get_input_embeddings(input_ids)
+  - _after_layer(hidden_states, layer_index, layer_context)
+  - forward(input_ids, position_ids, atten_info, inputs_embeds, layer_context, logits_positions)
+
+### lite_llama/models/config.py | total=289 | doc=12L/606c | usage=True
+DOC| Model configuration, backed by HuggingFace's ``AutoConfig``.
+DOC| 
+DOC| Rather than redeclare each architecture (a duplicated schema that rotted —
+DOC| transformers 5.x moved ``rope_theta``/``mrope_section`` into ``rope_parameters``,
+DOC| silently breaking Qwen3-VL mrope), the schema, parsing and per-architecture
+DOC| defaults all come from ``AutoConfig``; only the modelling code is lite_llama's own.
+DOC| Note ``head_dim`` is *not* always ``hidden_size // num_heads`` (Qwen3-0.6B has
+DOC| wider attention projections) — use :attr:`ModelConfig.q_size` for the query width.
+DOC| 
+DOC| Usage:
+DOC|     cfg = ModelConfig(checkpoints_dir, max_seq_len=4096)
+def read_model_type(checkpoints_dir)
+CLASS ModelConfig() :: A HuggingFace config plus the runtime knobs and derived geometry.
+  - __init__(hf_config, max_seq_len, kv_cache_dtype)
+  - _parse_quant(hf_config)
+  - from_pretrained(cls, checkpoints_dir, max_seq_len, kv_cache_dtype)
+  - dtype()
+  - kv_cache_torch_dtype()
+  - model_type()
+  - num_layers()
+  - num_heads()
+  - num_kv_heads()
+  - head_dim()
+  - hidden_size()
+  - intermediate_size()
+  - vocab_size()
+  - max_position_embeddings()
+  - tie_word_embeddings()
+  - q_size()
+  - kv_size()
+  - rope_parameters()
+  - rope_config()
+  - validate()
+  - __getattr__(name)
+  - __repr__()
+
+### lite_llama/models/interfaces.py | total=201 | doc=12L/583c | usage=True
+DOC| Capability interfaces a model opts into, plus their shared helpers.
+DOC| 
+DOC| Today just :class:`MultiModalCausalLM`, inherited by a model to accept
+DOC| ``multi_modal_inputs`` (mirrors vLLM's ``interfaces.py``). Because the HF
+DOC| processors already expand ``<image>`` into the exact number of placeholder tokens
+DOC| the vision tower emits, merging vision embeddings is a plain masked scatter
+DOC| (:func:`merge_multimodal_embeddings`) — no sequence-expanding rewrite, positions
+DOC| stay a plain ``arange``, and KV reservation needs no vision-specific arithmetic.
+DOC| 
+DOC| Usage:
+DOC|     class MyVLM(MultiModalCausalLM): ...
+VAR LANGUAGE_MODEL_PREFIX
+def merge_multimodal_embeddings(input_ids, inputs_embeds, multimodal_embeddings, placeholder_token_ids)
+CLASS MultiModalCausalLM(Module) :: Vision encoder + language model with placeholder-based embedding merge.
+  - encode_vision()
+  - placeholder_token_ids()
+  - translate_weight_key(key)
+  - load_weights(checkpoint)
+  - quantize_(quant)
+  - get_input_embeddings(input_ids)
+  - forward(input_ids, position_ids, atten_info, multi_modal_inputs, logits_positions)
+
+### lite_llama/models/llama.py | total=10 | doc=1L/81c | usage=False
+DOC| LLaMA: the baseline configuration — no q/k/v bias, no per-head q/k normalisation.
+CLASS LlamaModel(CausalLM) :: 
+
+### lite_llama/models/llava.py | total=124 | doc=12L/592c | usage=False
+DOC| LLaVA-1.5: CLIP vision tower + 2-layer MLP projector + LLaMA language model.
+DOC| 
+DOC| The vision tower is HuggingFace's ``CLIPVisionModel`` (a faithful ViT is not what
+DOC| this project is about), while the language model is lite_llama's own Triton-kernel
+DOC| :class:`~lite_llama.models.llama.LlamaModel`.
+DOC| 
+DOC| Parameter layout, and the HF checkpoint keys it is filled from::
+DOC| 
+DOC|     vision_tower.*        <- vision_tower.vision_model.*   (CLIPVisionModel, HF names)
+DOC|     multi_modal_projector.linear_{1,2}.{weight,bias}       (unchanged)
+DOC|     language_model.*      <- language_model.model.*        (lite_llama names)
+CLASS LlavaMultiModalProjector(Module) :: Projects CLIP patch features into the language model's embedding space.
+  - __init__(vision_hidden_size, text_hidden_size, projector_hidden_act)
+  - forward(image_features)
+CLASS LlavaLlama(MultiModalCausalLM) :: LLaVA-1.5 for single-image (or multi-image) conditioned generation.
+  - __init__(config)
+  - placeholder_token_ids()
+  - _select_image_features(image_features)
+  - encode_vision(pixel_values)
+
+### lite_llama/models/mla_single_layer.py | total=180 | doc=28L/1568c | usage=True
+DOC| Minimal single-layer MLA harness — the flashmla row's verification vehicle.
+DOC| 
+DOC| A single MLA layer (DeepSeek-V2 style latent attention) with random weights,
+DOC| deliberately ahead of the v0.10 wiring (ROADMAP: verifying MLA's structure
+DOC| and numeric path needs no 671B checkpoint). It is not in
+DOC| :mod:`lite_llama.models.registry` — today it answers exactly two questions:
+DOC| 
+DOC| * does the flashmla row have a golden vehicle? :meth:`MinimalMlaLayer.
+DOC|   reference_decode` is the pure-PyTorch baseline; running the flashmla row
+DOC|   next to it yields the ``max_abs_diff`` the row's ``GoldenRecord`` is waiting
+DOC|   for (``benchmarks/kernels/bench_mla_decode.py`` does exactly that);
+DOC| * what does the latent cache look like in this repo? ``q_a``/``q_b``/``kv_a``
+DOC|   projections plus a head-less paged latent cache — the shape
+DOC|   :class:`~lite_llama.kernels.ops.interfaces.MlaDecodeOp`'s contract spells
+DOC|   out, with its own ``kv:mla_latent`` layout tag so it can never be
+DOC|   dispatched against the per-head paged pool.
+DOC| ...(+11L)
+VAR MLA_LATENT
+def flashmla_decode_fn(q, kv_cache, block_table, cache_seqlens)
+CLASS MinimalMlaLayer(Module) :: Three projections plus a pluggable decode fn over the latent cache.
+  - __init__(hidden_size, num_heads, kv_lora_rank)
+  - project_q(x)
+  - reference_decode(q, kv_cache, block_table, cache_seqlens)
+  - write_kv(x, kv_cache, block_table, cache_seqlens)
+  - decode(x, kv_cache, block_table, cache_seqlens)
+
+### lite_llama/models/qwen2.py | total=10 | doc=1L/73c | usage=False
+DOC| Qwen2: identical to LLaMA except that the q/k/v projections carry a bias.
+CLASS Qwen2Model(CausalLM) :: 
+
+### lite_llama/models/qwen3.py | total=10 | doc=1L/81c | usage=False
+DOC| Qwen3: adds per-head RMSNorm on q and k, and decouples head_dim from hidden_size.
+CLASS Qwen3Model(CausalLM) :: 
+
+### lite_llama/models/qwen3_moe.py | total=47 | doc=10L/379c | usage=True
+DOC| Qwen3 MoE (A3B) model definition.
+DOC| 
+DOC| Attention, q/k-norm and RoPE are identical to dense Qwen3; the only difference
+DOC| is the per-layer MLP choice in :meth:`Qwen3MoeModel._build_mlp`: layers selected
+DOC| by :func:`is_moe_layer` get the routed :class:`~lite_llama.modules.moe.SparseMoeBlock`,
+DOC| the rest keep the dense SwiGLU.
+DOC| 
+DOC| Usage:
+DOC|     model = Qwen3MoeModel(config)   # via ModelRegistry
+def is_moe_layer(config, layer_index)
+CLASS Qwen3MoeModel(CausalLM) :: Qwen3-MoE causal LM: dense-Qwen3 attention, MoE FFN on configured layers.
+  - _build_mlp(config, layer_index)
+
+### lite_llama/models/qwen3_vl.py | total=179 | doc=12L/645c | usage=True
+DOC| Qwen3-VL: SigLIP-style vision tower + Qwen3 language model, with mrope + DeepStack.
+DOC| 
+DOC| Two things make it more than "encode image, scatter embeddings". **mrope**: each
+DOC| vision token carries a ``(t, h, w)`` position and the rotary dims are split across
+DOC| those components (:class:`~lite_llama.modules.rotary_embedding.MRotaryEmbedding`; the
+DOC| ``[3, batch, seq]`` ids come from the processor). **DeepStack**: the tower emits
+DOC| extra feature maps that are *added into* the LM hidden states at the vision-token
+DOC| positions after the first few layers — skipping it silently degrades quality.
+DOC| 
+DOC| Usage:
+DOC|     model = Qwen3VLForCausalLM(config)   # via ModelRegistry
+CLASS Qwen3VLTextModel(CausalLM) :: Qwen3 decoder stack with mrope and DeepStack feature injection.
+  - _after_layer(hidden_states, layer_index, layer_context)
+CLASS Qwen3VLForCausalLM(MultiModalCausalLM) :: Qwen3-VL for image/video conditioned generation.
+  - __init__(config)
+  - placeholder_token_ids()
+  - encode_vision(pixel_values, image_grid_thw, pixel_values_videos, video_grid_thw)
+  - forward(input_ids, position_ids, atten_info, multi_modal_inputs, logits_positions)
+
+### lite_llama/models/registry.py | total=70 | doc=12L/644c | usage=True
+DOC| Single source of truth mapping a HuggingFace ``model_type`` to its implementation.
+DOC| 
+DOC| Replaces a mapping once duplicated across the runner, a config table and a
+DOC| forward-time ``if model_type in (...)`` branch. Each entry is two facts: the class
+DOC| (``"module.path:ClassName"``, imported lazily so a missing transformers model only
+DOC| fails when requested) and whether it consumes ``multi_modal_inputs`` (the executor
+DOC| must know before it holds a model — it decides CUDA-graph eligibility). Adding a
+DOC| model is one line in ``_SPECS`` plus the implementation module.
+DOC| 
+DOC| Usage:
+DOC|     ModelRegistry maps a model_type to a ModelSpec (class path + multimodal flag).
+CLASS ModelSpec() :: How to serve one architecture.
+  - load_class()
+CLASS ModelRegistry() :: Registry of supported architectures, keyed by ``model_type``.
+  - supported_types(cls)
+  - resolve(cls, model_type)
+
+### lite_llama/models/weights.py | total=248 | doc=25L/1555c | usage=True
+DOC| HuggingFace checkpoint keys -> lite_llama parameters.
+DOC| 
+DOC| lite_llama loads HF checkpoints as-is; only a key translation is needed because three
+DOC| structural choices differ from HF: **fused QKV** (``q_proj``+``k_proj``+``v_proj``
+DOC| concatenated into ``qkv_proj.weight``, one GEMM per attention block), **fused gate/up**
+DOC| (the dense MLP's ``gate_proj``+``up_proj`` concatenated into ``gate_up_proj.weight`` so
+DOC| the forward pass is one GEMM) and **stacked MoE experts** (``3*num_experts`` matrices
+DOC| packed into three tensors for grouped-GEMM experts).
+DOC| The rest is naming (bare ``nn.Parameter`` vs ``nn.Linear``).
+DOC| 
+DOC| The work splits in two, and the split is the design. *Renaming* stays here: one pure
+DOC| function maps a checkpoint key to ``(parameter name, shard id)``, where the shard id
+DOC| says which block of a packed parameter the tensor fills (``0/1/2`` for
+DOC| ``[q | k | v]``, ``0/1`` for gate/up, ``(expert, projection)`` for stacked experts).
+DOC| *Placing* — which view of the parameter that block is, and which slice of the
+DOC| incoming tensor this tensor-parallel rank owns — belongs to the layer that owns the
+DOC| ...(+8L)
+VAR ShardId
+VAR Target
+VAR Translator
+def default_weight_loader(param, loaded, shard_id)
+VAR _EXPERT_KEY
+VAR _EXPERT_PROJ_ID
+def translate_text_key(key, packed)
+def strip_prefix(key, prefix)
+def load_weights(model, weights, translate, tied)
+def _alias_parameter(model, dotted_name, source)
+def _verify_coverage(params, filled)
+
+### lite_llama/modules/__init__.py | total=40 | doc=11L/502c | usage=False
+DOC| ``nn.Module`` building blocks shared by the decoder models.
+DOC| 
+DOC| Everything here is a *component* — a projection, an attention block, an MLP,
+DOC| an MoE block, a RoPE table — with no notion of how blocks stack into a model.
+DOC| The layer/model level (:class:`~lite_llama.models.base.DecoderLayer`,
+DOC| :class:`~lite_llama.models.base.CausalLM`, the concrete model classes) lives in
+DOC| :mod:`lite_llama.models`.
+DOC| 
+DOC| Import the public API from here:
+DOC|     ``from lite_llama.modules import ColumnParallelLinear, PagedAttention``
+VAR __all__
+
+### lite_llama/modules/attention.py | total=175 | doc=24L/1300c | usage=True
+DOC| Paged attention: the KV-cache write plus the phase-appropriate kernel call.
+DOC| 
+DOC| :class:`PagedAttention` is the lower half of an attention block. It owns
+DOC| everything that depends on *how K/V are stored* — the write into the paged
+DOC| buffer, the fp8 quantisation on the way in, the dequantisation scales the
+DOC| decode kernel needs, and the prefill/decode split — and nothing that depends on
+DOC| how q/k/v were produced. The projections, q/k norm and RoPE live one level up
+DOC| in :class:`~lite_llama.models.base.Attention`, so a model with a different
+DOC| composition (MLA) can reuse this half, and a different cache strategy can
+DOC| replace it without touching any projection.
+DOC| 
+DOC| The three ops this module runs — ``kv_write``, ``attention.prefill``,
+DOC| ``attention.decode`` — are dispatched once in ``__init__`` and loaded into
+DOC| plain attributes: the cache layout and the fp8-vs-plain distinction are fixed
+DOC| for this module's lifetime, so the hot path pays zero dispatch cost. Which
+DOC| *row* each op resolves to is declared as data in
+DOC| ...(+7L)
+CLASS PagedAttention(Module) :: Writes K/V into the paged cache and runs the phase-appropriate kernel.
+  - __init__(num_kv_heads, head_dim, kv_cache_dtype, dtype)
+  - _write_cache(xk, xv, atten_info, layer_index)
+  - context_forward(xq, xk, xv, atten_info, layer_index)
+  - token_forward(xq, xk, xv, atten_info, layer_index)
+  - forward(xq, xk, xv, atten_info, layer_index, is_prefill)
+
+### lite_llama/modules/linear.py | total=346 | doc=29L/1576c | usage=True
+DOC| Linear layers: one place that knows about both quantisation and sharding.
+DOC| 
+DOC| Every projection in the decoder goes through one of the four classes here.
+DOC| The classes themselves answer only the *sharding* question — the Megatron rule
+DOC| that chaining a column-parallel layer into a row-parallel one (``gate/up`` then
+DOC| ``down``, ``qkv`` then ``o``) makes one all-reduce per block enough. The
+DOC| *storage* question — fp16 ``F.linear`` or which quantised kernel — is delegated
+DOC| to a quant-method object from :mod:`lite_llama.modules.quantization`,
+DOC| so adding a scheme touches no layer code.
+DOC| 
+DOC| :class:`QKVParallelLinear` is the one class that is not a plain division: with
+DOC| grouped-query attention the query and key/value blocks have different head counts,
+DOC| so each is split by its own rule and the fused weight is assembled from the two.
+DOC| 
+DOC| Parameter names deliberately match HuggingFace (``weight``, ``weight_scale_inv``),
+DOC| so :mod:`lite_llama.models.weights` needs no rule for them.
+DOC| ...(+12L)
+CLASS LinearBase(Module) :: ``y = x @ W.T (+ b)`` with the weight stored however the quant method says.
+  - __init__(input_size, output_size)
+  - apply_linear(x)
+  - forward(x)
+  - _weight_loader(param, loaded, shard_id)
+  - quantize_(quant)
+  - extra_repr()
+CLASS ReplicatedLinear(LinearBase) :: Full weight on every rank; for layers too small or too awkward to split.
+CLASS ColumnParallelLinear(LinearBase) :: Splits the output features across ranks; no communication.
+  - __init__(input_size, output_size)
+  - _weight_loader(param, loaded, shard_id)
+CLASS QKVParallelLinear(LinearBase) :: The query, key and value projections as one column-parallel weight.
+  - __init__(hidden_size, num_heads, num_kv_heads, head_dim)
+  - split(qkv)
+  - project(x)
+  - _weight_loader(param, loaded, shard_id)
+  - extra_repr()
+CLASS RowParallelLinear(LinearBase) :: Splits the contracted features across ranks and all-reduces the result.
+  - __init__(input_size, output_size)
+  - _weight_loader(param, loaded, shard_id)
+  - forward(x)
+def _check_shard_alignment(quant, local_size, what)
+
+### lite_llama/modules/mlp.py | total=46 | doc=1L/73c | usage=False
+DOC| Feed-forward modules: the dense SwiGLU MLP shared by every decoder model.
+CLASS FusedMLP(Module) :: SwiGLU feed-forward block: ``down(silu(gate(x)) * up(x))``.
+  - __init__(config, quant)
+  - forward(x)
+
+### lite_llama/modules/moe.py | total=161 | doc=19L/989c | usage=True
+DOC| Mixture-of-experts modules: top-k routed sparse FFN with stacked experts.
+DOC| 
+DOC| :class:`SparseMoeBlock` mirrors vLLM's ``FusedMoE``: it holds the router and the
+DOC| stacked expert weights (three tensors, not ``3*num_experts``), and its forward is
+DOC| ``route -> fused_moe``. Routing follows HF exactly — fp32 softmax over *all*
+DOC| experts, then top-k, then renormalise — an order that is not interchangeable.
+DOC| The expert FFN runs as two grouped GEMMs
+DOC| (:func:`lite_llama.kernels.ops.moe.fused_moe.fused_moe`), not a Python loop.
+DOC| 
+DOC| The experts are where an A3B checkpoint's weight actually is (~29 of its 30B
+DOC| parameters), so this is also where the two features that make it servable on
+DOC| small cards apply: the stacked tensors stay 8-bit end to end, and their
+DOC| intermediate dimension is split across tensor-parallel ranks — the expert
+DOC| equivalent of the dense ``gate/up`` + ``down`` pairing, ending in the same
+DOC| single all-reduce.
+DOC| 
+DOC| ...(+2L)
+CLASS SparseMoeBlock(Module) :: Top-k routed MoE FFN with stacked expert weights.
+  - __init__(config, quant)
+  - _expert_loader(param, loaded, shard_id)
+  - _route(x)
+  - forward(x)
+  - quantize_(quant)
+
+### lite_llama/modules/rotary_embedding.py | total=262 | doc=13L/728c | usage=False
+DOC| Rotary positional embeddings (RoPE) with support for the LLaMA-3 / YaRN rescaling.
+DOC| 
+DOC| The module produces the ``(cos, sin)`` tables consumed by
+DOC| :func:`lite_llama.kernels.ops.rope.rope_emb_forward`. Only the frequency computation differs
+DOC| between variants, so each variant is a plain function registered in
+DOC| :data:`ROPE_INIT_FUNCTIONS` and selected from the config's ``rope_type``.
+DOC| 
+DOC| The config passed in is the flat mapping built by
+DOC| :attr:`lite_llama.models.config.ModelConfig.rope_config`, not a HF config object:
+DOC| transformers has moved these fields between ``rope_theta``, ``rope_scaling`` and
+DOC| ``rope_parameters`` across versions, and normalising that once at the config layer
+DOC| keeps the frequency functions free of version checks.
+def _rotary_dim(config)
+def compute_default_rope(config, device)
+def compute_llama3_rope(config, device)
+CLASS RotaryEmbedding(Module) :: Builds ``(cos, sin)`` for the given ``position_ids``.
+  - __init__(config, device)
+  - _autocast_device(x)
+  - _scaled_pair(cos, sin, scaling, dtype)
+  - _build_caches(device)
+  - forward(x, position_ids)
+  - _compute_per_step(x, position_ids)
+CLASS MRotaryEmbedding(RotaryEmbedding) :: Multimodal RoPE (mrope) with interleaved temporal/height/width sections.
+  - __init__(config, device)
+  - _interleave_sections(freqs, mrope_section)
+  - forward(x, position_ids)
+
+### lite_llama/modules/vocab_parallel.py | total=148 | doc=22L/1339c | usage=True
+DOC| Vocabulary-parallel embedding and LM head: the two ends of the token axis, sharded.
+DOC| 
+DOC| Both tensors are ``[vocab_size, hidden_size]``, so tensor parallelism cuts them along
+DOC| the *vocabulary*: rank ``r`` owns rows ``[r * vocab/tp, (r+1) * vocab/tp)``. The
+DOC| embedding is a gather, so each rank looks up only the ids it owns and one
+DOC| ``all_reduce`` sums the (mostly zero) contributions into the full hidden vector. The LM
+DOC| head is a GEMM against those same rows, so each rank produces a *slice* of the logits
+DOC| and deliberately does **not** gather them: the sampler consumes local logits directly
+DOC| (:mod:`lite_llama.engine.sampler`), which keeps the per-step transfer independent of
+DOC| the vocabulary size and never materialises a full logits tensor.
+DOC| 
+DOC| Why shard at all: for a 151K-token vocabulary at 8192 hidden these two tensors are
+DOC| ~4.9 GB per rank in fp16, and the decode-step ``lm_head`` GEMM is ``batch x vocab x
+DOC| hidden`` — the dominant matmul of a large-vocabulary model. Sharding divides both by
+DOC| ``tp``. For tied models it is also the only *correct* option: an unsharded head over a
+DOC| sharded embedding would be two different tensors claiming to be one.
+DOC| ...(+5L)
+def vocab_shard(vocab_size)
+CLASS VocabParallelEmbedding(Module) :: Token embedding whose rows are split across TP ranks.
+  - __init__(vocab_size, hidden_size, dtype)
+  - _weight_loader(param, loaded, shard_id)
+  - local_vocab_size()
+  - forward(input_ids)
+  - extra_repr()
+CLASS ParallelLMHead(VocabParallelEmbedding) :: Output projection over this rank's slice of the vocabulary.
+  - forward(hidden_states)
+  - extra_repr()
+
+### lite_llama/modules/quantization/__init__.py | total=171 | doc=26L/1375c | usage=False
+DOC| Quantisation sub-package: sglang-aligned architecture.
+DOC| 
+DOC| Layout (mirrors sglang ``srt/layers/quantization/``)::
+DOC| 
+DOC|     quantization/
+DOC|     ├── __init__.py          # Registry + public API
+DOC|     ├── base_config.py       # QuantizeMethodBase / LinearMethodBase / FusedMoEMethodBase / QuantizationConfig ABC
+DOC|     ├── fp8.py               # Fp8Config (weight-only fp8, block-wise scales)
+DOC|     ├── w8a8_fp8.py          # W8A8Fp8Config (true W8A8: fp8 weights + per-token fp8 activations)
+DOC|     ├── w8a8_int8.py         # W8A8Int8Config (SmoothQuant: int8 W8A8)
+DOC|     ├── blockwise_int8.py    # BlockInt8Config (int8 weight-only, per-channel / group-wise)
+DOC|     ├── awq.py               # AWQConfig (int4 AWQ checkpoints)
+DOC|     ├── gptq.py              # GPTQConfig (int4 GPTQ checkpoints)
+DOC|     ├── unquant.py           # UnquantizedConfig / Methods (fp16 default)
+DOC|     ├── kv_cache.py          # BaseKVCacheMethod / Fp8KVCacheMethod
+DOC|     ├── parameter.py         # RawParameter (loader must not cast to fp16)
+DOC| ...(+9L)
+VAR SCALE_SUFFIX
+def get_quantization_config(name)
+def get_quant_config_from_hf(hf_config)
+def for_runtime_scheme(name)
+VAR __all__
+
+### lite_llama/modules/quantization/awq.py | total=165 | doc=7L/298c | usage=False
+DOC| AWQ config and method (mirrors sglang ``awq/awq.py``).
+DOC| 
+DOC| AWQ checkpoints store group-wise int4 weights with an interleaved bit layout.
+DOC| The load stream converts to the canonical w4a16 layout (see
+DOC| :func:`lite_llama.modules.quantization.utils.adapt_int4_checkpoint`), then the shared int4
+DOC| kernel runs.
+CLASS AWQConfig(QuantizationConfig) :: AutoAWQ checkpoint config: group-wise int4 with configurable group size.
+  - __init__(group_size, ignored)
+  - get_name()
+  - get_supported_act_dtypes()
+  - get_min_capability(cls)
+  - from_config(cls, config)
+  - get_quant_method(layer, prefix)
+  - storage_dtype()
+  - is_int4()
+CLASS AWQLinearMethod(LinearMethodBase) :: Group-wise int4 from an AutoAWQ checkpoint; runs the w4a16 kernel.
+  - create_weights(layer, input_size, output_size)
+  - apply(layer, x, bias)
+  - quantize_from_fp16(layer, config)
+CLASS AWQMoEMethod(FusedMoEMethodBase) :: AWQ int4 MoE: group-wise int4 stacked experts through fused_moe w4a16 path.
+  - create_weights(block)
+  - apply(block, x, topk_weights, topk_ids)
+
+### lite_llama/modules/quantization/base_config.py | total=267 | doc=12L/527c | usage=False
+DOC| Quantisation base classes (mirrors sglang ``base_config.py``).
+DOC| 
+DOC| Three-layer method hierarchy:
+DOC|     QuantizeMethodBase          — abstract root (create_weights + apply)
+DOC|     ├── LinearMethodBase        — linear layer strategy
+DOC|     └── FusedMoEMethodBase      — stacked expert strategy
+DOC| 
+DOC| QuantizationConfig is the per-checkpoint-format class (one subclass per
+DOC| precision: Fp8Config, W8A8Fp8Config, AWQConfig …). It owns the registry
+DOC| dispatch (``get_quant_method``) and the layout metadata used by linear
+DOC| layers and the weight loader.
+CLASS QuantizeMethodBase(ABC) :: Base class for all quantised (or unquantised) method strategies.
+  - create_weights(layer)
+  - apply(layer)
+  - quantize_from_fp16(layer, config)
+CLASS LinearMethodBase(QuantizeMethodBase) :: Strategy interface for a quantised linear layer.
+  - create_weights(layer, input_size, output_size)
+  - apply(layer, x, bias)
+CLASS FusedMoEMethodBase(QuantizeMethodBase) :: Strategy interface for stacked-expert grouped GEMM.
+  - create_weights(block)
+  - apply(block, x, topk_weights, topk_ids)
+CLASS QuantizationConfig(ABC) :: Per-checkpoint-format configuration (one subclass per precision).
+  - get_name()
+  - get_supported_act_dtypes()
+  - get_min_capability(cls)
+  - from_config(cls, config)
+  - get_quant_method(layer, prefix)
+  - storage_dtype()
+  - scale_shape(out_features, in_features)
+  - shard_is_aligned(size)
+  - quantizes(module_name)
+  - _dispatch(layer, prefix, linear_method, moe_method)
+  - is_fp8()
+  - is_int4()
+  - format()
+def run_quant_linear(scheme, x, weight)
+
+### lite_llama/modules/quantization/blockwise_int8.py | total=165 | doc=5L/191c | usage=False
+DOC| Blockwise int8: weight-only int8 (per-channel or group-wise), fp16 activations.
+DOC| 
+DOC| Mirrors sglang's ``blockwise_int8.py``. Covers ``--quantization int8`` and
+DOC| ``--quantization int8-blockwise``.
+CLASS BlockInt8Config(QuantizationConfig) :: int8 weight-only with per-channel or group-wise scales.
+  - __init__(group_n, group_k, ignored)
+  - get_name()
+  - get_supported_act_dtypes()
+  - get_min_capability(cls)
+  - from_config(cls, config)
+  - per_channel(cls)
+  - groupwise(cls, group_size)
+  - get_quant_method(layer, prefix)
+  - storage_dtype()
+CLASS BlockInt8LinearMethod(LinearMethodBase) :: int8 weight + fp16 activation; per-channel or group-wise scale grid.
+  - create_weights(layer, input_size, output_size)
+  - apply(layer, x, bias)
+  - quantize_from_fp16(layer, config)
+CLASS BlockInt8MoEMethod(FusedMoEMethodBase) :: int8 stacked experts, fp16 activations.
+  - create_weights(block)
+  - apply(block, x, topk_weights, topk_ids)
+  - quantize_from_fp16(block, config)
+
+### lite_llama/modules/quantization/fp8.py | total=169 | doc=6L/270c | usage=False
+DOC| Fp8 weight-only config (fp8-e4m3 weights, fp16 activations).
+DOC| 
+DOC| Covers Qwen3 / DeepSeek fp8 checkpoints with 128×128 block-wise scales.
+DOC| Also serves the weight-only portion of MoE experts in fp8 checkpoints.
+DOC| Mirrors sglang's ``fp8.py`` (the weight-only variant, not W8A8).
+VAR FP8_BLOCK
+CLASS Fp8Config(QuantizationConfig) :: fp8-e4m3 weight-only (W8A16) with block-wise or per-channel scales.
+  - __init__(group_n, group_k, ignored)
+  - get_name()
+  - get_supported_act_dtypes()
+  - get_min_capability(cls)
+  - from_config(cls, config)
+  - get_quant_method(layer, prefix)
+  - storage_dtype()
+  - is_fp8()
+CLASS Fp8LinearMethod(LinearMethodBase) :: fp8-e4m3 weight + fp16 activation; per-channel or block-wise scale grid.
+  - create_weights(layer, input_size, output_size)
+  - apply(layer, x, bias)
+  - quantize_from_fp16(layer, config)
+CLASS Fp8MoEMethod(FusedMoEMethodBase) :: fp8 stacked experts (checkpoint), fp16 activations through grouped GEMM.
+  - create_weights(block)
+  - apply(block, x, topk_weights, topk_ids)
+  - quantize_from_fp16(block, config)
+
+### lite_llama/modules/quantization/gptq.py | total=172 | doc=9L/362c | usage=False
+DOC| GPTQ config and method (mirrors sglang ``gptq/gptq.py``).
+DOC| 
+DOC| GPTQ checkpoints store group-wise int4 weights with biased packed zero points
+DOC| and a ``[K//8, N]`` word matrix. The load stream converts to the canonical
+DOC| w4a16 layout (see :mod:`lite_llama.modules.quantization.utils`), then the
+DOC| shared int4 kernel runs.
+DOC| 
+DOC| Only ``desc_act=False`` checkpoints are accepted.
+CLASS GPTQConfig(QuantizationConfig) :: AutoGPTQ checkpoint config: group-wise int4 with configurable group size.
+  - __init__(group_size, ignored)
+  - get_name()
+  - get_supported_act_dtypes()
+  - get_min_capability(cls)
+  - from_config(cls, config)
+  - get_quant_method(layer, prefix)
+  - storage_dtype()
+  - is_int4()
+CLASS GPTQLinearMethod(LinearMethodBase) :: Group-wise int4 from an AutoGPTQ checkpoint; runs the w4a16 kernel.
+  - create_weights(layer, input_size, output_size)
+  - apply(layer, x, bias)
+  - quantize_from_fp16(layer, config)
+CLASS GPTQMoEMethod(FusedMoEMethodBase) :: GPTQ int4 MoE: group-wise int4 stacked experts through fused_moe w4a16 path.
+  - create_weights(block)
+  - apply(block, x, topk_weights, topk_ids)
+
+### lite_llama/modules/quantization/kv_cache.py | total=73 | doc=5L/161c | usage=False
+DOC| KV cache quantisation methods (mirrors sglang ``kv_cache.py``).
+DOC| 
+DOC| Encapsulates the write-side quantisation for the paged KV cache, currently
+DOC| supporting fp8-e4m3.
+CLASS BaseKVCacheMethod(QuantizeMethodBase,ABC) :: Abstract base for KV-cache quantisation strategies.
+  - quantize_kv(k, v)
+  - apply(layer)
+CLASS Fp8KVCacheMethod(BaseKVCacheMethod) :: fp8-e4m3 KV cache: per-tensor scale, uint8 storage.
+  - __init__(k_scale, v_scale)
+  - quantize_kv(k, v)
+def get_kv_cache_method(kv_cache_dtype)
+
+### lite_llama/modules/quantization/parameter.py | total=28 | doc=8L/397c | usage=False
+DOC| RawParameter: marker for "do not cast this".
+DOC| 
+DOC| :func:`lite_llama.executor.loader.materialise_parameters` gives every
+DOC| floating-point parameter fp16 storage, which is right for weights and wrong
+DOC| for the two things quantisation adds: the 8-bit weight itself (``uint8`` /
+DOC| ``int8``, so it is not floating point anyway) and its fp32 scales, whose
+DOC| dynamic range is the reason the fp8 format works at all.
+CLASS RawParameter(Parameter) :: A parameter the loader must leave alone instead of casting to fp16.
+  - __new__(cls, data, requires_grad)
+
+### lite_llama/modules/quantization/unquant.py | total=97 | doc=1L/79c | usage=False
+DOC| Unquantised (fp16) config and methods — the default for any un-quantised model.
+CLASS UnquantizedLinearMethod(LinearMethodBase) :: Plain weight projected via kernel dispatch (``F.linear`` floor row).
+  - create_weights(layer, input_size, output_size)
+  - apply(layer, x, bias)
+CLASS UnquantizedFusedMoEMethod(FusedMoEMethodBase) :: Plain fp16 stacked experts; the grouped GEMM runs without scales.
+  - create_weights(block)
+  - apply(block, x, topk_weights, topk_ids)
+CLASS UnquantizedConfig(QuantizationConfig) :: Pseudo-config for the fp16 (no quantisation) path.
+  - get_name()
+  - get_supported_act_dtypes()
+  - get_min_capability(cls)
+  - from_config(cls, config)
+  - get_quant_method(layer, prefix)
+  - storage_dtype()
+
+### lite_llama/modules/quantization/utils.py | total=287 | doc=7L/316c | usage=False
+DOC| Quantisation utilities: quantize helpers and checkpoint layout adapters.
+DOC| 
+DOC| Consolidates the parameter quantisation functions (fp8, int8, int4) and the
+DOC| AWQ/GPTQ checkpoint layout rearrangement into one flat module, matching the
+DOC| sglang convention of keeping implementation details private and the package
+DOC| surface flat.
+VAR FP8_E4M3_MAX
+def _quantize_fp8(values, scale)
+def quantize_fp8_per_channel(weight)
+def quantize_fp8_per_tensor(x, scale)
+def quantize_fp8_per_token(x)
+def quantize_int8_per_channel(weight)
+def quantize_int8_groupwise(weight, group_size)
+def quantize_int4_groupwise(weight, group_size)
+VAR _REVERSE_AWQ_PACK_ORDER
+def _awq_unpack(words)
+def awq_qweight_to_canonical(qweight)
+def awq_qzeros_to_canonical(qzeros)
+def awq_scales_to_canonical(scales)
+def awq_adapt_key(key, tensor)
+def _gptq_unpack(words)
+def gptq_qweight_to_canonical(qweight)
+def gptq_qzeros_to_canonical(qzeros)
+def gptq_scales_to_canonical(scales)
+def gptq_adapt_key(key, tensor)
+VAR _ADAPTERS
+def adapt_int4_checkpoint(checkpoint, quant)
+
+### lite_llama/modules/quantization/w8a8_fp8.py | total=150 | doc=7L/334c | usage=False
+DOC| W8A8 fp8: true W8A8 with fp8-e4m3 weights + dynamic per-token fp8 activations.
+DOC| 
+DOC| The weight storage is identical to the Fp8Config (uint8 e4m3 bytes + scale),
+DOC| but ``apply`` quantises the activations per token and runs the fp8 GEMM
+DOC| instead of keeping them fp16. The weight is never dequantised to fp16.
+DOC| Mirrors sglang's ``w8a8_fp8.py``.
+CLASS W8A8Fp8Config(QuantizationConfig) :: True W8A8 with fp8-e4m3: weights per-channel, activations per-token.
+  - __init__(group_n, group_k, ignored)
+  - get_name()
+  - get_supported_act_dtypes()
+  - get_min_capability(cls)
+  - from_config(cls, config)
+  - get_quant_method(layer, prefix)
+  - storage_dtype()
+CLASS W8A8Fp8LinearMethod(LinearMethodBase) :: fp8-e4m3 weights + per-token fp8-e4m3 activations (no calibration).
+  - create_weights(layer, input_size, output_size)
+  - apply(layer, x, bias)
+  - quantize_from_fp16(layer, config)
+CLASS W8A8Fp8MoEMethod(FusedMoEMethodBase) :: W8A8 fp8 stacked experts: fp8 weights + per-token fp8 activations through grouped GEMM.
+  - create_weights(block)
+  - apply(block, x, topk_weights, topk_ids)
+  - quantize_from_fp16(block, config)
+
+### lite_llama/modules/quantization/w8a8_int8.py | total=140 | doc=4L/124c | usage=False
+DOC| W8A8 int8: SmoothQuant — per-channel int8 weights + dynamic per-token int8 activations.
+DOC| 
+DOC| Mirrors sglang's ``w8a8_int8.py``.
+CLASS W8A8Int8Config(QuantizationConfig) :: SmoothQuant W8A8: per-channel int8 weights + dynamic per-token int8 activations.
+  - __init__(ignored)
+  - get_name()
+  - get_supported_act_dtypes()
+  - get_min_capability(cls)
+  - from_config(cls, config)
+  - get_quant_method(layer, prefix)
+  - storage_dtype()
+CLASS W8A8Int8LinearMethod(LinearMethodBase) :: SmoothQuant: int8 weights (per-channel) + int8 activations (per-token dynamic).
+  - create_weights(layer, input_size, output_size)
+  - apply(layer, x, bias)
+  - quantize_from_fp16(layer, config)
+CLASS W8A8Int8MoEMethod(FusedMoEMethodBase) :: SmoothQuant stacked experts: int8 weights + per-token int8 activations through grouped GEMM.
+  - create_weights(block)
+  - apply(block, x, topk_weights, topk_ids)
+  - quantize_from_fp16(block, config)
+

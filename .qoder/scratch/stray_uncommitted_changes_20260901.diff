@@ -1,0 +1,183 @@
+diff --git a/README.md b/README.md
+index 98de666..f2423db 100644
+--- a/README.md
++++ b/README.md
+@@ -420,7 +420,7 @@ On 2× A10 (Qwen2.5-1.5B-Instruct): **weak scaling 2.00x** (100% linear, 1857 
+ 
+ ## Observability and Debugging
+ 
+-### Token Scores (`logprobs` / `prompt_logprobs`)
++#### Token Scores (`logprobs` / `prompt_logprobs`)
+ 
+ A sampled token on its own tells you what the model said, not how close the call was. `logprobs=k` returns the drawn token's log-probability together with the `k` most likely alternatives it outranked; `prompt_logprobs=k` does the same for every position of the prompt, which is what perplexity scoring and prompt debugging need. Both come out of the forward pass the request was already paying for — there is no second scoring pass — and both are off by default.
+ 
+@@ -449,7 +449,7 @@ curl localhost:8000/v1/completions -H 'Content-Type: application/json' -d '{
+ 
+ Cost, measured with `python benchmarks/bench_observability.py` (A10, Qwen3-0.6B, batch=16, gen=128): `logprobs=5` moves TPOT 4.75 → 5.35 ms (throughput -10.4%) because each step adds a `log_softmax` + `topk` + a device-to-host copy; `prompt_logprobs=5` moves TTFT 23.3 → 32.0 ms and costs -1.5% throughput, since it only touches prefill. Log: [`docs/benchmark_logs/observability_v0.10.json`](docs/benchmark_logs/observability_v0.10.json).
+ 
+-### Metrics and Tracing
++#### Metrics and Tracing
+ 
+ `lite-llama serve` exposes a Prometheus endpoint — request counters, in-flight gauges, and the queue-time / TTFT / TPOT histograms on vLLM's bucket grid. The text format is a few lines per metric, so there is no `prometheus_client` dependency to install:
+ 
+@@ -469,7 +469,7 @@ lite_llama:time_to_first_token_seconds_count 3
+ 
+ Collection is opt-out (`LITE_LLAMA_METRICS=0`) and tracing is opt-in: set `LITE_LLAMA_OTLP_ENDPOINT=http://localhost:4318` and each request becomes one span carrying its id, prompt and output token counts, and finish reason. Without the endpoint the tracer is a no-op object — nothing is imported, nothing is timed, and the OpenTelemetry SDK stays an optional install. Both together stay inside the 0.5% run-to-run noise of the same benchmark above, because the work is a handful of float additions per request rather than per token.
+ 
+-### Single-Layer Harness
++#### Single-Layer Harness
+ 
+ A whole-network run is a bad place to find out that one decoder layer is wrong. The harness builds exactly one layer, on one GPU, and can mirror the matching `transformers` layer's weights to compare numerically — no checkpoint download needed, which is the point when the model is 671B and the change is one attention variant:
+ 
+@@ -544,8 +544,6 @@ lite_llama/
+ 
+ File and class names follow vLLM's, so the two are easy to read side by side: `model_runner.py` matches `v1/worker/gpu_model_runner.py`, `kv_cache_manager.py` matches `v1/core/kv_cache_manager.py`, `continuous_engine.py` plus `scheduler.py` match `v1/engine/` plus `v1/core/sched/`, `async_engine.py` matches `AsyncLLMEngine`, `entrypoints/` matches `entrypoints/openai/`, `models/interfaces.py` and `models/registry.py` match `model_executor/models/`, and the weight-loading split (key mapping in `models/weights.py`, file reading in `executor/weight_utils.py`) mirrors vLLM's `model_executor/models/utils.py` versus `model_loader/weight_utils.py`.
+ 
+-The per-model files declare only their differences — bias flags, per-head qk-norm, mrope, or DeepStack layer injection — while all shared behaviour lives in `models/base.py`. A new architecture typically means one class body plus one `ModelRegistry` entry; its config is whatever `AutoConfig` already returns.
+-
+ ## Acknowledgement
+ 
+ - [meta-llama/llama-models](https://github.com/meta-llama/llama-models/tree/main)
+diff --git a/benchmarks/bench_continuous.py b/benchmarks/bench_continuous.py
+index 2a1dfd2..d15e947 100644
+--- a/benchmarks/bench_continuous.py
++++ b/benchmarks/bench_continuous.py
+@@ -1,19 +1,7 @@
+-"""连续批处理 vs 一次性批处理:吞吐、延迟与在线到达场景的对比基线。
++"""Continuous vs. static batching compared across offline, offline-skew, 
++and online—no single metric, gap depends on scenario:
+ 
+-三个场景分测,不合成单一数字——两种调度的差距完全取决于场景:
+-
+-- offline:同一批一起提交。一次性批处理锁步推进,EOS 后的 batch 行仍参与计算;
+-  连续批处理让它立刻离场、槽位补给等待队列。差距来自输出长度的离散度,
+-  长度一致时两者持平。
+-- offline-skew:每请求要的长度不同。``generate()`` 只接受一个 ``max_gen_len``,
+-  一次性批处理只能按最长的跑,短请求的超额产出是浪费;TPS 只计用户要的 token,
+-  并单独报出浪费量。
+-- online:请求陆续到达。一次性批处理调用时就把 batch 定死,晚到者只能串行等
+-  下一趟;连续批处理把它插进正在跑的 batch。量的是每请求延迟,不是峰值吞吐。
+-
+-指标口径与 benchmarks/common.py 一致;greedy 保证两条路径的工作量同源。
+-
+-用法:
++Usage:
+     python benchmarks/bench_continuous.py --model-dir my_weight/Qwen2.5-1.5B-Instruct
+     python benchmarks/bench_continuous.py --scenario online --batch 16 --json out.json
+ """
+diff --git a/benchmarks/bench_observability.py b/benchmarks/bench_observability.py
+index 50d2fee..e5936c7 100644
+--- a/benchmarks/bench_observability.py
++++ b/benchmarks/bench_observability.py
+@@ -1,24 +1,7 @@
+-"""v0.10 两个新可观测面的热路径开销:logprobs 与 metrics/trace 各要多少。
++"""benchmarks logprobs (GPU, costly) vs. metrics/trace (host, cheap) 
++by detectability above noise, all on the same engine.
+ 
+-两者都是"看见推理内部"的功能,但代价的性质完全不同,所以分开量:
+-
+-- logprobs / prompt_logprobs 在 **GPU 侧**:每步多一次 log_softmax、一次 topk,
+-  以及把结果搬回 host。开销随 batch 与 vocab 走,是真花钱的那一类。
+-  prompt_logprobs 更贵——它要给整个 prompt 的每个位置打分,prefill 的 logits
+-  从"只留最后一行"变成"全留",显存与拷贝都按 prompt 长度放大。
+-- metrics / trace 在 **host 侧**:每步几个 float 加法(占用 gauge)、每请求一次
+-  直方图落桶和一个 span。理应淹没在步循环的噪声里,本脚本就是来证实这一点的。
+-
+-判据是"能不能从噪声里分辨出来",不是单跑一次看数字大小:同一配置两次测量本身
+-就有百分之几的抖动,所以基线跑两遍,把它的自差当噪声下限印出来。小于噪声的差值
+-只能说"测不出来",不能报成提速或变慢。
+-
+-同一个引擎跑完所有配置,只换 SamplingParams 与 engine.metrics/engine.tracer——
+-重建引擎会换一份 KV 池和一次新的 autotune,那点差异比要测的量还大。
+-
+-口径同 benchmarks/common.py(TTFT/TPOT/TPS),离线推理:整批一起提交,不模拟到达。
+-
+-用法:
++Usage:
+     python benchmarks/bench_observability.py --model-dir my_weight/Qwen3-0.6B
+     python benchmarks/bench_observability.py --batch 16 --max-gen-len 128 --json out.json
+ """
+diff --git a/examples/benchmark.py b/examples/benchmark.py
+index 2015040..adb7434 100644
+--- a/examples/benchmark.py
++++ b/examples/benchmark.py
+@@ -9,18 +9,6 @@ Reports the metrics used by vLLM / SGLang serving benchmarks, per engine:
+ * **TGS** (token generation speed, tokens/s) — aggregate output throughput,
+   ``total_output_tokens / latency``.
+ 
+-Methodology notes (why earlier numbers were not trustworthy):
+-
+-* Both engines decode **greedily** (``temperature=0`` / ``do_sample=False``) and
+-  stop **naturally at EOS** — identical stopping policy, unlike the old script,
+-  which forced transformers to ignore EOS (``eos_token_id=None``) while lite_llama
+-  stopped early, so the two never ran the same workload.
+-* Output tokens are counted by re-tokenising the generated text with the *same*
+-  tokenizer for both engines (this is exactly what vLLM's ``benchmark_serving``
+-  does; it may inflate counts slightly but is consistent, hence fair).
+-* Every timed region is wrapped in ``torch.cuda.synchronize()``; a warmup pass is
+-  excluded; ``--iters`` runs are aggregated by median.
+-
+ Results (and the full config) are printed and saved to ``--log-dir`` as JSON.
+ 
+ Run from the repository root:
+diff --git a/examples/benchmark_vision.py b/examples/benchmark_vision.py
+index 95c1a56..309fa0f 100644
+--- a/examples/benchmark_vision.py
++++ b/examples/benchmark_vision.py
+@@ -1,19 +1,10 @@
+ """
+-Multimodal (vision-language) benchmark: lite_llama ``VisionGenerator`` vs HF
+-transformers, for LLaVA and Qwen3-VL checkpoints.
++This benchmark compares lite_llama and HF for multimodal inference by fixing the input size 
++to normalize preprocessing, running single requests serially without batching, and reporting 
++median greedy-decoding results.
+ 
+ Shares the metric definitions of ``examples/benchmark.py`` (greedy decoding,
+-natural EOS stop for both engines, output tokens counted by re-tokenising with
+-the same tokenizer, ``torch.cuda.synchronize`` around every timed region,
+-median over ``--iters``). One difference is structural: the multimodal path
+-serves requests one at a time (lite_llama's processor path is single-request),
+-so there is no batch dimension — each iteration walks ``--num-requests``
+-(image, prompt) pairs serially and the numbers describe that loop.
+-
+-The image is resized to ``--image-size`` (square) before both engines see it.
+-LLaVA's CLIP preprocessing re-scales to 336x336 regardless; Qwen3-VL is
+-dynamic-resolution, and pinning the pixel count keeps its vision-token budget
+-(and thus prefill length) comparable across engines and runs.
++natural EOS stop for both engines.
+ 
+ Run from the repository root:
+     python examples/benchmark_vision.py --model my_weight/Qwen3-VL-4B-Instruct
+diff --git a/examples/example_llava.py b/examples/example_llava.py
+index 8342ed9..14b854b 100644
+--- a/examples/example_llava.py
++++ b/examples/example_llava.py
+@@ -14,7 +14,7 @@ from PIL import Image
+ from lite_llama.engine import SamplingParams, VisionGenerator
+ 
+ checkpoints_dir = "my_weight/llava-1.5-7b-hf"  # 改成自己的存放模型路径
+-image_path = "/path/to/your/image.jpg"  # 改成自己的图片路径
++image_path = "/path/to/your/image.jpg"         # 改成自己的图片路径
+ 
+ 
+ def main(
+diff --git a/lite_llama/engine/llm.py b/lite_llama/engine/llm.py
+index fe5d158..5a563b4 100644
+--- a/lite_llama/engine/llm.py
++++ b/lite_llama/engine/llm.py
+@@ -1,10 +1,10 @@
+ """User-facing ``LLM`` entry point — a vLLM-style facade over the engine.
+ 
+-``LLM`` *is* an :class:`~lite_llama.engine.llm_engine.LLMEngine` (inheritance): it
+-adds prompt normalisation, multimodal preparation and ``RequestOutput`` packaging,
+-while the engine owns the prefill/decode loop and ``ModelRunner`` the single-device
+-forward. One ``LLM`` == one engine; request routing (DP) and tensor parallel (TP)
+-grow in the respective layers without touching this API.
++``LLM`` *is* an :class: it adds prompt normalisation, multimodal preparation and 
++``RequestOutput`` packaging, while the engine owns the prefill/decode loop and 
++``ModelRunner`` the single-device forward. One ``LLM`` == one engine; 
++request routing (DP) and tensor parallel (TP) grow in the respective layers 
++without touching this API.
+ 
+ Usage:
+     llm = LLM(model="my_weight/Qwen2.5-0.5B")

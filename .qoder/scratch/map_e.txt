@@ -1,0 +1,290 @@
+@@@FILE lite_llama/observe/__init__.py
+"""Runtime observability: request metrics, and optional OTLP tracing.
+
+Re-exports :class:`EngineMetrics` and :class:`Tracer`; both degrade to
+no-ops unless their environment switches opt in, so observability never
+costs anything by default.
+
+Usage:
+    from lite_llama.observe import EngineMetrics, Tracer
+"""
+@@@END
+@@@FILE lite_llama/observe/metrics.py
+"""Request-level metrics: a tiny in-process registry with a Prometheus rendering.
+
+:class:`Counter` / :class:`Gauge` / :class:`Histogram` are the primitives
+and :class:`EngineMetrics` wires them to the request lifecycle; every
+``render`` emits Prometheus text format with no server dependency.
+
+Usage:
+    metrics = EngineMetrics.from_env()
+    print(metrics.render_prometheus())
+"""
+@@@END
+@@@FILE lite_llama/observe/trace.py
+"""Optional OTLP tracing: one span per request, exported over OTLP/HTTP.
+
+:class:`Tracer` wraps an OpenTelemetry tracer when the endpoint is
+configured via :meth:`Tracer.from_env`; unconfigured, ``start_span``
+returns None and every call is a cheap no-op.
+
+Usage:
+    tracer = Tracer.from_env()
+    span = tracer.start_span("generate")
+"""
+@@@END
+@@@FILE lite_llama/platform/cuda.py
+"""The CUDA platform: device probe for NVIDIA GPUs (sm75 through sm100+).
+
+:class:`CudaPlatform` reads the device name, capability and memory from
+torch at first use, so the platform layer can filter kernels by real
+hardware instead of hardcoded machine assumptions.
+
+Usage:
+    from lite_llama.platform import current_platform
+"""
+@@@END
+@@@FILE lite_llama/platform/spec.py
+"""Torch-free platform descriptors: what a device is, what a kernel needs.
+
+:class:`PlatformInfo` states the facts (arch, capability, memory) and
+:class:`CapabilityRequirement` the needs; :func:`capabilities_match`
+answers yes/no with stdlib-only imports, so KernelSpec rows stay
+filterable everywhere.
+
+Usage:
+    assert capabilities_match(requirement, info)
+"""
+@@@END
+@@@FILE lite_llama/tools/harness/__init__.py
+"""Harness tools: run one layer of a model instead of all of it.
+
+Re-exports :class:`SingleLayerHarness` — build, run and diff one decoder
+layer — plus its report types and the HuggingFace reference side.
+
+Usage:
+    from lite_llama.tools.harness import SingleLayerHarness
+"""
+@@@END
+@@@FILE lite_llama/tools/harness/reference.py
+"""The same layer as HuggingFace builds it, for the harness to diff against.
+
+:class:`HFLayerReference` instantiates the checkpoint's own decoder layer
+via :func:`hf_decoder_layer_class`, loads the matching weights, and runs
+the same inputs so a diff is meaningful.
+
+Usage:
+    ref = HFLayerReference(config, layer_index)
+"""
+@@@END
+@@@FILE lite_llama/tools/harness/single_layer.py
+"""One decoder layer, built and run on its own.
+
+:class:`SingleLayerHarness` builds just layer ``i`` of a checkpoint,
+runs prefill and decode steps on it, times the dispatched kernels, and
+diffs the outputs against an HF reference — layer-local evidence
+without loading the whole model.
+
+Usage:
+    report = SingleLayerHarness(config, 0).run(batch=4)
+"""
+@@@END
+@@@FILE lite_llama/tools/observability/__init__.py
+"""Observability tools: measure what the engine does, without changing it.
+
+Re-exports :class:`CollectiveStats` — the wire accounting for tensor
+parallelism — plus its enums and byte-formatting helpers.
+
+Usage:
+    from lite_llama.tools.observability import CollectiveStats
+"""
+@@@END
+@@@FILE lite_llama/tools/observability/collective_stats.py
+"""Collective accounting: what tensor parallelism actually puts on the wire.
+
+``CollectiveStats.collect()`` opens a window that tallies bytes per
+collective op; the window's report ranks ops by traffic, so sharding
+decisions get numbers instead of guesses.
+
+Usage:
+    with CollectiveStats.collect() as stats:
+        all_reduce_tp(x)
+    print(stats.report())
+"""
+@@@END
+@@@FILE lite_llama/tools/profiling/memory.py
+"""Static GPU memory budget from config numbers alone — no GPU, no model load.
+
+:class:`ModelShape` captures the config-derived sizes,
+:func:`compute_memory_budget` turns them into a :class:`MemoryBudget`
+(weights, KV cache, activations, CUDA graphs), and the print/export
+helpers render the table.
+
+Usage:
+    print_memory_budget()
+"""
+@@@END
+@@@FILE lite_llama/tools/profiling/structure.py
+"""Render a model as an indented text tree: layer types, params, dtypes.
+
+:func:`export_structure_tree` walks the ``nn.Module`` tree once, counting
+each node's own parameters and naming dtypes; depth budgeting reports
+what it hid instead of silently dropping subtrees.
+
+Usage:
+    print_structure_tree(model, max_depth=3)
+"""
+@@@END
+@@@FILE lite_llama/utils/prompt_templates.py
+"""Chat prompt formatting: wrap a user turn with the checkpoint's chat template.
+
+:func:`get_prompter` returns a :class:`ChatPrompter` when the tokenizer
+ships a chat template and None otherwise, so callers choose between
+chat formatting and raw prompts without template soup.
+
+Usage:
+    prompter = get_prompter(tokenizer)
+"""
+@@@END
+@@@FILE examples/basic.py
+"""Basic batch inference — mirrors vllm's ``examples/basic/basic.py``.
+
+The script builds an :class:`~lite_llama.engine.llm.LLM` over the
+checkpoint named at the top, generates for a fixed prompt list with
+greedy params, and prints the texts — the smallest honest smoke test.
+
+Usage:
+    python examples/basic.py   # set ``checkpoints_dir`` first
+"""
+@@@END
+@@@FILE examples/benchmark.py
+"""Latency/throughput benchmark: lite_llama vs HuggingFace transformers.
+
+``bench_lite_llama`` and ``bench_transformers`` time the same prompts on
+the same device, then ``_print_report`` diffs per-token latency and
+throughput — one table, not a wall of logs.
+
+Usage:
+    python examples/benchmark.py --model <ckpt> --batch-size 16
+"""
+@@@END
+@@@FILE examples/benchmark_vision.py
+"""Vision benchmark: lite_llama vs HF transformers at a fixed image size.
+
+Both backends run the same image + question prompts with the generation
+length pinned, so the comparison isolates engine overhead from the
+vision encoder's cost.
+
+Usage:
+    python examples/benchmark_vision.py --model <ckpt> --image <jpg>
+"""
+@@@END
+@@@FILE examples/chat.py
+"""Batch text generation with :class:`~lite_llama.engine.generator.TextGenerator`.
+
+A minimal CLI demo: build a :class:`TextGenerator` over the checkpoint
+named at the top, then generate for a fixed prompt batch (streaming or
+blocking) and print the texts.
+
+Usage:
+    python examples/chat.py   # set ``checkpoints_dir`` first
+"""
+@@@END
+@@@FILE examples/eval_accuracy.py
+"""Accuracy evaluation on HotpotQA / HellaSwag with lite_llama.
+
+:class:`EvaluatorAccuracy` drives one dataset end to end — load data,
+generate completions, score exact match / F1 — so a checkpoint swap
+yields one comparable accuracy number.
+
+Usage:
+    python examples/eval_accuracy.py   # set the checkpoint path first
+"""
+@@@END
+@@@FILE examples/evaluator/__init__.py
+"""Dataset adapters and scoring for the accuracy-evaluation example.
+
+Keeps the HotpotQA / HellaSwag loading and the exact-match / F1 / Jaccard
+metrics in one place, out of the example scripts themselves.
+
+Usage:
+    from examples.evaluator.datasets import HotpotQA, HellaSwag
+"""
+@@@END
+@@@FILE examples/evaluator/datasets.py
+"""Benchmark datasets and scoring metrics for the evaluation example.
+
+Each dataset class (``HotpotQA``, ``HellaSwag``) normalises its raw data
+into one common shape via ``unify_data``; the free functions score
+predictions — exact match, penalised F1, Jaccard, embedding similarity.
+
+Usage:
+    score = exact_match(normalize_answer(pred), normalize_answer(gt))
+"""
+@@@END
+@@@FILE examples/example_llava.py
+"""Single-image chat with :class:`~lite_llama.engine.generator.VisionGenerator`.
+
+Builds a :class:`VisionGenerator` over an LLaVA checkpoint, runs one
+image + question turn, and prints the answer — the multimodal smoke
+test.
+
+Usage:
+    python examples/example_llava.py   # set paths at the top first
+"""
+@@@END
+@@@FILE examples/teaching/causal_mask_variants.py
+"""Teaching demo: three ways to build the prefill causal mask.
+
+Each ``apply_prefill_mask*`` function masks the same score matrix with a
+different formulation, and ``create_and_print_mask`` shows that all
+three agree on the result.
+
+Usage:
+    python examples/teaching/causal_mask_variants.py
+"""
+@@@END
+@@@FILE examples/teaching/hf_gpt2_manual_decode.py
+"""Teaching demo: a hand-written token-by-token decode loop over GPT-2.
+
+``generate_text`` calls ``model.forward`` directly each step, applies
+temperature + top-p by hand, and feeds the sampled id back in — the
+loop a batching engine has to replace.
+
+Usage:
+    python examples/teaching/hf_gpt2_manual_decode.py
+"""
+@@@END
+@@@FILE examples/teaching/hf_llama_generate.py
+"""Teaching demo: HuggingFace ``generate()`` and ``pipeline()`` baselines.
+
+``generate_text`` shows the built-in sampler path and ``pipline_text``
+the one-call pipeline, so later comparisons against lite_llama's
+engines have an honest reference point.
+
+Usage:
+    python examples/teaching/hf_llama_generate.py
+"""
+@@@END
+@@@FILE examples/teaching/standard_mha.py
+"""Teaching demo: standard multi-head attention spelled out in full.
+
+:class:`MultiHeadAttention` splits q/k/v by hand, scores with the causal
+mask from ``generate_causal_mask``, and concatenates heads — no fused
+kernel, so every step of the maths is visible.
+
+Usage:
+    python examples/teaching/standard_mha.py
+"""
+@@@END
+@@@FILE examples/teaching/temperature_softmax.py
+"""Teaching demo: what temperature does to a softmax distribution.
+
+One logits vector is renormalised at several temperatures; printing the
+probabilities side by side shows low temperature sharpening toward the
+argmax and high temperature flattening the distribution.
+
+Usage:
+    python examples/teaching/temperature_softmax.py
+"""
+@@@END

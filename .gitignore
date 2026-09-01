@@ -30,6 +30,8 @@ tests/tmp/
 tests/debug/
 
 # Editors
+.qoder/scratch/
+
 .idea/
 .vscode/
 *.swp

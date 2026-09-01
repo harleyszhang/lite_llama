@@ -1,0 +1,406 @@
+@@@FILE lite_llama/kernels/__init__.py
+"""Kernel layer: implementations in ``ops/``, policy in ``dispatcher/``.
+
+The public names re-export the dispatch tier (``dispatch``) and the
+individual op entry points; importing the package loads no CUDA library
+until a kernel is actually dispatched.
+
+Usage:
+    from lite_llama.kernels import dispatch, fused_moe
+"""
+@@@END
+@@@FILE lite_llama/kernels/backend/__init__.py
+"""One package per external kernel backend: metadata, probe and wrappers.
+
+``survey()`` answers "what can this machine run, and what is missing" for
+every backend at once; each subpackage keeps its own probe and wrappers.
+
+Usage:
+    from lite_llama.kernels.backend import survey
+"""
+@@@END
+@@@FILE lite_llama/kernels/backend/deepep/__init__.py
+"""DeepEP: expert-parallel all-to-all dispatch and combine.
+
+``available()`` probes the DeepEP install; until it returns True the
+dispatcher treats the deepep rows as unusable and routing falls back.
+
+Usage:
+    from lite_llama.kernels.backend import deepep
+    deepep.available()
+"""
+@@@END
+@@@FILE lite_llama/kernels/backend/deepgemm/__init__.py
+"""DeepGEMM: fp8 dense GEMM and grouped MoE GEMM on Hopper (sm90).
+
+``available()`` gates the whole backend on the wheel plus ``CUDA_SM90``;
+the wrappers in :mod:`linear`, :mod:`moe` and :mod:`quant` follow the
+native kernel signatures.
+
+Usage:
+    from lite_llama.kernels.backend import deepgemm
+    deepgemm.available()
+"""
+@@@END
+@@@FILE lite_llama/kernels/backend/deepgemm/linear.py
+"""DeepGEMM dense fp8 GEMM — the ``deepgemm/fp8_gemm_nt`` row's wrapper.
+
+``fp8_gemm_nt`` repacks the weight into DeepGEMM's NT layout via
+:func:`_nt_weight` and calls the library, standing behind the native
+linear signature so dispatch can pick it transparently.
+
+Usage:
+    y = fp8_gemm_nt(x, weight)
+"""
+@@@END
+@@@FILE lite_llama/kernels/backend/deepgemm/moe.py
+"""DeepGEMM grouped fp8 MoE — the ``deepgemm/grouped_fp8_moe`` row's wrapper.
+
+:func:`grouped_moe` repacks per-expert weights into contiguous grouped
+tensors (:func:`_nt_experts`) and runs the grouped GEMM for the tokens
+each expert actually holds.
+
+Usage:
+    y = grouped_moe(hidden_states, w1, w2, topk_weights, topk_ids)
+"""
+@@@END
+@@@FILE lite_llama/kernels/backend/deepgemm/quant.py
+"""Per-token-group fp8 quantisation for the DeepGEMM GEMMs.
+
+:func:`per_token_group_quant_fp8` scales activations group-wise into
+e4m3; the block/NT helpers convert checkpoint weights to the layout
+DeepGEMM expects, and back again for reference checks.
+
+Usage:
+    qx, scale = per_token_group_quant_fp8(x)
+"""
+@@@END
+@@@FILE lite_llama/kernels/backend/flashinfer/__init__.py
+"""FlashInfer: the wheel-installable external backend, Ampere (sm75) onward.
+
+``available()`` probes the wheel; until it returns True the flashinfer
+rows stay filtered out of dispatch and the native Triton rows serve.
+
+Usage:
+    from lite_llama.kernels.backend import flashinfer
+    flashinfer.available()
+"""
+@@@END
+@@@FILE lite_llama/kernels/backend/flashinfer/attention.py
+"""FlashInfer attention wrappers: both phases behind the native signatures.
+
+Prefill and decode share one lazily allocated workspace and one wrapper
+cache keyed by shape (cleared via ``_reset_cache``); the functions mirror
+the native kernels' signatures so dispatch can swap them in.
+
+Usage:
+    out = prefill_attention(q, k, v, sm_scale, b_start_loc, b_seq_len,
+                            max_seq_len)
+"""
+@@@END
+@@@FILE lite_llama/kernels/backend/flashinfer/norm.py
+"""FlashInfer RMSNorm wrapper behind the native signature.
+
+``rmsnorm`` delegates to the FlashInfer fused kernel (norm plus residual
+add) with tensors in the layout the native ``skip_rmsnorm`` expects.
+
+Usage:
+    y = rmsnorm(x, residual, weight, eps)
+"""
+@@@END
+@@@FILE lite_llama/kernels/backend/flashinfer/rope.py
+"""FlashInfer RoPE wrapper behind the native signature.
+
+``rope`` applies the rotation with FlashInfer's kernel using the cos/sin
+tables the native rope kernel already receives.
+
+Usage:
+    rope(q, k, cos, sin)
+"""
+@@@END
+@@@FILE lite_llama/kernels/backend/flashmla/__init__.py
+"""FlashMLA: Multi-head Latent Attention decode on Hopper (sm90).
+
+``available()`` gates the backend on the wheel plus ``CUDA_SM90``; the
+decode wrapper lives in
+:mod:`~lite_llama.kernels.backend.flashmla.mla_decode`.
+
+Usage:
+    from lite_llama.kernels.backend import flashmla
+    flashmla.available()
+"""
+@@@END
+@@@FILE lite_llama/kernels/backend/flashmla/mla_decode.py
+"""FlashMLA decode — the ``flashmla/mla_decode`` row's wrapper.
+
+``mla_decode`` maps the paged KV buffer, block table and per-sequence
+lengths onto FlashMLA's arguments, so latent-attention decode runs
+against the same cache the native kernels use.
+
+Usage:
+    out = mla_decode(q, kv_cache, block_table, cache_seqlens)
+"""
+@@@END
+@@@FILE lite_llama/kernels/backend/probe.py
+"""Can this machine run an external backend — and if not, how to install it?
+
+``survey()`` probes every registered backend once via ``library_present``
+and reports :class:`BackendInstall` records — import name, present flag,
+pip hint — so callers can explain what is missing.
+
+Usage:
+    from lite_llama.kernels.backend import survey; survey()
+"""
+@@@END
+@@@FILE lite_llama/kernels/dispatcher/__init__.py
+"""The dispatch tier: choose an implementation once, and be able to say why.
+
+Re-exports the registry (``REGISTRY``, ``register``), :class:`KernelSpec`,
+:class:`Selected` and :func:`dispatch` — the whole "pick a row" surface a
+call site needs in one import.
+
+Usage:
+    from lite_llama.kernels.dispatcher import dispatch, register
+"""
+@@@END
+@@@FILE lite_llama/kernels/dispatcher/autotune/__init__.py
+"""Kernel autotune: collect, persist, and look up optimal tile configurations.
+
+:func:`get_best_config` is the call-site entry point; :class:`ConfigStore`
+persists results as JSON and :class:`TuneKey` fixes the stable cache key
+(op, shape bucket, dtype, GPU).
+
+Usage:
+    from lite_llama.kernels.dispatcher.autotune import get_best_config
+"""
+@@@END
+@@@FILE lite_llama/kernels/dispatcher/autotune/config_key.py
+"""Autotune key structure — the stable contract behind a stored config.
+
+:class:`TuneKey` normalises (op, m/n/k buckets, dtype, GPU name) into one
+hashable key, so a config measured for one shape or machine is never
+silently reused for another.
+
+Usage:
+    key = TuneKey.build("fused_moe", 16, 4096, 4096, "fp16", gpu_name)
+"""
+@@@END
+@@@FILE lite_llama/kernels/dispatcher/autotune/config_store.py
+"""Persistent JSON config store for autotune results.
+
+:class:`ConfigStore` reads and writes one JSON document per cache dir,
+merging measured configs under their :class:`TuneKey` — simple enough
+to inspect by hand, stable enough to commit.
+
+Usage:
+    store = ConfigStore(cache_dir)
+"""
+@@@END
+@@@FILE lite_llama/kernels/dispatcher/autotune/frozen.py
+"""Frozen measured ranking: the autotune store's answer to ``set_perf_provider``.
+
+``install_frozen_perf_provider`` turns a store's measured timings into a
+dispatch ranking provider, so production dispatch replays offline
+measurements instead of guessing.
+
+Usage:
+    install_frozen_perf_provider(store)
+"""
+@@@END
+@@@FILE lite_llama/kernels/dispatcher/autotune/lookup.py
+"""High-level autotune lookup — the call sites' single entry point.
+
+:func:`get_best_config` resolves the ambient store and GPU, builds the
+:class:`TuneKey`, and returns the stored best config or None; ``reset``
+clears the cached store handle between tests.
+
+Usage:
+    config = get_best_config("fused_moe", m, n, k, "fp16")
+"""
+@@@END
+@@@FILE lite_llama/kernels/dispatcher/autotune/searcher.py
+"""Offline autotune searcher: benchmark kernel configs and persist the best.
+
+:class:`AutotuneSearcher` runs each candidate config through a
+caller-supplied ``run_fn``, keeps the median timing, and writes the
+winner into a :class:`~lite_llama.kernels.dispatcher.autotune.config_store.ConfigStore`.
+
+Usage:
+    AutotuneSearcher(store).search(op, shape, dtype, configs, run_fn)
+"""
+@@@END
+@@@FILE lite_llama/kernels/dispatcher/dispatch.py
+"""Deterministic dispatch: filter, rank, cache — and be able to say why.
+
+:func:`dispatch` builds a :class:`DispatchKey` from the call context,
+filters the registry's specs to feasible ones, ranks them (native floor
+unless a perf provider says better) and returns a :class:`Selected`
+whose ``explain()`` states the reason.
+
+Usage:
+    selected = dispatch("rmsnorm"); print(selected.explain())
+    kernel = selected.load()
+"""
+@@@END
+@@@FILE lite_llama/kernels/dispatcher/registry.py
+"""Global KernelSpec registry: one table for every implementation of every op.
+
+:class:`OpRegistry` indexes specs by op name; the module-level ``REGISTRY``
+is the single instance every ops package registers into via
+:func:`register` at import time.
+
+Usage:
+    from lite_llama.kernels.dispatcher import register; register(spec)
+"""
+@@@END
+@@@FILE lite_llama/kernels/dispatcher/spec.py
+"""Declarative KernelSpec: one implementation's dispatch contract, torch-free.
+
+A :class:`KernelSpec` names its op and backend target, states its shape /
+layout requirements, and carries golden records plus perf tags; it is
+pure data, so the registry can filter rows without importing torch.
+
+Usage:
+    spec = KernelSpec(...); register(spec)
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/__init__.py
+"""Operator layer: kernels grouped by domain, each group owning its rows.
+
+Each subpackage (``attention``, ``gemm``, ...) registers its own specs at
+import and re-exports its entry points; the :class:`LogicalOp` ABCs pin
+the call contracts dispatch selects between.
+
+Usage:
+    from lite_llama.kernels.ops import LinearOp
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/activation/__init__.py
+"""Activation domain: the SwiGLU pair, fused and split.
+
+Registers the domain's spec rows and points at the implementations in
+:mod:`~lite_llama.kernels.ops.activation.swiglu`: the two-input
+``swiglu_forward`` and the fused single-input variant.
+
+Usage:
+    from lite_llama.kernels.ops.activation.swiglu import swiglu_forward
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/attention/__init__.py
+"""Attention domain: the prefill/decode phases, KV write and MLA decode.
+
+Registers the domain's spec rows and points at the implementations:
+:mod:`flashattention2_nopad` for prefill, :mod:`flashdecoding` for paged
+decode, plus the KV-write kernels in ``kvcache``.
+
+Usage:
+    from lite_llama.kernels.ops.attention.flashdecoding import flash_decoding
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/attention/flashattention2_nopad.py
+"""FlashAttention-2 (Triton) for variable-length, unpadded prefill batches.
+
+One kernel iterates query blocks against KV blocks of each sequence,
+using the ``B_Start_Loc`` / ``B_Seqlen`` row tables to skip padding — so
+a ragged batch needs no tensor padding at all.
+
+Usage:
+    from lite_llama.kernels import flash_attention2_no_pad
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/embeddings/__init__.py
+"""Embedding domain: the vocab-parallel embedding lookup.
+
+Registers the domain's spec row and re-exports the gather kernel
+:func:`~lite_llama.kernels.ops.embeddings.vocab_embedding.vocab_parallel_embedding`
+behind the sharded embedding layer.
+
+Usage:
+    from lite_llama.kernels import vocab_parallel_embedding
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/embeddings/vocab_embedding.py
+"""Vocabulary-parallel embedding lookup: gather this rank's rows, zero the rest.
+
+One Triton kernel walks flat ids; ids owned by this shard gather their row,
+foreign ids write exact zeros, and the TP all-reduce over ranks then sums
+the partials into the full embedding.
+
+Usage:
+    out = vocab_parallel_embedding(input_ids, weight, shard_start, local_vocab)
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/gemm/__init__.py
+"""GEMM domain: the linear projections, one row per quantisation scheme.
+
+Registers the spec rows and re-exports the entry points — ``linear_torch``
+plus one function per quant scheme (w8a16, w4a16, w8a8 int8/fp8).
+
+Usage:
+    from lite_llama.kernels import linear_torch, linear_w8a16
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/gemm/linear.py
+"""Entry points of the ``linear`` logical op: one per quantisation scheme.
+
+Each function shares the ``(x, weight)`` signature — the weight object
+knows its own quant format — so ``run_quant_linear`` can select on scheme
+and call the row without a conditional chain at the call site.
+
+Usage:
+    y = linear_torch(x, weight)
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/interfaces.py
+"""Logical-operator ABCs: the call contracts behind each ``dispatch()``.
+
+Each :class:`LogicalOp` subclass (``LinearOp``, ``MoeOp``, ...) pins the
+signature an implementation must expose, torch-free, so specs, registry
+and dispatch can reason about ops without importing the kernels.
+
+Usage:
+    from lite_llama.kernels.ops import LinearOp
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/quantization/__init__.py
+"""Quantisation GEMM kernels: one Triton kernel per numeric format.
+
+Re-exports the four matmul entry points — fp8, w8a16, w4a16 and
+smoothquant int8 — each the registered implementation of the
+``linear`` op under its scheme.
+
+Usage:
+    from lite_llama.kernels.ops.quantization import fp8_matmul
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/quantization/w4a16.py
+"""W4A16 GEMM: 4-bit weights (AWQ/GPTQ), fp16 activations, fp32 accumulation.
+
+The kernel unpacks int4 pairs, scales per group and accumulates in fp32;
+zeros may fold into the scale table when the checkpoint layout allows.
+
+Usage:
+    y = w4a16_matmul(x, qweight, scales, zeros)
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/quantization/w8a8.py
+"""SmoothQuant W8A8 GEMM: int8 weights + dynamic per-token int8 activations.
+
+A pre-kernel quantises activations per token
+(``_quantize_activations_kernel``) and the main GEMM multiplies int8 x
+int8 with fp32 accumulation, applying both scales in the epilogue.
+
+Usage:
+    y = smoothquant_matmul(x, qweight, weight_scales)
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/rope/rope_emb.py
+"""Rotary position embedding (RoPE) applied to q and k in a fused Triton kernel.
+
+One launch rotates every (head, position) pair in place using the cos/sin
+tables; head padding keeps the block mask aligned for any head count.
+
+Usage:
+    rope_emb_forward(q, k, cos, sin)
+"""
+@@@END

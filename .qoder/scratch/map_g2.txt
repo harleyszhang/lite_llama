@@ -1,0 +1,532 @@
+@@@FILE tests/entrypoints/test_api_server.py
+"""Tests for the OpenAI-compatible HTTP layer.
+
+A ``FakeEngine`` and FastAPI's test client drive every endpoint —
+health, metrics, completions, streaming SSE — so the HTTP contract is
+checked without a model or a port.
+
+Usage:
+    pytest tests/entrypoints/test_api_server.py
+"""
+@@@END
+@@@FILE tests/entrypoints/test_cli_wiring.py
+"""What the CLI hands the engine, and what it does with the engine's output.
+
+A ``FakeEngine`` records the kwargs each subcommand passes, so the
+tests pin the wiring — cuda-graph defaults, tensor-parallel surface,
+chat REPL behaviour — instead of running real engines.
+
+Usage:
+    pytest tests/entrypoints/test_cli_wiring.py
+"""
+@@@END
+@@@FILE tests/evals/__init__.py
+"""Accuracy evaluation harness.
+
+The subpackage turns ``configs/*.yaml`` into test cases: dataset
+acquisition (``dataset``), execution (``runner``) and scoring
+(``gsm8k``) are shared by every benchmark.
+
+Usage:
+    pytest tests/evals/
+"""
+@@@END
+@@@FILE tests/evals/conftest.py
+"""Turns ``configs/*.yaml`` into one test case each.
+
+``pytest_generate_tests`` parametrises the correctness test over the
+resolved config list, so adding a model to the suite means adding one
+YAML file.
+
+Usage:
+    pytest tests/evals/
+"""
+@@@END
+@@@FILE tests/evals/dataset.py
+"""Benchmark data acquisition: download once, cache on disk, read as JSONL.
+
+``fetch`` mirrors the upstream layout into a local cache dir and raises
+:class:`DatasetUnavailable` (never a hang) when offline, so evals skip
+cleanly instead of failing the suite.
+
+Usage:
+    rows = load_gsm8k()
+"""
+@@@END
+@@@FILE tests/evals/gsm8k.py
+"""GSM8K: grade-school word problems, scored by exact match on the final number.
+
+``extract_answer`` pulls the final number, ``build_prompts`` renders
+the few-shot template, and ``score`` compares answers — the whole
+benchmark in three pure functions.
+
+Usage:
+    prompts, labels = build_prompts(train, test)
+"""
+@@@END
+@@@FILE tests/evals/runner.py
+"""Offline execution layer shared by every benchmark in :mod:`tests.evals`.
+
+``build_llm`` + ``generate_completions`` run one model over one prompt
+set greedily and truncate at stop markers, returning :class:`EvalResult`
+rows that the benchmarks score.
+
+Usage:
+    llm = build_llm(model_dir); outs = generate_completions(llm, prompts)
+"""
+@@@END
+@@@FILE tests/evals/test_gsm8k_correctness.py
+"""GSM8K accuracy regression, one case per config file.
+
+Each YAML config names a checkpoint and an expected accuracy floor; a
+run generates on the real model and asserts the score clears the bar —
+the tier that catches quality regressions end to end.
+
+Usage:
+    pytest tests/evals/test_gsm8k_correctness.py
+"""
+@@@END
+@@@FILE tests/evals/test_gsm8k_scoring.py
+"""CPU-tier tests for the parts of the eval harness that decide the score.
+
+Answer extraction, stop-marker truncation, prompt shape — fixed inputs
+and expected strings, so a scoring change fails loudly before any GPU
+run.
+
+Usage:
+    pytest tests/evals/test_gsm8k_scoring.py
+"""
+@@@END
+@@@FILE tests/executor/test_kv_cache_manager.py
+"""Tests for :class:`~lite_llama.executor.kv_cache_manager.KVCacheManager`.
+
+Pure CPU against a tiny pool: alloc marks rows and debits the counter,
+over-allocation returns None and changes nothing, contiguous allocs
+find runs or fail on fragmentation, and ref-counts free the last holder.
+
+Usage:
+    pytest tests/executor/test_kv_cache_manager.py
+"""
+@@@END
+@@@FILE tests/executor/test_model_input.py
+"""The engine -> executor contract: what a step ships, and what it leaves out.
+
+:class:`~lite_llama.executor.worker.ModelInput` invariants — flattened
+rows, cached sampling tensors that detect mutated params, first-chunk
+vs resumed-chunk vs decode plans — pinned before any GPU work.
+
+Usage:
+    pytest tests/executor/test_model_input.py
+"""
+@@@END
+@@@FILE tests/executor/test_overlap.py
+"""L1 cross-stream overlap: the policy, the stream pool, the timeline.
+
+Stub KV manager and runner drive the row arithmetic on CPU; the env
+spellings (``1``/``0``, ``on``/``off``) and the extend-row planning are
+checked without a GPU.
+
+Usage:
+    pytest tests/executor/test_overlap.py
+"""
+@@@END
+@@@FILE tests/executor/test_slot_batch_copy.py
+"""Row arithmetic of :meth:`SlotBatch.copy_prefix` — pure CPU, no model.
+
+Stub runner and KV manager track which rows a copy touches: runs land
+at the same offset in the destination slot, calls are independent, and
+empty segments touch nothing.
+
+Usage:
+    pytest tests/executor/test_slot_batch_copy.py
+"""
+@@@END
+@@@FILE tests/golden/cases.py
+"""Canonical golden-regression cases, shared by the test and the update script.
+
+One row per (model, penalty, scheme) with fixed prompts and params, so
+``test_token_parity`` and the golden-update script always agree on
+what "the baseline" means.
+
+Usage:
+    from tests.golden.cases import case_key
+"""
+@@@END
+@@@FILE tests/golden/test_logprob_parity.py
+"""Reported log-probabilities must be the ones HuggingFace computes.
+
+The same prompt runs one-shot and chunked; every reported logprob is
+compared against HF within tight absolute and mean drift budgets, so
+sampling changes cannot hide behind "close enough".
+
+Usage:
+    pytest tests/golden/test_logprob_parity.py
+"""
+@@@END
+@@@FILE tests/golden/test_token_parity.py
+"""Golden-output regression: optimisations must not move a single token.
+
+Eager generation is diffed against graph replay, against a re-run in
+the same process, and against the committed JSON goldens — any single
+token change fails the suite.
+
+Usage:
+    pytest tests/golden/test_token_parity.py
+"""
+@@@END
+@@@FILE tests/kernels/test_autotune_store.py
+"""Tests for the autotune config store — pure CPU, no GPU required.
+
+Bucket maths, key equality, JSON round-trips and the lookup miss path:
+the storage contract everything else trusts.
+
+Usage:
+    pytest tests/kernels/test_autotune_store.py
+"""
+@@@END
+@@@FILE tests/kernels/test_flash_attention_nopad.py
+"""Numerical tests for the prefill attention kernel.
+
+Ragged batches, GQA ratios and head dims are parametrised against the
+pure-torch reference; isolation cases prove the first token attends
+only to itself and sequences do not leak.
+
+Usage:
+    pytest tests/kernels/test_flash_attention_nopad.py
+"""
+@@@END
+@@@FILE tests/kernels/test_flash_decoding.py
+"""Numerical tests for the decode attention kernel.
+
+History lengths, ragged batches, GQA ratios and head dims run against
+the paged reference; boundary cases pin page-crossing behaviour.
+
+Usage:
+    pytest tests/kernels/test_flash_decoding.py
+"""
+@@@END
+@@@FILE tests/kernels/test_fused_moe.py
+"""Tests for the fused MoE grouped-GEMM kernels against a pure-torch reference.
+
+``moe_align_block_size`` sorting and padding is checked exactly, then
+the fused kernel is diffed against ``_torch_moe_reference`` across
+token, expert and top-k counts, including fp8 blockwise.
+
+Usage:
+    pytest tests/kernels/test_fused_moe.py
+"""
+@@@END
+@@@FILE tests/kernels/test_kv_cache_ops.py
+"""Tests for the KV-cache scatter kernels.
+
+Scatter writes only selected rows (in any destination order); the
+index kernel records tokens at the last occupied slot and leaves
+unrelated entries untouched; scatter + gather round-trips.
+
+Usage:
+    pytest tests/kernels/test_kv_cache_ops.py
+"""
+@@@END
+@@@FILE tests/kernels/test_linear_dispatch.py
+"""GPU tests: the ``linear`` scheme entry points forward to the right kernel.
+
+Each adapter (w8a16 fp8/int8, w4a16, w8a8) is diffed against its Triton
+kernel called directly — the adapter layer adds dispatch, not maths.
+
+Usage:
+    pytest tests/kernels/test_linear_dispatch.py
+"""
+@@@END
+@@@FILE tests/kernels/test_norm_activation.py
+"""Tests for the fused norm and activation kernels.
+
+``skip_rmsnorm`` is checked for value, post-add residual and unit-RMS
+invariants; the SwiGLU pair (split and fused) against eager references
+including the zero-gate edge.
+
+Usage:
+    pytest tests/kernels/test_norm_activation.py
+"""
+@@@END
+@@@FILE tests/kernels/test_quantization.py
+"""Tests for the quantisation kernels: w8a16, w4a16, smoothquant.
+
+Each GEMM is diffed against a dequantised fp reference across shapes
+and group sizes; config parsing tests pin scheme strings to formats.
+
+Usage:
+    pytest tests/kernels/test_quantization.py
+"""
+@@@END
+@@@FILE tests/kernels/test_rope_emb.py
+"""Tests for the fused RoPE application kernel.
+
+Against the reference across shapes; in-place semantics, identity at
+zero angle, norm preservation, distinct rotations per position, and
+rejection of mismatched table geometry.
+
+Usage:
+    pytest tests/kernels/test_rope_emb.py
+"""
+@@@END
+@@@FILE tests/kernels/test_vocab_embedding.py
+"""Tests for the fused vocabulary-parallel embedding kernel.
+
+Owned ids gather their rows verbatim, foreign ids contribute exact
+zeros, ownership is half-open on both ends, and mixed batches equal
+the eager chain.
+
+Usage:
+    pytest tests/kernels/test_vocab_embedding.py
+"""
+@@@END
+@@@FILE tests/kernels/test_w4a16_accuracy.py
+"""Accuracy test for the w4a16 ``tl.dot`` kernel rewrite.
+
+The kernel is diffed against ``_reference_w4a16`` across group sizes
+and batch shapes, with and without bias — tolerance sized for the
+fp32-accumulation rewrite.
+
+Usage:
+    pytest tests/kernels/test_w4a16_accuracy.py
+"""
+@@@END
+@@@FILE tests/models/test_checkpoint_index.py
+"""Validate the weight mapping against real published checkpoints, offline.
+
+Index files (never weights) are read from locally available
+checkpoints; every checkpoint key must reach a parameter and every
+parameter be covered, including fp8 scale pairing.
+
+Usage:
+    pytest tests/models/test_checkpoint_index.py
+"""
+@@@END
+@@@FILE tests/models/test_quant_methods.py
+"""Tests for the quant-method strategies and the runtime quantisation schemes.
+
+Registry lookups, checkpoint-method dispatch (int4 variants), weight
+creation shapes for every scheme, and rejection paths — the strategy
+layer without kernels.
+
+Usage:
+    pytest tests/models/test_quant_methods.py
+"""
+@@@END
+@@@FILE tests/models/test_qwen3_moe.py
+"""Numeric parity tests for the Qwen3-MoE support.
+
+Block-fp8 dequantisation round-trips, fp8 scale-table consumption, and
+the HF-config plumbing that marks layers MoE vs dense — plus a decoder
+step against a hand-built tiny config.
+
+Usage:
+    pytest tests/models/test_qwen3_moe.py
+"""
+@@@END
+@@@FILE tests/models/test_registry.py
+"""Tests for the :class:`~lite_llama.models.registry.ModelRegistry` lookup.
+
+Resolution per model type, multimodal flagging, case-insensitivity,
+helpful errors listing alternatives, and lazy ``load_class`` imports —
+the model-dispatch contract.
+
+Usage:
+    pytest tests/models/test_registry.py
+"""
+@@@END
+@@@FILE tests/models/test_rotary_embedding.py
+"""Tests for RoPE and mrope frequency generation.
+
+Default and llama3 rescaling factors read from flat configs, fp32
+inv-freq preservation, cached-table equality with per-step maths, and
+rejection of unsupported rope types.
+
+Usage:
+    pytest tests/models/test_rotary_embedding.py
+"""
+@@@END
+@@@FILE tests/models/test_weight_mapping.py
+"""Weight-mapping unit tests: key translation, per-layer loaders, coverage.
+
+Checkpoint key -> parameter translation, fused gate/up and QKV block
+boundaries (with GQA and scale grids), and the coverage accounting
+that ``load_weights`` enforces.
+
+Usage:
+    pytest tests/models/test_weight_mapping.py
+"""
+@@@END
+@@@FILE tests/models/test_weight_parity.py
+"""Round-trip parity: HF checkpoint in, identical lite_llama parameters out.
+
+Hand-built HF checkpoints are saved for every registered model family
+and loaded back; each parameter must land in the right place with the
+right values — the loader's end-to-end proof.
+
+Usage:
+    pytest tests/models/test_weight_parity.py
+"""
+@@@END
+@@@FILE tests/multimodal/test_multimodal.py
+"""CPU tests for multimodal helpers (no vision tower, no GPU).
+
+``merge_multimodal_embeddings`` placeholder splicing: replacement
+positions, multiple placeholder ids, count-mismatch errors, and
+higher-rank vision inputs.
+
+Usage:
+    pytest tests/multimodal/test_multimodal.py
+"""
+@@@END
+@@@FILE tests/observe/__init__.py
+"""Tests for the observability layer: metrics primitives and wiring.
+
+The module groups the observe tests; engine-facing fixtures live in
+the suite-wide ``conftest.py``.
+
+Usage:
+    pytest tests/observe/
+"""
+@@@END
+@@@FILE tests/observe/test_metrics.py
+"""Unit tests for the observability primitives, no engine required.
+
+Counters accumulate per label set, gauges report the latest value,
+histogram buckets are cumulative, and ``observe_finish`` records the
+full latency breakdown — or no-ops when disabled.
+
+Usage:
+    pytest tests/observe/test_metrics.py
+"""
+@@@END
+@@@FILE tests/ops/test_dispatch.py
+"""Tests for the registry and deterministic dispatch (ROADMAP foundation 2).
+
+Filtering by shape / dtype / platform, ranking with the native floor,
+caching, forced backends, and the ``explain()`` reasons — a fresh fake
+registry per test keeps cases independent.
+
+Usage:
+    pytest tests/ops/test_dispatch.py
+"""
+@@@END
+@@@FILE tests/ops/test_external_backends.py
+"""Tests for the external-backend tier: probing, install metadata, optionality.
+
+``library_present`` semantics, every backend module's probe shape, the
+install metadata against pyproject extras, and the rule that external
+rows never make an op unusable when absent.
+
+Usage:
+    pytest tests/ops/test_external_backends.py
+"""
+@@@END
+@@@FILE tests/ops/test_frozen_rank.py
+"""Frozen measured ranking: store -> provider -> dispatch rank (ROADMAP v0.10).
+
+A store with fabricated measurements is installed as the perf
+provider; dispatch must then rank by the frozen numbers, and
+uninstalling restores the default provider.
+
+Usage:
+    pytest tests/ops/test_frozen_rank.py
+"""
+@@@END
+@@@FILE tests/ops/test_interfaces.py
+"""Tests for the logical-operator ABCs (ROADMAP foundation 2).
+
+Catalogue completeness, ABC enforcement (unimplemented ops cannot
+instantiate), signature pinning against the pinned table, and CPU
+reference implementations honouring the contracts.
+
+Usage:
+    pytest tests/ops/test_interfaces.py
+"""
+@@@END
+@@@FILE tests/ops/test_native_specs.py
+"""Tests for the registered spec rows: catalogue, routing and the floor impl.
+
+Every op group has its rows, scheme-to-row routing is pinned, the
+native row is always feasible where promised, and rows stay torch-free
+— the registry's structural invariants.
+
+Usage:
+    pytest tests/ops/test_native_specs.py
+"""
+@@@END
+@@@FILE tests/ops/test_spec.py
+"""Tests for :class:`KernelSpec` and its requirement dataclasses.
+
+Shape constraints, shape and layout requirements, spec validation,
+membership predicates and torch-free registration — the declarative
+contract dispatch trusts.
+
+Usage:
+    pytest tests/ops/test_spec.py
+"""
+@@@END
+@@@FILE tests/platform/test_platform.py
+"""Tests for the platform layer (ROADMAP A9).
+
+``PlatformInfo`` / ``CapabilityRequirement`` construction and matching,
+plus ``current_platform()`` agreeing with the torch-visible device.
+
+Usage:
+    pytest tests/platform/test_platform.py
+"""
+@@@END
+@@@FILE tests/tools/test_check_hardcoded_paths.py
+"""Tests for the ``no-hardcoded-weight-paths`` pre-commit hook.
+
+Rejected forms — absolute paths and bare directory prefixes — produce a
+report naming file, line and path, while allowed forms pass. The hook
+script is loaded and run against tmp files.
+
+Usage:
+    pytest tests/tools/test_check_hardcoded_paths.py
+"""
+@@@END
+@@@FILE tests/tools/test_collective_stats.py
+"""Assert what the collective stats claim: the bytes, not the calls.
+
+Recording starts only inside a window, bytes accumulate per op, ops
+that never ran report zero, nesting sees its own span, and a raising
+block still closes its window — plus report ordering.
+
+Usage:
+    pytest tests/tools/test_collective_stats.py
+"""
+@@@END
+@@@FILE tests/tools/test_harness.py
+"""Tests for the single-layer harness: assembly, weight routing, bookkeeping.
+
+The harness builds only the requested layer (negative indices count
+from the end), routes MoE layers to the routed MLP, fuses QKV with
+block ids, and reports what it ran.
+
+Usage:
+    pytest tests/tools/test_harness.py
+"""
+@@@END
+@@@FILE tests/utils/test_path_utils.py
+"""Tests for :func:`~lite_llama.utils.path_utils.get_model_name_from_path`.
+
+Checkpoint directories keep their parent name and llava checkpoints
+still contain "llava" — the naming rule the registry keys on.
+
+Usage:
+    pytest tests/utils/test_path_utils.py
+"""
+@@@END
+@@@FILE tests/utils/test_prompt_templates.py
+"""Tests for chat prompt formatting via the tokenizer's own chat template.
+
+A fake tokenizer with and without ``chat_template`` decides whether
+:func:`get_prompter` returns a :class:`ChatPrompter` or None; insertion
+defers to the template and prepends the system message when set.
+
+Usage:
+    pytest tests/utils/test_prompt_templates.py
+"""
+@@@END

@@ -693,7 +693,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - (已达成)L1 重叠有 timeline 作佐证
   - (已达成)Platform 可 mock 测试
 
-## v0.10 可观测性 + 算子分发(已发版)
+## v0.10.0 可观测性 + 算子分发(已发版)
 
 - **feat**
   - 地基 2 收尾:原计划"从雏形升级",但声明式 KernelSpec 清单、确定性 dispatch、registry 雏形与 `gen_backend_registry_gif.py` 的退场已随 v0.9 提前完成,本版只补两件
@@ -726,7 +726,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - (已达成)dispatcher 按 shape / dtype 选实现,并能 explain 决策链(v0.9 已达成,此处作回归项)
   - (已达成)Prometheus 能抓到标准 metric
 
-## v0.11 前沿架构 + 结构化输出
+## v0.11.0 前沿架构 + 结构化输出
 
 - **feat**
   - MLA:DeepSeek-V2-Lite 端到端 + V3/V4 单层
@@ -761,7 +761,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - 每个 overlap policy 有 on/off 对照数据,断言气泡减少幅度而非只断言"能跑"
   - DP + CUDA Graph 下 decode 无退化
 
-## v0.12 异步调度 + KV 传输
+## v0.12.0 异步调度 + KV 传输
 
 - **feat**
   - P9 引擎级异步调度(地基 0 的异步化终态,即 A 轴):EngineCore 独立进程 + ZMQ + N-batch 流水线
@@ -786,7 +786,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - DP 副本负载倾斜 < 10%
   - 前缀溢出到 CPU 后命中率不降
 
-## v0.13 前沿注意力 + TP Graph
+## v0.13.0 前沿注意力 + TP Graph
 
 - **feat**
   - P8 TP + CUDA Graph:所有 rank 锁步 capture 与 replay,保证 collective 调用顺序一致
@@ -806,7 +806,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - external 后端的 capability 命中与回退两条路径均可测
   - EP 可跑并有数据
 
-## v0.14 投机解码全家桶(P4)
+## v0.14.0 投机解码全家桶(P4)
 
 - **feat**
   - ngram(prompt lookup)先行:不需 draft 模型,用最简路径验证 verify 链路
@@ -824,10 +824,10 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - MTP mean accept 有报告
   - verify 正确性 golden 全绿
 
-## v1.0 收口
+## v0.15.0 收敛
 
 - **chore**
-  - 公开 API 冻结
+  - 公开 API 稳定下来
 - **test**
   - 全量回归:golden、精度门禁、服务端 API 三套一次跑绿
 - **docs**

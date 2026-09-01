@@ -1,0 +1,326 @@
+@@@FILE tests/__init__.py
+"""Test suite for lite_llama: unit, kernel-parity and golden-tier tests.
+
+The suite is CPU-first; GPU and checkpoint-dependent tests are collected
+only when the environment provides them (see ``conftest.py``).
+
+Usage:
+    pytest tests/
+"""
+@@@END
+@@@FILE tests/conftest.py
+"""Shared fixtures and collection policy for the lite_llama test suite.
+
+``pytest_ignore_collect`` drops GPU-only and golden directories when no
+checkpoint or device is available; fixtures expose the resolved model
+dir, reset torch state, and keep dispatch deterministic between tests.
+
+Usage:
+    pytest tests/   # collection policy from this file applies automatically
+"""
+@@@END
+@@@FILE tests/reference.py
+"""Pure-PyTorch reference implementations for the Triton kernels.
+
+Every function here is the slow, obvious maths —
+``varlen_causal_attention``, ``paged_decode_attention``, ``swiglu`` —
+that the kernel tests diff against; correctness from readability.
+
+Usage:
+    from tests.reference import skip_rmsnorm
+"""
+@@@END
+@@@FILE tests/test_imports.py
+"""Public imports must not eagerly initialise the GPU execution stack.
+
+Importing ``lite_llama.sampling`` (or engine / model components) must
+leave torch CUDA internals and Triton untouched, so lightweight
+consumers pay no GPU tax — asserted via the loaded-module diff.
+
+Usage:
+    pytest tests/test_imports.py
+"""
+@@@END
+@@@FILE tests/compile/test_cuda_graph.py
+"""CUDA Graph regression tests.
+
+Three guarantees: graph replay matches eager outputs, repeat replays
+stay stable, and capture clamps batch sizes to the request table so a
+graph never launches with unshaped rows.
+
+Usage:
+    pytest tests/compile/test_cuda_graph.py
+"""
+@@@END
+@@@FILE tests/config/test_config.py
+"""CPU-only tests for :class:`~lite_llama.models.config.ModelConfig`.
+
+Tiny HF-style config dicts are written to tmp dirs, so every geometry
+rule — head_dim derivation, GQA defaults, rope theta — is checked
+without downloading any checkpoint.
+
+Usage:
+    pytest tests/config/test_config.py
+"""
+@@@END
+@@@FILE tests/distributed/test_async_data_parallel.py
+"""Tests for :mod:`lite_llama.engine.async_data_parallel`.
+
+Fakes replace processes and queues (``_ChannelQueue``,
+``_FakeProcess``), so the asyncio surface — streamed chunks, replica
+spread, failure propagation — is tested without a real replica.
+
+Usage:
+    pytest tests/distributed/test_async_data_parallel.py
+"""
+@@@END
+@@@FILE tests/distributed/test_data_parallel.py
+"""Tests for :mod:`lite_llama.engine.data_parallel`.
+
+Argument validation and the routing table run CPU-only through a
+``_RouteHarness``; only the end-to-end two-GPU test needs real
+devices.
+
+Usage:
+    pytest tests/distributed/test_data_parallel.py
+"""
+@@@END
+@@@FILE tests/distributed/test_dp_load_balancer.py
+"""Tests for the DP load-balancing policies.
+
+Every policy advertised by ``LOAD_BALANCERS`` is built and driven through
+the same harness: idle-pool filling, round-robin cycling, prefix-aware
+placement — policy behaviour without any engine at all.
+
+Usage:
+    pytest tests/distributed/test_dp_load_balancer.py
+"""
+@@@END
+@@@FILE tests/distributed/test_dp_perf.py
+"""Performance guard for data parallelism: two replicas must actually serve twice.
+
+Two GPU replicas run the same fixed workload once singly and once in
+parallel; throughput must scale and every prompt must be answered — a
+lower bound, not a microbenchmark.
+
+Usage:
+    pytest tests/distributed/test_dp_perf.py
+"""
+@@@END
+@@@FILE tests/distributed/test_parallel_sampling.py
+"""Tests for sampling from a vocabulary that no single rank holds.
+
+Under TP each rank sees a vocab slice; the tests verify the offset
+arithmetic and the two-scalar log-softmax reconstruction that let ranks
+agree on one global sample without sharing full logits.
+
+Usage:
+    pytest tests/distributed/test_parallel_sampling.py
+"""
+@@@END
+@@@FILE tests/distributed/test_parallel_state.py
+"""Tests for the DP x TP rank grid in :mod:`lite_llama.distributed.parallel_state`.
+
+Pure CPU: initialise a grid and assert the coordinate maths — distinct
+cells, contiguous TP groups — plus rejection of out-of-range ranks.
+
+Usage:
+    pytest tests/distributed/test_parallel_state.py
+"""
+@@@END
+@@@FILE tests/distributed/test_qkv_parallel.py
+"""Tests for the fused, head-aware QKV projection under tensor parallelism.
+
+A one-layer checkpoint is loaded per rank slice through ``tp_harness``;
+each rank must hold exactly its heads, and the fused output must equal
+the unsharded reference.
+
+Usage:
+    pytest tests/distributed/test_qkv_parallel.py
+"""
+@@@END
+@@@FILE tests/distributed/test_tp_control_plane.py
+"""The control plane: what a driver rank tells its tensor-parallel followers.
+
+Plan broadcast and follower liveness are tested with monkeypatched
+queues and processes — the protocol, not the transport.
+
+Usage:
+    pytest tests/distributed/test_tp_control_plane.py
+"""
+@@@END
+@@@FILE tests/distributed/test_tp_engine.py
+"""End-to-end tensor parallelism: what two ranks answer, one rank must too.
+
+TP-2 groupings generate with real checkpoints and are compared against
+single-rank answers; shared-prefix agreement and tie-gap-tolerant greedy
+checks keep the comparison deterministic.
+
+Usage:
+    pytest tests/distributed/test_tp_engine.py
+"""
+@@@END
+@@@FILE tests/distributed/test_vocab_parallel.py
+"""Tests for the vocabulary-sharded embedding and LM head.
+
+Shards must partition the vocabulary exactly; foreign ids contribute
+zeros so the all-reduce sums to the unsharded result. Runs on CPU with
+a filled fake table.
+
+Usage:
+    pytest tests/distributed/test_vocab_parallel.py
+"""
+@@@END
+@@@FILE tests/distributed/tp_harness.py
+"""Run a payload on a real TP process group so sharded layers can be tested.
+
+``run_on_tp_ranks`` spawns one process per TP rank, initialises the
+grid, and returns the payload's results — the bridge between CPU unit
+tests and full TP engine tests.
+
+Usage:
+    results = run_on_tp_ranks(payload, tp_size=2)
+"""
+@@@END
+@@@FILE tests/engine/test_async_engine.py
+"""Tests for the asyncio front end of the continuous-batching engine.
+
+A ``StubEngine`` stands in for the real one, so the stream protocol is
+what gets tested: chunks until finish, the final chunk carrying whole
+text, abandoning a stream aborting the request.
+
+Usage:
+    pytest tests/engine/test_async_engine.py
+"""
+@@@END
+@@@FILE tests/engine/test_chunked_prefill.py
+"""Chunked prefill: what a step does when a prompt does not fit one chunk.
+
+A mixed batch of short and long prompts runs with a small chunk budget;
+only completed chunks may sample, and both requests must finish with
+their own text.
+
+Usage:
+    pytest tests/engine/test_chunked_prefill.py
+"""
+@@@END
+@@@FILE tests/engine/test_continuous_batching.py
+"""End-to-end correctness of continuous batching against the one-shot batch path.
+
+The same prompts run through the static engine and the continuous engine
+with arrivals spread over time; texts must match, with no foreign tail
+leaking between sequences.
+
+Usage:
+    pytest tests/engine/test_continuous_batching.py
+"""
+@@@END
+@@@FILE tests/engine/test_continuous_engine.py
+"""Step-level tests for the continuous-batching engine, without a model.
+
+A scripted executor drives the plan -> execute -> harvest loop on CPU,
+covering the harvest layer — stop handling, finish accounting, the
+``step()`` return contract: a request stopping this step still appears
+in the return with its finish reason, or its stream strands forever.
+
+Usage:
+    pytest tests/engine/test_continuous_engine.py
+"""
+@@@END
+@@@FILE tests/engine/test_continuous_perf.py
+"""Performance regression guards for continuous batching.
+
+Requests arrive on a schedule while the engine steps; the guard asserts
+throughput and latency improve over the static baseline by at least the
+recorded margins — catching regressions, not chasing speed.
+
+Usage:
+    pytest tests/engine/test_continuous_perf.py
+"""
+@@@END
+@@@FILE tests/engine/test_detokenizer.py
+"""Tests for :class:`IncrementalDetokenizer`.
+
+Fake SentencePiece-like and byte-level tokenizers drive the edge cases:
+leading spaces, multibyte characters held back until complete, and the
+invariant stream == full decode.
+
+Usage:
+    pytest tests/engine/test_detokenizer.py
+"""
+@@@END
+@@@FILE tests/engine/test_engine_e2e.py
+"""End-to-end generation tests over a real converted checkpoint.
+
+Determinism, batch-vs-single equality, streaming agreement and KV-cache
+reuse without leaks — the behaviours every optimisation must preserve.
+
+Usage:
+    pytest tests/engine/test_engine_e2e.py
+"""
+@@@END
+@@@FILE tests/engine/test_llm_entrypoint.py
+"""Tests for the vLLM-style :class:`~lite_llama.engine.llm.LLM` entry point.
+
+Return shapes, single-string convenience, greedy determinism, finish
+reasons, and the rejected promises (images on a text model, legacy
+kwargs) — the public contract of the facade.
+
+Usage:
+    pytest tests/engine/test_llm_entrypoint.py
+"""
+@@@END
+@@@FILE tests/engine/test_prefix_cache.py
+"""Tests for prefix caching — pure CPU, no GPU or checkpoint required.
+
+One test class per behaviour: hashing, matching, reference counting,
+LRU eviction, capacity boundaries, cache isolation, and the scheduler
+integration that reuses copied blocks.
+
+Usage:
+    pytest tests/engine/test_prefix_cache.py
+"""
+@@@END
+@@@FILE tests/engine/test_repeat_detection.py
+"""CPU-only tests for the repetition circuit breaker and stop-token loading.
+
+``detect_repetition`` is driven with counting loops, verbatim loops and
+honest prose; the stop-id tests merge tokenizer and generation configs
+from tmp dirs.
+
+Usage:
+    pytest tests/engine/test_repeat_detection.py
+"""
+@@@END
+@@@FILE tests/engine/test_sampler.py
+"""CPU-only tests for the Sampler + SamplingParams pair.
+
+Param validation, greedy argmax behaviour, nucleus-sampling bounds and
+the repetition penalty — logits are small tensors built inline.
+
+Usage:
+    pytest tests/engine/test_sampler.py
+"""
+@@@END
+@@@FILE tests/engine/test_scheduler.py
+"""Tests for the continuous-batching admission policy.
+
+Requests are plain objects driven through the :class:`Scheduler` on
+CPU: admission, chunked prefill, decode budget, slot accounting and
+preemption — one test class per concern.
+
+Usage:
+    pytest tests/engine/test_scheduler.py
+"""
+@@@END
+@@@FILE tests/engine/test_stop_criteria.py
+"""Tests for :class:`StopCriteria`.
+
+Writable-position bookkeeping with tiny tensors: a stop token finishes
+only its own sequence, non-stop tokens change nothing, and unwritable
+positions are skipped safely.
+
+Usage:
+    pytest tests/engine/test_stop_criteria.py
+"""
+@@@END

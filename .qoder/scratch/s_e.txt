@@ -1,0 +1,540 @@
+### benchmarks/bench_continuous.py | total=376 | doc=7L/306c | usage=True
+DOC| Continuous vs. static batching compared across offline, offline-skew, 
+DOC| and online—no single metric, gap depends on scenario:
+DOC| 
+DOC| Usage:
+DOC|     python benchmarks/bench_continuous.py --model-dir my_weight/Qwen2.5-1.5B-Instruct
+DOC|     python benchmarks/bench_continuous.py --scenario online --batch 16 --json out.json
+VAR CKPT
+CLASS Measurement() :: 一次测量结果;``gen_tokens`` 只算真正交付给用户的 token。
+  - tps()
+  - _percentile(values, fraction)
+  - row()
+  - as_dict()
+def static_engine(model_dir, kv_blocks, max_seq_len, warm_prompts)
+def continuous_engine(model_dir, kv_blocks, max_seq_len, max_num_seqs, warm_prompts)
+def skewed_caps(count, short, long, every)
+def measure_static_offline(model_dir, prompts, params, kv_blocks, max_seq_len)
+def measure_static_skewed(model_dir, prompts, caps, kv_blocks, max_seq_len)
+def measure_continuous_batch(model_dir, prompts, params_list, kv_blocks, max_seq_len, max_num_seqs, label)
+def measure_static_online(model_dir, prompts, params, kv_blocks, max_seq_len, interval)
+def measure_continuous_online(model_dir, prompts, params, kv_blocks, max_seq_len, max_num_seqs, interval)
+def main()
+
+### benchmarks/bench_data_parallel.py | total=264 | doc=20L/1155c | usage=True
+DOC| Benchmark data-parallel throughput scaling, and check the outputs stay sane.
+DOC| 
+DOC| DP adds replicas, so it can only add *throughput* — a replica runs the same kernels
+DOC| on the same shapes a single GPU would, and no individual token gets faster. Whether
+DOC| that materialises depends entirely on how loaded the one GPU already was. Two framings:
+DOC| 
+DOC| * ``--scaling weak`` (default): **batch per replica fixed**, total grows with the
+DOC|   replica count — the serving question, and where DP earns its near-linear gain.
+DOC| * ``--scaling strong``: a **fixed total batch** split across replicas. Only pays when
+DOC|   decode step time depends on batch size, which a bandwidth-bound small model often
+DOC|   does not — a flat result here is a real measurement, not a bug.
+DOC| 
+DOC| Either way the call ends when the *slowest* replica finishes, so an uneven split shows
+DOC| up as lost speedup. Baseline is ``DataParallelEngine`` with ``data_parallel_size=1``;
+DOC| an in-process ``LLM`` row alongside shows the coordinator's IPC cost.
+DOC| 
+DOC| ...(+3L)
+CLASS DPResult() :: One configuration's measurement. ``tps`` is the number DP is judged on.
+  - tps()
+  - tps_per_gpu()
+  - as_dict()
+def bench_single_process(model, prompts, gen_len, iters)
+def bench_data_parallel(model, replicas, prompts, gen_len, iters, load_balancer, max_num_seqs)
+def print_table(results, baseline, scaling)
+def main()
+
+### benchmarks/bench_dp_prefix_cache.py | total=309 | doc=36L/1981c | usage=True
+DOC| Benchmark prefix caching *across* data-parallel replicas.
+DOC| 
+DOC| Each replica owns its KV cache outright — there is no cross-replica transfer — so a
+DOC| prompt whose prefix was prefilled on replica 0 hits nothing on replica 1: round-robin
+DOC| scatters every prefix group over every replica and makes each one pay the prefill
+DOC| again. Prefix-affinity routing (``--load-balancer cache_aware``) turns the
+DOC| per-replica cache into a pool-wide one. Three configurations separate the effects:
+DOC| 
+DOC| * **off / round_robin** — baseline: every prompt prefills in full.
+DOC| * **on / round_robin** — the cache alone: group members landing together share, but
+DOC|   each group is instantiated on all ``dp`` replicas.
+DOC| * **on / cache_aware** — cache + affinity, the configuration under test.
+DOC| 
+DOC| The workload is deliberately prefill-heavy (long shared prefix, short generation):
+DOC| the saving is prefill work, and a long generation dilutes it. Measured on
+DOC| Qwen2.5-0.5B, 2x A10, ~980-token prefixes, ``--gen-len 4``::
+DOC| ...(+19L)
+VAR _FILLER
+CLASS Row() :: One (cache, policy) configuration's measurement.
+  - label()
+  - tps()
+  - as_dict()
+def build_workload(groups, per_group, prefix_sentences, seed)
+def describe_routing(prompts, group_of, dp, tokenizer)
+def measure(model, prompts)
+def print_table(rows, baseline)
+def main()
+
+### benchmarks/bench_e2e.py | total=131 | doc=11L/530c | usage=False
+DOC| 端到端指标基线:lite_llama eager / CUDA Graph 的 TTFT / TPOT / TPS 分解。
+DOC| 
+DOC| 指标口径见 benchmarks/common.py(对齐 vLLM/TensorRT-LLM)。多模态 checkpoint
+DOC| (llava / qwen3_vl)自动走 VisionBackend。--backend hf 跑 HF transformers 同口径
+DOC| 对照;--verify 用短 prompt 隔离 decode,断言 graph capture 不改变贪心输出。
+DOC| 
+DOC| 用法:
+DOC|     .venv/bin/python benchmarks/bench_e2e.py --greedy --json out.json
+DOC|     .venv/bin/python benchmarks/bench_e2e.py --model-dir my_weight/Qwen3-VL-4B-Instruct
+DOC|     .venv/bin/python benchmarks/bench_e2e.py --backend hf --greedy --model-dir my_weight/Qwen2.5-1.5B-Instruct
+VAR CKPT
+def run_hf(args, prompts)
+def run_lite(args, prompts)
+def verify_graph_matches_eager(args)
+def main()
+
+### benchmarks/bench_observability.py | total=217 | doc=7L/297c | usage=True
+DOC| benchmarks logprobs (GPU, costly) vs. metrics/trace (host, cheap) 
+DOC| by detectability above noise, all on the same engine.
+DOC| 
+DOC| Usage:
+DOC|     python benchmarks/bench_observability.py --model-dir my_weight/Qwen3-0.6B
+DOC|     python benchmarks/bench_observability.py --batch 16 --max-gen-len 128 --json out.json
+VAR CKPT
+VAR _TOP_K
+CLASS Variant() :: 一个被测配置:采样参数上的开关 + 引擎侧的观测对象。
+  - params(max_gen_len)
+VAR VARIANTS
+def build_metrics(enabled)
+def build_tracer(enabled)
+def measure(engine, prompts, params)
+def run_variant(engine, variant, prompts, max_gen_len, iters)
+def report(results)
+def main()
+
+### benchmarks/bench_overlap_l1.py | total=153 | doc=16L/627c | usage=False
+DOC| L1 跨 stream 重叠:copy-stream 输入上传的 on/off A/B 与 timeline 佐证。
+DOC| 
+DOC| 连续批处理一步可携带 prefill/decode 混合 pass;默认输入上传在 compute stream 上
+DOC| 串行,``LITE_LLAMA_OVERLAP`` 开启后读回推迟到步末,上传从 pinned staging 经 copy
+DOC| stream 起飞,与上一个 pass 的计算重叠。脚本回答两个问题:
+DOC| 
+DOC| 1. 墙钟差多少:同一负载 overlap 开关各跑一遍。负载刻意选长 prompt + 小 token
+DOC|    预算,让 prefill 切成多个 chunk、与 decode 交错出混合步——重叠的收益集中在
+DOC|    混合步,纯 decode 稳态步差值落在噪声里是预期行为。
+DOC| 2. 机制真的发生了吗:``--timeline`` 打印 copy/compute 两条 stream 的 region 表,
+DOC|    混合步里 upload.* 与 forward.* 区间相交才是"重叠"的证据。
+DOC| 
+DOC| 用法:
+DOC|     python benchmarks/bench_overlap_l1.py --model-dir my_weight/Qwen2.5-1.5B-Instruct
+DOC|     python benchmarks/bench_overlap_l1.py --timeline --json out.json
+VAR CKPT
+VAR OVERLAP_ENV
+VAR TIMELINE_ENV
+def measure(model_dir, prompts, max_gen_len, overlap, max_num_batched_tokens)
+def timeline_evidence(model_dir, prompts, max_num_batched_tokens)
+def long_prompts(batch)
+def main()
+
+### benchmarks/bench_quant.py | total=229 | doc=11L/410c | usage=False
+DOC| 量化基准:速度、显存、精度一次测完。
+DOC| 
+DOC| 每个方案跑同一批 prompt,报 TTFT/TPOT/TPS、权重与 KV 池占用、以及与 HF fp16 基线的
+DOC| 输出一致率。后端与指标口径全部来自 benchmarks/common.py,``--tp`` 大于 1 时自动走
+DOC| 连续批处理引擎(decode eager)。
+DOC| 
+DOC| 用法:
+DOC|     python benchmarks/bench_quant.py --model-dir my_weight/Qwen3-0.6B
+DOC|     python benchmarks/bench_quant.py --model-dir my_weight/Qwen3-0.6B --schemes fp16 int8 fp8
+DOC|     python benchmarks/bench_quant.py --all --json docs/benchmark_logs/quant.json
+VAR _MAX_GEN
+VAR _BATCH
+CLASS QuantRow() :: 一个方案的测量结果:速度 + 显存 + 精度。
+  - as_dict()
+def _run_lite(model_dir, scheme, tp, kv_cache_dtype, image)
+def _run_hf(model_dir)
+def _token_match_rate(lite_texts, hf_texts, tokenizer)
+def benchmark_model(model_dir, schemes, tp, skip_hf, kv_cache_dtype, image)
+def render_markdown_table(rows)
+VAR _ALL_CONFIGS
+def main()
+
+### benchmarks/common.py | total=639 | doc=34L/1364c | usage=False
+DOC| benchmark 公共层:一套指标口径、一组测量策略、一份运行时工具。
+DOC| 
+DOC| benchmarks/ 下的脚本测量同一组 prompts,指标口径对齐 vLLM/TensorRT-LLM:
+DOC|     TTFT = prefill 提交到第一个 token 可见的墙钟时间
+DOC|     TPOT = 稳态每步(每 token)延迟,取首 token 之后所有步间隔的均值
+DOC|     TPS  = batch 聚合生成吞吐 = gen_tokens / 总时间
+DOC| 
+DOC| 三层结构:
+DOC| 
+DOC| 口径层——改测试输入或采样口径只动这里
+DOC|     PROMPTS / SAMPLE_KW / GREEDY_PARAMS / expand_prompts() / sampling_params()
+DOC| 
+DOC| 测量层(Strategy + Factory + Template Method)
+DOC|     BenchResult       指标值对象,负责把自身渲染成一行表格
+DOC|     steps_to_result() 逐 step 时间戳 -> BenchResult,消掉各后端重复的统计代码
+DOC|     Backend           策略接口:measure() 出一个 BenchResult,close() 交还显存
+DOC| ...(+17L)
+VAR PROMPTS
+VAR SAMPLE_KW
+VAR GREEDY_PARAMS
+def expand_prompts(prompts, batch)
+def sampling_params(max_gen_len, greedy)
+CLASS BenchResult() :: One benchmark measurement. ``gen_tokens`` is the throughput denominator.
+  - tps()
+  - as_dict()
+  - row(label)
+def steps_to_result(step_ends)
+def print_table(results)
+CLASS Backend(ABC) :: 一种被测系统的测量策略。
+  - measure(prompts, max_gen_len, greedy)
+  - runner()
+  - texts()
+  - close()
+CLASS LiteBackend(Backend) :: lite_llama 单卡策略:stream 每步回调,直接拆出 TTFT 与稳态 TPOT。
+  - __init__(model_dir, use_cuda_graph)
+  - generator()
+  - runner()
+  - measure(prompts, max_gen_len, greedy)
+  - texts()
+  - close()
+CLASS EngineBackend(Backend) :: 连续批处理引擎策略:提交整批后逐 step 打点。
+  - __init__(model_dir)
+  - runner()
+  - measure(prompts, max_gen_len, greedy)
+  - texts()
+  - close()
+CLASS VisionBackend(Backend) :: 多模态测量策略:VisionGenerator 逐请求串行 stream 打点。
+  - __init__(model_dir, use_cuda_graph, image_path)
+  - runner()
+  - _wrap(prompt)
+  - measure(prompts, max_gen_len, greedy)
+  - texts()
+  - close()
+CLASS HFBackend(Backend) :: HF transformers 测量策略:generate 无逐步回调,用两段式拆 TTFT。
+  - __init__(model_dir, attn)
+  - measure(prompts, max_gen_len, greedy)
+  - texts()
+  - sample_text(limit)
+  - close()
+def make_backend(model_dir)
+def free_gpu()
+def reset_peak_mem()
+def peak_mem_gb()
+def describe_footprint(runner, replicas)
+def timed_runs(run, iters)
+def measure_generate(generate, prompts)
+def count_gen_tokens(texts, tokenizer)
+def report_agreement(reference, rows)
+def require_gpus(min_count)
+def timestamped_log_path(log_dir, prefix)
+def write_json_log(path, config, results)
+
+### benchmarks/kernels/bench_dispatch.py | total=113 | doc=7L/281c | usage=True
+DOC| Dispatch costs pure Python and happens only once at startup.
+DOC| The hot path never touches it—implementation is cached as an attribute at construction.
+DOC| 
+DOC| Usage:
+DOC|     python benchmarks/kernels/bench_dispatch.py
+DOC|     python benchmarks/kernels/bench_dispatch.py --iters 200 --json out.json
+VAR DTYPE
+VAR DECODE_STEP_MS
+def median_us(call, iters, before)
+def probe_op(op, scheme, layout, iters)
+def breakdown(op, scheme, layout, iters)
+def main()
+
+### benchmarks/kernels/bench_flashinfer.py | total=255 | doc=20L/1037c | usage=True
+DOC| Native vs FlashInfer on identical shapes: the priority-flip evidence.
+DOC| 
+DOC| Static dispatch ranks every external row below the native floor
+DOC| (``priority=UNMEASURED``) until a measured number says otherwise — that is
+DOC| deliberate, and this script is where those numbers come from: the same op,
+DOC| the same shape, the native Triton kernel and the FlashInfer row side by side,
+DOC| ``verify`` printing the max-abs-diff the golden records cite and ``Row``
+DOC| pairs making the latency gap (or its absence) a table instead of an anecdote.
+DOC| 
+DOC| Rows are forced with ``dispatch(..., backend="flashinfer")`` — the same
+DOC| mechanism ``LITE_LLAMA_<OP>_BACKEND`` exposes to a serving process — because
+DOC| the point is to measure the registered row, not some hand-imported function.
+DOC| Requires ``flashinfer`` (``pip install lite-llama[flashinfer]``) and an
+DOC| sm75+ GPU; the tolerance windows match the flashinfer rows' golden records
+DOC| (attention 2e-2, rope 2e-2 — the bf16 catastrophic-cancellation floor — and
+DOC| rmsnorm 1e-2).
+DOC| ...(+3L)
+VAR HIDDEN
+VAR SEQ
+VAR DT
+VAR DEVICE
+def require_flashinfer()
+def bench_rmsnorm()
+def bench_rope()
+def bench_prefill()
+def bench_decode()
+def main()
+
+### benchmarks/kernels/bench_fused_mlp_silu.py | total=265 | doc=21L/1028c | usage=True
+DOC| Fused SwiGLU MLP: silu(x @ w1) * (x @ w2) @ w3, three GEMMs and an epilogue.
+DOC| 
+DOC| One Triton kernel serves both GEMM shapes via ``FUSE_SILU``: True folds the
+DOC| gate/up pair into a single launch with a silu-mul epilogue (two accumulators,
+DOC| two B operands per K step); False is the plain down-projection. The old file
+DOC| carried the two variants as near-duplicate kernels; only the accumulator and
+DOC| epilogue actually differ, and the constexpr branch compiles them apart with the
+DOC| pid mapping and K loop shared.
+DOC| 
+DOC| The third GEMM chain the implementations disagree on is the down-projection:
+DOC| Triton launch versus ``torch.mm``. Running both quantifies what the fusion is
+DOC| worth against cuBLAS at these shapes.
+DOC| 
+DOC| Timing follows ``microbench``: verify against ``torch_mlp`` first, then
+DOC| cold-L2 medians divided by the operation's theoretical work — ``6MNK`` FLOP
+DOC| (three GEMMs) and the read-each-input-once traffic — so implementations share a
+DOC| ...(+4L)
+def mlp_kernel(a_ptr, w1_ptr, w2_ptr, c_ptr, M, N, K)
+def _launch(a, w1, w2, out, fuse_silu)
+def _fused_silu_up(x, w1, w2)
+def _check(x, w1, w2)
+def mlp_silu(x, w1, w2, w3)
+def triton_torch_mlp_silu(x, w1, w2, w3)
+def torch_mlp(x, w1, w2, w3)
+CLASS FusedMLP(Module) :: The eager path dressed as a module — kept as a correctness reference only,
+  - __init__(hidden_size, intermediate_size)
+  - forward(x)
+VAR CASES
+def main()
+
+### benchmarks/kernels/bench_kv_write.py | total=301 | doc=31L/1681c | usage=True
+DOC| Microbenchmark the KV-cache *write* path: the scatter, and the allocation before it.
+DOC| 
+DOC| A decode step touches the cache twice: :func:`update_kv_buffer` stores this
+DOC| token's K/V into rows that :meth:`KVCacheManager.alloc_kvcache_index` picked one
+DOC| instruction earlier. Both are cheap next to attention, which is exactly why they
+DOC| get benchmarked badly — and a few microseconds of per-step overhead is a few
+DOC| percent of TPOT at decode batch 1.
+DOC| 
+DOC| The two halves need different timing discipline, which is the point of this file:
+DOC| 
+DOC| *Scatter* is idempotent — writing the same rows twice leaves the same bytes — so
+DOC| back-to-back replay through :func:`microbench.bench` is valid.
+DOC| 
+DOC| *Allocation* is not. Every call consumes rows, and which of the allocator's three
+DOC| strategies runs depends on how the pool got into its current state. Replaying it
+DOC| back to back walks the pool from empty to full and averages a staircase, so it
+DOC| ...(+14L)
+VAR _ALLOC_POOL_ROWS
+VAR _ALLOC_SIZES
+VAR _IMPL
+def scatter_work(tokens, num_kv_heads, head_dim, esz)
+def check_scatter()
+def bench_scatter()
+def _invalidate_bump(kv)
+def _alloc_states(kv)
+def check_alloc(kv)
+def bench_alloc(kv)
+def show_dispatch()
+def main()
+
+### benchmarks/kernels/bench_mla_decode.py | total=142 | doc=19L/933c | usage=True
+DOC| MLA decode: reference vs FlashMLA — where the flashmla row's golden comes from.
+DOC| 
+DOC| The flashmla row is ``verified=False`` because no Hopper box has produced a
+DOC| max-abs-diff yet. This script is the vehicle that produces it: the minimal
+DOC| single-layer MLA harness (random weights, paged latent cache) runs its
+DOC| pure-PyTorch :meth:`reference_decode` first — always — and the flashmla row
+DOC| second, on the same cache; the printed diff is the number the row's
+DOC| ``GoldenRecord`` freezes, and the paired :class:`~microbench.Row` entries are
+DOC| the latency comparison.
+DOC| 
+DOC| On the CI A10 the script still has a job: it validates the harness's own
+DOC| reference path end to end (projections, page writes, gather) and prints the
+DOC| flashmla install recipe — the row stays out of dispatch until the library is
+DOC| importable and the capability window (sm90+) opens. Requires a CUDA device
+DOC| for the reference path.
+DOC| 
+DOC| ...(+2L)
+VAR PAGE_SIZE
+VAR CACHE_LENS
+VAR DT
+VAR DEVICE
+def build_case(cache_len)
+def main()
+def _traffic(kv_cache, cache_len, out)
+
+### benchmarks/kernels/bench_paged_decode.py | total=240 | doc=41L/2407c | usage=True
+DOC| Microbenchmark ``attention.decode`` over the paged KV cache.
+DOC| 
+DOC| Decode attention is the kernel every generated token waits on, and it is
+DOC| bandwidth-bound: one query row per sequence against the whole cached history, so
+DOC| the score is achieved GB/s against the pool's minimum traffic. Three plausible
+DOC| ways of building the inputs could each make the gather cheaper than production's,
+DOC| which is why the same kernel is timed over four constructions rather than one.
+DOC| What each construction is worth on an A10 is recorded below — two of the three
+DOC| turned out to be worth nothing, and that result is more useful than the warning
+DOC| it replaced:
+DOC| 
+DOC| ``production``
+DOC|     Fragmented pool, strided K/V views out of the combined per-layer buffer.
+DOC|     This is what ``lite_llama/modules/attention.py`` passes, so this row is the
+DOC|     kernel's speed and the only row to quote. It reaches 63-67% of peak
+DOC|     bandwidth at batch >= 8, and 55% at batch 1 where there is not enough work to
+DOC| ...(+24L)
+VAR _IMPL
+def decode_work(pool, num_q_heads)
+def run(pool, q)
+def check_correctness()
+def check_fp8()
+def show_dispatch()
+def main()
+
+### benchmarks/kernels/bench_softmax.py | total=216 | doc=11L/479c | usage=True
+DOC| Benchmark two Triton row-wise softmax kernels against ``torch.softmax``.
+DOC| 
+DOC| Both subtract the row max before ``exp`` (safe softmax) and reduce in fp32.
+DOC| ``softmax_native_fwd`` runs one program per row — simplest and fastest while a
+DOC| row fits in SRAM; ``softmax_split`` tiles a wide row across programs via
+DOC| log-sum-exp, staying stable when a row does not. The CLI verifies correctness,
+DOC| then prints a GB/s table and saves a plot.
+DOC| 
+DOC| Usage:
+DOC|     python benchmarks/kernels/bench_softmax.py
+def naive_softmax(x)
+def _softmax_kernel_fwd(output_ptr, input_ptr, input_row_stride, output_row_stride, num_cols, BLOCK_SIZE)
+def _num_warps(block_size)
+def softmax_native_fwd(x)
+def _logsumexp_kernel(out_ptr, in_ptr, M, N, TILE_N)
+def _combine_logsumexp_kernel(out_ptr, inp_ptr, M, N, TILE_N)
+def _softmax_split_kernel(out_ptr, in_ptr, logz_ptr, M, N, TILE_N)
+def softmax_split(x)
+def verify(rows, cols, device)
+def benchmark_softmax(M, N, provider)
+
+### benchmarks/kernels/bench_vocab_embedding.py | total=99 | doc=21L/941c | usage=True
+DOC| Benchmark the fused vocab-parallel embedding kernel against the eager chain.
+DOC| 
+DOC| The old forward ran the id->row mapping as an eager chain of seven kernels
+DOC| (subtract, compare, compare, and, clamp, gather, multiply); the fused kernel
+DOC| does all of it in one launch. That matters most at decode sizes: under TP
+DOC| there is no CUDA graph to hide launch overhead behind, so the gap between
+DOC| seven launches and one is paid in full on every step.
+DOC| 
+DOC| Two regimes are measured at a Qwen2.5-sized layout (vocab 151936, hidden
+DOC| 4096, a tp=8 shard of 18992 rows):
+DOC| 
+DOC| * decode  (1-256 tokens per step): launch-bound — the fusion's home turf.
+DOC| * prefill (1K-8K tokens):          bandwidth-bound — both should converge.
+DOC| 
+DOC| ``plain`` is an unmasked ``F.embedding`` on the same shard — the theoretical
+DOC| floor (one gather, nothing else), shown so the fused kernel's margin over it
+DOC| ...(+4L)
+VAR VOCAB
+VAR HIDDEN
+VAR TP_SIZE
+VAR SHARD_START
+VAR LOCAL_VOCAB
+def eager_chain(ids, weight, shard_start, local_vocab)
+def verify(weight)
+def bench_regime(label, sizes, weight)
+
+### benchmarks/kernels/freeze_dispatch_ranking.py | total=332 | doc=27L/1554c | usage=True
+DOC| Freeze measured dispatch ranking records (ROADMAP v0.10, foundation 2).
+DOC| 
+DOC| Times every feasible row of each multi-candidate op on this GPU and writes the
+DOC| latencies into the frozen store (``<autotune cache>/frozen/``), which
+DOC| :func:`~lite_llama.kernels.dispatcher.autotune.install_frozen_perf_provider` —
+DOC| wired at ``lite_llama.kernels`` import — turns into the rank step's perf input.
+DOC| From then on a dispatch key selects the measured winner until the records are
+DOC| re-frozen; ``UNMEASURED`` static priority alone never flips a default.
+DOC| 
+DOC| An op joins the freeze only when at least two of its rows pass the physical
+DOC| gates here (probe, capability, dtype, scheme, layout) — a one-row op has
+DOC| nothing to rank — and this file has an input builder for it. Every external
+DOC| row is verified against the native floor's output *before any timing loop
+DOC| runs* (the stateful timers mutate their operands), at twice the row's golden
+DOC| record: a plausibility bar that catches a fast-but-wrong kernel, while the
+DOC| strict number stays the golden gate's own business.
+DOC| ...(+10L)
+VAR HIDDEN
+VAR SEQ
+VAR DT
+VAR DEVICE
+CLASS Case() :: How to measure one op: the dispatch-key context plus the builder.
+def _feasible(specs)
+def _reference(specs)
+def _atol(spec)
+def measure_rmsnorm(specs)
+def measure_rope(specs)
+def measure_prefill(specs)
+def measure_decode(specs)
+def main()
+
+### benchmarks/kernels/kv_pool.py | total=273 | doc=39L/2496c | usage=True
+DOC| Paged KV-cache fixtures: the pool the production path actually hands a kernel.
+DOC| 
+DOC| Four properties of the real pool differ from what a bare ``torch.randn`` builds,
+DOC| and this module is the one place that knows them, so a benchmark cannot quietly
+DOC| measure a cache lite_llama never allocates. How much each property is *worth* is
+DOC| a measurement, not an assumption — two of the four turned out to cost almost
+DOC| nothing at the production head geometry, and the notes below say so, because a
+DOC| fixture justified by a wrong reason gets deleted by the next reader.
+DOC| 
+DOC| * **Combined layout.** :meth:`~lite_llama.executor.kv_cache_manager.KVCacheManager.init_kv_buffers`
+DOC|   allocates one tensor per layer, ``[max_tokens, 2 * num_kv_heads, head_dim]``,
+DOC|   K heads first and V heads second. ``lite_llama/modules/attention.py`` slices it
+DOC|   and hands ``flash_decoding`` two **views** whose row stride is
+DOC|   ``2 * num_kv_heads * head_dim``. Two separate allocations halve that stride,
+DOC|   and on an A10 that measured as no difference at all (8 heads x 128 dim fp16 =
+DOC|   2 KiB per side per row, already 16 cache lines, so halving the stride changes
+DOC| ...(+22L)
+VAR Layout
+VAR _MIN_L2_MULTIPLE
+CLASS PagedPool() :: One layer's KV pool plus the tables a decode kernel indexes it through.
+  - total_tokens()
+  - kv_bytes_read()
+  - describe()
+def paged_pool(seq_lens)
+def _pool_bytes(rows, num_kv_heads, head_dim, dtype, device)
+def _as_cache_dtype(ref, dtype)
+def _row_table(seq_lens, capacity)
+def fresh_rows(num_tokens)
+
+### benchmarks/kernels/microbench.py | total=405 | doc=33L/1868c | usage=True
+DOC| Kernel microbenchmark harness: one timing discipline, one honest metric.
+DOC| 
+DOC| A kernel number is worth keeping only if a reader can tell what it measured.
+DOC| This module fixes the three things every benchmark here would otherwise
+DOC| re-decide: how long to time (cold-L2 median through ``triton.testing.do_bench``),
+DOC| what to divide by (the *theoretical* work of the operation, never one
+DOC| implementation's actual traffic), and what to compare against (the device's own
+DOC| roofline, derived from CUDA properties instead of a spec sheet).
+DOC| 
+DOC| Which timer to use is the one decision a caller must make consciously, and it is
+DOC| not a matter of taste. ``do_bench`` replays the callable back to back, valid only
+DOC| when a call leaves the world as it found it: a KV-cache scatter is idempotent and
+DOC| qualifies, a block allocator does not — its second call runs against a pool the
+DOC| first one consumed, so replay times a different operation each iteration and
+DOC| averages a staircase. :func:`bench_stateful` restores the precondition between
+DOC| timed intervals; :func:`bench_host` measures host wall time for operations whose
+DOC| ...(+16L)
+VAR _RELEVANT_ENV
+CLASS Peaks() :: The two roofline corners of the current device.
+  - ridge()
+def device_peaks(device)
+def l2_bytes(device)
+CLASS Work() :: The work the *operation* implies, not the work a kernel happens to do.
+  - intensity()
+CLASS Row() :: One measured (implementation, case) pair.
+  - tflops()
+  - gbps()
+def bench(fn)
+def bench_stateful(fn, reset)
+def bench_host(fn, reset)
+def _l2_flusher(device)
+def verify(name, out, ref)
+def metadata(device)
+def _git_describe()
+def report(rows)
+

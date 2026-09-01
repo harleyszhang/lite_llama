@@ -1,0 +1,172 @@
+### examples/basic.py | total=37 | doc=9L/300c | usage=False
+DOC| Basic batch inference — mirrors ``vllm/examples/basic/offline_inference/basic.py``.
+DOC| 
+DOC| One entry point (:class:`LLM`), one config object (:class:`SamplingParams`),
+DOC| one call (``generate``) returning structured :class:`RequestOutput` objects.
+DOC| 
+DOC| Run from the repository root:
+DOC| 
+DOC|     python examples/basic.py
+VAR prompts
+VAR sampling_params
+def main()
+
+### examples/benchmark.py | total=279 | doc=17L/794c | usage=False
+DOC| Latency/throughput benchmark: lite_llama vs HuggingFace transformers.
+DOC| 
+DOC| Reports the metrics used by vLLM / SGLang serving benchmarks, per engine:
+DOC| 
+DOC| * **TTFT** (time to first token, s) — prefill latency, measured as the wall-clock
+DOC|   time of a ``max_new_tokens=1`` generation over the batch (prefill + 1 token).
+DOC| * **TPOT** (time per output token, ms) — steady-state decode latency, defined
+DOC|   exactly as vLLM does: ``(latency - ttft) / (output_len - 1)``.
+DOC| * **TGS** (token generation speed, tokens/s) — aggregate output throughput,
+DOC|   ``total_output_tokens / latency``.
+DOC| 
+DOC| Results (and the full config) are printed and saved to ``--log-dir`` as JSON.
+DOC| 
+DOC| Run from the repository root:
+DOC|     python examples/benchmark.py --model my_weight/Qwen2.5-1.5B-Instruct         --batch-size 8 --gen-len 128 --iters 2
+CLASS Metrics() :: Per-engine measurement for one (batch_size, gen_len) configuration.
+  - from_runs(cls, engine, batch_size, prompt_tokens, ttfts, latencies, out_tokens)
+def _sync()
+def count_tokens(texts, tokenizer)
+def _timed(fn)
+def bench_lite_llama(model_dir, prompts, gen_len, iters, device, max_gpu_num_blocks, tensor_parallel_size)
+def bench_transformers(model_dir, prompts, gen_len, iters, device, dtype)
+def _print_report(cfg, lite, hf)
+def main()
+
+### examples/benchmark_vision.py | total=250 | doc=11L/443c | usage=False
+DOC| 
+DOC| This benchmark compares lite_llama and HF for multimodal inference by fixing the input size 
+DOC| to normalize preprocessing, running single requests serially without batching, and reporting 
+DOC| median greedy-decoding results.
+DOC| 
+DOC| Shares the metric definitions of ``examples/benchmark.py`` (greedy decoding,
+DOC| natural EOS stop for both engines.
+DOC| 
+DOC| Run from the repository root:
+DOC|     python examples/benchmark_vision.py --model my_weight/Qwen3-VL-4B-Instruct
+CLASS Metrics() :: Per-engine measurement for one serial multimodal pass.
+  - from_runs(cls, engine, num_requests, prompt_tokens, ttfts, latencies, out_tokens)
+def _sync()
+def count_tokens(texts, tokenizer)
+def _timed(fn)
+def load_image(path, size)
+def build_prompts(model_dir, questions)
+def bench_lite(model_dir, prompts, image, gen_len, iters, device)
+def bench_hf(model_dir, prompts, image, gen_len, iters, device, dtype)
+def _print_report(cfg, lite, hf)
+def main()
+
+### examples/chat.py | total=76 | doc=9L/345c | usage=False
+DOC| Batch text generation with :class:`~lite_llama.engine.generator.TextGenerator`.
+DOC| 
+DOC| Two usage patterns over the same engine:
+DOC|   * ``stream`` — yields incremental text per decode step (interactive/chat UIs);
+DOC|   * ``generate`` — blocking call returning the full completion per prompt.
+DOC| 
+DOC| Run from the repository root:
+DOC|     python examples/example_chat.py
+VAR checkpoints_dir
+def cli_generate_stream(temperature, top_p, max_seq_len, max_gen_len)
+def cli_generate(temperature, top_p, max_seq_len, max_gen_len)
+
+### examples/eval_accuracy.py | total=71 | doc=10L/403c | usage=False
+DOC| Accuracy evaluation on HotpotQA / HellaSwag with lite_llama.
+DOC| 
+DOC| Feeds the benchmark prompts through a :class:`~lite_llama.engine.generator.TextGenerator`
+DOC| in batches and hands the completions to the dataset evaluators in
+DOC| ``evaluator/datasets.py`` (HotpotQA uses sentence-embedding similarity, HellaSwag
+DOC| scores multiple-choice selections).
+DOC| 
+DOC| Run from the ``examples/`` directory:
+DOC|     python eval_accuracy.py
+CLASS EvaluatorAccuracy() :: Runs a benchmark dataset through lite_llama and scores the completions.
+  - __init__(test_data_path, custom_checkpoints_dir, data_batch)
+  - process_prompts(prompts)
+  - process()
+
+### examples/example_llava.py | total=45 | doc=8L/300c | usage=False
+DOC| Single-image chat with :class:`~lite_llama.engine.generator.VisionGenerator`.
+DOC| 
+DOC| Works for both LLaVA (``<image>`` marker in the prompt) and Qwen3-VL (plain
+DOC| prompt; the generator wraps it in the chat template and computes mrope ids).
+DOC| 
+DOC| Run from the repository root:
+DOC|     python examples/example_llava.py
+VAR checkpoints_dir
+VAR image_path
+def main(temperature, top_p, max_seq_len, max_gen_len)
+
+### examples/evaluator/__init__.py | total=0 | doc=0L/0c | usage=False
+
+### examples/evaluator/datasets.py | total=322 | doc=0L/0c | usage=False
+VAR embedding_model
+def read_jsonl(jsonl_path)
+def read_json(json_path)
+CLASS HotpotQA(object) :: for testing hotpot wget http://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json
+  - __init__(data_path, data_batch)
+  - extract_supporting_context(data)
+  - build_prompt(data)
+  - parse_data()
+  - evaluate(predictions, ground_truth)
+CLASS HellaSwag(object) :: for testing HellaSwag wget https://raw.githubusercontent.com/rowanz/hellaswag/refs/heads/master/data
+  - __init__(data_path, data_batch)
+  - format_prompt(ctx, endings)
+  - extract_choice(output_text)
+  - convert_answer(answer)
+  - parse_data()
+  - evaluate(predictions, ground_truth, options)
+def unify_data(test_data, data_batch, data_type)
+def normalize_answer(s)
+def exact_match(pred, gt)
+def penalized_f1(prediction, ground_truth, max_len_ratio, penalty_factor)
+def jaccard_similarity(prediction, ground_truth)
+def embedding_similarity(prediction, ground_truth)
+def extract_final_choice(text)
+def match_mc_option(prediction, options)
+
+### examples/teaching/causal_mask_variants.py | total=109 | doc=0L/0c | usage=False
+def create_and_print_mask()
+def apply_prefill_mask1(scores, seq_len)
+def apply_prefill_mask2(scores, seq_len)
+def apply_prefill_mask3(scores, seq_len)
+
+### examples/teaching/hf_gpt2_manual_decode.py | total=119 | doc=10L/271c | usage=False
+DOC| 教学示例:用 HuggingFace 的 ``model.forward`` 手写逐 token 解码循环。
+DOC| 
+DOC| 展示 lite_llama 引擎内部替你做掉的那些步骤——维护 ``past_key_values``、
+DOC| 每步只喂新 token、top-p 过滤后采样。与 ``lite_llama.engine`` 的实现对照阅读,
+DOC| 可以看出后者省掉了哪些主机侧开销。
+DOC| 
+DOC| 用法::
+DOC| 
+DOC|     python examples/teaching/hf_gpt2_manual_decode.py --model-dir /path/to/gpt2
+def generate_text(model, tokenizer, prompt, max_length, temperature, top_p, device)
+
+### examples/teaching/hf_llama_generate.py | total=118 | doc=9L/258c | usage=False
+DOC| 教学示例:HuggingFace ``generate()`` 与 ``pipeline()`` 两种基线用法。
+DOC| 
+DOC| 作为 lite_llama 的性能/精度对照基线保留:同样的 prompt 与采样参数下,
+DOC| ``benchmarks/bench_e2e.py --backend hf`` 用的就是这套调用方式。
+DOC| 
+DOC| 用法::
+DOC| 
+DOC|     python examples/teaching/hf_llama_generate.py --model-dir my_weight/Llama-3.2-1B-Instruct
+def load_llama_model(model_path, device)
+def generate_text(model, tokenizer, prompt, max_length, device)
+def pipline_text(model_id)
+
+### examples/teaching/standard_mha.py | total=99 | doc=0L/0c | usage=False
+CLASS MultiHeadAttention(Module) :: 
+  - __init__(embed_dim, num_heads)
+  - forward(x, mask)
+def generate_causal_mask(seq_length)
+def test_multihead_attention(vocab_size, batch_size, seq_length, embed_dim, num_heads)
+
+### examples/teaching/temperature_softmax.py | total=34 | doc=0L/0c | usage=False
+VAR logits
+VAR temperatures
+

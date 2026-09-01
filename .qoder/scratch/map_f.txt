@@ -1,0 +1,210 @@
+@@@FILE benchmarks/bench_continuous.py
+"""Continuous vs static batching, across offline and skewed-arrival scenarios.
+
+The same prompts run through a one-shot engine and a continuous engine;
+``Measurement`` captures TTFT / TPOT / throughput per scenario so the
+gain from continuous batching is one comparable table.
+
+Usage:
+    python benchmarks/bench_continuous.py --model-dir <ckpt>
+"""
+@@@END
+@@@FILE benchmarks/bench_data_parallel.py
+"""Data-parallel throughput scaling — and a sanity check on the outputs.
+
+``--scaling weak`` grows the total batch with the replica count (the
+serving question, where DP earns near-linear gains); ``strong`` splits a
+fixed batch. Answers are diffed so speed never hides wrongness.
+
+Usage:
+    python benchmarks/bench_data_parallel.py --model <ckpt> --dp 2
+"""
+@@@END
+@@@FILE benchmarks/bench_dp_prefix_cache.py
+"""Prefix caching across data-parallel replicas.
+
+Prompts share prefixes within a group; whether a cache-aware balancer
+keeps a group on one replica decides if the prefix cache ever hits. The
+benchmark measures both routing quality and the resulting KV savings.
+
+Usage:
+    python benchmarks/bench_dp_prefix_cache.py --model <ckpt> --dp 2
+"""
+@@@END
+@@@FILE benchmarks/bench_e2e.py
+"""End-to-end metric baseline: TTFT / TPOT / TPS, eager vs CUDA Graph.
+
+``run_lite`` and ``run_hf`` drive the same prompts while ``verify``
+checks the graph path still answers exactly like eager — the numbers
+and the guarantee in one run.
+
+Usage:
+    python benchmarks/bench_e2e.py --model-dir <ckpt> --verify
+"""
+@@@END
+@@@FILE benchmarks/bench_observability.py
+"""What observability costs: logprobs (GPU, costly) vs metrics/trace (host, cheap).
+
+Each :class:`Variant` enables one observability surface and ``measure``
+times the same workload, so the per-token overhead of every knob is a
+row in one table.
+
+Usage:
+    python benchmarks/bench_observability.py --model-dir <ckpt>
+"""
+@@@END
+@@@FILE benchmarks/bench_overlap_l1.py
+"""L1 cross-stream overlap: copy-stream input upload on/off, with timeline proof.
+
+``measure`` A/B-runs the same workload with overlap enabled and
+disabled; ``timeline_evidence`` records the timeline showing uploads
+actually overlapping compute.
+
+Usage:
+    python benchmarks/bench_overlap_l1.py --model-dir <ckpt> --timeline
+"""
+@@@END
+@@@FILE benchmarks/bench_quant.py
+"""Quantisation benchmark: speed, memory and accuracy in one run.
+
+Each scheme runs the same prompts (``_run_lite``); peak memory,
+tokens/s and the token-match rate against HF fp16 land in one markdown
+table so a scheme choice can cite all three.
+
+Usage:
+    python benchmarks/bench_quant.py --model-dir <ckpt> --schemes w8a8_int8
+"""
+@@@END
+@@@FILE benchmarks/common.py
+"""Shared benchmark layer: one metrics vocabulary, one timing discipline.
+
+``BenchResult`` plus ``steps_to_result`` define every script's numbers,
+the :class:`Backend` ABC adapts engines into one interface, and the
+helpers (``expand_prompts``, ``sampling_params``) keep workload shapes
+reproducible across scripts.
+
+Usage:
+    from benchmarks.common import BenchResult, print_table
+"""
+@@@END
+@@@FILE benchmarks/kernels/bench_dispatch.py
+"""Dispatch overhead: pure-Python cost, paid once at startup.
+
+``probe_op`` times one dispatch through filter / rank / cache, and
+``breakdown`` splits the cost per stage — the number that decides
+whether dispatch can run per-call or must be cached.
+
+Usage:
+    python benchmarks/kernels/bench_dispatch.py
+"""
+@@@END
+@@@FILE benchmarks/kernels/bench_flashinfer.py
+"""Native vs FlashInfer on identical shapes: the priority-flip evidence.
+
+rmsnorm, rope, prefill and decode each run through both backends on
+the same tensors; the table shows where the external wheel wins enough
+to outrank the native row.
+
+Usage:
+    python benchmarks/kernels/bench_flashinfer.py
+"""
+@@@END
+@@@FILE benchmarks/kernels/bench_fused_mlp_silu.py
+"""Fused SwiGLU MLP: silu(x @ w1) * (x @ w2) @ w3 — three GEMMs, one kernel.
+
+The Triton kernel fuses the up/gate GEMMs with the silu-multiply
+epilogue; ``_check`` diffs against the eager chain before anything is
+timed.
+
+Usage:
+    python benchmarks/kernels/bench_fused_mlp_silu.py
+"""
+@@@END
+@@@FILE benchmarks/kernels/bench_kv_write.py
+"""Microbenchmark the KV-cache write path: the scatter, and the alloc before it.
+
+``bench_scatter`` times the row scatter and ``bench_alloc`` the block
+allocator with its cache states invalidated between runs, so neither
+number borrows warmth from the previous call.
+
+Usage:
+    python benchmarks/kernels/bench_kv_write.py
+"""
+@@@END
+@@@FILE benchmarks/kernels/bench_mla_decode.py
+"""MLA decode: reference vs FlashMLA — the flashmla row's golden source.
+
+``build_case`` makes one latent-compressed KV cache per history length
+and ``_traffic`` computes the bytes the kernel must move, so measured
+milliseconds and roofline seconds sit side by side.
+
+Usage:
+    python benchmarks/kernels/bench_mla_decode.py
+"""
+@@@END
+@@@FILE benchmarks/kernels/bench_paged_decode.py
+"""Microbenchmark ``attention.decode`` over the paged KV cache.
+
+``decode_work`` builds the pool, table and queries;
+``check_correctness`` / ``check_fp8`` diff against a reference first,
+and ``show_dispatch`` prints which implementation actually ran.
+
+Usage:
+    python benchmarks/kernels/bench_paged_decode.py
+"""
+@@@END
+@@@FILE benchmarks/kernels/bench_softmax.py
+"""Two Triton row-wise softmax kernels vs ``torch.softmax``.
+
+The one-pass naive kernel is compared with a split variant (logsumexp,
+then combine) on wide rows; correctness is checked before any timing
+loop starts.
+
+Usage:
+    python benchmarks/kernels/bench_softmax.py
+"""
+@@@END
+@@@FILE benchmarks/kernels/bench_vocab_embedding.py
+"""Fused vocab-parallel embedding kernel vs the eager chain.
+
+The eager chain (masked lookup + zeros + all-reduce) is the reference;
+``bench_regime`` times both across id-batch regimes while ``verify``
+proves the kernel matches the chain exactly first.
+
+Usage:
+    python benchmarks/kernels/bench_vocab_embedding.py
+"""
+@@@END
+@@@FILE benchmarks/kernels/freeze_dispatch_ranking.py
+"""Freeze measured dispatch ranking records (ROADMAP v0.10, foundation 2).
+
+Each op's feasible specs are timed against a reference with a per-spec
+tolerance, and the winner is written into the frozen store that
+``install_frozen_perf_provider`` later replays in production.
+
+Usage:
+    python benchmarks/kernels/freeze_dispatch_ranking.py --dry-run
+"""
+@@@END
+@@@FILE benchmarks/kernels/kv_pool.py
+"""Paged KV-cache fixtures: the pool the production path actually hands a kernel.
+
+:class:`PagedPool` builds a real row table, block table and buffers for
+arbitrary sequence lengths, so benchmarks measure the kernel's true
+input shapes — not a conveniently contiguous stand-in.
+
+Usage:
+    pool = paged_pool(seq_lens=[17, 23, 5])
+"""
+@@@END
+@@@FILE benchmarks/kernels/microbench.py
+"""Kernel microbenchmark harness: one timing discipline, one honest metric.
+
+``bench`` warms, L2-flushes and times with device sync;
+``bench_stateful`` / ``bench_host`` cover alloc-reset and host-side
+work. ``verify`` gates every result on numerical correctness first.
+
+Usage:
+    from benchmarks.kernels.microbench import bench
+"""
+@@@END

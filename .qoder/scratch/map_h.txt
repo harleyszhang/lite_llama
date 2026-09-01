@@ -1,0 +1,369 @@
+@@@FILE lite_llama/engine/generator.py
+"""Backward-compatible ``TextGenerator`` / ``VisionGenerator`` wrappers.
+
+Both classes build and hold an
+:class:`~lite_llama.engine.llm_engine.LLMEngine` and forward ``generate``
+to it — thin facades kept so older scripts keep working while new code
+uses :class:`~lite_llama.engine.llm.LLM`.
+
+Usage:
+    gen = TextGenerator(checkpoints_dir, tokenizer_path)
+    texts = gen.generate(prompts, params)
+"""
+@@@END
+@@@FILE lite_llama/engine/multimodal.py
+"""Multimodal prompt preparation (strategy seam for the LLM entry point).
+
+:class:`MultimodalPreparer` inspects the engine's model type and produces
+what the forward pass needs — image tensors for LLaVA, mrope position
+ids for Qwen3-VL — keeping vision plumbing out of the engine itself.
+
+Usage:
+    ids, inputs, pos = preparer.prepare(prompt, images)
+"""
+@@@END
+@@@FILE lite_llama/engine/outputs.py
+"""Output containers for the user-facing :class:`~lite_llama.engine.llm.LLM` API.
+
+:class:`RequestOutput` holds one request's prompt and its
+:class:`CompletionOutput` rows (text, token ids, finish reason) — plain
+dataclasses, the API's return shape and nothing more.
+
+Usage:
+    out = llm.generate(prompts, params)[0]
+    print(out.outputs[0].text)
+"""
+@@@END
+@@@FILE lite_llama/entrypoints/protocol.py
+"""Request and response schemas for the OpenAI-compatible endpoints.
+
+Pydantic models mirror the OpenAI wire format —
+:class:`CompletionRequest`, :class:`ChatCompletionRequest` and the
+response objects — so parsing, defaults and validation live once where
+FastAPI can see them.
+
+Usage:
+    req = CompletionRequest(model="m", prompt="hi")
+    params = req.to_sampling_params()
+"""
+@@@END
+@@@FILE lite_llama/executor/attention_metadata.py
+"""Runtime attention / KV-cache bookkeeping passed through the forward pass.
+
+:class:`AttentionMetadata` is the one dataclass every attention call
+receives: the paged ``kv_buffer``, this step's cache rows, the
+request->token table and per-sequence lengths — so kernel signatures
+stay stable and graph replay can mutate fields in place.
+
+Usage:
+    attn = AttentionMetadata(kv_buffer=..., cur_select_index=...)
+"""
+@@@END
+@@@FILE lite_llama/executor/cuda_graph.py
+"""CUDA Graph capture and replay for the decode phase.
+
+:class:`CUDAGraphManager` captures one graph per (batch, seq-bucket)
+shape via :class:`CUDAGraphRunner`; ``try_replay`` launches the matching
+graph when a decode step fits one, else returns None so eager runs.
+
+Usage:
+    mgr = CUDAGraphManager(model)
+    logits = mgr.try_replay(input_ids, position_ids, attn_info)
+"""
+@@@END
+@@@FILE lite_llama/executor/loader.py
+"""Model loading: a HuggingFace checkpoint in, a ready-to-run ``nn.Module`` out.
+
+:class:`DefaultModelLoader` builds the model with empty parameters
+(:func:`init_empty_parameters`), streams checkpoint weights through the
+translator, then :func:`materialise_parameters` moves them to device.
+
+Usage:
+    model = DefaultModelLoader().load(...)
+"""
+@@@END
+@@@FILE lite_llama/executor/model_runner.py
+"""Model runner: builds the model, sizes the KV cache, runs each forward step.
+
+``ModelRunner.build`` is the one-call constructor (config, loader, KV
+blocks); the instance then owns the KV buffers, the request-to-token
+table and ``forward`` for both phases.
+
+Usage:
+    runner = ModelRunner.build(checkpoints_dir, max_seq_len)
+"""
+@@@END
+@@@FILE lite_llama/kernels/backend/flashinfer/sample.py
+"""FlashInfer sampling wrapper behind the native signature.
+
+``sample`` delegates the top-p draw to FlashInfer's sampling kernel,
+taking the same logits tensor the native sampler path receives.
+
+Usage:
+    token = sample(logits)
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/activation/activations.py
+"""Elementwise activation kernels (Triton): relu, leaky_relu, tanh, gelu, silu.
+
+One Triton launch per element — no fused GEMM epilogue here; the fused
+variants live in :mod:`~lite_llama.kernels.ops.activation.swiglu`.
+
+Usage:
+    from lite_llama.kernels import silu, gelu
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/activation/swiglu.py
+"""SwiGLU activation as a fused Triton kernel.
+
+``swiglu_forward`` fuses the silu gate with the elementwise multiply
+over two input tensors; ``swiglu_forward_fused`` is the single-input
+variant used by the fused-MLP path.
+
+Usage:
+    y = swiglu_forward(gate, up)
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/attention/flashdecoding.py
+"""FlashDecoding: single-token decode attention against the paged KV cache.
+
+Two stages — partial attention per KV partition, then a logsumexp-combine
+— so history length is split across blocks instead of serially walked,
+with scales applied inside the kernel.
+
+Usage:
+    out = flash_decoding(q, k_cache, v_cache, qk_scale,
+                         b_req_tokens_table, b_req_idx, b_seq_len,
+                         max_actual_seq_len)
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/kvcache/__init__.py
+"""KV-cache domain: writing new tokens into the paged buffer.
+
+Registers the domain's spec rows and re-exports the two write kernels:
+:func:`~lite_llama.kernels.ops.kvcache.update_kv_buffer.update_kv_buffer`
+(scatter rows) and ``update_kv_index`` (record their locations).
+
+Usage:
+    from lite_llama.kernels import update_kv_buffer
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/kvcache/update_kv_buffer.py
+"""Scatter freshly computed K/V rows into the paged KV buffer.
+
+One Triton launch writes the selected rows of this step's K and V to
+the cache positions ``select_index`` names — rows not selected are
+never touched.
+
+Usage:
+    update_kv_buffer(k, v, select_index, kv_buffer)
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/kvcache/update_kv_index.py
+"""Record where each sequence's newly written KV rows live.
+
+The kernel writes each request's row ids into the request->token table
+at ``seq_len - 1`` — the slot the decode kernel will read next step.
+
+Usage:
+    update_kv_index(req_to_token_indexs, b_req_idx, b_seq_len, select_index)
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/layernorm/__init__.py
+"""LayerNorm domain: RMSNorm, fused with the residual add when there is one.
+
+Registers the domain's spec row and re-exports
+:func:`~lite_llama.kernels.ops.layernorm.skip_rmsnorm.skip_rmsnorm`,
+the fused residual-add + RMSNorm kernel.
+
+Usage:
+    from lite_llama.kernels import skip_rmsnorm
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/layernorm/skip_rmsnorm.py
+"""Fused residual-add + RMSNorm ("skip rmsnorm") in Triton.
+
+``skip_rmsnorm`` returns the new residual (x + residual) and the normed
+output in one launch; passing a zero residual degrades to plain RMSNorm.
+
+Usage:
+    residual, y = skip_rmsnorm(x, residual, weight, eps)
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/moe/__init__.py
+"""MoE domain: the fused expert GEMMs, one row per implementation.
+
+Registers the domain's spec rows and re-exports the grouped-GEMM entry
+point :func:`~lite_llama.kernels.ops.moe.fused_moe.fused_moe` plus its
+alignment helper.
+
+Usage:
+    from lite_llama.kernels import fused_moe
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/moe/fused_moe.py
+"""Fused MoE: top-k routed experts as a Triton grouped GEMM.
+
+``moe_align_block_size`` sorts tokens by expert into padded blocks; the
+fused kernel then runs both expert GEMMs and the activation for every
+block, with quantisation folded in per weight format.
+
+Usage:
+    y = fused_moe(hidden_states, w1, w2, topk_weights, topk_ids)
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/quantization/fp8.py
+"""FP8 W8A8 GEMM: fp8-e4m3 weights + dynamic per-token fp8-e4m3 activations.
+
+Both operands are quantised before the launch — activations per token,
+weights per block — and the kernel multiplies in fp8 with fp32
+accumulation, applying scales in the epilogue.
+
+Usage:
+    y = fp8_matmul(qx, x_scale, qweight, weight_scale_inv)
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/quantization/w8a16.py
+"""W8A16 GEMM: 8-bit weights (fp8-e4m3 or int8), fp16 activations.
+
+The kernel dequantises each weight tile on the fly (fp8 via a bit-trick
+fast path, int8 by scale multiply) and accumulates in fp32, so
+activations never leave fp16.
+
+Usage:
+    y = w8a16_matmul(x, qweight, scales)
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/rope/__init__.py
+"""RoPE domain: applying rotary position embeddings in place.
+
+Registers the domain's spec row and re-exports
+:func:`~lite_llama.kernels.ops.rope.rope_emb.rope_emb_forward`, the
+fused kernel that rotates q and k against the cos/sin tables.
+
+Usage:
+    from lite_llama.kernels import rope_emb_forward
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/sampling/__init__.py
+"""Sampling domain: turning logits into token ids.
+
+Registers the domain's spec rows; the stochastic draw itself is served
+by the native sampler or an external backend's sampling wrapper.
+
+Usage:
+    from lite_llama.kernels.ops import SampleOp
+"""
+@@@END
+@@@FILE lite_llama/kernels/ops/utils.py
+"""Shared helpers for the Triton kernels (block sizing, contiguity, HIP).
+
+``calculate_settings`` picks BLOCK_SIZE / num_warps for a row length,
+``ensure_contiguous`` guards kernel inputs, plus a HIP check.
+
+Incorporates code from Unsloth (Apache-2.0, https://github.com/unslothai/unsloth)
+and Liger-Kernel; modifications by Yanning Chen, 2024.
+
+Usage:
+    block_size, num_warps = calculate_settings(n)
+"""
+@@@END
+@@@FILE lite_llama/models/config.py
+"""Model configuration, backed by HuggingFace's ``AutoConfig``.
+
+``read_model_type`` sniffs a checkpoint's model_type;
+:class:`ModelConfig` wraps the HF config and derives the geometry
+(heads, head_dim, rope settings) the runtime needs.
+
+Usage:
+    config = ModelConfig(hf_config, max_seq_len)
+"""
+@@@END
+@@@FILE lite_llama/models/interfaces.py
+"""Capability interfaces a model opts into, plus their shared helpers.
+
+:class:`MultiModalCausalLM` marks models that splice vision features
+into token embeddings; :func:`merge_multimodal_embeddings` is the one
+splice implementation they share.
+
+Usage:
+    inputs = merge_multimodal_embeddings(ids, embeds, vision, placeholder_ids)
+"""
+@@@END
+@@@FILE lite_llama/models/qwen3_moe.py
+"""Qwen3 MoE (A3B) model definition.
+
+``is_moe_layer`` reads the config's layer boundaries so dense and
+routed layers interleave correctly; :class:`Qwen3MoeModel` stacks them
+on the shared CausalLM skeleton with :class:`SparseMoeBlock` MLPs.
+
+Usage:
+    model = Qwen3MoeModel(config)
+"""
+@@@END
+@@@FILE lite_llama/models/qwen3_vl.py
+"""Qwen3-VL: SigLIP-style vision tower + Qwen3 language model, mrope + DeepStack.
+
+:class:`Qwen3VLForCausalLM` implements :class:`MultiModalCausalLM`:
+the vision tower produces patch features, mrope positions carry the 2-D
+layout, and DeepStack injects features at several decoder depths.
+
+Usage:
+    model = Qwen3VLForCausalLM(config)
+"""
+@@@END
+@@@FILE lite_llama/models/registry.py
+"""Single source of truth mapping a HuggingFace ``model_type`` to its implementation.
+
+Each :class:`ModelSpec` pairs a model_type with its implementation
+class (loaded lazily); :class:`ModelRegistry` resolves a checkpoint to
+its spec or lists the known alternatives in the error.
+
+Usage:
+    from lite_llama.models.registry import ModelRegistry
+"""
+@@@END
+@@@FILE lite_llama/platform/__init__.py
+"""Accelerator platform layer (ROADMAP A9): detect once, filter kernels anywhere.
+
+``current_platform()`` returns the platform for this machine; specs and
+dispatch ask it (or match :class:`PlatformInfo` directly) whether a
+kernel's requirements hold.
+
+Usage:
+    from lite_llama.platform import current_platform
+"""
+@@@END
+@@@FILE lite_llama/platform/interface.py
+"""Platform ABC: one subclass per accelerator family, CUDA first.
+
+Subclasses implement the probe (device name, capability, memory);
+``register_platform`` installs them and :func:`current_platform` picks
+the one whose probe succeeds, defaulting to :class:`CpuPlatform`.
+
+Usage:
+    platform = current_platform()
+"""
+@@@END
+@@@FILE lite_llama/tools/profiling/__init__.py
+"""Profiling tools: model structure tree and memory budget table.
+
+Re-exports both halves — ``print_structure_tree`` /
+``export_structure_tree`` and ``compute_memory_budget`` /
+``print_memory_budget`` — one import for the whole toolkit.
+
+Usage:
+    from lite_llama.tools.profiling import print_memory_budget
+"""
+@@@END
+@@@FILE tests/tools/test_profiling.py
+"""Tests for the profiling tools: the structure tree and the memory budget.
+
+Tree rendering (branch glyphs, hidden-depth reporting, per-node
+parameter accounting, dtype naming) and the static memory budget are
+checked with hand-built ``nn.Module`` trees — CPU only.
+
+Usage:
+    pytest tests/tools/test_profiling.py
+"""
+@@@END
