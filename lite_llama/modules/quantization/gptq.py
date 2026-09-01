@@ -15,7 +15,6 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from ...kernels import fused_moe
 from .base_config import (
     FusedMoEMethodBase,
     LinearMethodBase,
@@ -156,6 +155,8 @@ class GPTQMoEMethod(FusedMoEMethodBase):
         }
 
     def apply(self, block, x, topk_weights, topk_ids) -> torch.Tensor:
+        from ...kernels import fused_moe
+
         config: GPTQConfig = block.quant  # type: ignore[assignment]
         return fused_moe(
             x,
