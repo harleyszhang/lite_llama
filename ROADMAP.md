@@ -68,7 +68,7 @@
 |---|---|---|
 | acc.golden | 多模型×多路径逐 token 门禁,GPU runner 强制跑,禁止静默 skip | 修掉"skip 了还显绿"的假安全 |
 | acc.align | 外部后端 vs 原生 max-abs-diff 阈值门禁 | 使测试量为 N+M 而非 N×M |
-| acc.bisect | **精度断层定位器**:整模型 vs HF 逐层对比,自动定位第一个超阈的层/算子 | 新模型接入 debug 神器,vLLM 无 |
+| acc.divergence | **精度断层定位器**:整模型 vs HF 逐层对比,自动定位第一个超阈的层/算子 | 新模型接入 debug 神器,vLLM 无 |
 
 **模块 C · 可视化 (viz)**
 
@@ -103,7 +103,7 @@
 
 设计原则:metrics/tracing 是**一等 API**,不是离线工具的附属品。`Engine.step()` 返回的 `RequestOutput` 内嵌 `ObservabilitySpan`,调用方可零成本获取每步的 per-request 延迟分解。单元测试:每个 metric 有 fixture 驱动的 assertion(不是"能跑",是"数值在预期区间")。
 
-真正没人做的:perf.profile 的人可读 roofline 归因、acc.bisect 精度断层定位、viz.* 全套、explain、autotune 自动生成、observe.* 运行时可观测 —— 加上功能维度的 F1(单层 harness)、架构维度的 A1/A2/A6/A7。面试讲"我怎么用自动化保证单人维护多后端框架的质量"是很强的叙事。
+真正没人做的:perf.profile 的人可读 roofline 归因、acc.divergence 精度断层定位、viz.* 全套、explain、autotune 自动生成、observe.* 运行时可观测 —— 加上功能维度的 F1(单层 harness)、架构维度的 A1/A2/A6/A7。面试讲"我怎么用自动化保证单人维护多后端框架的质量"是很强的叙事。
 
 # 三、四个地基设计方案
 
@@ -574,7 +574,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
 
 每个版本都有一项固定交付物:该版本支持的全部模型跑一遍性能(TTFT / TPOT / TPS)与精度(golden 逐 token + 数据集分数)benchmark,与上一版同配置结果并列,归档为 `docs/release-vX.Y.Z.md`,原始数据落 `docs/benchmark_logs/*.json`。这部分基线不在各版本重复,各版本的 **benchmark** 只写该版本**新增的对照维度**——新做的东西必须给出"比什么快了/退了多少"的对照,否则不算做完。
 
-执行路径是工具而非人工:采集入口统一挂到 Makefile 的 `bench-*` 目标(`benchmarks/bench_*.py` + `examples/benchmark.py`),`perf.watchdog` 与上一版最优比对并标出劣化项,`acc.golden` 出精度门禁、`acc.bisect` 定位精度断层,最后由一个 release-bench agent 按固定模板汇总成发版文档。人只审两处:被标红的劣化项,和结论段的因果解释。工具链自身在 v0.4(watchdog 入库)与 v0.5(autotune collect)成型,所以 v0.4 那份报告的作用是立零点,没有上一版可比。
+执行路径是工具而非人工:采集入口统一挂到 Makefile 的 `bench-*` 目标(`benchmarks/bench_*.py` + `examples/benchmark.py`),`perf.watchdog` 与上一版最优比对并标出劣化项,`acc.golden` 出精度门禁、`acc.divergence` 定位精度断层,最后由一个 release-bench agent 按固定模板汇总成发版文档。人只审两处:被标红的劣化项,和结论段的因果解释。工具链自身在 v0.4(watchdog 入库)与 v0.5(autotune collect)成型,所以 v0.4 那份报告的作用是立零点,没有上一版可比。
 
 当前状态:v0.4 - v0.11.0 已发版(发版文档与原始数据如上所述);v0.11.5 起未动。
 
@@ -746,7 +746,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
 - **test**
   - (已达成)新增算子 / module / 模型的精度与性能测试:MLA 模块单测 + DeepSeek-V2-Lite
     TP=2 golden(5 用例,drift 预算门禁)+ 通信原语双进程测试;全量回归 1359 passed
-  - (已达成,形态调整)acc.bisect 换成 **acc.divergence**:整模型对 HF 逐层对比不变,
+  - (已达成,形态调整)计划里的 acc.bisect 换成 **acc.divergence**:整模型对 HF 逐层对比不变,
     定位从"第一个超阈层"升为"逐层 diff + 扰动注入 + 预算式门禁"——BOS 热点排查证明
     单层超阈可能只是 ULP 算术假热点,预算式门禁比硬阈值更诚实
 - **benchmark**
