@@ -211,6 +211,8 @@ class SparseMoeBlock(nn.Module):
             return
         method = quant.get_quant_method(self)
         method.quantize_from_fp16(self, quant)
-        method.process_weights_after_loading(self)
+        # Set quant before the hook: GPTQ bits=8 reads self.quant.bits inside
+        # process_weights_after_loading to pick the repack kernel.
         self.quant = quant
         self.quant_method = method
+        method.process_weights_after_loading(self)

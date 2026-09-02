@@ -104,13 +104,14 @@ class LinearBase(nn.Module):
             return
         method = quant.get_quant_method(self)
         method.quantize_from_fp16(self, quant)
-        # Same post-load hook the checkpoint path runs (CausalLM.load_weights):
-        # a method whose kernel layout differs from what quantize_from_fp16
-        # produced — GPTQ bits=8 unpacks its packed words to int8 bytes — needs
-        # this pass before the first apply. For every other method it is a no-op.
-        method.process_weights_after_loading(self)
+        # Set quant before the hook: a method whose kernel layout differs from
+        # what quantize_from_fp16 produced — GPTQ bits=8 unpacks its packed
+        # words to int8 bytes — reads self.quant.bits inside the hook.
         self.quant = quant
         self.quant_method = method
+        # Same post-load hook the checkpoint path runs (CausalLM.load_weights):
+        # for every other method it is a no-op.
+        method.process_weights_after_loading(self)
 
     def extra_repr(self) -> str:
         fmt = self.quant.format if self.quant else "unquantized"
