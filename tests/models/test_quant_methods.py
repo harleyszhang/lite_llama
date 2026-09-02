@@ -467,3 +467,122 @@ def test_replicated_linear_int8_forward_matches_reference():
     # int8's rounding noise of the original fp16 product.
     fp16_ref = x.float() @ w.cuda().T
     torch.testing.assert_close(out.float(), fp16_ref, rtol=2e-2, atol=2e-2)
+
+
+# --------------------------------------------------------------------------- #
+# GPTQ bits=8: config, dense layer end-to-end, MoE create + repack
+# --------------------------------------------------------------------------- #
+def test_gptq_config_accepts_bits_8():
+    """``bits`` selects the pack factor and the kernel; 4/8 share the container."""
+    from lite_llama.modules.quantization.gptq import GPTQConfig
+
+    qc = GPTQConfig.from_config({"bits": 8, "group_size": 128})
+    assert not qc.is_int4
+    assert qc.is_packed
+    assert qc.pack_factor == 4
+    assert qc.storage_dtype == torch.int32
+    assert qc.scale_shape(256, 512) == (256, 4)
+
+    qc4 = GPTQConfig.from_config({"bits": 4, "group_size": 128})
+    assert qc4.is_int4 and qc4.is_packed and qc4.pack_factor == 8
+
+    with pytest.raises(ValueError, match="4- and 8-bit"):
+        GPTQConfig.from_config({"bits": 2})
+
+
+def test_packed_flag_separates_packed_from_per_element_formats():
+    """``is_packed`` owns the checkpoint-adapter trigger; ``is_int4`` is a query."""
+    from lite_llama.modules.quantization.awq import AWQConfig
+    from lite_llama.modules.quantization.blockwise_int8 import BlockInt8Config
+    from lite_llama.modules.quantization.fp8 import Fp8Config
+    from lite_llama.modules.quantization.gptq import GPTQConfig
+
+    for qc in (AWQConfig(), GPTQConfig(), GPTQConfig(bits=8)):
+        assert qc.is_packed
+    for qc in (Fp8Config(128, 128), BlockInt8Config.per_channel()):
+        assert not qc.is_packed
+
+
+@pytest.mark.gpu
+def test_gptq_int8_layer_quantize_and_forward():
+    """Runtime conversion for ``bits=8``, end to end on one layer.
+
+    ``quantize_from_fp16`` packs ``[N, K//4]`` int32 (the checkpoint container);
+    ``process_weights_after_loading`` unpacks to ``[N, K]`` int8 (the kernel's),
+    so the same tensors flow whether the weights came from a checkpoint or were
+    computed here — the point of the packed intermediate.
+    """
+    from lite_llama.modules.quantization.gptq import GPTQConfig
+
+    torch.manual_seed(0)
+    layer = ReplicatedLinear(256, 128).cuda()
+    w = _fill_fp16(layer)
+    layer.quantize_(GPTQConfig(group_size=128, bits=8))
+
+    assert layer.weight.dtype == torch.int8
+    assert layer.weight.shape == (128, 256)
+    assert layer.weight_scale.shape == (128, 2)
+    assert layer.weight_zeros.shape == (128, 2)
+
+    x = torch.randn(8, 256, device="cuda", dtype=torch.float16) * 0.5
+    out = layer(x)
+
+    deq = (
+        (layer.weight.float().reshape(128, 2, 128) - layer.weight_zeros.unsqueeze(-1))
+        * layer.weight_scale.unsqueeze(-1)
+    ).reshape(128, 256)
+    torch.testing.assert_close(out.float(), x.float() @ deq.T, rtol=1e-2, atol=1e-2)
+    # And within int8's rounding of the original fp16 product.
+    torch.testing.assert_close(out.float(), x.float() @ w.cuda().T, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.gpu
+def test_gptq_int8_moe_create_and_repack():
+    """The MoE hook swaps checkpoint words for the fused kernel's byte layout.
+
+    ``create_weights`` allocates ``[E, N, K//4]`` int32 so the expert loader
+    fills it directly; ``process_weights_after_loading`` expands to ``[E, N, K]``
+    int8 — the asymmetric container the kernel's zeros branch dequantises.
+    """
+    from lite_llama.modules.quantization.gptq import GPTQConfig, GPTQMoEMethod
+    from lite_llama.modules.quantization.parameter import RawParameter
+
+    torch.manual_seed(0)
+    block = _StubMoeBlock(quant=GPTQConfig(group_size=128, bits=8))
+    method = GPTQMoEMethod()
+    params = method.create_weights(block)
+    assert params["gate_up_proj"].shape == (4, 256, 64)  # [E, 2I, H//4]
+    assert params["gate_up_proj"].dtype == torch.int32
+    assert params["down_proj"].shape == (4, 256, 32)  # [E, H, I//4]
+    assert params["gate_up_proj_zeros"].shape == (4, 256, 2)
+
+    # Fill with checkpoint-like words on the device the hook runs on, then run
+    # the swap and check it against an independent torch unpack.
+    block.experts = nn.ParameterDict(
+        {name: RawParameter(p.data.cuda()) for name, p in params.items()}
+    )
+    for name in ("gate_up_proj", "down_proj"):
+        block.experts[name].data.copy_(
+            torch.randint(
+                -(2**31),
+                2**31 - 1,
+                block.experts[name].shape,
+                device="cuda",
+                dtype=torch.int64,
+            ).to(torch.int32)
+        )
+    packed = {name: block.experts[name].data.clone() for name in ("gate_up_proj", "down_proj")}
+
+    method.process_weights_after_loading(block)
+
+    shifts = torch.arange(0, 32, 8, device="cuda", dtype=torch.int32)
+    for name in ("gate_up_proj", "down_proj"):
+        ref = (
+            ((packed[name].unsqueeze(-1) >> shifts) & 0xFF)
+            .flatten(-2)
+            .to(torch.uint8)
+            .view(torch.int8)
+        )
+        assert block.experts[name].shape == ref.shape
+        assert block.experts[name].dtype == torch.int8
+        assert torch.equal(block.experts[name].data, ref)

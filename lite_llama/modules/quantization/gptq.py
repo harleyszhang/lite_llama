@@ -40,9 +40,7 @@ class GPTQConfig(QuantizationConfig):
     the kernel the methods route to differ.
     """
 
-    def __init__(
-        self, group_size: int = 128, ignored: tuple[str, ...] = (), bits: int = 4
-    ) -> None:
+    def __init__(self, group_size: int = 128, ignored: tuple[str, ...] = (), bits: int = 4) -> None:
         super().__init__()
         self.group_n = 1
         self.group_k = group_size
@@ -76,7 +74,7 @@ class GPTQConfig(QuantizationConfig):
         if group_size <= 0 or (group_size & (group_size - 1)) != 0:
             raise ValueError(f"group_size must be a positive power of 2, got {group_size}")
         ignored = tuple(config.get("modules_to_not_convert") or ())
-        return cls(group_size, ignored)
+        return cls(group_size, ignored, bits=bits)
 
     def get_quant_method(self, layer: nn.Module, prefix: str = "") -> QuantizeMethodBase | None:
         return self._dispatch(layer, prefix, GPTQLinearMethod, GPTQMoEMethod)
@@ -137,9 +135,7 @@ class GPTQLinearMethod(LinearMethodBase):
 
     def quantize_from_fp16(self, layer: nn.Module, config: QuantizationConfig) -> None:
         cfg: GPTQConfig = config  # type: ignore[assignment]
-        quantize = (
-            quantize_int4_groupwise if cfg.bits == 4 else quantize_int8_groupwise_asym
-        )
+        quantize = quantize_int4_groupwise if cfg.bits == 4 else quantize_int8_groupwise_asym
         qweight, scales, zeros = quantize(layer.weight.data, cfg.group_k)
         layer.weight = RawParameter(qweight)
         layer.weight_scale = RawParameter(scales)
@@ -217,9 +213,7 @@ class GPTQMoEMethod(FusedMoEMethodBase):
         """
         from ...kernels import repack_int4_experts, unpack_int8_experts
 
-        repack = (
-            repack_int4_experts if block.quant.bits == 4 else unpack_int8_experts
-        )
+        repack = repack_int4_experts if block.quant.bits == 4 else unpack_int8_experts
         for name in ("gate_up_proj", "down_proj"):
             block.experts[name] = RawParameter(repack(block.experts[name].data))
 

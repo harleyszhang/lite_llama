@@ -240,6 +240,18 @@ decode 与 prefill 在这里是两个不同的操作，不平均成一个加速�
 
 同一次扫描持久化到 `ConfigStore` 后，15 个 store key 中 13 个相对启发式有提升（最大：fp16 在 M512 档，2502.8 → 1694.1 µs，+32.3%）。搜索按 `TuneKey` 进行而不是按 token 数，因为 `bucket_m` 会把 M 向上取整到 (16, 32, 64, 128, 256, 512) 的下一档——t1 与 t8 共享一个条目，按 token 数搜索会让它们互相覆盖。注意未量化模式现在按*激活 dtype* 键入（`bf16` 与 `fp16` 是两个条目），这批 fp16 扫描条目不会覆盖 bf16 路径——切到 bf16 基线后请重跑 `--tune`。换新设备同理；持久化的缓存不入库。
 
+## INT4 byte 布局与双 dot kernel
+
+fused MoE 的 int4 权重存储从 int32 8-nibble 打包换成了 vLLM 的 uint8 byte 布局（`[E, N, K//2]`：byte b 的低 nibble 覆盖 k=2b，高 nibble 覆盖 k=2b+1）。checkpoint 布局不变——GPTQ/AWQ 的 int32 词在加载后由 `repack_int4_experts`（`lite_llama/kernels/ops/quantization/int4_repack.py`）一次性转换，调用点是 vLLM 同名的 `process_weights_after_loading` 钩子（`GptqMoEMethod`/`AwqMoEMethod` 实现，`Model.load_weights` 尾部统一触发；`MoE.quantize_` 的在线量化路径同样收口于此）。
+
+动机是一次测量的结论：**byte 布局本身不解决问题，vLLM 的复制寻址 idiom 在 Triton 上同样无法向量化**。他们的 kernel（`fused_moe_kernel_gptq_awq`）让逻辑 k 读 byte k//2——每个 byte 出现在它两个 nibble 的行里——非仿射索引使 Triton 的合并分析失效，编译成 128 条标量 `ld.global.b8`。逐字提取该 kernel 到本机同几何实测 13-18 ms/GEMM；vLLM 的生产 int4 走的是 Marlin CUDA kernel，Triton 版只是 fallback。
+
+lite_llama 的 kernel 走另一条路：B 按 `[BLOCK_K//2, BLOCK_N]` **仿射 dense** 加载（向量化、软件流水线保持 `cp.async`），两个 nibble 平面在寄存器分离（`(b & 0xF)` 与 `(b >> 4) & 0xF`，直转 compute_type——[-15,15] 的小整数在 bf16 精确），A 侧以 `tl.split(tl.reshape(a, (BLOCK_M, BLOCK_K//2, 2)))` 拆出偶/奇 k 列，两个半 K dot 之和等价于原全 K dot。`EVEN_K`（K 整除 BLOCK_K 时）免掉 masked load——逐元素谓词同样会把加载拆成标量字节；Qwen3-30B-A3B 的两个 GEMM（K=2048/768）在 BLOCK_K=128 下都满足。
+
+t4096（最难的档）的演进：int32 格式 1.92 ms → byte 布局 + vLLM 复制寻址 **7.35 ms**（倒退 3.8×，即上面那个 idiom）→ dense 加载 + 双 dot 3.31 ms → `EVEN_K` + nibble 直转 **1.70 ms**。对照 int8 同档 1.15 ms、bf16 1.06 ms：0.54× → 0.62×，中间档（t8/t64/t512）从 1.02-1.11× 提到 1.16-1.72×，t4096 绝对值也首次低于 int32 格式（1916.4 µs）。
+
+tile 重扫（12 候选 × 5 token 档）确认现有表仍最优（tier 0 16×128、其余 64×128）：BLOCK_K=256（每 k 迭代 4 个半 K dot，寄存器压力）与 BLOCK_N=256（两个 (BLOCK_K, BLOCK_N) compute_type 平面驻留寄存器）都慢 1.6-2×。t4096 残留的 0.62× 是结构性成本：每 row-block 重读权重 tile 时寄存器 nibble 分离的 ALU 随重读次数线性放大，比 8-bit 格式的单次加宽贵——Triton 上 int4 weight-only 的通病，vLLM 的解法是换 Marlin CUDA kernel，不是换寻址。
+
 ## w4a16 中的第二个 tile 启发式缺陷
 
 dense GEMM 存在同类问题，而且其中只有一个能通过缓存修复。五个量化 kernel 里，**`w4a16_matmul` 是唯一会查 `ConfigStore` 的**——fp8 W8A8、fp8/int8 W8A16 与 NVFP4 都无条件计算 launch 配置，因此 `bench_quant_gemm.py --tune` 对它们如实报告「无消费者」，而不是写入没有任何 kernel 会读的条目。（`v0.5` 的 changelog 声称 autotune 覆盖「量化 GEMM」；对 dense 路径而言，那只是五个 kernel 中的一个。）

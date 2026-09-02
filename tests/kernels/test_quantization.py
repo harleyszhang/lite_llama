@@ -246,9 +246,7 @@ def test_per_token_group_quant_fuses_silu_and_mul(out_dtype):
     t, h = 64, 2048
     gate_up = torch.randn(t, 2 * h, device="cuda", dtype=torch.bfloat16)
 
-    q, s = per_token_group_quant(
-        gate_up, 128, out_dtype=out_dtype, fuse_silu_and_mul=True
-    )
+    q, s = per_token_group_quant(gate_up, 128, out_dtype=out_dtype, fuse_silu_and_mul=True)
 
     assert q.shape == (t, h) and q.dtype == out_dtype
     assert s.shape == (t, h // 128) and s.dtype == torch.float32
@@ -283,13 +281,9 @@ def test_per_token_group_quant_rejects_misaligned_rows():
     with pytest.raises(ValueError, match="power of two"):
         per_token_group_quant(torch.zeros(4, 128, device="cuda"), 96)
     with pytest.raises(ValueError, match="2D inputs only"):
-        per_token_group_quant(
-            torch.zeros(2, 4, 128, device="cuda"), 128, column_major_scales=True
-        )
+        per_token_group_quant(torch.zeros(2, 4, 128, device="cuda"), 128, column_major_scales=True)
     with pytest.raises(ValueError, match="even row width"):
-        per_token_group_quant(
-            torch.zeros(4, 254, device="cuda"), 128, fuse_silu_and_mul=True
-        )
+        per_token_group_quant(torch.zeros(4, 254, device="cuda"), 128, fuse_silu_and_mul=True)
     with pytest.raises(ValueError, match="int8 or uint8"):
         per_token_group_quant(torch.zeros(4, 128, device="cuda"), 128, out_dtype=torch.float16)
     with pytest.raises(ValueError, match="float tensor"):
@@ -646,9 +640,9 @@ def test_unpack_int8_experts_matches_torch_unpack():
     kernel's ``& 0xFF`` mask (and torch's here) is load-bearing.
     """
     torch.manual_seed(0)
-    words = torch.randint(
-        -(2**31), 2**31 - 1, (8, 64, 96), device="cuda", dtype=torch.int64
-    ).to(torch.int32)
+    words = torch.randint(-(2**31), 2**31 - 1, (8, 64, 96), device="cuda", dtype=torch.int64).to(
+        torch.int32
+    )
 
     out = unpack_int8_experts(words)
     assert out.shape == (8, 64, 96 * 4)
@@ -680,3 +674,71 @@ def test_quantize_int4_groupwise():
     assert qw.shape == (64, 32)  # 256 / 8 = 32
     assert scales.shape == (64, 2)  # 256 / 128 = 2
     assert zeros.shape == (64, 2)
+
+
+def test_quantize_int8_groupwise_asym_roundtrip():
+    """GPTQ ``bits=8`` quantiser: pack, unpack, dequant within half a step.
+
+    Two shapes of failure are gated here that the GEMM tests would blur. The
+    pack must be bit-faithful — a negative byte's sign bits riding into the
+    byte above would pass the GEMM's rtol but fail this equality. And an
+    all-negative group drives the uint8-domain zero point past 255; the fp32
+    zeros container must carry it unclamped, where a clamp would collapse the
+    whole group onto one code level.
+    """
+    torch.manual_seed(0)
+    for w in (
+        torch.randn(64, 256, device="cuda") * 0.05,
+        # Every group entirely negative: -min/scale exceeds 255 by construction.
+        torch.linspace(-1.0, -0.5, 256, device="cuda").unsqueeze(0).repeat(8, 1).contiguous(),
+    ):
+        qw, scales, zeros = quantize_int8_groupwise_asym(w, group_size=128)
+        assert qw.dtype == torch.int32
+        assert qw.shape == (w.shape[0], 256 // 4)  # four bytes per int32 word
+        assert scales.shape == zeros.shape == (w.shape[0], 2)
+
+        un = unpack_int8_experts(qw).reshape(-1, 2, 128)
+        deq = ((un - zeros.unsqueeze(-1)) * scales.unsqueeze(-1)).reshape(w.shape)
+        err = (deq - w).abs().max().item()
+        assert err <= scales.max().item() / 2 + 1e-6, f"roundtrip error {err} > half-step"
+
+
+def test_gptq_int8_checkpoint_adapters():
+    """``bits=8`` key adapter: qzeros domain-shift, qweight transpose, g_idx drop.
+
+    AutoGPTQ packs int8 zero points four bytes per int32 word and stores
+    ``z_true - 1`` (the same bias its int4 packing uses), so the adapter
+    unpacks bytes, undoes the ``+1``, and shifts the uint8 domain AutoGPTQ
+    quantises in into the int8 domain our kernels subtract in — the exact
+    chain vLLM's ``loaded_weight.T + 1`` performs in a uint8 container.
+    """
+    torch.manual_seed(0)
+    N, K, G = 128, 256, 128
+    prefix = "model.layers.0.mlp.gate_proj"
+
+    # qzeros: [G, N//4] int32 words holding biased zero points (z_true - 1).
+    # z_true ∈ [1, 255] because the GPTQ bias stores z_true - 1 ∈ [0, 254];
+    # z_true = 0 would make z_cp = -1, which the byte cannot represent.
+    z_true = torch.randint(1, 256, (G, N), dtype=torch.int32)
+    z_cp = z_true - 1
+    shifts = torch.arange(4, dtype=torch.int32) * 8
+    packed_z = ((z_cp.reshape(G, N // 4, 4) & 0xFF) << shifts).sum(-1)
+    key, out = gptq_adapt_key(f"{prefix}.qzeros", packed_z, bits=8)
+    assert key == f"{prefix}.weight_zeros"
+    assert out.shape == (N, G) and out.dtype == torch.float32
+    assert torch.equal(out, (z_true - 128).t().float())
+
+    # qweight: [K//4, N] -> transposed canonical packing, words untouched.
+    qw = torch.randint(-(2**31), 2**31 - 1, (K // 4, N), dtype=torch.int64).to(torch.int32)
+    key, out = gptq_adapt_key(f"{prefix}.qweight", qw, bits=8)
+    assert key == f"{prefix}.weight"
+    assert torch.equal(out, qw.t().contiguous())
+
+    # scales: [G, N] -> [N, G] fp32, the same relayout as int4.
+    scales = torch.rand(G, N)
+    key, out = gptq_adapt_key(f"{prefix}.scales", scales, bits=8)
+    assert key == f"{prefix}.weight_scale"
+    assert torch.equal(out, scales.t().float().contiguous())
+
+    # g_idx: desc_act checkpoints only; dropped, the groups ride in K order.
+    assert gptq_adapt_key(f"{prefix}.g_idx", torch.arange(K // G), bits=8) is None
