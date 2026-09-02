@@ -1,0 +1,34 @@
+{
+  "config": {
+    "model": "/data/shared/llm_weights/DeepSeek-V3-4layers-MTP-BF16",
+    "batch_size": 8,
+    "gen_len": 128,
+    "iters": 2,
+    "tensor_parallel_size": 1,
+    "hf_overrides": {
+      "num_hidden_layers": 1
+    },
+    "gpu": "NVIDIA A10",
+    "timestamp": "2026-09-03T00:53:44"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "batch_size": 8,
+    "prompt_tokens": 120,
+    "output_tokens": 1058,
+    "ttft_s": 0.010967018082737923,
+    "tpot_ms": 6.7182634983743945,
+    "tgs": 1185.1166789268568,
+    "latency_s": 0.8927391022443771
+  },
+  "transformers": {
+    "engine": "transformers",
+    "batch_size": 8,
+    "prompt_tokens": 120,
+    "output_tokens": 1060,
+    "ttft_s": 0.011618955060839653,
+    "tpot_ms": 7.700780470334985,
+    "tgs": 1034.8817770078913,
+    "latency_s": 1.0242715869098902
+  }
+}
