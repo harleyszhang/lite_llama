@@ -194,7 +194,7 @@ def bench_transformers(model_dir, prompts, gen_len, iters, device, dtype="fp16",
 
 
 def bench_vllm(model_dir, prompts, gen_len, iters, hf_overrides=None,
-               gpu_memory_utilization=0.9) -> Metrics:
+               gpu_memory_utilization=0.9, tensor_parallel_size=1) -> Metrics:
     """Measure vLLM's offline ``LLM`` on one (batch_size, gen_len) configuration.
 
     Production defaults stay on (chunked prefill, CUDA graphs, torch.compile)
@@ -206,6 +206,10 @@ def bench_vllm(model_dir, prompts, gen_len, iters, hf_overrides=None,
     checkpoint whose weights already fill most of the card (e.g. the 13 GB
     DeepSeek-V3-4layers on a 22 GiB A10): at 0.9 the KV reserve crowds out the
     MLA attention workspace and the first forward OOMs.
+
+    ``tensor_parallel_size`` mirrors the other engines: a full-size checkpoint
+    one card cannot hold (e.g. the 30 GB DeepSeek-V2-Lite) is sharded over the
+    same GPUs the lite_llama replica and the transformers baseline run on.
     """
     from vllm import LLM as VllmLLM
     from vllm import SamplingParams as VllmParams
@@ -216,6 +220,7 @@ def bench_vllm(model_dir, prompts, gen_len, iters, hf_overrides=None,
         dtype="bfloat16",
         enable_prefix_caching=False,
         gpu_memory_utilization=gpu_memory_utilization,
+        tensor_parallel_size=tensor_parallel_size,
         hf_overrides=hf_overrides or {},
     )
     tokenizer = llm.get_tokenizer()
@@ -334,7 +339,7 @@ def main() -> None:
     if args.engine in ("all", "vllm"):
         results.append(bench_vllm(
             args.model, prompts, args.gen_len, args.iters, hf_overrides,
-            args.vllm_gpu_mem_util,
+            args.vllm_gpu_mem_util, args.tensor_parallel_size,
         ))
 
     cfg = dict(model=args.model, batch_size=args.batch_size, gen_len=args.gen_len,

@@ -1,0 +1,43 @@
+{
+  "config": {
+    "model": "/data/shared/llm_weights/DeepSeek-V2-Lite",
+    "batch_size": 8,
+    "gen_len": 128,
+    "iters": 2,
+    "tensor_parallel_size": 2,
+    "hf_overrides": null,
+    "gpu": "NVIDIA A10",
+    "timestamp": "2026-09-03T02:08:13",
+    "note": "three engines run as separate processes (TP2 follower does not release GPU mem in-process)"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "batch_size": 8,
+    "prompt_tokens": 121,
+    "output_tokens": 1024,
+    "ttft_s": 0.06468380615115166,
+    "tpot_ms": 61.927587365892926,
+    "tgs": 129.1382340541778,
+    "latency_s": 7.929487401619554
+  },
+  "transformers": {
+    "engine": "transformers",
+    "batch_size": 8,
+    "prompt_tokens": 121,
+    "output_tokens": 1011,
+    "ttft_s": 0.11663623712956905,
+    "tpot_ms": 137.98375634229552,
+    "tgs": 58.048903362623555,
+    "latency_s": 17.41634968854487
+  },
+  "vllm": {
+    "engine": "vllm",
+    "batch_size": 8,
+    "prompt_tokens": 121,
+    "output_tokens": 910,
+    "ttft_s": 0.09879860654473305,
+    "tpot_ms": 24.438555317284525,
+    "tgs": 318.8232863344279,
+    "latency_s": 2.8542457185685635
+  }
+}
