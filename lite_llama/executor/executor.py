@@ -186,6 +186,11 @@ class MultiprocExecutor(Executor):
         crashed follower is joined without being asked. An empty follower tuple
         means somebody else owns the processes, and the signal is still theirs to
         receive.
+
+        Owning the followers means owning the rank-0 half of their group too, so
+        a non-empty tuple tears the group down with them: left standing, it
+        re-shards the next engine this process builds, and even changes how an
+        unrelated transformers load behaves.
         """
         if not self._live:
             return
@@ -197,6 +202,10 @@ class MultiprocExecutor(Executor):
             if process.is_alive():
                 _log.warning("tp follower pid %s did not exit; terminating", process.pid)
                 process.terminate()
+        if self._followers:
+            from ..distributed.parallel_state import destroy_parallel
+
+            destroy_parallel()
 
 
 def ensure_followers_alive(followers: Sequence[mp.process.BaseProcess]) -> None:
