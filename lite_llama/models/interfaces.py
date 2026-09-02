@@ -46,10 +46,10 @@ def merge_multimodal_embeddings(
         ``inputs_embeds`` with the placeholder positions replaced.
 
     Raises:
-        ValueError: If the number of vision embeddings does not match the number of
-            placeholders. Silently padding or truncating here hides upstream bugs
-            (a wrong ``patch_size``, or a processor/model config mismatch), so the
-            mismatch is surfaced instead.
+        ValueError: If the number of vision embeddings does not match the
+            number of placeholders. Silently padding or truncating here hides
+            upstream bugs (a wrong ``patch_size``, a processor/model config
+            mismatch), so the mismatch is surfaced instead.
     """
     if isinstance(placeholder_token_ids, int):
         placeholder_token_ids = (placeholder_token_ids,)
@@ -75,13 +75,13 @@ def merge_multimodal_embeddings(
 class MultiModalCausalLM(nn.Module):
     """Vision encoder + language model with placeholder-based embedding merge.
 
-    Subclasses build ``self.language_model`` (a :class:`CausalLM`) plus whatever
-    vision modules they need, and implement :meth:`encode_vision`. The prefill /
-    decode split and the merge itself are handled here.
+    Subclasses build ``self.language_model`` (a :class:`CausalLM`) plus
+    whatever vision modules they need, and implement :meth:`encode_vision`.
+    The prefill/decode split and the merge itself are handled here.
 
-    Class attributes:
-        weight_prefixes: ``(checkpoint prefix, lite_llama prefix)`` pairs covering the
-            whole checkpoint, tried in order. A pair targeting
+    Attributes:
+        weight_prefixes: is ``(checkpoint prefix, lite_llama prefix)`` pairs
+            covering the whole checkpoint, tried in order: a pair targeting
             :data:`LANGUAGE_MODEL_PREFIX` hands the remainder to the text model's own
             key translation; every other pair is a plain rename, because the vision
             tower and projector *are* HF modules and keep HF parameter names.

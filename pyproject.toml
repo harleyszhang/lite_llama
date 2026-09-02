@@ -60,6 +60,10 @@ trace = ["opentelemetry-sdk>=1.25", "opentelemetry-exporter-otlp-proto-http>=1.2
 # rather than an extra that installs nothing: their verified build recipes live
 # in each backend module's INSTALL and are printed by `survey()`.
 flashinfer = ["flashinfer-python>=0.2"]
+# Kernel benchmark plots (``benchmarks/``): triton.testing.perf_report's save
+# path imports both. Optional so benchmarks degrade to their printed tables
+# on a bare install; the assert-free printing path needs nothing extra.
+bench = ["matplotlib>=3.8", "pandas>=2.0"]
 
 [dependency-groups]
 dev = [

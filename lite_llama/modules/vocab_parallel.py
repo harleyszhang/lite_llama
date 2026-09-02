@@ -21,9 +21,9 @@ from ..kernels import vocab_parallel_embedding
 def vocab_shard(vocab_size: int, *, rank: int | None = None, tp_size: int | None = None) -> range:
     """Vocabulary ids owned by ``rank``, as a half-open ``range``.
 
-    Kept as a free function of plain integers — no module, no device — because it is
-    the whole of the layout's logic: a test can ask which rank owns id 40 000 of a
-    151 936-token vocabulary without building anything.
+    A free function of plain integers — no module, no device — so a test can
+    ask which rank owns id 40 000 of a 151 936-token vocabulary without
+    building anything.
 
     Raises:
         ValueError: If ``vocab_size`` does not divide across the ranks.
@@ -37,24 +37,17 @@ def vocab_shard(vocab_size: int, *, rank: int | None = None, tp_size: int | None
 class VocabParallelEmbedding(nn.Module):
     """Token embedding whose rows are split across TP ranks.
 
-    Each rank holds ``vocab_size / tp`` rows, gathers the ids that fall inside its
-    range and zeroes the rest, then one ``all_reduce`` over the hidden dimension
-    makes every rank hold the same complete embedding. An unmasked
-    ``F.embedding`` would happily return row ``id - start`` for an id this rank
-    does not own, and the all-reduce would sum that garbage in — the zeroing is
-    the whole subtlety.
+    Each rank holds ``vocab_size / tp`` rows, gathers the ids that fall inside
+    its range and zeroes the rest, then one ``all_reduce`` over the hidden
+    dimension makes every rank hold the same complete embedding. The zeroing
+    is the whole subtlety: an unmasked ``F.embedding`` would return row
+    ``id - start`` for an id this rank does not own, and the all-reduce would
+    sum that garbage in.
 
-    The mapping, the gather and the zeroing are one fused Triton kernel
-    (:func:`~lite_llama.kernels.ops.embeddings.vocab_embedding.vocab_parallel_embedding`):
-    the id->row arithmetic that used to run as an eager chain of seven kernels
-    per lookup is two scalar register ops inside it. That matters here more
-    than anywhere else in the model because TP disables CUDA graphs, so there
-    is no replay to hide launch overhead behind on the decode path.
-
-    Args:
-        vocab_size: Full vocabulary size (split across ranks).
-        hidden_size: Width of the residual stream (not split).
-        dtype: Storage type of the weight.
+    The mapping, gather and zeroing are one fused Triton kernel
+    (:func:`~lite_llama.kernels.ops.embeddings.vocab_embedding.vocab_parallel_embedding`);
+    launch overhead matters here more than anywhere else because TP disables
+    CUDA graphs, so no replay hides it on the decode path.
     """
 
     def __init__(
@@ -74,8 +67,8 @@ class VocabParallelEmbedding(nn.Module):
     ) -> torch.Tensor:
         """Fill this rank's vocabulary rows from the full table; return the view written.
 
-        The same rule serves the embedding and the LM head: both are
-        ``[vocab, hidden]`` split along the vocabulary, so the incoming tensor is
+        Both the embedding and the LM head are ``[vocab, hidden]`` split along
+        the vocabulary, so the same rule serves them; the incoming tensor is
         narrowed to this rank's rows — the same :attr:`shard` the gather masks
         with. Never packed, so ``shard_id`` is unused.
         """
@@ -99,9 +92,6 @@ class VocabParallelEmbedding(nn.Module):
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         if get_tp_world_size() == 1:
             return F.embedding(input_ids, self.weight)
-        # One fused kernel — map, gather, zero — where the eager path launched
-        # seven, then the all-reduce sums every rank's contribution into the
-        # complete embedding.
         out = vocab_parallel_embedding(
             input_ids, self.weight, self.shard.start, self.local_vocab_size
         )
@@ -117,12 +107,12 @@ class VocabParallelEmbedding(nn.Module):
 class ParallelLMHead(VocabParallelEmbedding):
     """Output projection over this rank's slice of the vocabulary.
 
-    Shares :class:`VocabParallelEmbedding`'s storage and shard arithmetic — same tensor,
-    read the other way round — which is what makes ``tie_word_embeddings`` a single
-    assignment rather than a special case. :meth:`forward` returns **local** logits
-    ``[*, vocab_size / tp]``; :class:`lite_llama.engine.sampler.Sampler` reconstructs
-    the global distribution from a scalar per row (see there), so no logits collective
-    happens here.
+    Shares :class:`VocabParallelEmbedding`'s storage and shard arithmetic —
+    same tensor read the other way round — which makes ``tie_word_embeddings``
+    a single assignment rather than a special case. :meth:`forward` returns
+    **local** logits ``[*, vocab_size / tp]``;
+    :class:`lite_llama.engine.sampler.Sampler` reconstructs the global
+    distribution from a scalar per row, so no logits collective happens here.
     """
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

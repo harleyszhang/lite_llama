@@ -8,7 +8,7 @@ v0.11 交付两条独立主线：KV 显存占用最小的注意力架构 MLA 端
 
 **MLA 端到端（commit b43013c）：** `DeepseekV2Model`（MLA + DeepSeek-MoE）注册进 registry，KV cache 行从「每头两列」泛化为 `(dim,)` 元组——MLA 每 token 只缓存一条 576 维 latent（512 lora + 64 rope），TP 下按 vLLM 的口径在每 rank 复制而非切分。精度验证不依赖人工比对：`tests/golden/test_deepseek_v2_tp2.py` 在 2×A10 上对 transformers 逐 token 比对，门禁不是硬阈值而是从 parity probe 实测校准的 drift 预算——**BOS 排查证明单层 max-abs 超阈可能只是 ULP 算术假热点**（BOS 的 MoE 输出范数是普通 token 的千倍，同相对误差落在 [1024,2048) 桶恰好差 1 个 bf16 ULP=8.0），预算式门禁比「首个超阈层即失败」的硬阈值更贴合实测误差分布。
 
-**acc.divergence（同 commit）：** 计划里的 `acc.bisect` 以扩展形态落地——不止定位第一个超阈层，还做逐层 diff、扰动注入自证、预算式门禁。CLI 挂 `lite-llama acc divergence`，`tools/accuracy/divergence.py` 568 行。
+**acc.divergence（同 commit）：**不止定位第一个超阈层，还做逐层 diff、扰动注入自证、预算式门禁。CLI 挂 `lite-llama acc divergence`，`tools/accuracy/divergence.py` 568 行。
 
 **F8 流式解析（本版收尾 commit）：** `engine/reasoning.py` + `engine/tool_parser.py` 把 think 标签与 DeepSeek/Qwen 双族 tool 标记从增量 detokenizer 文本里流式拆出。与 vLLM 的差异在两处：解析器**按请求声明**（vLLM/SGLang 都是服务启动时单选一个，一个部署只能服务一种模型），以及流式分块与一次性解析的等价性是**不变式**——parser 层穷举全部 two-cut 切分，server 层再验证流式帧拼接等于一次性 message。
 

@@ -187,10 +187,9 @@ class QuantizationConfig(ABC):
     ) -> QuantizeMethodBase:
         """Pick *layer*'s strategy: stacked experts vs plain linear.
 
-        Every config dispatches the same way - only the two method classes
-        differ - so this one helper replaces the seven hand-rolled copies.
-        A prefix listed in ``ignored`` still gets real tensors, just the
-        fp16 (unquantised) methods.
+        Every config dispatches the same way — only the two method classes
+        differ. A prefix listed in ``ignored`` still gets real tensors, just
+        the fp16 (unquantised) methods.
         """
         from ..moe import SparseMoeBlock
         from .unquant import UnquantizedFusedMoEMethod, UnquantizedLinearMethod
@@ -219,7 +218,7 @@ class QuantizationConfig(ABC):
 
 
 # --------------------------------------------------------------------------- #
-# Kernel dispatch helper (single registry — ROADMAP foundation 2)
+# Kernel dispatch helper
 # --------------------------------------------------------------------------- #
 
 
@@ -236,12 +235,11 @@ def run_quant_linear(
 ) -> torch.Tensor:
     """Route one quantised (or plain) projection through kernel dispatch.
 
-    This is the *only* call site ``LinearMethodBase.apply`` implementations
-    need: the scheme string (a ``BASE_QUANTIZATION_METHODS`` key) becomes a
-    dispatch-key dimension, dtype and shape come from the tensors, and the
-    selected implementation arrives behind the common :class:`LinearOp`
-    signature — so native Triton and deepgemm rows are interchangeable
-    without touching any method class.
+    The only call site ``LinearMethodBase.apply`` implementations need: the
+    scheme string (a ``BASE_QUANTIZATION_METHODS`` key) becomes a dispatch-key
+    dimension, dtype and shape come from the tensors, and the selected
+    implementation arrives behind the common :class:`LinearOp` signature, so
+    kernel rows are interchangeable without touching any method class.
     """
     from lite_llama.kernels.dispatcher import dispatch, dtype_label
 

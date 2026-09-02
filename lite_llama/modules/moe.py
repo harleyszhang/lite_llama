@@ -5,7 +5,10 @@ fused grouped-GEMM kernel over the routed batch, and applies the routed
 normalisation. Two route families, dispatched on the HF ``topk_method``:
 greedy top-k (Qwen3-MoE, DeepSeek-V2-Lite) and :func:`grouped_topk` — the
 group-limited selection DeepSeek-V2 and the biased ``noaux_tc`` routing
-DeepSeek-V2.5+/V3 ship.
+DeepSeek-V2.5+/V3 ship. The grouped router itself lives next to its fused
+kernel in :mod:`lite_llama.kernels.ops.moe.grouped_topk` (one Triton program
+per token on CUDA, the torch reference elsewhere) and is re-exported here:
+this module is where the model layer reads it from.
 
 Usage:
     moe = SparseMoeBlock(config, quant)
@@ -18,119 +21,24 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..distributed.parallel_state import all_reduce, divide, get_tp_rank, get_tp_world_size
+from ..kernels import grouped_topk
 from ..models.config import ModelConfig
 from .mlp import FusedMLP
 from .quantization import QuantizationConfig, RawParameter, UnquantizedFusedMoEMethod
 
 
-def grouped_topk(
-    router_logits: torch.Tensor,
-    *,
-    top_k: int,
-    renormalize: bool,
-    num_expert_group: int,
-    topk_group: int,
-    scoring_func: str = "softmax",
-    routed_scaling_factor: float = 1.0,
-    e_score_correction_bias: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Grouped top-k routing: DeepSeek-V2's ``group_limited_greedy`` and V2.5+/V3's
-    ``noaux_tc``, semantics aligned with vLLM's ``grouped_topk``.
-
-    1. Score every expert (softmax or sigmoid over the raw logits, fp32).
-    2. Bias the scores when a correction bias exists: biased scores *choose*
-       the experts, original scores *weight* them — exactly why the bias can
-       shift selection without shifting the output magnitude.
-    3. Score each group — the sum of its two best experts when a bias exists
-       (one outlier alone can't win a group), the plain max otherwise — keep
-       the ``topk_group`` strongest groups and mask every other expert to
-       ``-inf``.
-    4. Top-k over the survivors, renormalise the weights, then apply the
-       DeepSeek routed scale.
-
-    Args:
-        router_logits: ``[tokens, num_experts]`` raw gating output, fp32.
-        top_k: Experts each token activates (``num_experts_per_tok``).
-        renormalize: Whether to renormalise the selected weights (HF
-            ``norm_topk_prob``).
-        num_expert_group: Expert groups (HF ``n_group``); must divide the
-            expert count.
-        topk_group: Groups each token may draw experts from.
-        scoring_func: ``"softmax"`` (V2 family) or ``"sigmoid"`` (V2.5+/V3).
-        routed_scaling_factor: The DeepSeek routed-output scale.
-        e_score_correction_bias: ``[num_experts]`` fp32 correction bias a
-            ``noaux_tc`` checkpoint ships; ``None`` selects and weights with
-            the same score.
-
-    Returns:
-        ``(weights, ids)``, each ``[tokens, top_k]``; weights fp32.
-
-    Raises:
-        ValueError: If ``scoring_func`` is neither softmax nor sigmoid, or the
-            expert count does not split into ``num_expert_group`` equal groups.
-    """
-    n_experts = router_logits.shape[-1]
-    if num_expert_group <= 0 or n_experts % num_expert_group:
-        raise ValueError(
-            f"num_experts {n_experts} must divide into num_expert_group "
-            f"{num_expert_group} equal groups"
-        )
-    if scoring_func == "softmax":
-        scores = torch.softmax(router_logits, dim=-1)
-    elif scoring_func == "sigmoid":
-        scores = torch.sigmoid(router_logits)
-    else:
-        raise ValueError(f"unsupported MoE scoring_func {scoring_func!r}")
-    num_tokens = scores.shape[0]
-
-    # Store the originals before biasing: biased scores only choose which
-    # experts run, original scores decide how much each counts.
-    original_scores = scores
-    if e_score_correction_bias is not None:
-        scores = scores + e_score_correction_bias.unsqueeze(0)
-        group_scores = scores.view(num_tokens, num_expert_group, -1).topk(2, dim=-1)[0].sum(dim=-1)
-    else:
-        group_scores = scores.view(num_tokens, num_expert_group, -1).max(dim=-1).values
-    group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[1]
-    group_mask = torch.zeros_like(group_scores)
-    group_mask.scatter_(1, group_idx, 1)
-    score_mask = (
-        group_mask.unsqueeze(-1)
-        .expand(num_tokens, num_expert_group, n_experts // num_expert_group)
-        .reshape(num_tokens, -1)
-    )
-    tmp_scores = scores.masked_fill(~score_mask.bool(), float("-inf"))
-
-    topk_ids = torch.topk(tmp_scores, k=top_k, dim=-1, sorted=False)[1]
-    # Unbiased weights. The -inf cells never survive selection, so gathering
-    # the originals is exactly vLLM's split of "topk values when no bias,
-    # gather originals when there is one" — one code path, same result.
-    topk_weights = original_scores.gather(1, topk_ids)
-
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-    if routed_scaling_factor != 1.0:
-        topk_weights = topk_weights * routed_scaling_factor
-    return topk_weights.to(torch.float32), topk_ids
-
-
 class SparseMoeBlock(nn.Module):
     """Top-k routed MoE FFN with stacked expert weights.
 
-    Args:
-        config: Any config exposing the HF MoE fields ``num_experts``,
-            ``num_experts_per_tok``, ``moe_intermediate_size`` and
-            ``norm_topk_prob``. DeepSeek configs additionally drive the shared
-            expert (``n_shared_experts``), ``routed_scaling_factor``, the
-            routing family (``topk_method``: ``greedy`` vs the grouped
-            ``noaux_tc``/``group_limited_greedy``) and, for ``noaux_tc``, the
-            ``e_score_correction_bias`` the checkpoint ships under
-            ``mlp.gate``.
-        quant: Quantisation layout of the expert weights, or ``None``.
-            The router always stays in the model dtype: it is
-            ``num_experts x hidden``, small enough to be free and precise
-            enough to matter, since a wrong top-k pick costs far more than a
-            rounded weight.
+    Reads the HF MoE fields (``num_experts``, ``num_experts_per_tok``,
+    ``moe_intermediate_size``, ``norm_topk_prob``); DeepSeek configs
+    additionally drive the shared expert, ``routed_scaling_factor`` and the
+    routing family (``topk_method``: ``greedy`` vs the grouped
+    ``noaux_tc``/``group_limited_greedy``).
+
+    The router always stays in the model dtype: it is
+    ``num_experts x hidden``, small enough to be free and precise enough to
+    matter — a wrong top-k pick costs far more than a rounded weight.
     """
 
     def __init__(self, config: ModelConfig, quant: QuantizationConfig | None = None) -> None:
@@ -139,12 +47,11 @@ class SparseMoeBlock(nn.Module):
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
         self.routed_scaling_factor = config.routed_scaling_factor
-        # The routing fields below read defensively: configs outside DeepSeek
+        # Routing fields below read defensively: configs outside DeepSeek
         # (Qwen3-MoE, test doubles) do not carry them.
         self.scoring_func = str(getattr(config, "scoring_func", "softmax") or "softmax")
-        # Routing family. ``greedy`` is plain top-k over the scores; the
-        # grouped methods (V2's ``group_limited_greedy``, V2.5+/V3's
-        # ``noaux_tc``) first pick which expert groups a token may draw from.
+        # ``greedy`` is plain top-k; the grouped methods first pick which expert
+        # groups a token may draw from.
         self.topk_method = str(getattr(config, "topk_method", "greedy") or "greedy")
         self.n_group = int(getattr(config, "n_group", 1) or 1)
         self.topk_group = int(getattr(config, "topk_group", 1) or 1)
@@ -162,12 +69,11 @@ class SparseMoeBlock(nn.Module):
         self.gate_weight = nn.Parameter(
             torch.empty(self.num_experts, self.hidden_size, dtype=self.dtype)
         )
-        # ``noaux_tc`` (V2.5+/V3) biases the routing scores before selection;
-        # fp32, matching the widened router logits — the bias is an absolute
-        # additive term and bf16 would round away small-expert differences.
-        # The name keeps the ``gate_`` prefix so the checkpoint key
-        # ``mlp.gate.e_score_correction_bias`` folds onto it via the same
-        # suffix rule that maps ``mlp.gate.weight`` to ``mlp.gate_weight``.
+        # ``noaux_tc`` (V2.5+/V3) biases the routing scores before selection.
+        # fp32 to match the widened router logits: the bias is an absolute
+        # additive term and bf16 would round away small-expert differences. The
+        # ``gate_`` prefix keeps the checkpoint key ``mlp.gate.e_score_correction_bias`
+        # folding onto it via the same suffix rule as ``mlp.gate.weight``;
         # RawParameter so the loader's dtype pass leaves the fp32 alone.
         self.gate_e_score_correction_bias: nn.Parameter | None = None
         if self.topk_method == "noaux_tc":
@@ -175,9 +81,8 @@ class SparseMoeBlock(nn.Module):
                 torch.zeros(self.num_experts, dtype=torch.float32)
             )
         # Experts live in a ParameterDict so the state-dict keys read
-        # ``mlp.experts.{gate_up_proj,down_proj}``; gate and up projections are
-        # fused along dim 1, mirroring the fused K/V layout of attention. Their
-        # storage format is the quant method's business, not this class's.
+        # ``mlp.experts.{gate_up_proj,down_proj}``; the storage format is the
+        # quant method's business, not this class's.
         self.quant_method = (
             quant.get_quant_method(self) if quant is not None else UnquantizedFusedMoEMethod()
         )
@@ -188,11 +93,9 @@ class SparseMoeBlock(nn.Module):
         for param in self.experts.values():
             param.weight_loader = self._expert_loader
         # DeepSeek-V2 routes top-k *and* runs one dense MLP every token passes
-        # through ("shared"), ``moe_intermediate_size * n_shared_experts`` wide.
-        # It rides the same quant-aware FusedMLP as the dense layers — TP splits
-        # its intermediate like any MLP, so only its partial sums join the
-        # routed all_reduce. Purely routed MoEs (qwen3_moe) leave this ``None``
-        # and their checkpoints carry no ``shared_experts`` keys at all.
+        # through, ``moe_intermediate_size * n_shared_experts`` wide. It rides
+        # the same quant-aware FusedMLP as the dense layers; purely routed MoEs
+        # (qwen3_moe) leave this ``None``.
         self.shared_experts: FusedMLP | None = None
         if config.n_shared_experts > 0:
             self.shared_experts = FusedMLP(
@@ -204,17 +107,14 @@ class SparseMoeBlock(nn.Module):
     def _expert_loader(self, param, loaded, shard_id) -> torch.Tensor:
         """Fill one expert's slice of a stacked parameter; return the view written.
 
-        ``shard_id`` is ``(expert_index, projection)`` with projection numbering
-        gate=0, up=1, down=2. gate/up share one stacked tensor fused along dim 1,
-        so each fills its half of the expert's slice and is TP-sharded along the
-        incoming rows; down fills a whole slice, sharded along the columns. The
-        scale grids of a quantised checkpoint follow the same rule — their axes
-        count scale blocks, so the same proportional narrow applies.
-
-        A checkpoint that ships the experts already stacked (transformers >= 5
-        writes the ``[E, ...]`` layout itself) carries no shard id and is copied
-        whole — supported only without tensor parallelism, the same boundary the
-        table-driven loader had.
+        ``shard_id`` is ``(expert_index, projection)`` with gate=0, up=1,
+        down=2. gate/up share one stacked tensor fused along dim 1, so each
+        fills its half of the expert's slice, TP-sharded along the incoming
+        rows; down fills a whole slice, sharded along the columns. Quantised
+        scale grids follow the same rule — their axes count scale blocks, so
+        the same proportional narrow applies. A checkpoint that ships experts
+        already stacked carries no shard id and is copied whole — supported
+        only without tensor parallelism.
         """
         if shard_id is None:
             if get_tp_world_size() > 1:
@@ -258,11 +158,10 @@ class SparseMoeBlock(nn.Module):
         Returns:
             ``(weights, ids)``, each ``[tokens, top_k]``; weights in x.dtype.
         """
-        # fp32 logits — the precision DeepSeek's router spells out (explicit
-        # ``.float()`` casts) and qwen3's reference semantics assume: a bf16/fp16
-        # GEMM can flip a topk pick on near-ties, and a wrong expert costs far
-        # more than the cast. The gate weight stays stored in the model dtype;
-        # only the GEMM is widened.
+        # fp32 logits, as DeepSeek's router (explicit ``.float()`` casts) and
+        # qwen3's reference semantics require: a bf16/fp16 GEMM can flip a topk
+        # pick on near-ties, and a wrong expert costs far more than the cast.
+        # The gate weight stays stored in the model dtype; only the GEMM widens.
         router_logits = F.linear(x.float(), self.gate_weight.float())
         if self.topk_method in ("noaux_tc", "group_limited_greedy"):
             weights, ids = grouped_topk(
@@ -281,10 +180,8 @@ class SparseMoeBlock(nn.Module):
         routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
         if self.norm_topk_prob:
             routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
-        # After the normalisation, exactly where DeepSeek-V2TopkRouter applies
-        # it: the scale widens the routed half only — the shared expert (if any)
-        # is added unscaled in ``forward``. qwen3_moe leaves the factor at 1.0,
-        # a multiply-by-one identity.
+        # The scale widens the routed half only — the shared expert (if any) is
+        # added unscaled in ``forward``. qwen3_moe leaves the factor at 1.0.
         routing_weights = routing_weights * self.routed_scaling_factor
         return routing_weights.to(x.dtype), selected_experts
 
@@ -294,20 +191,17 @@ class SparseMoeBlock(nn.Module):
 
         weights, ids = self._route(x)
         out = self.quant_method.apply(self, x, weights, ids)
-        # Each rank produced the partial sum from its slice of the experts'
-        # intermediate dimension.
+        # Each rank's routed partial sum joined the all_reduce; the shared MLP's
+        # down_proj is row-parallel and reduces on its own, and summing after is
+        # the same total (all_reduce(a) + all_reduce(b) == all_reduce(a + b)).
         out = all_reduce(out)
         if self.shared_experts is not None:
-            # The shared MLP's down_proj is row-parallel and all-reduces on its
-            # own; summing after the routed reduce is the same total as folding
-            # it in (all_reduce(a) + all_reduce(b) == all_reduce(a + b)).
             out = out + self.shared_experts(x)
         return out.reshape(*leading_shape, self.hidden_size)
 
     @torch.no_grad()
     def quantize_(self, quant: QuantizationConfig) -> None:
-        """Convert loaded fp16 expert weights to the requested scheme, in place
-        (see :meth:`lite_llama.models.base.CausalLM.quantize_`)."""
+        """Convert loaded fp16 expert weights to the requested scheme, in place."""
         if self.quant is not None:
             return
         method = quant.get_quant_method(self)

@@ -41,6 +41,7 @@ class TextGenerator:
         tensor_parallel_size: int = 1,
         kv_cache_dtype: str = "auto",
         cuda_graph_lazy: bool = False,
+        hf_overrides: dict[str, object] | None = None,
     ) -> None:
         self._llm = LLM(
             model=checkpoints_dir,
@@ -53,6 +54,7 @@ class TextGenerator:
             tensor_parallel_size=tensor_parallel_size,
             kv_cache_dtype=kv_cache_dtype,
             cuda_graph_lazy=cuda_graph_lazy,
+            hf_overrides=hf_overrides,
         )
         # Legacy attribute: callers (e.g. the CLI) read ``engine.last_stop_reasons``.
         self.engine = self._llm

@@ -39,18 +39,8 @@ class Attention(nn.Module):
     The model-layer half of the attention block: this class owns the
     projections and their composition (project → per-head reshape → q/k norm →
     RoPE → :class:`~lite_llama.modules.attention.PagedAttention` → output
-    projection), while the paged-cache write and the prefill/decode kernel call
-    live in :class:`~lite_llama.modules.attention.PagedAttention`. A model
-    family that composes attention differently (MLA, v0.10) overrides
-    :meth:`CausalLM._build_attention` and replaces this block whole — the
-    ROADMAP prerequisite that motivated the split.
-
-    q, k and v are one :class:`~lite_llama.modules.linear.QKVParallelLinear` weight, so
-    the block runs two GEMMs rather than three. Under tensor parallelism the heads are
-    dealt out across ranks: that layer is column-parallel (each rank owns
-    ``num_heads / tp`` query heads and the KV heads that go with them, so its KV cache
-    is that much smaller too) and ``o_proj`` is row-parallel, contributing this block's
-    only all-reduce.
+    projection), while the paged-cache write and the prefill/decode kernel
+    call live in :class:`~lite_llama.modules.attention.PagedAttention`.
 
     Args:
         config: Model config supplying the head geometry.
@@ -82,9 +72,8 @@ class Attention(nn.Module):
             quant=quant,
             dtype=config.dtype,
         )
-        # This rank's share of the head geometry, read back from the layer that owns
-        # the weight rather than divided a second time here. Attention width is
-        # independent of the residual stream width (Qwen3).
+        # This rank's share of the head geometry, read back from the layer
+        # that owns the weight rather than divided a second time here.
         self.num_heads = self.qkv_proj.num_heads
         self.num_kv_heads = self.qkv_proj.num_kv_heads
         self.q_size = self.qkv_proj.q_size
@@ -95,7 +84,8 @@ class Attention(nn.Module):
         )
 
         if use_qk_norm:
-            # Normalises over head_dim, so it is replicated rather than sharded.
+            # RMSNorm over head_dim, i.e. independently per head; replicated
+            # rather than sharded because of that.
             self.q_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=config.dtype))
             self.k_norm_weight = nn.Parameter(torch.ones(self.head_dim, dtype=config.dtype))
 
@@ -180,7 +170,7 @@ class DecoderLayer(nn.Module):
             torch.ones(config.hidden_size, dtype=config.dtype)
         )
         # Same injection seam as the MLP: ``CausalLM._build_attention`` supplies
-        # the block, and an MLA variant (v0.10) replaces it whole.
+        # the block; an MLA variant replaces it whole.
         self.self_attn = (
             attention
             if attention is not None
@@ -268,10 +258,9 @@ class CausalLM(nn.Module):
         """Quantisation layout for layer ``layer_index``, honouring the checkpoint's
         ``modules_to_not_convert``.
 
-        Checkpoints exclude modules by HF path, so the question is asked with the
-        HF path a projection of this layer would have. All projections of one layer
-        share an answer in every checkpoint seen so far; the ones excluded by name
-        (layer norms, the MoE router, ``lm_head``) are not built from
+        Checkpoints exclude modules by HF path, so the question is asked with
+        the HF path a projection of this layer would have. The modules excluded
+        by name (layer norms, the MoE router, ``lm_head``) are not built from
         :class:`~lite_llama.modules.linear.LinearBase` at all.
         """
         if self.quant is None:
@@ -282,9 +271,8 @@ class CausalLM(nn.Module):
         """Per-layer attention block factory.
 
         The standard GQA composition (fused QKV, q/k norm, RoPE, paged
-        attention) lives in :class:`Attention` here at the model layer since
-        the M1.5 split; an MLA variant (v0.10) overrides this hook to swap
-        the whole block — the ROADMAP prerequisite that motivated the split.
+        attention) lives in :class:`Attention`; an MLA variant overrides this
+        hook to swap the whole block.
         """
         return Attention(
             config,
@@ -320,8 +308,8 @@ class CausalLM(nn.Module):
         Layer keys at or past ``num_layers`` are dropped first: their weights
         belong to modules this model never built — the MTP/nextn layers a
         DeepSeek checkpoint ships past its stack, or whatever an
-        ``hf_overrides`` ``num_hidden_layers`` trim cut away — and failing the
-        load on them would make trimming impossible.
+        ``hf_overrides`` ``num_hidden_layers`` trim cut away — and failing
+        the load on them would make trimming impossible.
         """
         stripped = key.removeprefix(self.hf_prefix)
         if stripped.startswith("layers."):
@@ -354,9 +342,9 @@ class CausalLM(nn.Module):
     def quantize_(self, quant: QuantizationConfig) -> None:
         """Convert every loaded fp16 projection to the requested scheme, in place.
 
-        The ``--quantization <scheme>`` path: the checkpoint has no scales of its
-        own, so they are computed here, after loading. Layers that were already
-        quantised (an fp8 checkpoint) are left alone.
+        The ``--quantization <scheme>`` path: the checkpoint has no scales of
+        its own, so they are computed here after loading. Already-quantised
+        layers (an fp8 checkpoint) are left alone.
         """
         for module in self.modules():
             if isinstance(module, (LinearBase, SparseMoeBlock)):
@@ -400,17 +388,16 @@ class CausalLM(nn.Module):
             layer_context: Optional per-step payload handed to :meth:`_after_layer`.
             logits_positions: Optional ``[batch]`` position per sequence whose
                 logits the caller wants. Given, the hidden states are gathered
-                at exactly those positions *before* the lm_head projection and
-                the return is ``[batch, vocab_size]`` — a prefill of a 2 048-token
-                prompt then pays one vocabulary row instead of 2 048. ``None``
-                projects every position (decode steps want their single row
-                anyway, so the gather would save nothing).
+                at exactly those positions *before* the lm_head projection, so
+                a prefill of a 2 048-token prompt pays one vocabulary row
+                instead of 2 048. ``None`` projects every position (decode
+                steps want their single row anyway).
 
         Returns:
             ``[batch, seq_len, vocab_size]`` logits, or ``[batch, vocab_size]``
             when ``logits_positions`` was given. Under tensor parallelism the
-            vocabulary dimension is this rank's slice; the sampler completes the
-            distribution from a scalar per row instead of gathering logits.
+            vocabulary dimension is this rank's slice; the sampler completes
+            the distribution from a scalar per row instead of gathering logits.
         """
         hidden_states = (
             inputs_embeds if inputs_embeds is not None else self.get_input_embeddings(input_ids)

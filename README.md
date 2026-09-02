@@ -428,7 +428,7 @@ For serving, `lite-llama serve --data-parallel-size 2 --load-balancer total_toke
 
 On 2× A10 (Qwen2.5-1.5B-Instruct): **weak scaling 2.00x** (100% linear, 1857 → 3716 tok/s) with byte-identical outputs, and **1.64x** on a fixed 256-prompt batch. Compose it with TP — `data_parallel_size=2, tensor_parallel_size=2` — on a 4-GPU box.
 
-## Observability and Debugging
+## Observability
 
 ### Token Scores (`logprobs` / `prompt_logprobs`)
 
@@ -498,7 +498,7 @@ python scripts/layer_harness.py --model-dir my_weight/Qwen3-0.6B \
 
 `--tolerance` turns the comparison into a gate (non-zero exit above it), so the harness works as a pre-flight check in CI as well as by hand.
 
-## Structured Streaming Output (v0.11)
+## Structured Streaming Output
 
 What the model is thinking, and which tools it wants to call, are properties of the reply — so they are declared **per request**, not per deployment. vLLM and SGLang pick one reasoning parser at server start (`--reasoning-parser`), which means one deployment serves one output style; here `reasoning_parser` and `tool_parser` are fields of `ChatCompletionRequest` (validated at the schema layer), so the same server streams R1-style and direct models side by side.
 

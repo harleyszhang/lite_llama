@@ -1,7 +1,7 @@
-"""Latency/throughput benchmark: lite_llama vs HuggingFace transformers.
+"""Latency/throughput benchmark: lite_llama vs HuggingFace transformers vs vLLM.
 
-``bench_lite_llama`` and ``bench_transformers`` time the same prompts on
-the same device, then ``_print_report`` diffs per-token latency and
+``bench_lite_llama``, ``bench_transformers`` and ``bench_vllm`` time the same
+prompts on the same device, then ``_print_report`` diffs per-token latency and
 throughput — one table, not a wall of logs.
 
 Usage:
@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from lite_llama.engine import SamplingParams, TextGenerator
 
@@ -90,7 +90,8 @@ def _timed(fn) -> tuple[object, float]:
 
 
 def bench_lite_llama(
-    model_dir, prompts, gen_len, iters, device, max_gpu_num_blocks=None, tensor_parallel_size=1
+    model_dir, prompts, gen_len, iters, device, max_gpu_num_blocks=None,
+    tensor_parallel_size=1, hf_overrides=None,
 ) -> Metrics:
     """Measure lite_llama on one (batch_size, gen_len) configuration.
 
@@ -109,6 +110,7 @@ def bench_lite_llama(
             max_seq_len=2048,
             max_gpu_num_blocks=max_gpu_num_blocks,
             tensor_parallel_size=tensor_parallel_size,
+            hf_overrides=hf_overrides,
         )
 
         def generate(params):
@@ -118,7 +120,7 @@ def bench_lite_llama(
     else:
         gen = TextGenerator(
             checkpoints_dir=model_dir, max_seq_len=2048, device=device,
-            max_gpu_num_blocks=max_gpu_num_blocks,
+            max_gpu_num_blocks=max_gpu_num_blocks, hf_overrides=hf_overrides,
         )
 
         def generate(params):
@@ -147,13 +149,21 @@ def bench_lite_llama(
     return Metrics.from_runs("lite_llama", len(prompts), prompt_tokens, ttfts, latencies, out_tokens)
 
 
-def bench_transformers(model_dir, prompts, gen_len, iters, device, dtype="fp16") -> Metrics:
+def bench_transformers(model_dir, prompts, gen_len, iters, device, dtype="fp16",
+                      hf_overrides=None) -> Metrics:
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"  # correct for decoder-only batched generation
+    config = AutoConfig.from_pretrained(model_dir)
+    # The same override the lite_llama side runs under, so a trimmed stack is
+    # measured on identical arithmetic both sides — the point of layer-local
+    # comparisons.
+    for field, value in (hf_overrides or {}).items():
+        setattr(config, field, value)
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
+        config=config,
         torch_dtype={"fp16": torch.float16, "bf16": torch.bfloat16, "auto": "auto"}[dtype],
         device_map=device,
     ).eval()
@@ -183,19 +193,66 @@ def bench_transformers(model_dir, prompts, gen_len, iters, device, dtype="fp16")
     return Metrics.from_runs("transformers", len(prompts), prompt_tokens, ttfts, latencies, out_tokens)
 
 
-def _print_report(cfg: dict, lite: Metrics, hf: Metrics) -> None:
+def bench_vllm(model_dir, prompts, gen_len, iters, hf_overrides=None) -> Metrics:
+    """Measure vLLM's offline ``LLM`` on one (batch_size, gen_len) configuration.
+
+    Production defaults stay on (chunked prefill, CUDA graphs, torch.compile)
+    except prefix caching, which lite_llama also leaves off by default — the
+    warmup would otherwise serve every timed run from cache and the measured
+    TTFT would describe the cache, not the engine.
+    """
+    from vllm import LLM as VllmLLM
+    from vllm import SamplingParams as VllmParams
+
+    llm = VllmLLM(
+        model=model_dir,
+        max_model_len=2048,  # the ceiling the lite_llama side runs under
+        dtype="bfloat16",
+        enable_prefix_caching=False,
+        hf_overrides=hf_overrides or {},
+    )
+    tokenizer = llm.get_tokenizer()
+
+    def generate(max_tokens):
+        params = VllmParams(temperature=0.0, max_tokens=max_tokens)
+        return [out.outputs[0].text for out in llm.generate(prompts, params)]
+
+    generate(8)  # warmup: also pays vLLM's one-off compile
+
+    ttfts, latencies, out_tokens = [], [], []
+    for _ in range(iters):
+        _, ttft = _timed(lambda: generate(1))
+        texts, latency = _timed(lambda: generate(gen_len))
+        ttfts.append(ttft)
+        latencies.append(latency)
+        out_tokens.append(count_tokens(texts, tokenizer))
+
+    prompt_tokens = count_tokens(prompts, tokenizer)
+    del llm
+    gc.collect()
+    torch.cuda.empty_cache()
+    return Metrics.from_runs("vllm", len(prompts), prompt_tokens, ttfts, latencies, out_tokens)
+
+
+def _print_report(cfg: dict, results: list[Metrics]) -> None:
     print(f"\n{'=' * 68}\n{cfg['model']}  |  batch={cfg['batch_size']}  gen_len={cfg['gen_len']}"
           f"  iters={cfg['iters']}  gpu={cfg['gpu']}\n{'=' * 68}")
-    row = "{:<14}{:>12}{:>12}{:>14}{:>14}"
+    if cfg.get("hf_overrides"):
+        print(f"hf_overrides={cfg['hf_overrides']}")
+    row = "{:>14}{:>12}{:>12}{:>14}{:>14}"
     print(row.format("engine", "TTFT (s)", "TPOT (ms)", "TGS (tok/s)", "out_tokens"))
-    for m in (lite, hf):
-        if m is None:
-            continue
+    for m in results:
         print(row.format(m.engine, f"{m.ttft_s:.4f}", f"{m.tpot_ms:.3f}",
                          f"{m.tgs:.2f}", m.output_tokens))
+    by_engine = {m.engine: m for m in results}
+    lite, hf = by_engine.get("lite_llama"), by_engine.get("transformers")
     if hf is not None and lite is not None and hf.tpot_ms and lite.tpot_ms:
-        print(f"\nspeedup  TGS {lite.tgs / hf.tgs:.2f}x   "
+        print(f"\nspeedup vs transformers  TGS {lite.tgs / hf.tgs:.2f}x   "
               f"TPOT {hf.tpot_ms / lite.tpot_ms:.2f}x   TTFT {hf.ttft_s / lite.ttft_s:.2f}x")
+    vllm = by_engine.get("vllm")
+    if vllm is not None and lite is not None and vllm.tpot_ms and lite.tpot_ms:
+        print(f"speedup vs vllm          TGS {lite.tgs / vllm.tgs:.2f}x   "
+              f"TPOT {vllm.tpot_ms / lite.tpot_ms:.2f}x   TTFT {vllm.ttft_s / lite.ttft_s:.2f}x")
 
 
 def main() -> None:
@@ -211,9 +268,18 @@ def main() -> None:
              "checkpoints (on GPUs without native fp8 it dequantises to the config dtype)",
     )
     parser.add_argument(
-        "--engine", choices=["both", "lite_llama", "transformers"], default="both",
+        "--engine", choices=["both", "lite_llama", "transformers", "vllm", "all"],
+        default="both",
         help="which side to measure; use lite_llama one-sided for checkpoints whose "
-             "quantisation transformers cannot load here (AWQ needs gptqmodel/autoawq)",
+             "quantisation transformers cannot load here (AWQ needs gptqmodel/autoawq); "
+             "vllm runs in whichever interpreter has it installed (its own venv, not "
+             "this project's), so it is typically a separate invocation",
+    )
+    parser.add_argument(
+        "--hf-overrides", default=None,
+        help="JSON applied over the checkpoint's config on every engine (vLLM "
+             "--hf-overrides semantics), e.g. '{\"num_hidden_layers\": 1}' to run a "
+             "trimmed stack — the layer-local comparison",
     )
     parser.add_argument(
         "--max-gpu-num-blocks", type=int, default=None,
@@ -235,24 +301,31 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
     prompts = (_PROMPTS * (args.batch_size // len(_PROMPTS) + 1))[: args.batch_size]
+    hf_overrides = json.loads(args.hf_overrides) if args.hf_overrides else None
 
-    lite = hf = None
-    if args.engine in ("both", "lite_llama"):
-        lite = bench_lite_llama(
+    results: list[Metrics] = []
+    if args.engine in ("both", "all", "lite_llama"):
+        results.append(bench_lite_llama(
             args.model, prompts, args.gen_len, args.iters, device,
-            args.max_gpu_num_blocks, args.tensor_parallel_size,
-        )
-    if args.engine in ("both", "transformers"):
+            args.max_gpu_num_blocks, args.tensor_parallel_size, hf_overrides,
+        ))
+    if args.engine in ("both", "all", "transformers"):
         # TP runs spread the baseline's layers across the same GPUs (model
         # parallelism, transformers' device_map=auto), keeping both sides on
         # identical hardware.
         hf_device = "auto" if args.tensor_parallel_size > 1 else device
-        hf = bench_transformers(args.model, prompts, args.gen_len, args.iters, hf_device, args.hf_dtype)
+        results.append(bench_transformers(
+            args.model, prompts, args.gen_len, args.iters, hf_device,
+            args.hf_dtype, hf_overrides,
+        ))
+    if args.engine in ("all", "vllm"):
+        results.append(bench_vllm(args.model, prompts, args.gen_len, args.iters, hf_overrides))
 
     cfg = dict(model=args.model, batch_size=args.batch_size, gen_len=args.gen_len,
                iters=args.iters, tensor_parallel_size=args.tensor_parallel_size,
-               gpu=gpu, timestamp=datetime.now().isoformat(timespec="seconds"))
-    _print_report(cfg, lite, hf)
+               hf_overrides=hf_overrides, gpu=gpu,
+               timestamp=datetime.now().isoformat(timespec="seconds"))
+    _print_report(cfg, results)
 
     log_dir = Path(args.log_dir)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -260,10 +333,8 @@ def main() -> None:
     tp_tag = f"_tp{args.tensor_parallel_size}" if args.tensor_parallel_size > 1 else ""
     log_path = log_dir / f"bench_{tag}_b{args.batch_size}_g{args.gen_len}{tp_tag}_{stamp}.json"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text(
-        json.dumps({"config": cfg, "lite_llama": asdict(lite) if lite else None,
-                    "transformers": asdict(hf) if hf else None}, indent=2)
-    )
+    engines = {m.engine: asdict(m) for m in results}
+    log_path.write_text(json.dumps({"config": cfg, **engines}, indent=2))
     print(f"\nsaved log -> {log_path}")
 
 
