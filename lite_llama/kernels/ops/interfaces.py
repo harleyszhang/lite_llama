@@ -66,6 +66,44 @@ class AttentionPrefillOp(LogicalOp):
         raise NotImplementedError
 
 
+class AttentionChunkedPrefillOp(LogicalOp):
+    """Causal prefill for chunks resuming on K/V that is already cached."""
+
+    op_id = "attention.chunked_prefill"
+
+    @abstractmethod
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        sm_scale: float,
+        b_start_loc: torch.Tensor,
+        b_kv_base: torch.Tensor,
+        b_prefix_len: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        max_chunk_len: int,
+    ) -> torch.Tensor:
+        """Attend over the paged cache for a resumed chunk.
+
+        Args:
+            q: ``[total_rows, num_heads, head_dim]`` packed query rows of the
+                chunk grid, padding columns included (masked out inside).
+            k_cache: ``[max_tokens, num_kv_heads, head_dim]`` paged key cache,
+                already holding this chunk's rows; ``v_cache`` the same for V.
+            sm_scale: Softmax scale, ``1 / sqrt(head_dim)``.
+            b_start_loc: ``[batch]`` first packed query row of each sequence.
+            b_kv_base: ``[batch]`` cache row holding each sequence's KV row 0.
+            b_prefix_len: ``[batch]`` cached rows preceding this chunk.
+            b_seq_len: ``[batch]`` total length once the chunk lands.
+            max_chunk_len: Widest chunk, sizing the query-block grid.
+
+        Returns:
+            ``[total_rows, num_heads, head_dim]`` attention output.
+        """
+        raise NotImplementedError
+
+
 class AttentionDecodeOp(LogicalOp):
     """Decode attention reading a paged KV cache."""
 
@@ -494,6 +532,7 @@ LOGICAL_OPS: dict[str, type[LogicalOp]] = {
     cls.op_id: cls
     for cls in (
         AttentionPrefillOp,
+        AttentionChunkedPrefillOp,
         AttentionDecodeOp,
         MlaDecodeOp,
         MlaPrefillOp,

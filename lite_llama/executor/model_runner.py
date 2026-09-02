@@ -252,6 +252,11 @@ class ModelRunner:
         self.atten_info.b_seq_len = actual_prompt_lens
         self.atten_info.max_actual_seq_len = max_prompt_len
         self.atten_info.is_prefill = True
+        # One-shot prefills always start at position zero, so the chunked
+        # routing fields must not survive whatever pass armed them last.
+        self.atten_info.b_prefix_len = None
+        self.atten_info.b_kv_base = None
+        self.atten_info.max_chunk_len = 0
         self.atten_info.b_start_loc = self._init_req_tokens_table(
             b_req_idx, actual_prompt_lens, self.atten_info.cur_select_index, max_prompt_len
         )

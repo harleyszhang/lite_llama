@@ -68,7 +68,10 @@ class _ScriptedExecutor:
 def _build_engine(rows: list[list[int]]) -> ContinuousBatchingEngine:
     """A real ContinuousBatchingEngine over a fake LLMEngine and scripted passes."""
     fake = SimpleNamespace(
-        model_runner=SimpleNamespace(spec=SimpleNamespace(is_multimodal=False)),
+        model_runner=SimpleNamespace(
+            spec=SimpleNamespace(is_multimodal=False),
+            config=SimpleNamespace(kv_cache_torch_dtype=None),
+        ),
         device="cpu",
         tokenizer=_FakeTokenizer(),
         stop_token_ids={_EOS},
@@ -208,7 +211,10 @@ class _LogprobsExecutor(_ScriptedExecutor):
 
 def _build_logprobs_engine(rows, **config) -> ContinuousBatchingEngine:
     fake = SimpleNamespace(
-        model_runner=SimpleNamespace(spec=SimpleNamespace(is_multimodal=False)),
+        model_runner=SimpleNamespace(
+            spec=SimpleNamespace(is_multimodal=False),
+            config=SimpleNamespace(kv_cache_torch_dtype=None),
+        ),
         device="cpu",
         tokenizer=_FakeTokenizer(),
         stop_token_ids={_EOS},

@@ -127,6 +127,7 @@ PLANNED_OPS = {
     "attention.decode",
     "attention.mla_decode",
     "attention.mla_prefill",
+    "attention.chunked_prefill",
     "linear",
     "moe",
     "comm.dispatch",

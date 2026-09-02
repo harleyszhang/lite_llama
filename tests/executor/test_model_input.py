@@ -215,6 +215,27 @@ class TestResumedChunkPlans:
         assert len(work) == 1
         assert work[0].plan.slots == (0, 1)
 
+    def test_resumed_rows_route_by_replay_capacity(self):
+        """The resumed group is one pass, routed by its total row count.
+
+        Rows that fit a captured graph batch extend (the pass replays a decode
+        graph); anything longer takes the chunked kernel.
+        """
+        small = make_request("small", prompt_len=20, slot=0, computed=10)
+        chunked = make_request("big", prompt_len=300, slot=1, computed=160)
+
+        replayable = _prefill_work([small], [8], chunked_min_rows=33)
+        assert replayable[0].plan.kind is PassKind.EXTEND
+
+        longer = _prefill_work([chunked], [140], chunked_min_rows=33)
+        assert longer[0].plan.kind is PassKind.PREFILL
+
+        # The whole resumed group routes together, decided by its row total.
+        both = _prefill_work([small, chunked], [8, 140], chunked_min_rows=33)
+        assert len(both) == 1
+        assert both[0].plan.kind is PassKind.PREFILL
+        assert both[0].plan.slots == (0, 1)
+
 
 class TestDecodePlans:
     """One token per running request, planned from host state alone."""

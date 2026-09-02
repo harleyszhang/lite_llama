@@ -182,11 +182,23 @@ class SlotBatch:
         reads past ``b_seq_len``, and later steps overwrite exactly those rows
         in order.
 
+        A pass with any ``seq_starts[i] > 0`` resumes on cached K/V, so its
+        queries must also attend the prefix rows: the chunked-prefill metadata
+        (``b_prefix_len`` / ``b_kv_base``) is armed for the attention module to
+        pick up, and a first-chunk pass (all starts zero) clears it so the
+        plain self-attention kernel keeps running.
+
         Args:
             slots: Slot id per sequence, as handed out by the scheduler.
             seq_starts: First cache row each sequence's chunk writes.
             seq_lens: Total cached length per sequence once the chunk lands
                 (its prefix within the slot plus this chunk).
+
+        Raises:
+            ValueError: A resumed chunk on a quantised KV cache, whose bytes
+                the chunk kernel cannot read verbatim. Routing keeps those
+                passes on the extend path; meeting this means routing and
+                cache dtype disagreed.
         """
         # Grid width is the widest *chunk* in the group, not the span between
         # the earliest start and the latest end — rows start at their own
@@ -212,6 +224,20 @@ class SlotBatch:
         cols = starts.unsqueeze(1) + torch.arange(max_prompt_len, device=self.device).unsqueeze(0)
         self._atten.cur_select_index = table[b_req_idx.unsqueeze(1), cols].reshape(-1)
         self._atten.b_start_loc = self._row_offsets[:n] * max_prompt_len
+
+        if any(start > 0 for start in seq_starts):
+            if self._runner.config.kv_cache_torch_dtype == torch.uint8:
+                raise ValueError(
+                    "a chunked prefill grid cannot resume on an fp8 KV cache; "
+                    "route resumed chunks through the extend pass instead"
+                )
+            # KV row 0 of each slot — the contiguous base its whole history
+            # hangs off for the chunk kernel.
+            self._atten.b_prefix_len = starts
+            self._atten.b_kv_base = table[b_req_idx, 0]
+            self._atten.max_chunk_len = max_prompt_len
+        else:
+            self._clear_chunked_metadata()
 
         # A prefill always changes the running set, so the decode after it has to
         # rebuild its own metadata rather than increment this.
@@ -282,6 +308,7 @@ class SlotBatch:
         # Row `seq_len - 1` is the cache row this row's fresh K/V lands in.
         self._atten.cur_select_index = table[rows_slot, rows_len - 1]
         self._atten.b_start_loc = None
+        self._clear_chunked_metadata()
 
         # A prefill always changes the running set, so the decode after it has
         # to rebuild its own metadata rather than increment this.
@@ -323,6 +350,7 @@ class SlotBatch:
         # Row `seq_len - 1` of each slot's region: where this step's K/V goes.
         self._atten.cur_select_index = table[self._b_req_idx, self._b_seq_len - 1]
         self._atten.b_start_loc = None
+        self._clear_chunked_metadata()
         return len(padded_slots)
 
     def plan_extend_rows(
@@ -400,6 +428,17 @@ class SlotBatch:
         return self._b_seq_len
 
     # -------------------------------------------------------------- internals #
+    def _clear_chunked_metadata(self) -> None:
+        """Drop the chunked-prefill routing fields for a non-chunked pass.
+
+        The metadata object is one reused instance, so a grid pass that armed
+        them would otherwise leak them into the next decode step and silently
+        reroute its attention.
+        """
+        self._atten.b_prefix_len = None
+        self._atten.b_kv_base = None
+        self._atten.max_chunk_len = 0
+
     def _flatten_rows(
         self,
         slots: Sequence[int],
