@@ -54,6 +54,7 @@ class _ScriptedExecutor:
         self._rows = rows
         self._calls = 0
         self.num_slots = 4
+        self.num_kv_blocks = 0  # no real cache; the scheduler sizes its own pool
         self.readbacks = 0
         self.plans: list = []
 
@@ -177,6 +178,7 @@ def test_decode_work_from_device_plans_the_optimistic_ledger():
         output_token_ids=[5, 6],
         pending_tokens=1,  # the device has sampled one more
         params=None,
+        block_plan=(),  # no block boundary crossed this step
     )
     plan = _decode_work([request], from_device=True).plan
     assert plan.tokens == (-1,)  # replaced by the worker's device-side gather

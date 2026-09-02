@@ -17,7 +17,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from .prefix_cache import PREFIX_CACHE_BLOCK_SIZE, PrefixCache, PrefixMatch
+from .prefix_cache import PREFIX_CACHE_BLOCK_SIZE, PrefixCache
 from .sampler import PositionLogprobs, SamplingParams
 
 
@@ -67,13 +67,16 @@ class Request:
         first_token_time: When the first token became visible (for TTFT).
         finish_time: When the request finished.
         num_cached_tokens: Leading prompt tokens this request reused from the
-            prefix cache instead of prefilling: their K/V was copied into this
-            slot before the first chunk ran, so ``num_computed_tokens`` starts
-            here rather than at 0.
-        prefix_copies: Per-step scratch, set only on the step this request is
-            admitted: ``(src_slot, start_token, num_tokens)`` runs of prefix K/V
-            to copy into this request's slot before its first chunk runs. Empty
-            on a miss, and on every later chunk.
+            prefix cache instead of prefilling. Their K/V sits in physical
+            blocks this request now *shares* with whoever computed them, so
+            ``num_computed_tokens`` starts here rather than at 0 and nothing
+            was copied to get there.
+        block_plan: Per-step scratch: the block-table entries the executor must
+            write before this step's pass reads them, as ``(group_id,
+            start_block, block_ids)`` per KV cache group. Set on the step a
+            request is admitted (its whole mapping, reused blocks included) and
+            on any later step that grew it past a block boundary; empty on
+            steps that need no new mapping.
         prompt_logprobs: Per-position records for the prompt, ``prompt_len``
             long once prefill completes; position 0 and prefix-cache hits stay
             ``None`` (their predictor never ran). Built chunk by chunk; ``None``
@@ -113,7 +116,7 @@ class Request:
     first_token_time: float | None = None
     finish_time: float | None = None
     num_cached_tokens: int = 0
-    prefix_copies: tuple[tuple[int, int, int], ...] = ()
+    block_plan: tuple[tuple[int, int, tuple[int, ...]], ...] = ()
     prompt_logprobs: list[PositionLogprobs | None] | None = None
     output_logprobs: list[PositionLogprobs] | None = None
     delta_logprobs: PositionLogprobs | None = None
@@ -161,11 +164,15 @@ class SchedulerConfig:
         max_chunk_size: Maximum tokens per prefill chunk. When a prompt is
             longer than this, it is split into chunks and interleaved with
             decode steps (chunked prefill). Set to 0 to disable chunking.
-        enable_prefix_cache: Whether to use hash-based prefix caching.
-        prefix_cache_blocks: Resident-block ceiling for the prefix cache.
-            ``None`` derives one from the cache geometry (see
-            :meth:`Scheduler._default_prefix_capacity`); an explicit value is for
-            deployments that want the bookkeeping bounded tighter than that.
+        enable_prefix_cache: Whether to reuse blocks across sequences by block
+            hash. Blocks are paged and reference-counted either way; this only
+            decides whether a completed block is *indexed* so another sequence
+            can share it.
+        prefix_cache_blocks: Override for the physical block-pool size, in
+            blocks of :data:`~lite_llama.engine.prefix_cache.PREFIX_CACHE_BLOCK_SIZE`
+            tokens. ``None`` takes the executor's real cache size, falling back
+            to a bound derived from the slot geometry (see
+            :meth:`Scheduler._default_num_blocks`).
         enable_preemption: When True, ``max_num_seqs`` is honoured as a desired
             concurrency even beyond the slot count: an oversubscribed batch
             time-shares slots by preempting (recompute) the youngest running
@@ -201,9 +208,10 @@ class SchedulerConfig:
             )
         if self.max_chunk_size < 0:
             raise ValueError(f"max_chunk_size must be >= 0, got {self.max_chunk_size}")
-        if self.prefix_cache_blocks is not None and self.prefix_cache_blocks < 1:
+        # Two is the floor rather than one: block 0 is the reserved null block.
+        if self.prefix_cache_blocks is not None and self.prefix_cache_blocks < 2:
             raise ValueError(
-                f"prefix_cache_blocks must be >= 1 or None, got {self.prefix_cache_blocks}"
+                f"prefix_cache_blocks must be >= 2 or None, got {self.prefix_cache_blocks}"
             )
         if self.decode_window_steps < 0:
             raise ValueError(
@@ -237,31 +245,6 @@ class SchedulerOutput:
         return not self.prefill and not self.decode
 
 
-class _NullPrefixCache:
-    """Null Object standing in for a disabled :class:`PrefixCache`.
-
-    Lets the admission path run one branch-free version of itself whether or
-    not prefix caching is on; the no-op answers are exactly what the
-    ``if cache is None`` branches used to compute.
-    """
-
-    def admit(self, token_ids: list[int]) -> PrefixMatch:
-        return PrefixMatch()
-
-    def invalidate_slot(self, slot: int) -> None:
-        pass
-
-    def assign_owner(self, token_ids: list[int], slot: int, upto_tokens: int) -> None:
-        pass
-
-    def release(self, token_ids: list[int]) -> None:
-        pass
-
-    @property
-    def hit_rate(self) -> float:
-        return 0.0
-
-
 class Scheduler:
     """FCFS admission with chunked prefill and preemption support.
 
@@ -271,12 +254,24 @@ class Scheduler:
     Every stage advances ``num_computed_tokens`` on the request itself as it
     commits work, which is why no external ``advance`` protocol exists.
 
+    The scheduler is also the KV cache's allocator: every stage that plans work
+    first reserves the physical blocks that work will write, through the
+    :class:`~lite_llama.engine.prefix_cache.PrefixCache`. That is what makes
+    reuse free — a shared prefix is a shared block, and the ``block_plan`` each
+    request carries is the executor's instruction to point its table rows at it.
+
     Args:
         config: Admission and chunking limits.
         num_slots: Cache slots available.
+        num_blocks: Physical KV blocks the executor allocated, the null block
+            included. ``None`` derives a bound from the slot geometry (see
+            :meth:`_default_num_blocks`), which is what a scheduler driven
+            without an executor gets.
     """
 
-    def __init__(self, config: SchedulerConfig, num_slots: int) -> None:
+    def __init__(
+        self, config: SchedulerConfig, num_slots: int, num_blocks: int | None = None
+    ) -> None:
         if num_slots < 1:
             raise ValueError(f"need at least one cache slot, got {num_slots}")
         self.config = config
@@ -296,33 +291,35 @@ class Scheduler:
         self._requests: dict[str, Request] = {}
         self._free_slots: list[int] = list(reversed(range(num_slots)))
 
-        self._prefix_cache: PrefixCache | _NullPrefixCache = (
-            PrefixCache(
-                block_size=PREFIX_CACHE_BLOCK_SIZE,
-                capacity=config.prefix_cache_blocks or self._default_prefix_capacity(num_slots),
-            )
-            if config.enable_prefix_cache
-            else _NullPrefixCache()
+        # One allocator whether or not reuse is on: paging is how a request gets
+        # its rows at all now, so "prefix caching off" only switches off the hash
+        # index. That keeps admission on a single code path instead of a
+        # branch-per-stage null object.
+        self._prefix_cache = PrefixCache(
+            num_blocks=(
+                config.prefix_cache_blocks or num_blocks or self._default_num_blocks(num_slots)
+            ),
+            block_size=PREFIX_CACHE_BLOCK_SIZE,
+            enable_caching=config.enable_prefix_cache,
         )
 
-        self._pending_owners: list[tuple[Request, int, int]] = []
+        # Blocks whose K/V a planned pass will write, awaiting the step that
+        # proves it ran; see :meth:`_commit_pending_blocks`.
+        self._pending_blocks: list[tuple[Request, int]] = []
         self.num_preemptions: int = 0
         # Pure-decode steps deferred since the first request started waiting
         # (O9 decode window): the wait is bounded by ``decode_window_steps``.
         self._deferred_steps: int = 0
 
-    def _default_prefix_capacity(self, num_slots: int) -> int:
-        """Resident-block ceiling to use when the deployment does not name one.
+    def _default_num_blocks(self, num_slots: int) -> int:
+        """Pool size to use when the executor did not report its cache size.
 
-        An unbounded prefix cache is a leak rather than a cache: a block whose
-        ``ref_cnt`` falls to zero stays resident forever by design (that is what
-        keeps a shared system prompt warm), so a server that never restarts
-        accumulates one entry per distinct block it has ever hashed. Bounding it
-        at the number of blocks the KV cache itself could hold keeps the
-        bookkeeping proportional to the hardware, and costs no hit rate: a prefix
-        too large to ever be resident is one this cache could not serve anyway.
+        Enough blocks for every slot to hold a full context — the capacity the
+        fixed-slot layout used to reserve outright. Paging pays off precisely
+        when the pool is *smaller* than this, but a scheduler built without an
+        executor (every unit test) should not be where that is discovered.
         """
-        return max(1, num_slots * self.config.max_seq_len // PREFIX_CACHE_BLOCK_SIZE)
+        return max(2, num_slots * self.config.max_seq_len // PREFIX_CACHE_BLOCK_SIZE + 1)
 
     # ------------------------------------------------------------------ queue #
     def add_request(self, request: Request) -> None:
@@ -365,6 +362,7 @@ class Scheduler:
             request.status = RequestStatus.FINISHED
             request.finish_reason = "abort"
             request.finish_time = time.monotonic()
+            self._prefix_cache.free(request_id)
             self._requests.pop(request_id, None)
         else:
             self.finish(request, "abort")
@@ -382,28 +380,35 @@ class Scheduler:
         """
         prefill: list[Request] = []
         chunk_lens: list[int] = []
+        preempted: list[Request] = []
 
-        # Stage 0: last step's prefills have executed by now, so the prefixes
-        # they computed are really in their slots and may be copied from.
-        self._promote_pending_owners()
+        # Stage 0: last step's passes have executed by now, so the blocks they
+        # filled really hold their K/V and may be offered to other requests.
+        self._commit_pending_blocks()
 
         # Stage 1: resume requests whose prefill is still in flight. Their
-        # slot and KV are held, so they come before new admissions — FCFS by
+        # slot and blocks are held, so they come before new admissions — FCFS by
         # arrival, and re-admitting a new request first would starve them.
         for request in self._running:
             if request.prefill_done:
                 continue
-            # Copies belong to the admission step only; a resumed chunk's prefix
-            # is already in its slot.
-            request.prefix_copies = ()
+            # A mapping belongs to the step that created it; a resumed chunk
+            # emits only whatever blocks it just grew into.
+            request.block_plan = ()
             chunk = self._chunk_of(request)
+            reach = request.num_computed_tokens + chunk
+            if not self._reserve(request, reach, prefill, preempted):
+                # No blocks for the next chunk and nobody left to evict: the
+                # request keeps its slot and its progress, and retries next step.
+                continue
             prefill.append(request)
             chunk_lens.append(chunk)
-            request.num_computed_tokens += chunk
-            self._track_owner(request)
+            request.num_computed_tokens = reach
+            self._map_blocks(request)
+            self._track_pending(request, reach)
 
         # Stage 2: admit queued requests into the remaining budget and slots.
-        preempted = self._admit(prefill, chunk_lens)
+        self._admit(prefill, chunk_lens, preempted)
 
         # Stage 3: decode every request that finished prefill before this
         # step. A prompt completed *this* step is sampled in its prefill pass
@@ -415,27 +420,55 @@ class Scheduler:
             for request in self._running
             if request.prefill_done and id(request) not in just_prefilled
         ]
+        self._grow_decode(decode, prefill, preempted)
 
         return SchedulerOutput(
             prefill=prefill, decode=decode, prefill_chunk_lens=chunk_lens, preempted=preempted
         )
 
-    def _admit(self, prefill: list[Request], chunk_lens: list[int]) -> list[Request]:
+    def _grow_decode(
+        self, decode: list[Request], prefill: list[Request], preempted: list[Request]
+    ) -> None:
+        """Reserve the block each decode row's token will be written into.
+
+        A decode step writes one row per request, and every sixteenth of them
+        starts a new block — so this is where a running sequence grows its
+        allocation, and where a full pool is felt. Requests that cannot be grown
+        are preempted and dropped from the batch (``decode`` is filtered in
+        place), because a row with nowhere to write is not a step it can take.
+        """
+        limit = self.config.max_seq_len
+        for request in list(decode):
+            request.block_plan = ()
+            # The token this step produces lands at position ``seq_len``, plus
+            # whatever the pipeline launched and the host has not harvested.
+            # Clamped: a request at the context limit writes no further row.
+            reach = min(request.seq_len + request.pending_tokens + 1, limit)
+            if self._reserve(request, reach, prefill + decode, preempted):
+                self._map_blocks(request)
+                self._track_pending(request, min(request.seq_len, limit))
+                continue
+            self._preempt(request)
+            preempted.append(request)
+        if preempted:
+            decode[:] = [r for r in decode if r.status is RequestStatus.RUNNING]
+
+    def _admit(
+        self, prefill: list[Request], chunk_lens: list[int], preempted: list[Request]
+    ) -> None:
         """Admit waiting requests, committing their first chunk (or whole prompt).
 
         A newly admitted request's first chunk is its uncached remainder capped
         at ``max_chunk_size``; short prompts therefore finish prefill in this
         very step, while long ones re-enter through Stage 1 on later steps.
 
-        Returns:
-            Requests preempted to make room, for reporting.
+        Preempted victims are appended to *preempted*, for reporting.
         """
-        preempted: list[Request] = []
         longest = max(chunk_lens, default=0)
 
         if self._defer_admission(prefill):
             self._deferred_steps += 1
-            return preempted
+            return
         self._deferred_steps = 0
 
         while self._waiting:
@@ -449,46 +482,46 @@ class Scheduler:
                 break
 
             if not self._free_slots:
-                preempted_victim = self._maybe_preempt(prefill)
-                if preempted_victim is None:
+                victim = self._maybe_preempt(prefill)
+                if victim is None:
                     break
-                preempted.append(preempted_victim)
+                preempted.append(victim)
 
-            # A preempted victim may just have been inserted at the head, so
-            # remove the original candidate by id rather than popping the head.
-            self._waiting.pop(candidate.request_id)
+            # Prefix cache: find the longest prefix already sitting in physical
+            # blocks, then take a *reference* on those very blocks — reuse is a
+            # shared block, not a copy of its rows. Never the whole prompt: at
+            # least one token must run to produce the first logits, exactly as
+            # vLLM keeps the last block uncached.
+            rid = candidate.request_id
+            hashes = self._prefix_cache.track(rid, candidate.prompt_token_ids)
+            match = self._prefix_cache.lookup(hashes, candidate.prompt_len)
+            chunk = self._chunk_of(candidate, computed=match.num_tokens)
+            if not self._prefix_cache.allocate(rid, match.num_tokens + chunk, match):
+                # Nothing was allocated, so admission simply waits for the pool
+                # to drain — having first offered a victim towards that.
+                self._prefix_cache.free(rid)
+                victim = self._maybe_preempt(prefill)
+                if victim is not None:
+                    preempted.append(victim)
+                break
+
+            self._waiting.pop(rid)
             candidate.slot = self._free_slots.pop()
             candidate.status = RequestStatus.RUNNING
             candidate.scheduled_time = time.monotonic()
             self._running.append(candidate)
 
-            # Prefix cache: reuse the K/V of leading blocks that are both cached
-            # and still resident in some slot, then register this prompt so later
-            # requests with the same prefix hit it. Never skip the whole prompt:
-            # at least one token must run to produce the first logits, exactly as
-            # vLLM keeps the last block uncached.
-            match = self._prefix_cache.admit(candidate.prompt_token_ids)
-            cached = min(match.copyable_tokens, candidate.prompt_len - 1)
-            candidate.num_cached_tokens = cached
-            candidate.prefix_copies = tuple(
-                run for run in match.segments if run[0] != candidate.slot
-            )
-            candidate.num_computed_tokens = cached
-
-            self._prefix_cache.invalidate_slot(candidate.slot)
-
-            chunk = self._chunk_of(candidate)
+            candidate.num_cached_tokens = match.num_tokens
+            candidate.num_computed_tokens = match.num_tokens + chunk
+            self._map_blocks(candidate)
 
             prefill.append(candidate)
             chunk_lens.append(chunk)
-            candidate.num_computed_tokens += chunk
-            self._track_owner(candidate)
+            self._track_pending(candidate, candidate.num_computed_tokens)
             longest = max(longest, chunk)
 
             if preempted:
                 break
-
-        return preempted
 
     def _defer_admission(self, resume_prefill: list[Request]) -> bool:
         """Whether this step stays pure-decode instead of admitting new prefills.
@@ -522,64 +555,130 @@ class Scheduler:
         # Without this cap, one long request violates the advertised ceiling.
         return min(remaining, size, self.config.max_num_batched_tokens)
 
-    def _promote_pending_owners(self) -> None:
-        """Hand prefix ownership to the slots that now really hold the K/V."""
-        for request, slot, upto in self._pending_owners:
-            if request.status is RequestStatus.RUNNING and request.slot == slot:
-                self._claim_prefix(request, slot, upto)
-        self._pending_owners.clear()
+    # ---------------------------------------------------------------- blocks #
+    def _reserve(
+        self,
+        request: Request,
+        num_tokens: int,
+        protect: list[Request],
+        victims: list[Request],
+    ) -> bool:
+        """Grow *request*'s block coverage to *num_tokens*, evicting if it must.
 
-    def _track_owner(self, request: Request) -> None:
-        """Queue an ownership claim for the chunk this step just planned.
+        Preemption here is a mechanism rather than the ``enable_preemption``
+        policy: a request that already holds a slot has nowhere else to put the
+        rows its next tokens need, so evicting somebody is the only alternative
+        to deadlock. It stays unreachable while the pool is sized for every slot
+        to hold a full context, which is the default.
 
-        Per chunk, not per completed prompt: a shareable prefix is usually
-        long enough to be split, and waiting for the whole prompt would leave
-        its blocks unowned exactly while the requests that would reuse them
-        arrive.
+        Args:
+            request: The request to grow. Never itself a victim.
+            num_tokens: Tokens its blocks must cover after this call.
+            protect: Requests already granted work this step; evicting one would
+                pull the blocks out from under a pass that is about to run.
+            victims: Extended with whoever was evicted, for reporting.
+
+        Returns:
+            Whether the request's blocks now cover ``num_tokens``.
         """
-        if request.slot is not None:
-            self._pending_owners.append((request, request.slot, request.num_computed_tokens))
+        protected = {id(candidate) for candidate in protect}
+        protected.add(id(request))
+        while not self._prefix_cache.allocate(request.request_id, num_tokens):
+            victim = self._preempt_victim(protected)
+            if victim is None:
+                return False
+            victims.append(victim)
+        return True
 
-    def _claim_prefix(self, request: Request, slot: int, upto: int) -> None:
-        """Record ``slot`` as the live copy of ``request``'s first ``upto`` tokens."""
-        self._prefix_cache.assign_owner(request.prompt_token_ids, slot, upto)
+    def _map_blocks(self, request: Request) -> None:
+        """Record the block-table entries the executor owes this request.
 
-    def _settle_pending_owner(self, request: Request) -> None:
-        """Cash in a retiring request's claim instead of discarding it.
-
-        Retirement runs after the step executed, so the K/V really is in the
-        slot — the request that first pays for a shared prompt typically
-        finishes before the ones that would inherit it arrive.
+        This is the whole device-side cost of prefix reuse: pointing table rows
+        at blocks somebody else filled, with no K/V moved. The cache emits each
+        block once, so a steady decode carries an empty plan fifteen steps out of
+        sixteen and a boundary-crossing one carries a single block.
         """
-        kept: list[tuple[Request, int, int]] = []
-        for candidate, slot, upto in self._pending_owners:
+        request.block_plan = self._prefix_cache.take_table_writes(request.request_id)
+
+    def _commit_pending_blocks(self) -> None:
+        """Index the blocks last step's passes actually filled.
+
+        Registration deliberately lags one step behind planning:
+        ``num_computed_tokens`` advances when a chunk is *planned*, and a block
+        offered to the next admission before the model wrote its K/V would be
+        read as though it held the prefix. Generated tokens ride the same path,
+        which is what makes a finished answer reusable by its own follow-up turn.
+        """
+        for request, upto in self._pending_blocks:
+            if request.status is RequestStatus.RUNNING:
+                self._commit(request, upto)
+        self._pending_blocks.clear()
+
+    def _commit(self, request: Request, upto: int) -> None:
+        """Hash and index whatever full blocks of this request are now computed."""
+        rid = request.request_id
+        if upto // PREFIX_CACHE_BLOCK_SIZE > len(self._prefix_cache.block_hashes(rid)):
+            # Generated tokens completed a block: extend the chain over them.
+            # Skipped fifteen steps out of sixteen, which is what keeps decode
+            # caching close to free.
+            self._prefix_cache.observe(rid, request.prompt_token_ids + request.output_token_ids)
+        self._prefix_cache.commit(rid, upto)
+
+    def _track_pending(self, request: Request, upto: int) -> None:
+        """Queue a registration for the rows the step just planned will write.
+
+        Per chunk, not per completed prompt: a shareable prefix is usually long
+        enough to be split, and waiting for the whole prompt would leave its
+        blocks unindexed exactly while the requests that would reuse them arrive.
+        """
+        self._pending_blocks.append((request, upto))
+
+    def _settle_pending_blocks(self, request: Request) -> None:
+        """Cash in a retiring request's registration instead of discarding it.
+
+        Retirement runs after the step executed, so its last blocks really do
+        hold their K/V — and the request that first pays for a shared prompt
+        typically finishes before the ones that would inherit it arrive.
+        """
+        kept: list[tuple[Request, int]] = []
+        for candidate, upto in self._pending_blocks:
             if candidate is request:
-                self._claim_prefix(request, slot, upto)
+                self._commit(request, upto)
             else:
-                kept.append((candidate, slot, upto))
-        self._pending_owners = kept
+                kept.append((candidate, upto))
+        self._pending_blocks = kept
 
-    def _drop_pending_owner(self, request: Request) -> None:
-        """Cancel a queued ownership claim, by identity.
+    def _drop_pending_blocks(self, request: Request) -> None:
+        """Cancel a queued registration, by identity.
 
         Mandatory for preemption: it moves generated tokens into
-        ``prompt_token_ids``, so a replayed claim would map the *new* prompt's
-        hashes onto rows holding the old prompt's K/V.
+        ``prompt_token_ids``, so a replayed registration would hash the *new*
+        prompt onto blocks holding the old sequence's K/V.
         """
-        self._pending_owners = [entry for entry in self._pending_owners if entry[0] is not request]
+        self._pending_blocks = [
+            entry for entry in self._pending_blocks if entry[0] is not request
+        ]
 
     def _maybe_preempt(self, prefill: list[Request]) -> Request | None:
-        """Evict the youngest eligible running request, or ``None``.
+        """Evict the youngest eligible running request, if the policy allows it.
 
-        Eligible = past prefill, not in this step's prefill group, and past
-        the progress quantum (>=1 output token) — without the quantum a
-        just-recomputed request could be evicted again before making progress.
+        This is the *policy* gate, used where preemption buys concurrency rather
+        than correctness: a deployment that left ``enable_preemption`` off gets
+        no eviction, and admission simply waits.
         """
         if not self.config.enable_preemption:
             return None
-        scheduled = {id(request) for request in prefill}
+        return self._preempt_victim({id(request) for request in prefill})
+
+    def _preempt_victim(self, protect: set[int]) -> Request | None:
+        """Evict the youngest eligible running request, or ``None``.
+
+        Eligible = past prefill, not already granted work this step, and past
+        the progress quantum (>=1 output token) — without the quantum a
+        just-recomputed request could be evicted again before making progress.
+        """
         for request in reversed(self._running):
-            if not request.prefill_done or id(request) in scheduled:
+            if not request.prefill_done or id(request) in protect:
                 continue
             if request.output_token_ids:
                 self._preempt(request)
@@ -600,7 +699,7 @@ class Scheduler:
         request.status = RequestStatus.WAITING
         request.num_computed_tokens = 0
         request.num_cached_tokens = 0
-        request.prefix_copies = ()
+        request.block_plan = ()
         # The optimistic ledger follows the real one: re-admission replays the
         # prompt through prefill, so nothing is launched-and-unharvested any
         # more. (The engine refuses pipeline + preemption together; this line
@@ -611,10 +710,10 @@ class Scheduler:
         request.prompt_logprobs = None
         request.output_logprobs = None
         request.delta_logprobs = None
-        self._drop_pending_owner(request)
-        # Release the prefix-block references; skipping this would inflate
-        # ref_cnt once per preempt cycle, and referenced blocks never evict.
-        self._prefix_cache.release(request.prompt_token_ids)
+        self._drop_pending_blocks(request)
+        # Give the blocks back. Skipping this would pin one set of rows per
+        # preempt cycle, and a referenced block never evicts.
+        self._prefix_cache.free(request.request_id)
         moved = len(request.output_token_ids)
         request.prompt_token_ids.extend(request.output_token_ids)
         request.output_token_ids.clear()
@@ -637,13 +736,13 @@ class Scheduler:
             request.slot = None
         if was_running:
             self._discard_running(request)
-            self._settle_pending_owner(request)
-            # A shared prefix survives as long as another live request references it.
-            self._prefix_cache.release(request.prompt_token_ids)
+            self._settle_pending_blocks(request)
         else:
-            # A queued request registered no blocks; releasing would decrement
-            # a different request's references when the prompts match.
             self._waiting.pop(request.request_id, None)
+        # A shared prefix survives as long as another live request references it;
+        # a queued request may still hold the hash chain of an admission the pool
+        # refused, and freeing by id leaves nothing behind either way.
+        self._prefix_cache.free(request.request_id)
         if self._requests.get(request.request_id) is request:
             self._requests.pop(request.request_id)
 
@@ -662,6 +761,16 @@ class Scheduler:
     def prefix_cache_hit_rate(self) -> float:
         """Fraction of queried prompt tokens served from the prefix cache."""
         return self._prefix_cache.hit_rate
+
+    @property
+    def num_free_blocks(self) -> int:
+        """Physical KV blocks available right now."""
+        return self._prefix_cache.num_free_blocks
+
+    @property
+    def kv_cache_utilization(self) -> float:
+        """Fraction of the block pool live requests hold (0.0 empty, 1.0 full)."""
+        return self._prefix_cache.utilization
 
     @property
     def running(self) -> list[Request]:

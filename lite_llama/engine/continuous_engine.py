@@ -95,7 +95,7 @@ def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
     slots, starts, lens, tokens = [], [], [], []
     sampled, requests = [], []
     prompt_logprobs, prompt_targets = [], []
-    copies: list[tuple[int, int, int, int]] = []
+    writes: list[tuple[int, int, int, tuple[int, ...]]] = []
     for row, (request, chunk) in enumerate(chunks):
         start = request.num_computed_tokens - chunk
         end = request.num_computed_tokens
@@ -109,9 +109,9 @@ def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
         # last row is sampled and has no target. Both tails pad with 0.
         targets = request.prompt_token_ids[start + 1 : end + 1]
         prompt_targets.extend(targets + [0] * (chunk - len(targets)))
-        copies += [
-            (src_slot, request.slot, start_token, length)
-            for src_slot, start_token, length in request.prefix_copies
+        writes += [
+            (request.slot, group_id, start_block, block_ids)
+            for group_id, start_block, block_ids in request.block_plan
         ]
         if request.num_computed_tokens == request.prompt_len:
             # Only a finished prompt has a next token to sample; the pass
@@ -131,7 +131,7 @@ def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
             sampled=tuple(sampled),
             # A first token has no repetition-penalty history yet.
             gen_counts=(0,) * len(requests),
-            prefix_copies=tuple(copies),
+            block_writes=tuple(writes),
             prompt_logprobs=tuple(prompt_logprobs) if wants_prompt else (),
             prompt_targets=tuple(prompt_targets) if wants_prompt else (),
         ),
@@ -195,6 +195,13 @@ def _decode_work(running: list[Request], *, from_device: bool = False) -> _Work:
             sampled=tuple(range(len(running))),
             gen_counts=tuple(
                 len(request.output_token_ids) + ahead(request) for request in running
+            ),
+            # A decode step that crossed a block boundary was given a fresh page
+            # by the scheduler; its table entry has to land before the gather.
+            block_writes=tuple(
+                (request.slot, group_id, start_block, block_ids)
+                for request in running
+                for group_id, start_block, block_ids in request.block_plan
             ),
         ),
         running,
@@ -268,8 +275,11 @@ class ContinuousBatchingEngine:
             engine, config.max_num_seqs, config.max_seq_len, pipeline=self._pipeline
         )
         # The executor owns the cache, so it decides how many requests can be in
-        # flight; the scheduler hands out exactly those slots.
-        self.scheduler = Scheduler(config, self._executor.num_slots)
+        # flight; the scheduler hands out exactly those slots, and pages out of a
+        # pool sized by the cache the executor actually profiled.
+        self.scheduler = Scheduler(
+            config, self._executor.num_slots, self._executor.num_kv_blocks or None
+        )
 
         self._detokenizers: dict[str, IncrementalDetokenizer] = {}
         self._request_ids = itertools.count()

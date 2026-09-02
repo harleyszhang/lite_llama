@@ -1,21 +1,31 @@
-"""Prefix caching: reuse the KV of shared prompt prefixes across requests.
+"""Prefix caching: reuse the KV of shared prefixes by sharing physical blocks.
 
-:class:`PrefixCache` hashes fixed-size blocks of tokens, matches a new
-prompt's block run against cached ones, and reference-counts blocks so
-several sequences share one physical KV region until all finish.
+:class:`PrefixCache` is the scheduler's whole view of the KV cache. It hashes a
+sequence in fixed-size blocks, looks the hashes up in a
+:class:`~lite_llama.engine.block_pool.BlockPool`, and hands the caller the
+*physical blocks* a matching prefix already lives in. Reuse is then a reference
+on a shared block rather than a copy of its rows: the executor's block table is
+the indirection that lets two sequences read the same rows.
+
+Because the hash chain covers generated tokens too, a completed request's whole
+sequence — prompt *and* output — is reusable by the next prompt that starts with
+it, which is what makes multi-turn conversations cheap.
 
 Usage:
-    cache = PrefixCache(); match = cache.admit(token_ids)
-    cache.release(token_ids)
+    cache = PrefixCache(num_blocks=1024)
+    hashes = cache.hash_tokens(prompt); match = cache.lookup(hashes, len(prompt))
+    cache.allocate(rid, len(prompt), match); cache.free(rid)
 """
 
 from __future__ import annotations
 
 import hashlib
 import struct
-from collections import OrderedDict
-from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterator, MutableSequence, Sequence
+from dataclasses import dataclass, field
+
+from .block_pool import BlockPool, KVCacheBlock
+from .kv_cache_spec import KVCacheConfig, KVCacheCoordinator, KVCacheGroup
 
 #: Tokens per prefix-cache block; 16 mirrors vLLM's default page granularity.
 #: It lives here rather than on the scheduler because everyone who computes a
@@ -59,15 +69,45 @@ def iter_block_hashes(token_ids: Sequence[int], block_size: int, seed: int = 0) 
         yield parent
 
 
+def extend_block_hashes(
+    hashes: MutableSequence[int],
+    token_ids: Sequence[int],
+    block_size: int,
+    seed: int = 0,
+) -> None:
+    """Append the hashes of blocks *token_ids* has completed since last time.
+
+    The chain is a running digest, so a sequence that has grown by one token
+    only needs rehashing when that token completed a block — and then only that
+    block. This is what keeps generated tokens cacheable without rehashing the
+    whole sequence on every decode step: appending one token costs nothing 15
+    steps out of 16, and one blake2b on the sixteenth.
+
+    Args:
+        hashes: The chain so far, extended in place.
+        token_ids: The whole sequence, prompt and output together.
+        block_size: Tokens per block.
+        seed: Salt folded into the chain.
+    """
+    num_full = len(token_ids) // block_size
+    parent = hashes[-1] if hashes else (seed & 0xFFFFFFFFFFFFFFFF)
+    layout = f"<Q{block_size}I"
+    for b in range(len(hashes), num_full):
+        block = token_ids[b * block_size : (b + 1) * block_size]
+        digest = hashlib.blake2b(struct.pack(layout, parent, *block), digest_size=8)
+        parent = int.from_bytes(digest.digest(), "little")
+        hashes.append(parent)
+
+
 @dataclass
 class PrefixCacheStats:
     """Cumulative counters for prefix-cache effectiveness (mirrors vLLM's stats).
 
     Attributes:
-        num_requests: How many prompts were queried.
-        queried_tokens: Total prompt tokens looked up.
-        hit_tokens: Prompt tokens served from cache.
-        evictions: Blocks physically dropped under capacity pressure.
+        num_requests: How many sequences were looked up.
+        queried_tokens: Total tokens looked up.
+        hit_tokens: Tokens served from cache.
+        evictions: Cached blocks dropped so their rows could be reused.
     """
 
     num_requests: int = 0
@@ -77,7 +117,7 @@ class PrefixCacheStats:
 
     @property
     def hit_rate(self) -> float:
-        """Fraction of queried prompt tokens served from cache (0.0 - 1.0)."""
+        """Fraction of queried tokens served from cache (0.0 - 1.0)."""
         if self.queried_tokens == 0:
             return 0.0
         return self.hit_tokens / self.queried_tokens
@@ -85,255 +125,307 @@ class PrefixCacheStats:
 
 @dataclass(frozen=True)
 class PrefixMatch:
-    """What a prompt may reuse, and where the reusable K/V must be copied from.
+    """The physical blocks a sequence may reuse.
 
     Attributes:
-        num_tokens: Leading tokens whose blocks are cached, block-aligned. This
-            is the hit-rate numerator, *not* what prefill can skip: a block can
-            be cached while no slot holds its K/V any more.
-        copyable_tokens: Leading tokens whose K/V is both cached and still
-            resident in some slot. Always ``<= num_tokens`` and always a prefix
-            — attention reads a slot's rows contiguously from 0, so reuse stops
-            at the first block without a live copy.
-        segments: ``(src_slot, start_token, num_tokens)`` runs covering exactly
-            ``copyable_tokens``, merged across adjacent blocks sharing an owner.
-            The chained hash pins a block to one absolute prompt position, so
-            source and destination rows always line up.
+        num_tokens: Leading tokens covered by the hit, block-aligned in every
+            group. Unlike the copy-based scheme this replaces, it is exactly
+            what prefill may skip: a hit *is* a physical block, so there is no
+            longer a difference between "cached" and "readable".
+        blocks: One tuple of blocks per KV cache group, in prefix order. The
+            caller passes them straight back to :meth:`PrefixCache.allocate`,
+            which is where the references are taken.
     """
 
     num_tokens: int = 0
-    copyable_tokens: int = 0
-    segments: tuple[tuple[int, int, int], ...] = ()
+    blocks: tuple[tuple[KVCacheBlock, ...], ...] = ()
+
+    def __bool__(self) -> bool:
+        return self.num_tokens > 0
 
 
 @dataclass
-class _CachedBlock:
-    """One resident prefix block: its chained hash, references, and live copy.
+class _Sequence:
+    """What the cache remembers about one live sequence.
 
     Attributes:
-        block_hash: Chained hash naming this block *and* every block before it,
-            i.e. a prefix rather than a bag of tokens.
-        ref_cnt: Live requests holding this block; zero does not evict.
-        owner_slot: Cache slot whose rows currently hold this block's K/V, or
-            ``None`` when no live copy exists. A block may be hittable yet
-            unreadable; whoever recomputes it next becomes the new owner.
+        block_hashes: Chained hash per completed block of prompt + output,
+            extended in place as the sequence grows.
+        num_cached_tokens: Tokens whose blocks are already indexed by hash, so
+            each step only indexes what is new.
+        num_mapped_blocks: Blocks per group the executor has already been told
+            to map, so each step emits only the blocks the sequence just grew
+            into. A steady decode step therefore emits nothing at all.
     """
 
-    block_hash: int
-    ref_cnt: int = 0
-    owner_slot: int | None = None
+    block_hashes: list[int] = field(default_factory=list)
+    num_cached_tokens: int = 0
+    num_mapped_blocks: list[int] = field(default_factory=list)
 
 
 class PrefixCache:
-    """Ref-counted, LRU-evicted store of cached prefix blocks.
+    """Block-level KV allocator with hash-based reuse across sequences.
 
-    The block map doubles as the LRU order: an ``OrderedDict`` whose tail is
-    most-recently-used. A hit or a fresh reference moves a block to the tail;
-    eviction (only when over ``capacity``) removes unreferenced blocks from the
-    head. Referenced blocks (``ref_cnt > 0``) are never evicted.
+    Every sequence's KV lives in blocks drawn from one
+    :class:`~lite_llama.engine.block_pool.BlockPool`, and a prefix two sequences
+    share is one set of blocks both of them reference. Nothing is copied, and a
+    block survives exactly as long as someone holds it — after that it stays
+    cached and hittable until its rows are needed for something else.
+
+    The class is host-side and device-free: it hands out block *ids*, and the
+    executor turns them into block-table entries. That split is what lets the
+    whole thing be tested without a GPU.
 
     Args:
-        block_size: Tokens per block. Larger blocks hash cheaper but match
-            coarser; 16 mirrors vLLM's default page granularity.
-        capacity: Maximum resident blocks. ``None`` means unbounded.
+        num_blocks: Physical blocks in the pool, the null block included. The
+            executor derives it from the KV cache it actually allocated.
+        block_size: Tokens per block; must match every party that hashes.
+        kv_cache_config: The groups to allocate for. Defaults to one
+            full-attention group, which is what every homogeneous model needs.
         hash_seed: Salt folded into every block hash, isolating one cache's
             hashes from another's. Under data parallelism every replica — and
             the router's affinity index — must share the seed.
+        enable_caching: When False, blocks are still allocated and recycled but
+            never indexed, so nothing is reused across sequences. This is
+            "prefix caching off", and it is the same code path rather than a
+            parallel one.
     """
 
     def __init__(
         self,
-        block_size: int = 16,
-        capacity: int | None = None,
+        num_blocks: int,
+        block_size: int = PREFIX_CACHE_BLOCK_SIZE,
+        kv_cache_config: KVCacheConfig | None = None,
         hash_seed: int = 0,
+        enable_caching: bool = True,
     ) -> None:
         if block_size < 1:
             raise ValueError(f"block_size must be >= 1, got {block_size}")
-        if capacity is not None and capacity < 1:
-            raise ValueError(f"capacity must be >= 1 or None, got {capacity}")
         self.block_size = block_size
-        self.capacity = capacity
         self.hash_seed = hash_seed
-        #: block-hash -> _CachedBlock, ordered least- to most-recently-used.
-        self._blocks: OrderedDict[int, _CachedBlock] = OrderedDict()
-        #: slot -> hashes it is the live copy of. A reverse index so
-        #: :meth:`invalidate_slot` (which runs on every admission) does not scan
-        #: the whole pool.
-        self._owned: dict[int, set[int]] = {}
-        self.stats = PrefixCacheStats()
+        self.enable_caching = enable_caching
+        self.config = kv_cache_config or KVCacheConfig.homogeneous(block_size)
+        self.pool = BlockPool(num_blocks, block_size, enable_caching=enable_caching)
+        self.coordinator = KVCacheCoordinator(
+            self.pool, self.config.groups, self.config.hash_block_size
+        )
+        self._stats = PrefixCacheStats()
+        # Evictions are the pool's counter, not ours; a reset rebases rather than
+        # zeroing it, so the pool stays the single place that counts them.
+        self._eviction_base = 0
+        self._sequences: dict[str, _Sequence] = {}
 
-    # ------------------------------------------------------------------ lookup #
-    def query(self, token_ids: list[int]) -> int:
-        """Return the number of leading tokens already cached for this prompt.
+    @property
+    def stats(self) -> PrefixCacheStats:
+        """Cumulative counters, with the pool's live eviction count folded in.
 
-        Walks the prompt's block hashes from the front and stops at the first
-        uncached block: prefix reuse must be contiguous from token 0. Hit blocks
-        are refreshed to most-recently-used.
+        Read through rather than mirrored on every eviction: an eviction happens
+        deep inside an allocation, and a counter copied at some later call would
+        read as zero for however long nobody made that call.
         """
-        self.stats.num_requests += 1
-        self.stats.queried_tokens += len(token_ids)
-        cached = 0
-        for h in iter_block_hashes(token_ids, self.block_size, self.hash_seed):
-            block = self._blocks.get(h)
-            if block is None:
-                break
-            self._blocks.move_to_end(h)  # LRU touch
-            cached += self.block_size
-        self.stats.hit_tokens += cached
-        return cached
+        self._stats.evictions = self.pool.stats.evictions - self._eviction_base
+        return self._stats
 
-    # -------------------------------------------------------------- mutation #
-    def register(self, token_ids: list[int]) -> int:
-        """Reference every full block of *token_ids*, creating missing ones.
+    # ---------------------------------------------------------------- hashing #
+    def hash_tokens(self, token_ids: Sequence[int]) -> list[int]:
+        """Return the chained hash of every complete block of *token_ids*."""
+        return list(iter_block_hashes(token_ids, self.block_size, self.hash_seed))
 
-        Returns the cached-prefix length that existed before this call — the
-        reuse this request enjoys. Newly created blocks may trigger LRU
-        eviction of unreferenced blocks when over capacity.
+    def track(self, request_id: str, token_ids: Sequence[int]) -> list[int]:
+        """Start (or resume) tracking a sequence, returning its hash chain.
+
+        The chain is owned by the cache rather than recomputed per call, because
+        :meth:`observe` extends it one block at a time as the sequence generates.
         """
-        return self._reference_blocks(token_ids).num_tokens
+        state = self._sequences.get(request_id)
+        if state is None:
+            state = _Sequence(block_hashes=self.hash_tokens(token_ids))
+            self._sequences[request_id] = state
+        else:
+            extend_block_hashes(state.block_hashes, token_ids, self.block_size, self.hash_seed)
+        return state.block_hashes
 
-    def admit(self, token_ids: list[int]) -> PrefixMatch:
-        """One-pass :meth:`query` + :meth:`register`, for the admission path.
+    def observe(self, request_id: str, token_ids: Sequence[int]) -> list[int]:
+        """Extend a tracked sequence's chain over tokens it has since produced.
 
-        The scheduler needs both answers in the same breath; asking as two
-        calls would hash the prompt twice — 256 chained hashes for a 4 k-token
-        prompt, all duplicate, on the critical path of every admission.
-        Counts towards the hit-rate statistics exactly as :meth:`query` does.
+        This is the decode-caching entry point: a generated token that completes
+        a block gives that block a hash, and once the block is indexed (see
+        :meth:`commit`) the next prompt starting with this whole sequence hits
+        it. Untracked sequences are ignored, so a caller need not special-case
+        requests admitted before the cache was created.
+        """
+        state = self._sequences.get(request_id)
+        if state is None:
+            return []
+        extend_block_hashes(state.block_hashes, token_ids, self.block_size, self.hash_seed)
+        return state.block_hashes
+
+    def block_hashes(self, request_id: str) -> list[int]:
+        """The tracked hash chain of a sequence, empty when it is not tracked."""
+        state = self._sequences.get(request_id)
+        return state.block_hashes if state is not None else []
+
+    # ----------------------------------------------------------------- lookup #
+    def lookup(self, block_hashes: Sequence[int], num_tokens: int) -> PrefixMatch:
+        """Find the longest reusable prefix of a sequence with these hashes.
+
+        Args:
+            block_hashes: The sequence's chained block hashes.
+            num_tokens: Length of the sequence being admitted.
 
         Returns:
-            The full :class:`PrefixMatch`, whose ``copyable_tokens`` (not
-            ``num_tokens``) is what prefill may actually skip.
+            The blocks every group can serve, and how many tokens that covers.
+
+        The hit is capped at ``num_tokens - 1``: a request whose every token is
+        cached still has to run one of them, because the step that produces its
+        next token needs logits, and logits come from a forward pass. vLLM caps
+        it the same way and for the same reason.
         """
-        self.stats.num_requests += 1
-        self.stats.queried_tokens += len(token_ids)
-        match = self._reference_blocks(token_ids)
-        self.stats.hit_tokens += match.num_tokens
-        return match
+        self._stats.num_requests += 1
+        self._stats.queried_tokens += num_tokens
+        if not self.enable_caching or num_tokens < 1:
+            return PrefixMatch(0, tuple(() for _ in self.config.groups))
+        blocks, hit = self.coordinator.find_longest_cache_hit(block_hashes, max(num_tokens - 1, 0))
+        self._stats.hit_tokens += hit
+        return PrefixMatch(hit, tuple(tuple(group) for group in blocks))
 
-    def invalidate_slot(self, slot: int) -> None:
-        """Forget that *slot* holds any block's K/V, as it changes hands.
+    # ------------------------------------------------------------- allocation #
+    def allocate(self, request_id: str, num_tokens: int, match: PrefixMatch | None = None) -> bool:
+        """Give *request_id* blocks covering its first *num_tokens* tokens.
 
-        A slot's next occupant refills it from its own token 0, so every block
-        this slot was the live copy of becomes unreadable. The blocks stay
-        cached and hittable — their hashes are still true — they merely stop
-        being copy sources; whoever recomputes them next becomes the new owner.
+        Call it at admission with the :class:`PrefixMatch` the request adopts,
+        and again on any step that pushes the sequence past a block boundary
+        (with no match). Adopting a match takes a reference on shared blocks; it
+        never copies rows.
 
-        Must run *after* the new occupant's match, not before: a freed slot
-        keeps its rows until they are overwritten, so the commonest hit of all
-        is the request that lands on the slot whose prefix it wanted.
+        Returns:
+            False when the pool cannot cover the request, having allocated
+            nothing. The caller decides what that means — preempt, or wait.
         """
-        for block_hash in self._owned.pop(slot, ()):
-            block = self._blocks.get(block_hash)
-            if block is not None and block.owner_slot == slot:
-                block.owner_slot = None
+        adopted = match.blocks if match is not None and match.num_tokens else None
+        return self.coordinator.allocate(request_id, num_tokens, adopted)
 
-    def assign_owner(self, token_ids: list[int], slot: int, upto_tokens: int) -> None:
-        """Record *slot* as the live copy of the ownerless blocks it now holds.
+    def commit(self, request_id: str, num_computed_tokens: int) -> None:
+        """Index the request's blocks whose K/V the model has actually written.
 
-        Callers must have *executed* the prefill covering ``upto_tokens``, not
-        merely scheduled it. Under a committing scheduler those are different
-        moments: ``num_computed_tokens`` advances when a chunk is planned, one
-        engine step before its K/V exists, and a block claimed at planning time
-        would be offered as a copy source to the next admission in that same
-        step -- which would read cache rows the model had not written yet.
-
-        Blocks that already have an owner keep it: one live copy is all a copy
-        needs, and leaving the incumbent alone keeps segment lists short.
+        The token count must be *executed*, not merely scheduled. Under a
+        committing scheduler those are different moments: ``num_computed_tokens``
+        advances when a chunk is planned, one engine step before its K/V exists,
+        and a block indexed at planning time would be handed to the next
+        admission as readable rows the model had not written yet.
         """
-        blocks = upto_tokens // self.block_size
-        if blocks <= 0:
+        state = self._sequences.get(request_id)
+        if state is None or num_computed_tokens <= state.num_cached_tokens:
             return
-        for index, h in enumerate(iter_block_hashes(token_ids, self.block_size, self.hash_seed)):
-            if index >= blocks:
-                break
-            block = self._blocks.get(h)
-            if block is not None and block.owner_slot is None:
-                block.owner_slot = slot
-                self._owned.setdefault(slot, set()).add(h)
+        self.coordinator.cache_blocks(request_id, state.block_hashes, num_computed_tokens)
+        state.num_cached_tokens = num_computed_tokens
 
-    def _reference_blocks(self, token_ids: list[int]) -> PrefixMatch:
-        """Take a reference on every full block, creating the missing ones.
+    def trim_window(self, request_id: str, num_computed_tokens: int) -> None:
+        """Release blocks that have fallen out of a windowed group's window."""
+        self.coordinator.remove_skipped_blocks(request_id, num_computed_tokens)
 
-        Returns the leading reuse the caller inherits: the cached length, plus
-        the shorter copyable length and the segments realising it.
+    def free(self, request_id: str) -> None:
+        """Release every block a request holds and stop tracking it."""
+        self.coordinator.free(request_id)
+        self._sequences.pop(request_id, None)
+
+    def reset(self) -> bool:
+        """Drop every cached block and zero the stats, if nothing is in use.
+
+        Returns False and changes nothing while a live request holds a block:
+        see :meth:`~lite_llama.engine.block_pool.BlockPool.reset_prefix_cache`
+        for why a forced reset would leak capacity instead of freeing it.
         """
-        hit = 0
-        counting_hit = True
-        copyable = 0
-        segments: list[list[int]] = []
-        for index, h in enumerate(iter_block_hashes(token_ids, self.block_size, self.hash_seed)):
-            block = self._blocks.get(h)
-            if block is None:
-                counting_hit = False
-                block = _CachedBlock(block_hash=h)
-                self._blocks[h] = block
-            elif counting_hit:
-                hit += self.block_size
-            block.ref_cnt += 1
-            self._blocks.move_to_end(h)  # newest / just-touched -> MRU
-
-            # The copy plan tracks the *unbroken* run of cached blocks that
-            # still have a live copy: the first gap ends it, because a slot's
-            # rows are only meaningful read from 0 up.
-            if (
-                copyable == index * self.block_size
-                and counting_hit
-                and block.owner_slot is not None
-            ):
-                start = index * self.block_size
-                previous = segments[-1] if segments else None
-                if previous is not None and previous[0] == block.owner_slot:
-                    previous[2] += self.block_size  # extend the run in place
-                else:
-                    segments.append([block.owner_slot, start, self.block_size])
-                copyable += self.block_size
-        self._evict_to_capacity()
-        return PrefixMatch(hit, copyable, tuple(tuple(run) for run in segments))
-
-    def release(self, token_ids: list[int]) -> None:
-        """Drop one reference per block; blocks stay cached (LRU) at zero."""
-        for h in iter_block_hashes(token_ids, self.block_size, self.hash_seed):
-            block = self._blocks.get(h)
-            if block is not None and block.ref_cnt > 0:
-                block.ref_cnt -= 1
-
-    def _evict_to_capacity(self) -> None:
-        """Evict least-recently-used *unreferenced* blocks until within capacity."""
-        if self.capacity is None:
-            return
-        # Iterate a snapshot of keys from LRU (front) to MRU (back).
-        for h in list(self._blocks.keys()):
-            if len(self._blocks) <= self.capacity:
-                break
-            block = self._blocks[h]
-            if block.ref_cnt == 0:
-                if block.owner_slot is not None:
-                    self._owned.get(block.owner_slot, set()).discard(h)
-                del self._blocks[h]
-                self.stats.evictions += 1
-
-    def reset(self) -> None:
-        """Drop all cached blocks and zero the stats (e.g. between benchmarks)."""
-        self._blocks.clear()
-        self.stats = PrefixCacheStats()
+        if not self.pool.reset_prefix_cache():
+            return False
+        self._sequences.clear()
+        self._stats = PrefixCacheStats()
+        self._eviction_base = self.pool.stats.evictions
+        return True
 
     # ------------------------------------------------------------------ views #
+    def block_ids(self, request_id: str) -> tuple[tuple[int, ...], ...]:
+        """Per-group block ids a request holds, in prefix order."""
+        return self.coordinator.block_ids(request_id)
+
+    def take_table_writes(self, request_id: str) -> tuple[tuple[int, int, tuple[int, ...]], ...]:
+        """Block-table entries the executor has not been given yet, and mark them given.
+
+        This is the whole device-side effect of prefix reuse: the executor points
+        the request's table rows at these physical blocks and the reused K/V is
+        readable, with nothing copied.
+
+        Draining rather than reporting, because a block only needs mapping once:
+        a table entry covers its block's whole row span the moment it is written,
+        so a sequence growing into a block it already mapped has nothing to say.
+        That makes a steady decode step free and a boundary-crossing one cost one
+        block's worth of int32 writes.
+
+        The cursor lives with the rest of the request's state, so it is dropped by
+        :meth:`free` along with the blocks -- a preempted request re-mapping from
+        scratch is exactly right, since it also re-allocates from scratch.
+
+        Returns:
+            ``(group_id, start_block, block_ids)`` per group with anything to
+            map, and nothing for groups that are already up to date.
+        """
+        state = self._sequences.get(request_id)
+        if state is None:
+            return ()
+        groups = self.config.groups
+        if not state.num_mapped_blocks:
+            state.num_mapped_blocks = [0] * len(groups)
+        writes: list[tuple[int, int, tuple[int, ...]]] = []
+        mapped = state.num_mapped_blocks
+        held = self.block_ids(request_id)
+        for index, (group, blocks) in enumerate(zip(groups, held, strict=True)):
+            start = mapped[index]
+            if len(blocks) > start:
+                writes.append((group.group_id, start, blocks[start:]))
+                mapped[index] = len(blocks)
+        return tuple(writes)
+
+    def num_committed_tokens(self, request_id: str) -> int:
+        """Tokens of a sequence whose blocks are already indexed by hash."""
+        state = self._sequences.get(request_id)
+        return state.num_cached_tokens if state is not None else 0
+
+    @property
+    def groups(self) -> tuple[KVCacheGroup, ...]:
+        """The KV cache groups this cache allocates for, in group order."""
+        return self.config.groups
+
     @property
     def hit_rate(self) -> float:
-        """Cumulative fraction of queried prompt tokens served from cache."""
-        return self.stats.hit_rate
+        """Cumulative fraction of queried tokens served from cache."""
+        return self._stats.hit_rate
+
+    @property
+    def num_blocks(self) -> int:
+        """Physical blocks in the pool, the null block included."""
+        return self.pool.num_blocks
+
+    @property
+    def num_free_blocks(self) -> int:
+        """Blocks available right now, cached-but-unreferenced ones included."""
+        return self.pool.num_free_blocks
 
     @property
     def num_cached_blocks(self) -> int:
-        """Total resident blocks (referenced + evictable)."""
-        return len(self._blocks)
+        """Blocks reachable through the hash index."""
+        return self.pool.num_cached_blocks
 
     @property
     def num_referenced_blocks(self) -> int:
-        """Blocks a live request still holds (``ref_cnt > 0``, never evicted)."""
-        return sum(1 for b in self._blocks.values() if b.ref_cnt > 0)
+        """Blocks a live request holds; the null block is not counted."""
+        return sum(1 for b in self.pool.blocks if b.ref_cnt > 0) - 1
 
     @property
     def num_evictable_blocks(self) -> int:
-        """Resident blocks with no live reference (LRU-eviction candidates)."""
-        return sum(1 for b in self._blocks.values() if b.ref_cnt == 0)
+        """Cached blocks no live request holds — the eviction candidates."""
+        return sum(1 for b in self.pool.blocks if b.ref_cnt == 0 and b.block_hash is not None)
+
+    @property
+    def utilization(self) -> float:
+        """Fraction of the pool a live request holds (0.0 empty, 1.0 full)."""
+        return 1.0 - self.num_free_blocks / self.pool.num_blocks

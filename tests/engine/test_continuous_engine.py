@@ -51,6 +51,9 @@ class _ScriptedExecutor:
         self._rows = rows
         self._calls = 0
         self.num_slots = 4
+        # 0 means "cannot say": the scheduler then sizes its block pool from the
+        # slot geometry, which is what a fake with no real cache wants.
+        self.num_kv_blocks = 0
 
     def execute(self, plan) -> tuple[torch.Tensor, None]:
         row = self._rows[min(self._calls, len(self._rows) - 1)]

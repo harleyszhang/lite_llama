@@ -51,6 +51,7 @@ class _ScriptedExecutor:
         self._rows = rows
         self._calls = 0
         self.num_slots = 4
+        self.num_kv_blocks = 0  # no real cache; the scheduler sizes its own pool
 
     def execute(self, plan):
         row = self._rows[min(self._calls, len(self._rows) - 1)]

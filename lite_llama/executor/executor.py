@@ -48,6 +48,16 @@ class Executor(ABC):
     def num_slots(self) -> int:
         """How many cache slots plans may address, i.e. the concurrency ceiling."""
 
+    @property
+    def num_kv_blocks(self) -> int:
+        """Cache blocks the scheduler may hand out, or ``0`` if the executor cannot say.
+
+        Zero leaves the scheduler to size its block pool from the slot geometry it
+        already knows, which is what a fake executor in a test wants; a real one
+        reports what its profiled cache actually holds.
+        """
+        return 0
+
     @abstractmethod
     def execute(self, model_input: ModelInput) -> tuple[torch.Tensor, PassLogprobs | None]:
         """Run one pass: its sampled token ids, one per sampled row, and any
@@ -107,6 +117,10 @@ class UniProcExecutor(Executor):
     def num_slots(self) -> int:
         return self._worker.num_slots
 
+    @property
+    def num_kv_blocks(self) -> int:
+        return self._worker.num_kv_blocks
+
     def execute(self, model_input: ModelInput) -> tuple[torch.Tensor, PassLogprobs | None]:
         return self._worker.execute(model_input)
 
@@ -161,6 +175,10 @@ class MultiprocExecutor(Executor):
     @property
     def num_slots(self) -> int:
         return self._worker.num_slots
+
+    @property
+    def num_kv_blocks(self) -> int:
+        return self._worker.num_kv_blocks
 
     def execute(self, model_input: ModelInput) -> tuple[torch.Tensor, PassLogprobs | None]:
         ensure_followers_alive(self._followers)

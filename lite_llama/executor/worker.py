@@ -94,11 +94,12 @@ class ModelInput:
         gen_counts: Tokens already generated per sampled sequence. Doubles as the
             column its next token is written to and as the width of its
             repetition-penalty window.
-        prefix_copies: ``(src_slot, dst_slot, start_token, num_tokens)`` runs of
-            prefix-cache K/V to copy in before the pass runs, so its extend rows
-            can attend over a prefix they never computed. Empty on a miss. Every
-            tensor-parallel rank replays them against its own shard, which is why
-            they travel with the plan rather than being applied by the driver.
+        block_writes: ``(slot, group_id, start_block, block_ids)`` block-table
+            entries to install before the pass runs, so its rows address the
+            physical pages the scheduler allocated them — a reused prefix points
+            at the blocks that already hold its K/V, and no K/V is moved. Every
+            tensor-parallel rank applies them to its own table, which is why they
+            travel with the plan rather than being applied by the driver.
         prompt_logprobs: Per-sequence top-k width for prompt scoring, parallel
             to ``slots``; ``None`` for a sequence that did not ask. Empty (the
             default) when no sequence in the pass asked. Parallel to ``slots``
@@ -120,7 +121,7 @@ class ModelInput:
     sampling: tuple[SamplingParams, ...]
     sampled: tuple[int, ...]
     gen_counts: tuple[int, ...]
-    prefix_copies: tuple[tuple[int, int, int, int], ...] = ()
+    block_writes: tuple[tuple[int, int, int, tuple[int, ...]], ...] = ()
     prompt_logprobs: tuple[int | None, ...] = ()
     prompt_targets: tuple[int, ...] = ()
 
@@ -257,6 +258,12 @@ class ModelWorker:
         # proportional to the concurrency the caller asked for rather than to
         # however many slots happen to fit in the cache.
         self.num_slots = min(self._slot_batch.num_slots, max_num_seqs)
+        # Cache rows, expressed in the scheduler's block size: the block pool is
+        # what admits requests now, so it has to be sized by the memory that
+        # actually exists rather than by the table's geometry.
+        self.num_kv_blocks = (
+            self._runner.kv_cache_manager.gpu_num_blocks // self._slot_batch.block_size
+        )
         self._gen_grid = torch.zeros(
             (self.num_slots, max_seq_len), dtype=torch.long, device=self._device
         )
@@ -301,11 +308,11 @@ class ModelWorker:
             records, when asked for, are entirely prompt records.
         """
         prepared = self.prepare(model_input)
-        # Before the forward, so extend rows resuming on a reused prefix find it
-        # in their own slot. Same stream, so the ordering needs no synchronisation.
-        # After the prepare: the pass's own copies cannot overlap its prefix
-        # copies, but the next pass's will overlap this pass's forward.
-        self._slot_batch.copy_prefix(model_input.prefix_copies)
+        # Before the forward, so every row this pass reads or writes already has
+        # a page behind it. After the prepare, because prepare only gathers table
+        # entries for rows the plan names, and those are exactly the ones these
+        # writes install -- the gather happens on the device, after this.
+        self._slot_batch.write_block_tables(model_input.block_writes)
         logits, prompt = self._forward(model_input, prepared)
         sampled_records = None
         if logits is None:
