@@ -1,0 +1,26 @@
+{
+  "config": {
+    "chunks": 8000,
+    "iters": 9,
+    "tpot_ms": null,
+    "json": "docs/benchmark_logs/parser_v0.11.json",
+    "timestamp": "2026-09-02T20:17:19"
+  },
+  "results": {
+    "off": {
+      "total_ms": 0.3,
+      "tokens": 8030,
+      "per_token_us": 0.037
+    },
+    "reasoning": {
+      "total_ms": 0.92,
+      "tokens": 8030,
+      "per_token_us": 0.114
+    },
+    "reasoning+tools": {
+      "total_ms": 9.71,
+      "tokens": 8030,
+      "per_token_us": 1.21
+    }
+  }
+}

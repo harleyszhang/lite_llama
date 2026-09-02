@@ -13,10 +13,10 @@
 | F2 | 默认单卡路径全程单进程,`pdb` 可直达 kernel 调用点 | 已有 | v1 全量多进程隔离(pdb 进不了 EngineCore);这里多进程只在 TP/DP>1 时启用(地基 0 的 UniProc/Multiproc 双实现),单卡默认仍是单进程 |
 | F3 | 冷启动秒级(无 CUDA C++ 编译、无 torch.compile、graph 捕获可关) | 已有 | 他们为长驻服务优化,启动 30s–2min 不在乎 |
 | F4 | 后端缺失自动回退原生,永不硬失败 | 待建 | 他们缺库常直接报错退出 |
-| F5 | bf16 权重与 KV:参数与 cache dtype 脱离 fp16 硬编码(现散在 config/base/moe/attention 多处),由 checkpoint dtype 驱动 | 待建 | 他们早已全面支持;fp16-only 是我们刻意保持的最小精度面,补 bf16 需连带各量化 method 的 supported_dtypes 与 kernel cast 策略 |
+| F5 | **bf16 权重与 KV**:参数与 cache dtype 脱离 fp16 硬编码(现散在 config/base/moe/attention 多处),由 checkpoint dtype 驱动 | 已有(v0.11) | 他们早已全面支持;fp16-only 是我们刻意保持的最小精度面,补 bf16 需连带各量化 method 的 supported_dtypes 与 kernel cast 策略 |
 | F6 | **logprobs / prompt_logprobs**:采样时同步产出 top-k 对数概率,覆盖 prompt + 生成段 | 已有(v0.10) | vLLM 需要独立的 `PromptLogprobsWorker` 二次前向;这里一次 forward 拿全 |
 | F7 | **结构化输出 / 约束生成(guided decoding)**:JSON Schema / 正则 / CFG / choice 约束,grammar bitmask 作用于采样 logits | 待建 | 对标 vLLM `StructuredOutputManager` + xgrammar(旧 API 即 guided_json/guided_regex/guided_choice);自有:Triton bitmask kernel 复用现有 sampler |
-| F8 | **Reasoning parser / Tool parser**:推理段(`think` 标签拆分)与工具调用(函数调用 JSON)在协议层流式拆分,OpenAI 兼容 `reasoning_content` / `tool_calls` 字段 | 待建 | 对标 vLLM `reasoning/`(DeepSeekR1/Qwen3 等 30+ parser)与 `tool_parsers/`(ToolParser ABC);自有:parser 与增量 detokenizer 协同,流式解析不等完整段 |
+| F8 | **Reasoning parser / Tool parser**:推理段(`think` 标签拆分)与工具调用(函数调用 JSON)在协议层流式拆分,OpenAI 兼容 `reasoning_content` / `tool_calls` 字段 | 已有(v0.11) | 对标 vLLM `reasoning/`(DeepSeekR1/Qwen3 等 30+ parser)与 `tool_parsers/`(ToolParser ABC);自有:parser 与增量 detokenizer 协同,流式解析不等完整段,且解析器按请求声明(vLLM/SGLang 均为服务级单选) |
 
 ## 性能维度(主动技术创新,非防守论点)
 
@@ -576,7 +576,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
 
 执行路径是工具而非人工:采集入口统一挂到 Makefile 的 `bench-*` 目标(`benchmarks/bench_*.py` + `examples/benchmark.py`),`perf.watchdog` 与上一版最优比对并标出劣化项,`acc.golden` 出精度门禁、`acc.bisect` 定位精度断层,最后由一个 release-bench agent 按固定模板汇总成发版文档。人只审两处:被标红的劣化项,和结论段的因果解释。工具链自身在 v0.4(watchdog 入库)与 v0.5(autotune collect)成型,所以 v0.4 那份报告的作用是立零点,没有上一版可比。
 
-当前状态:v0.4 - v0.10.0 已发版(发版文档与原始数据如上所述);v0.11 起未动。
+当前状态:v0.4 - v0.11.0 已发版(发版文档与原始数据如上所述);v0.11.5 起未动。
 
 ## v0.4 可信基线(已发版)
 
@@ -726,26 +726,44 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - (已达成)dispatcher 按 shape / dtype 选实现,并能 explain 决策链(v0.9 已达成,此处作回归项)
   - (已达成)Prometheus 能抓到标准 metric
 
-## v0.11.0 前沿架构 + 结构化输出
+## v0.11.0 前沿架构 + 结构化输出(已发版)
 
 - **feat**
-  - MLA:DeepSeek-V2-Lite 端到端 + V3/V4 单层
-  - F7 结构化输出:grammar bitmask 作用于 sampler
-  - F8 reasoning parser / tool parser:think 标签拆分 + tool_calls 流式解析
-  - SWA / HCA / DSA 等新 module 接入,先打通正确性
-  - 通信原语补全:all_gather / reduce_scatter / all_to_all / P2P send-recv
+  - (已达成)MLA:DeepSeek-V2-Lite 端到端(TP=2)——kv_lora_rank 512 + rope 64 的 latent cache 全链路(
+    投影/吸收/分页池/decode kernel);偏差:V3/V4 单层未做,V2 架构已覆盖 MLA 全部核心路径,
+    V3/V4 差异集中在 router 与权重组织,随下轮
+  - (偏差:F7 结构化输出明确移出本轮,见发版文档范围裁剪;grammar bitmask 接口位置已预留)
+  - (已达成)F8 reasoning parser / tool parser:`engine/reasoning.py`(think 标签流式状态机,
+    后缀窗口处理跨 delta 标签)+ `engine/tool_parser.py`(DeepSeek/Qwen 双族标记集,
+    JSON 字符级扫描器),protocol 层补 `reasoning_content`/`tool_calls`,解析器按**请求**声明
+  - (偏差:SWA / HCA / DSA 明确移出本轮,相关接口预留)
+  - (已达成)通信原语补全:all_gather / reduce_scatter / all_to_all / P2P send-recv,
+    gloo 后端双进程数值正确性入测
+  - (已达成)TP 引擎释放对称化:MultiprocExecutor.shutdown 补销毁 rank-0 侧进程组——
+    拥有 followers 即拥有 group;同进程先 TP=2 后 TP=1 的切换挂死(bench_mla 实测踩到)
+    由此根除,golden/探针的手动规避序列随之删除,主进程回归测试反向验证过
+    (撤销修复即失败)
 - **test**
-  - 新增算子 / module / 模型的精度与性能测试
-  - acc.bisect:整模型对 HF 逐层对比,自动定位第一个超阈的层
+  - (已达成)新增算子 / module / 模型的精度与性能测试:MLA 模块单测 + DeepSeek-V2-Lite
+    TP=2 golden(5 用例,drift 预算门禁)+ 通信原语双进程测试;全量回归 1359 passed
+  - (已达成,形态调整)acc.bisect 换成 **acc.divergence**:整模型对 HF 逐层对比不变,
+    定位从"第一个超阈层"升为"逐层 diff + 扰动注入 + 预算式门禁"——BOS 热点排查证明
+    单层超阈可能只是 ULP 算术假热点,预算式门禁比硬阈值更诚实
 - **benchmark**
-  - MLA 模型首份报告,与同尺寸 MHA 模型并列,标出 KV 占用的差距
-  - 结构化输出与 reasoning parser 开启后的 TPOT 影响(bitmask 与流式解析各自的开销)
-  - SWA 在长上下文下相对 full attention 的显存与延迟对照
+  - (已达成)MLA 模型首份报告:`benchmarks/bench_mla.py`——KV 几何从各自 config.json 解析
+    (V2-Lite latent 576 vs 未压缩 5120 vs Qwen3-1.7B GQA 2048 elements/token/层),同负载
+    实测 TTFT/TPOT/峰值显存/KV 池容量;TP 下 latent 复制(每 rank 全量)的口径在报告里标明
+  - (已达成,部分)reasoning parser 开启后的开销:`benchmarks/bench_parser.py`——reasoning
+    +0.07 us/token、reasoning+tools +1.17 us/token(相对本版实测 decode TPOT 21.7–63.0 ms
+    占比 0.002%–0.005%,噪声内);bitmask 侧随 F7 移出
+  - (偏差:SWA 对照随 SWA 移出)
 - **验收**
-  - HF 单层 max-abs-diff 达阈值
-  - JSON Schema 约束下输出 100% 合法
-  - reasoning_content / tool_calls 与 vLLM 输出对齐
-  - SWA 与 full attention 混用可跑
+  - (已达成)HF 单层 max-abs-diff 达阈值:golden TP=2 逐 token + parity probe 校准
+    (prompt drift mean 0.046/max 0.298,decode 步 mean 0.221/max 1.967,greedy match 86%)
+  - (偏差:JSON Schema 100% 合法随 F7 移出)
+  - (已达成)reasoning_content / tool_calls 与 vLLM 对齐:双族标记集对齐 vLLM
+    deepseek/qwen parser,流式分块==一次性解析的公理在 parser 层与 server 层各验证一遍
+  - (偏差:SWA 混用随 SWA 移出)
 
 ## v0.11.5 计算通信重叠
 

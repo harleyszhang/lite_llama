@@ -15,23 +15,21 @@ import torch
 import torch.nn as nn
 
 from lite_llama.modules.linear import ReplicatedLinear
+from lite_llama.modules.moe import SparseMoeBlock
 from lite_llama.modules.quantization import (
-    UnquantizedLinearMethod,
-    UnquantizedFusedMoEMethod,
     QuantizationConfig,
+    UnquantizedFusedMoEMethod,
+    UnquantizedLinearMethod,
 )
+from lite_llama.modules.quantization.awq import AWQLinearMethod
+from lite_llama.modules.quantization.blockwise_int8 import BlockInt8LinearMethod, BlockInt8MoEMethod
+from lite_llama.modules.quantization.fp8 import Fp8LinearMethod, Fp8MoEMethod
 from lite_llama.modules.quantization.utils import (
     quantize_fp8_per_channel,
     quantize_int8_groupwise,
 )
-from lite_llama.modules.quantization.blockwise_int8 import BlockInt8LinearMethod, BlockInt8MoEMethod
-from lite_llama.modules.quantization.fp8 import Fp8LinearMethod, Fp8MoEMethod
 from lite_llama.modules.quantization.w8a8_fp8 import W8A8Fp8LinearMethod
 from lite_llama.modules.quantization.w8a8_int8 import W8A8Int8LinearMethod
-from lite_llama.modules.quantization.awq import AWQLinearMethod
-
-
-from lite_llama.modules.moe import SparseMoeBlock
 
 
 class _StubMoeBlock(SparseMoeBlock):
@@ -42,7 +40,7 @@ class _StubMoeBlock(SparseMoeBlock):
         num_experts: int = 4,
         hidden_size: int = 256,
         moe_intermediate_size: int = 128,
-        quant: "QuantizationConfig | None" = None,
+        quant: QuantizationConfig | None = None,
     ) -> None:
         # Bypass SparseMoeBlock.__init__ which requires a full ModelConfig
         nn.Module.__init__(self)
@@ -63,10 +61,10 @@ def _fill_fp16(layer: ReplicatedLinear, scale: float = 0.05) -> torch.Tensor:
 # Registry: config.get_quant_method() dispatch
 # --------------------------------------------------------------------------- #
 def test_linear_method_registry():
-    from lite_llama.modules.quantization.fp8 import Fp8Config
-    from lite_llama.modules.quantization.blockwise_int8 import BlockInt8Config
-    from lite_llama.modules.quantization.w8a8_int8 import W8A8Int8Config
     from lite_llama.modules.quantization.awq import AWQConfig
+    from lite_llama.modules.quantization.blockwise_int8 import BlockInt8Config
+    from lite_llama.modules.quantization.fp8 import Fp8Config
+    from lite_llama.modules.quantization.w8a8_int8 import W8A8Int8Config
 
     layer = ReplicatedLinear(64, 128)
     assert isinstance(Fp8Config(128, 128).get_quant_method(layer), Fp8LinearMethod)
@@ -86,9 +84,8 @@ def test_int4_method_dispatches_on_checkpoint_method():
 
 
 def test_moe_method_registry():
-    from lite_llama.modules.quantization.fp8 import Fp8Config
     from lite_llama.modules.quantization.blockwise_int8 import BlockInt8Config
-    from lite_llama.modules.moe import SparseMoeBlock
+    from lite_llama.modules.quantization.fp8 import Fp8Config
 
     # Use a stub that inherits from SparseMoeBlock for isinstance check
     block = _StubMoeBlock()
@@ -98,7 +95,6 @@ def test_moe_method_registry():
 
 def test_moe_method_rejects_int4():
     """AWQ has no MoE support; get_quant_method returns UnquantizedFusedMoEMethod for ignored."""
-    from lite_llama.modules.quantization.awq import AWQConfig
     # AWQ doesn't have a MoE method at all — it only returns linear methods.
     # The config simply doesn't support MoE layers.
     pass
@@ -325,7 +321,7 @@ def test_quantize_fp8_per_channel_zero_row():
 # Runtime schemes and shard alignment
 # --------------------------------------------------------------------------- #
 def test_for_runtime_scheme_covers_every_registered_name():
-    from lite_llama.modules.quantization import for_runtime_scheme, RUNTIME_SCHEMES
+    from lite_llama.modules.quantization import RUNTIME_SCHEMES, for_runtime_scheme
     for name in RUNTIME_SCHEMES:
         quant = for_runtime_scheme(name)
         assert quant is not None
@@ -346,8 +342,8 @@ def test_shard_is_aligned_per_channel_always():
 
 
 def test_shard_is_aligned_blockwise():
-    from lite_llama.modules.quantization.blockwise_int8 import BlockInt8Config
     from lite_llama.modules.quantization.awq import AWQConfig
+    from lite_llama.modules.quantization.blockwise_int8 import BlockInt8Config
     from lite_llama.modules.quantization.fp8 import Fp8Config
     for quant in (
         BlockInt8Config.groupwise(group_size=128),

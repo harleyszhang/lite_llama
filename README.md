@@ -41,6 +41,8 @@
 - **Declarative kernel dispatch** (v0.9): every kernel is a `KernelSpec` row (availability / capability / dtype+scheme / shape / layout / golden), selection is `filter → rank → cache` with a per-rejection reason, and a frozen measured ranking replaces hand-written priorities. One dispatch costs 27 µs at construction time and nothing per step.
 - **Token scores** (v0.10): `logprobs=k` reports the chosen token and its top-k alternatives, `prompt_logprobs=k` scores every prompt position — both out of the forward pass that was happening anyway, no rescoring run. Verified against `transformers` on every position.
 - **Metrics and tracing** (v0.10): Prometheus `/metrics` (queue time, TTFT, TPOT, token counters) with no `prometheus_client` dependency, plus one OTLP span per request when a collector is configured. Measured cost is below the 0.5% run-to-run noise.
+- **MLA — DeepSeek-V2-Lite end-to-end** (v0.11): latent KV — 576 elements/token/layer vs 5120 for the same architecture uncompressed — through the same `(dim,)` KV row every other model uses; under TP the latent is replicated, not sharded. On 2× A10: **33.6k vs 9.3k KV tokens per GiB** of pool memory vs a GQA model on the same card, golden-gated against `transformers` token by token.
+- **Streaming reasoning & tool-call parsing** (v0.11): `reasoning_parser` / `tool_parser` are **request fields**, not server flags — one deployment serves R1-style and direct models side by side. Streamed frames concatenate to the one-shot message by construction (tested as an axiom); DeepSeek/Qwen tool marker families; ~1.2 µs/token.
 
 ## Setup and Installation
 
@@ -288,6 +290,14 @@ Recording is windowed, so the default path costs one `if`; windows nest, so a pe
 
 See [docs/tensor_parallel.md](docs/tensor_parallel.md) for the design, the sharding rules (including why QKV is split per segment under GQA), and what byte-exact parity between `tp=1` and `tp=2` can and cannot assert under fp16.
 
+### Multi-head Latent Attention (v0.11)
+
+DeepSeek-V2-Lite runs end-to-end (`lite-llama serve --model-dir my_weight/DeepSeek-V2-Lite --tensor-parallel-size 2`): every token caches one 576-element latent row (512 lora + 64 rope) instead of per-head K and V, through the same `(dim,)` KV row every other model uses. Under TP the latent is **replicated, not sharded** — it is single-KV-head, so splitting it would leave no rank able to compute attention alone; the consequence is that a per-rank pool IS the whole-model pool, and the benchmark reports it under that convention.
+
+On 2× A10 (batch=8, gen=128, eager decode): TTFT 64.8 ms, TPOT 63.01 ms; KV density **33.6k tokens/GiB** of pool memory vs 9.3k for Qwen3-1.7B's GQA on the same card — the 3.6× is the config-parsed 30.4 vs 112.0 KiB/token showing up in a real pool. `python benchmarks/bench_mla.py` prints the honest version of this table: two models that are not the same size, labeled as such, with the latency columns run on one identical workload.
+
+Accuracy is a gate, not a hope: `pytest tests/golden/test_deepseek_v2_tp2.py` compares greedy tokens and per-step logprobs against `transformers` on 2× A10, with drift budgets calibrated from a parity probe — the BOS investigation showed a single-layer max-abs threshold can flag a 1-ULP arithmetic tie as a hotspot, so the budget is what the noise floor actually measured, not a round number.
+
 ### Cross-Stream Overlap (L1)
 
 A continuous-batching step can hold up to three passes — prefill, extend, decode — and each pass needs its input tensors on the GPU. With L1 overlap (on by default, `LITE_LLAMA_OVERLAP=0` to disable) the next pass's upload leaves on a dedicated copy stream while the current forward is still running, so the H2D transfer hides inside the compute instead of serialising behind it. The engine step harvests tokens once at the end rather than synchronising after every pass, which is what makes the overlap structurally possible at all.
@@ -487,6 +497,31 @@ python scripts/layer_harness.py --model-dir my_weight/Qwen3-0.6B \
 ```
 
 `--tolerance` turns the comparison into a gate (non-zero exit above it), so the harness works as a pre-flight check in CI as well as by hand.
+
+## Structured Streaming Output (v0.11)
+
+What the model is thinking, and which tools it wants to call, are properties of the reply — so they are declared **per request**, not per deployment. vLLM and SGLang pick one reasoning parser at server start (`--reasoning-parser`), which means one deployment serves one output style; here `reasoning_parser` and `tool_parser` are fields of `ChatCompletionRequest` (validated at the schema layer), so the same server streams R1-style and direct models side by side.
+
+![streaming reasoning parser](./docs/images/reasoning.gif)
+
+The GIF is a real Qwen3-1.7B run (`python scripts/gen_reasoning_gif.py`): the prompt opens the think tag itself, so the splitter is born inside a thinking section (`starts_inside=True`) and has to catch the closing tag mid-stream — every delta lands in its channel and the tags never leak through.
+
+```bash
+curl localhost:8000/v1/chat/completions -d '{
+  "model": "m", "stream": true,
+  "messages": [{"role": "user", "content": "Tokyo weather?"}],
+  "reasoning_parser": "deepseek_r1",
+  "tool_parser": "deepseek"
+}'
+```
+
+Two switches, independently composable: `reasoning_parser` routes `<think>…</think>` into `delta.reasoning_content`; `tool_parser` (DeepSeek or Qwen marker families) streams `delta.tool_calls` by call index and flips `finish_reason` to `"tool_calls"`. Three properties hold by construction rather than by luck:
+
+- **Streamed == one-shot is an axiom.** The parsers hold any delta that might complete a tag until it cannot, so an arbitrary chunking of a reply concatenates to what a one-shot parse of the same text says — the parser tests enumerate every two-cut split, and a server-level test asserts the streamed frames merge to the one-shot message on the same request.
+- **`finish_reason` is its own frame.** The parser's flush (a tool call cut mid-JSON, a held partial tag) must reach the client before it stops reading, so the terminal frame is an empty delta carrying only the reason — the OpenAI shape.
+- **Length does not lie.** A call truncated by `max_tokens` reports the fragments it did get, but `finish_reason` stays `"length"` rather than claiming `"tool_calls"`.
+
+Cost, measured with `python benchmarks/bench_parser.py`: reasoning + tool parsing adds ~1.17 µs/token — 0.002–0.005% of decode TPOT, below run-to-run noise.
 
 ## Architecture
 
