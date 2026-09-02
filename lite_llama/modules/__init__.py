@@ -22,6 +22,7 @@ if TYPE_CHECKING:
         ReplicatedLinear,
         RowParallelLinear,
     )
+    from .mla import DeepseekV2MLAAttention
     from .mlp import FusedMLP
     from .moe import SparseMoeBlock
     from .rotary_embedding import MRotaryEmbedding, RotaryEmbedding
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 # RotaryEmbedding`` CPU-only.
 _EXPORTS: dict[str, tuple[str, str]] = {
     "ColumnParallelLinear": (".linear", "ColumnParallelLinear"),
+    "DeepseekV2MLAAttention": (".mla", "DeepseekV2MLAAttention"),
     "FusedMLP": (".mlp", "FusedMLP"),
     "LinearBase": (".linear", "LinearBase"),
     "MRotaryEmbedding": (".rotary_embedding", "MRotaryEmbedding"),
@@ -64,6 +66,7 @@ def __dir__() -> list[str]:
 
 __all__ = [
     "ColumnParallelLinear",
+    "DeepseekV2MLAAttention",
     "FusedMLP",
     "LinearBase",
     "MRotaryEmbedding",

@@ -314,6 +314,7 @@ class ContinuousBatchingEngine:
         cuda_graph_lazy: bool = False,
         async_tokenize: bool = False,
         pipeline: bool | None = None,
+        hf_overrides: dict[str, object] | None = None,
     ) -> ContinuousBatchingEngine:
         """Load a checkpoint and wrap it in a continuous-batching engine.
 
@@ -360,6 +361,11 @@ class ContinuousBatchingEngine:
                 :data:`~lite_llama.executor.worker.PIPELINE_ENV`. Stop handling
                 runs one token late, and a request asking for logprobs pays
                 its synchronisation inside the pass as usual.
+            hf_overrides: Fields applied over the checkpoint's ``config.json``
+                (vLLM ``--hf-overrides`` semantics), e.g.
+                ``{"num_hidden_layers": 1}`` to run a trimmed stack — the
+                supported way to exercise one family's layer arithmetic
+                without paying for the whole model. Passed to every rank.
 
         Raises:
             NotImplementedError: The checkpoint is multimodal.
@@ -388,6 +394,7 @@ class ContinuousBatchingEngine:
             "quantization": quantization,
             "kv_cache_dtype": kv_cache_dtype,
             "cuda_graph_lazy": cuda_graph_lazy,
+            "hf_overrides": hf_overrides,
         }
 
         resolved_pipeline = pipeline_enabled() if pipeline is None else pipeline

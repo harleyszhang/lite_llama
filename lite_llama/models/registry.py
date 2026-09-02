@@ -46,6 +46,7 @@ class ModelRegistry:
         ModelSpec("qwen3", "lite_llama.models.qwen3:Qwen3Model"),
         ModelSpec("qwen3_moe", "lite_llama.models.qwen3_moe:Qwen3MoeModel"),
         ModelSpec("deepseek_v2", "lite_llama.models.deepseek_v2:DeepseekV2Model"),
+        ModelSpec("deepseek_v3", "lite_llama.models.deepseek_v2:DeepseekV3Model"),
         ModelSpec("llava", "lite_llama.models.llava:LlavaLlama", is_multimodal=True),
         ModelSpec("qwen3_vl", "lite_llama.models.qwen3_vl:Qwen3VLForCausalLM", is_multimodal=True),
     )

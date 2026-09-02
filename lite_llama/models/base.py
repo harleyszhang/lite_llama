@@ -256,12 +256,7 @@ class CausalLM(nn.Module):
         # them, and a tied model cannot honestly shard one without the other.
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size, dtype)
         self.layers = nn.ModuleList(
-            DecoderLayer(
-                config,
-                attention=self._build_attention(config, i),
-                mlp=self._build_mlp(config, i),
-            )
-            for i in range(config.num_layers)
+            self._build_decoder_layer(config, i) for i in range(config.num_layers)
         )
         self.norm_weight = nn.Parameter(torch.ones(config.hidden_size, dtype=dtype))
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size, dtype)
@@ -302,6 +297,19 @@ class CausalLM(nn.Module):
         """Per-layer MLP factory; MoE variants override it to pick per layer."""
         return FusedMLP(config, self._layer_quant(layer_index))
 
+    def _build_decoder_layer(self, config: ModelConfig, layer_index: int) -> DecoderLayer:
+        """Per-layer block factory: the default pairs the two factories above.
+
+        A family that assembles the block differently (DeepSeek picks MLA plus
+        dense-or-MoE per position inside its own ``DecoderLayer`` subclass)
+        overrides this instead of the two narrower hooks.
+        """
+        return DecoderLayer(
+            config,
+            attention=self._build_attention(config, layer_index),
+            mlp=self._build_mlp(config, layer_index),
+        )
+
     # ---- weight loading --------------------------------------------------- #
     def translate_weight_key(self, key: str) -> weights.Target:
         """Map a checkpoint key onto this model's parameters.
@@ -309,10 +317,18 @@ class CausalLM(nn.Module):
         Strips :attr:`hf_prefix` (``lm_head.weight`` sits outside it) and defers
         the rest to :func:`lite_llama.models.weights.translate_text_key`, with
         :attr:`packed_modules_mapping` supplying the fused-projection rules.
+        Layer keys at or past ``num_layers`` are dropped first: their weights
+        belong to modules this model never built — the MTP/nextn layers a
+        DeepSeek checkpoint ships past its stack, or whatever an
+        ``hf_overrides`` ``num_hidden_layers`` trim cut away — and failing the
+        load on them would make trimming impossible.
         """
-        return weights.translate_text_key(
-            key.removeprefix(self.hf_prefix), self.packed_modules_mapping
-        )
+        stripped = key.removeprefix(self.hf_prefix)
+        if stripped.startswith("layers."):
+            index, _, _ = stripped[len("layers.") :].partition(".")
+            if index.isdigit() and int(index) >= self.config.num_layers:
+                return None
+        return weights.translate_text_key(stripped, self.packed_modules_mapping)
 
     def load_weights(self, checkpoint: Iterable[tuple[str, torch.Tensor]]) -> None:
         """Fill every parameter from a HuggingFace checkpoint stream.

@@ -343,16 +343,13 @@ def test_mla_layer_builds_the_latent_attention(tmp_path):
     The absorbed-decode views are checked by shape because that is their whole
     contract: zero-copy reads of kv_b's per-head ``[k_nope | v]`` layout.
     """
-    from lite_llama.models.deepseek_v2 import MlaAttention
-    from lite_llama.modules import FusedMLP, SparseMoeBlock
+    from lite_llama.modules import DeepseekV2MLAAttention, FusedMLP, SparseMoeBlock
 
     config = _config(tmp_path, _MLA)
     harness = SingleLayerHarness(config, 0, device="cpu")
-    assert isinstance(harness.layer.self_attn, MlaAttention)
+    assert isinstance(harness.layer.self_attn, DeepseekV2MLAAttention)
     assert isinstance(harness.layer.mlp, FusedMLP)
-    assert isinstance(
-        SingleLayerHarness(config, 1, device="cpu").layer.mlp, SparseMoeBlock
-    )
+    assert isinstance(SingleLayerHarness(config, 1, device="cpu").layer.mlp, SparseMoeBlock)
 
     attn = harness.layer.self_attn
     assert attn.w_uk.shape == (4, 16, 32)  # heads, kv_lora, qk_nope

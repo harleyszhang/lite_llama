@@ -136,6 +136,7 @@ class ModelRunner:
         quantization: str | None = None,
         kv_cache_dtype: str = "auto",
         cuda_graph_lazy: bool = False,
+        hf_overrides: dict[str, object] | None = None,
     ) -> ModelRunner:
         """Load config + weights and return a ready-to-run runner.
 
@@ -159,8 +160,14 @@ class ModelRunner:
                 instead of the whole grid's — pair with
                 :meth:`enable_cuda_graph`'s ``lazy`` flag or on-demand captures
                 fight the cache for workspace that was never withheld.
+            hf_overrides: Fields applied over the checkpoint's ``config.json``
+                (vLLM ``--hf-overrides`` semantics), e.g.
+                ``{"num_hidden_layers": 1}`` to trim the stack while still
+                loading and running through every production path.
         """
-        config = ModelConfig.from_pretrained(checkpoints_dir, max_seq_len, kv_cache_dtype)
+        config = ModelConfig.from_pretrained(
+            checkpoints_dir, max_seq_len, kv_cache_dtype, hf_overrides=hf_overrides
+        )
         spec = ModelRegistry.resolve(config.model_type)
         model = (loader or DefaultModelLoader()).load_model(
             config, spec.load_class(), checkpoints_dir, device, quantization
