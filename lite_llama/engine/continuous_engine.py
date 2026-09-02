@@ -23,7 +23,8 @@ import itertools
 import os
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -47,6 +48,7 @@ from .scheduler import (
     DEFAULT_MAX_NUM_BATCHED_TOKENS,
     DEFAULT_MAX_NUM_SEQS,
     Request,
+    RequestStatus,
     Scheduler,
     SchedulerConfig,
 )
@@ -67,6 +69,20 @@ class _Work(NamedTuple):
     plan: ModelInput
     requests: list[Request]
     chunk_requests: tuple[Request, ...] = ()
+
+
+# Background tokenize workers (O10). Tokenizer.encode releases the GIL, so a
+# few workers give a burst of arrivals genuinely parallel encoding; idle
+# threads cost nothing.
+_TOKENIZE_WORKERS = 4
+
+
+class _TokenizeJob(NamedTuple):
+    """One background encode (O10): a request awaiting its prompt tokens."""
+
+    request: Request
+    future: Future[list[int]]
+    on_error: Callable[[Request, BaseException], None] | None
 
 
 def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
@@ -201,6 +217,11 @@ class ContinuousBatchingEngine:
         executor: Where passes run. Defaults to a
             :class:`~lite_llama.executor.executor.UniProcExecutor` (single GPU);
             injecting a fake is how a test drives the step loop without a model.
+        async_tokenize: O10 — encode prompts on a background thread pool
+            instead of the caller's thread. ``add_request`` returns a request
+            whose tokens fill in on the first :meth:`step` after the encode
+            lands, so a large prompt no longer stalls the engine loop (or the
+            step cadence) for its tens of milliseconds of encoding.
 
     Raises:
         NotImplementedError: The checkpoint is multimodal — vision prefill
@@ -214,6 +235,7 @@ class ContinuousBatchingEngine:
         executor: Executor | None = None,
         *,
         pipeline: bool | None = None,
+        async_tokenize: bool = False,
     ) -> None:
         if engine.model_runner.spec.is_multimodal:
             raise NotImplementedError(
@@ -252,6 +274,12 @@ class ContinuousBatchingEngine:
         self._detokenizers: dict[str, IncrementalDetokenizer] = {}
         self._request_ids = itertools.count()
         self._step_count = 0
+        # O10 background tokenize: pool created on first use, jobs collected at
+        # the top of every step (same thread that calls add_request, so the
+        # dict needs no lock).
+        self._async_tokenize = async_tokenize
+        self._tokenize_pool: ThreadPoolExecutor | None = None
+        self._tokenizing: dict[str, _TokenizeJob] = {}
         # One step's launched-but-unharvested passes, when pipelined: each entry
         # is the launched list of (work, host tokens, event, records). Depth is
         # one by construction — every step harvests before it schedules.
@@ -282,6 +310,9 @@ class ContinuousBatchingEngine:
         tensor_parallel_size: int = 1,
         kv_cache_dtype: str = "auto",
         enable_prefix_cache: bool = False,
+        decode_window_steps: int = 0,
+        cuda_graph_lazy: bool = False,
+        async_tokenize: bool = False,
         pipeline: bool | None = None,
     ) -> ContinuousBatchingEngine:
         """Load a checkpoint and wrap it in a continuous-batching engine.
@@ -311,6 +342,18 @@ class ContinuousBatchingEngine:
                 resident in the cache. Off by default: it only pays when prompts
                 share a prefix, and otherwise costs a hash per block. See
                 :mod:`lite_llama.engine.prefix_cache`.
+            decode_window_steps: O9 decode window — how many pure-decode steps
+                a fresh prompt waits at most before it may interrupt them.
+                ``0`` (default) admits immediately; ``N > 0`` trades a little
+                TTFT for TPOT smoothness under bursty arrivals.
+            cuda_graph_lazy: O13 lazy graph capture — seed pair at startup,
+                remaining shapes captured on first use. Pairs with
+                ``use_cuda_graph``; ignored when graphs are off or TP > 1.
+            async_tokenize: O10 — encode prompts on a background thread pool
+                so a large prompt's tens of milliseconds of tokenization stop
+                serialising against the engine loop and every step it would
+                have delayed. ``add_request`` returns immediately; the request
+                joins the scheduler once its tokens are ready.
             pipeline: Run the launch/harvest engine loop (O2): launches run one
                 step ahead of harvests so the host's bookkeeping overlaps
                 compute, and decode inputs stay on the device. ``None`` reads
@@ -344,6 +387,7 @@ class ContinuousBatchingEngine:
             "use_cuda_graph": use_cuda_graph and tensor_parallel_size == 1,
             "quantization": quantization,
             "kv_cache_dtype": kv_cache_dtype,
+            "cuda_graph_lazy": cuda_graph_lazy,
         }
 
         resolved_pipeline = pipeline_enabled() if pipeline is None else pipeline
@@ -375,6 +419,7 @@ class ContinuousBatchingEngine:
             max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
             enable_prefix_cache=enable_prefix_cache,
+            decode_window_steps=decode_window_steps,
         )
         executor: Executor | None = None
         if get_tp_world_size() > 1:
@@ -382,7 +427,9 @@ class ContinuousBatchingEngine:
                 engine, config.max_num_seqs, config.max_seq_len, followers,
                 pipeline=resolved_pipeline,
             )
-        return cls(engine, config, executor, pipeline=resolved_pipeline)
+        return cls(
+            engine, config, executor, pipeline=resolved_pipeline, async_tokenize=async_tokenize
+        )
 
     # ------------------------------------------------------------- public API #
     def add_request(
@@ -391,6 +438,7 @@ class ContinuousBatchingEngine:
         sampling_params: SamplingParams | None = None,
         request_id: str | None = None,
         prompt_token_ids: list[int] | None = None,
+        on_error: Callable[[Request, BaseException], None] | None = None,
     ) -> Request:
         """Queue a request and return the handle that tracks it.
 
@@ -402,11 +450,32 @@ class ContinuousBatchingEngine:
             sampling_params: Per-request knobs; defaults to :class:`SamplingParams`.
             request_id: Caller-supplied id; generated when omitted.
             prompt_token_ids: Pre-tokenised prompt, to skip re-encoding.
+            on_error: O10 — fired (on the engine thread, from :meth:`step`)
+                when a background encode fails or the tokenised prompt is
+                rejected. The synchronous path raises from here instead.
         """
         if request_id is None:
             request_id = f"req-{next(self._request_ids)}"
-            while request_id in self._detokenizers:
+            while request_id in self._detokenizers or request_id in self._tokenizing:
                 request_id = f"req-{next(self._request_ids)}"
+
+        if prompt_token_ids is None and self._async_tokenize:
+            # O10: encode off this thread. The request joins the scheduler (or
+            # fails, firing ``on_error``) at the top of the next step, so a
+            # large prompt never stalls the loop that drives every other
+            # request's steps.
+            request = Request(
+                request_id=request_id,
+                prompt=prompt,
+                prompt_token_ids=[],
+                params=sampling_params or SamplingParams(),
+            )
+            future = self._ensure_tokenize_pool().submit(
+                self.tokenizer.encode, prompt, add_special_tokens=True
+            )
+            self._tokenizing[request_id] = _TokenizeJob(request, future, on_error)
+            return request
+
         request = Request(
             request_id=request_id,
             prompt=prompt,
@@ -417,15 +486,63 @@ class ContinuousBatchingEngine:
             ),
             params=sampling_params or SamplingParams(),
         )
+        self._register_request(request)
+        return request
+
+    def _register_request(self, request: Request) -> None:
+        """Hand a fully tokenised request to the scheduler and open its buffers."""
         self.scheduler.add_request(request)
         self._detokenizers[request.request_id] = IncrementalDetokenizer(self.tokenizer, 1)
         self._spans[request.request_id] = self.tracer.start_span(
             "request", request_id=request.request_id, prompt_tokens=request.prompt_len
         )
-        return request
+
+    def _ensure_tokenize_pool(self) -> ThreadPoolExecutor:
+        """The shared encode pool, created on first background tokenize."""
+        if self._tokenize_pool is None:
+            self._tokenize_pool = ThreadPoolExecutor(
+                max_workers=_TOKENIZE_WORKERS, thread_name_prefix="lite-llama-tokenize"
+            )
+        return self._tokenize_pool
+
+    def _collect_tokenized(self) -> None:
+        """Fold finished background encodes into the queue (O10).
+
+        Runs at the top of every step, on the engine thread — the same one
+        that called ``add_request``, so the dict needs no lock. A finished
+        job's tokens join the scheduler; a failed one (encode error, empty or
+        over-long prompt) finishes its request with ``finish_reason="invalid"``
+        and the exception on ``request.error``, and fires the caller's
+        ``on_error`` — exactly what the synchronous path would have raised.
+        """
+        if not self._tokenizing:
+            return
+        for request_id, job in [*self._tokenizing.items()]:
+            if not job.future.done():
+                continue
+            del self._tokenizing[request_id]
+            request = job.request
+            try:
+                request.prompt_token_ids = job.future.result()
+                self._register_request(request)
+            except Exception as exc:
+                request.error = exc
+                request.status = RequestStatus.FINISHED
+                request.finish_reason = "invalid"
+                self.metrics.finished.inc(finish_reason="invalid")
+                if job.on_error is not None:
+                    job.on_error(request, exc)
 
     def abort(self, request_id: str) -> Request | None:
         """Cancel a request; its slot is free for the next step."""
+        job = self._tokenizing.pop(request_id, None)
+        if job is not None:
+            # Never reached the scheduler; its encode result is garbage now.
+            request = job.request
+            request.status = RequestStatus.FINISHED
+            request.finish_reason = "abort"
+            self.metrics.finished.inc(finish_reason="abort")
+            return request
         request = self.scheduler.abort(request_id)
         if request is not None:
             self.metrics.finished.inc(finish_reason="abort")
@@ -435,7 +552,9 @@ class ContinuousBatchingEngine:
 
     def has_unfinished_requests(self) -> bool:
         """Whether anything is queued, in flight, or awaiting its harvest."""
-        return self.scheduler.has_unfinished_requests() or bool(self._inflight)
+        return (
+            self.scheduler.has_unfinished_requests() or bool(self._inflight) or bool(self._tokenizing)
+        )
 
     @torch.inference_mode()
     def step(self) -> list[Request]:
@@ -450,6 +569,7 @@ class ContinuousBatchingEngine:
             tokens this step harvested: the return value is one step behind
             the launches, which is the latency the mode trades for overlap.
         """
+        self._collect_tokenized()
         if self._pipeline:
             return self._step_pipelined()
         return self._step_synchronous()
@@ -620,7 +740,19 @@ class ContinuousBatchingEngine:
             submission order.
         """
         params = sampling_params or SamplingParams()
-        requests = [self.add_request(prompt, params) for prompt in prompts]
+        if self._async_tokenize and len(prompts) > 1:
+            # O10: encode releases the GIL, so the batch tokenises in parallel
+            # — sum(encode_i) collapses to max(encode_i) before the first step.
+            pool = self._ensure_tokenize_pool()
+            futures = [
+                pool.submit(self.tokenizer.encode, p, add_special_tokens=True) for p in prompts
+            ]
+            requests = [
+                self.add_request(prompt, params, prompt_token_ids=future.result())
+                for prompt, future in zip(prompts, futures, strict=True)
+            ]
+        else:
+            requests = [self.add_request(prompt, params) for prompt in prompts]
         while self.has_unfinished_requests():
             self.step()
         return [
@@ -641,6 +773,9 @@ class ContinuousBatchingEngine:
         # Unharvested passes are gone with the executor; their pinned buffers
         # belong to it, and their requests are nobody's to advance any more.
         self._inflight.clear()
+        self._tokenizing.clear()
+        if self._tokenize_pool is not None:
+            self._tokenize_pool.shutdown(wait=False)
         self._executor.shutdown()
 
     def timeline_summary(self) -> str:

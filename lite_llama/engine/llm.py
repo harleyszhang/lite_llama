@@ -55,6 +55,9 @@ class LLM(LLMEngine):
             the replicas and exposes the same ``generate``.
         kv_cache_dtype: KV-cache element type — ``"auto"`` (fp16) or an fp8
             spelling (``"fp8"`` / ``"fp8_e4m3"``), halving the cache footprint.
+        cuda_graph_lazy: O13 lazy graph capture — seed pair at startup, the
+            remaining ``(batch, bucket)`` shapes on first use. Trades a one-off
+            ~0.5–1 s stall per new shape for a seconds-scale cold start.
     """
 
     def __init__(
@@ -69,6 +72,7 @@ class LLM(LLMEngine):
         tensor_parallel_size: int = 1,
         data_parallel_size: int = 1,
         kv_cache_dtype: str = "auto",
+        cuda_graph_lazy: bool = False,
     ) -> None:
         if data_parallel_size != 1:
             raise ValueError(
@@ -95,6 +99,7 @@ class LLM(LLMEngine):
             quantization=quantization,
             tensor_parallel_size=tensor_parallel_size,
             kv_cache_dtype=kv_cache_dtype,
+            cuda_graph_lazy=cuda_graph_lazy,
         )
 
         # Strategy: only multimodal checkpoints get a preparer (and pay for the

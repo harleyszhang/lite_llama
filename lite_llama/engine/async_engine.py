@@ -266,7 +266,9 @@ class AsyncLLMEngine:
         if kind == "add":
             request_id, prompt, params = payload
             try:
-                self._engine.add_request(prompt, params, request_id=request_id)
+                self._engine.add_request(
+                    prompt, params, request_id=request_id, on_error=self._fail_async
+                )
             except ValueError as exc:
                 # A rejected prompt (empty, or longer than the context window) is
                 # the caller's problem, not a server fault: hand the error to that
@@ -274,6 +276,15 @@ class AsyncLLMEngine:
                 self._fail(request_id, exc)
         elif kind == "abort":
             self._engine.abort(payload)
+
+    def _fail_async(self, request, exc: BaseException) -> None:
+        """Deliver a background-tokenize failure to its stream (O10).
+
+        The engine thread fires this from ``step`` once a request's encode
+        failed or its prompt was rejected — the same exception the
+        synchronous path above would have raised from ``add_request``.
+        """
+        self._fail(request.request_id, exc)
 
     def _publish(self, request) -> None:
         stream = self._streams.get(request.request_id)

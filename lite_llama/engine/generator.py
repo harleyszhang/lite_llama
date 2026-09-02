@@ -40,6 +40,7 @@ class TextGenerator:
         quantization: str | None = None,
         tensor_parallel_size: int = 1,
         kv_cache_dtype: str = "auto",
+        cuda_graph_lazy: bool = False,
     ) -> None:
         self._llm = LLM(
             model=checkpoints_dir,
@@ -51,6 +52,7 @@ class TextGenerator:
             quantization=quantization,
             tensor_parallel_size=tensor_parallel_size,
             kv_cache_dtype=kv_cache_dtype,
+            cuda_graph_lazy=cuda_graph_lazy,
         )
         # Legacy attribute: callers (e.g. the CLI) read ``engine.last_stop_reasons``.
         self.engine = self._llm
@@ -85,6 +87,7 @@ class VisionGenerator:
         quantization: str | None = None,
         tensor_parallel_size: int = 1,
         kv_cache_dtype: str = "auto",
+        cuda_graph_lazy: bool = False,
     ) -> None:
         self._llm = LLM(
             model=checkpoints_dir,
@@ -95,6 +98,7 @@ class VisionGenerator:
             quantization=quantization,
             tensor_parallel_size=tensor_parallel_size,
             kv_cache_dtype=kv_cache_dtype,
+            cuda_graph_lazy=cuda_graph_lazy,
         )
         self.engine = self._llm
         self.device = device
