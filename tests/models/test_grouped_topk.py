@@ -9,8 +9,15 @@ tolerance — decides the outcome, and the whole function is checked against a
 naive per-token transcription of vLLM's implementation across parameter
 combinations.
 
+The rules are device-independent torch ops, so the grid runs on the CPU tier
+CI executes on every PR; a ``gpu``-marked section re-runs the reference
+agreement on the device production routes on — where ``torch.topk`` breaks
+ties and fp32 reductions round differently — plus the one input class that
+can differ by device: saturated sigmoid scores tying at exactly 1.0.
+
 Usage:
-    pytest tests/models/test_grouped_topk.py
+    pytest tests/models/test_grouped_topk.py            # rules + CPU grid
+    pytest tests/models/test_grouped_topk.py -m gpu     # the device section
 """
 
 from __future__ import annotations
@@ -58,7 +65,7 @@ def _naive_grouped_topk(
         else:
             grouped = scores[row].view(num_expert_group, per_group)
             group_scores = grouped.max(dim=-1).values
-        alive = torch.zeros(n_experts, dtype=torch.bool)
+        alive = torch.zeros(n_experts, dtype=torch.bool, device=scores.device)
         for group in torch.topk(group_scores, k=topk_group).indices.tolist():
             alive[group * per_group : (group + 1) * per_group] = True
         if e_score_correction_bias is not None:
@@ -269,6 +276,82 @@ def test_matches_naive_reference(scoring, bias, renormalize, scale, groups, topk
         ref_ids,
         f"scoring={scoring} bias={bias is not None} renorm={renormalize} "
         f"scale={scale} groups={groups} topk_group={topk_group} top_k={top_k}",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# The device production routes on
+# --------------------------------------------------------------------------- #
+@pytest.mark.gpu
+@pytest.mark.parametrize("scoring,bias", [("softmax", False), ("sigmoid", True)])
+def test_matches_naive_reference_on_the_device(scoring, bias):
+    """The rules must hold where production routes: CUDA, fp32 logits.
+
+    The CPU grid pins the semantics; what only the device can pin is the
+    numeric environment the router actually runs in — ``torch.topk`` and
+    the fp32 reductions take CUDA code paths there. Seeded ``randn`` logits
+    make exact score ties measure-zero, so selection must agree with the
+    per-row reference *and* with the CPU run of the same seed; only
+    reduction rounding may differ, which the tolerance absorbs.
+    """
+    torch.manual_seed(0)
+    logits = torch.randn(64, 16)
+    bias_cpu = torch.randn(16) if bias else None
+    common = {
+        "top_k": 4,
+        "renormalize": True,
+        "num_expert_group": 4,
+        "topk_group": 2,
+        "routed_scaling_factor": 2.5,
+        "scoring_func": scoring,
+    }
+    device_kwargs = {
+        **common,
+        "e_score_correction_bias": bias_cpu.cuda() if bias_cpu is not None else None,
+    }
+    weights, ids = grouped_topk(logits.cuda(), **device_kwargs)
+    assert weights.is_cuda and ids.is_cuda
+    ref_weights, ref_ids = _naive_grouped_topk(logits.cuda(), **device_kwargs)
+    _assert_same_routing(weights, ids, ref_weights, ref_ids, f"on-device {scoring}")
+
+    cpu_kwargs = {**common, "e_score_correction_bias": bias_cpu}
+    cpu_weights, cpu_ids = grouped_topk(logits, **cpu_kwargs)
+    _assert_same_routing(weights, ids, cpu_weights, cpu_ids, f"device-vs-cpu {scoring}")
+
+
+@pytest.mark.gpu
+def test_saturated_scores_keep_the_rules_on_the_device():
+    """Saturated sigmoid scores tie at exactly 1.0 in fp32 — and the rules survive.
+
+    fp32 sigmoid saturates once ``|logit|`` passes ~17: every high expert's
+    original score is exactly 1.0, every low expert's ~9e-14. Real router
+    logits reach this, and it is the one input class where CUDA and CPU
+    ``topk`` may pick different winners (why vLLM pins ``sorted=True`` for
+    batch invariance), so the winners themselves cannot be asserted across
+    devices — but every rule that holds regardless of the tie-break must:
+    the weights are whoever won's *original* scores, renormalised and scaled.
+    A bias leaking into them would read 1.0 + bias, not 1.0.
+    """
+    torch.manual_seed(0)
+    logits = torch.where(torch.arange(16) % 2 == 0, 30.0, -30.0).repeat(8, 1).cuda()
+    bias = torch.randn(16).cuda()
+    weights, ids = grouped_topk(
+        logits,
+        top_k=4,
+        renormalize=True,
+        num_expert_group=4,
+        topk_group=2,
+        scoring_func="sigmoid",
+        routed_scaling_factor=2.5,
+        e_score_correction_bias=bias,
+    )
+    originals = torch.sigmoid(logits)
+    # The premise this test exists for: the high half sits at exactly 1.0.
+    assert originals[:, 0::2].eq(1.0).all()
+    unrenormed = originals.gather(1, ids)
+    expected = unrenormed / unrenormed.sum(dim=-1, keepdim=True) * 2.5
+    assert torch.allclose(weights, expected, rtol=1e-6), (
+        "weights must be the winners' tied original scores, renormalised"
     )
 
 
