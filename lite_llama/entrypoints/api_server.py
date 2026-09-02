@@ -19,7 +19,9 @@ from typing import Any
 
 from ..engine.async_data_parallel import AsyncDataParallelEngine
 from ..engine.async_engine import AsyncLLMEngine, StreamedOutput
+from ..engine.reasoning import ReasoningSplitter, for_family
 from ..engine.sampler import PositionLogprobs, SamplingParams
+from ..engine.tool_parser import ToolCall, ToolCallDelta, ToolParser
 from ..utils.logger import get_logger
 from ..utils.prompt_templates import get_prompter
 from .protocol import (
@@ -38,6 +40,10 @@ from .protocol import (
     CompletionLogprobs,
     CompletionRequest,
     CompletionResponse,
+    DeltaFunctionCall,
+    DeltaToolCall,
+    FunctionCall,
+    MessageToolCall,
     ModelCard,
     ModelList,
     UsageInfo,
@@ -48,6 +54,31 @@ logger = get_logger(__name__)
 
 # Terminator every OpenAI-compatible stream ends with; clients watch for it.
 _SSE_DONE = "data: [DONE]\n\n"
+
+
+def _message_tool_call(call: ToolCall) -> MessageToolCall:
+    """Lift a parser call onto the wire shape of a chat message."""
+    return MessageToolCall(
+        id=call.id, function=FunctionCall(name=call.name, arguments=call.arguments)
+    )
+
+
+def _delta_tool_call(delta: ToolCallDelta) -> DeltaToolCall:
+    """Lift one stream delta onto the wire shape clients merge by index."""
+    return DeltaToolCall(
+        index=delta.index,
+        id=delta.id,
+        function=DeltaFunctionCall(name=delta.name, arguments=delta.arguments),
+    )
+
+
+def _build_parsers(
+    body: ChatCompletionRequest,
+) -> tuple[ReasoningSplitter | None, ToolParser | None]:
+    """Instantiate what the request asked for; ``(None, None)`` passes text through."""
+    splitter = for_family(body.reasoning_parser) if body.reasoning_parser else None
+    tool_parser = ToolParser.for_model(body.tool_parser) if body.tool_parser else None
+    return splitter, tool_parser
 
 
 def _require_fastapi() -> Any:
@@ -298,10 +329,10 @@ class OpenAIServer:
         prompt = self._render_chat(body)
         params = body.to_sampling_params()
         if body.stream:
-            return self._stream_chat(prompt, params)
-        return await self._full_chat(prompt, params)
+            return self._stream_chat(prompt, params, body)
+        return await self._full_chat(prompt, params, body)
 
-    async def _full_chat(self, prompt: str, params: SamplingParams):
+    async def _full_chat(self, prompt: str, params: SamplingParams, body: ChatCompletionRequest):
         collector = (
             _LogprobsCollector(self.engine.tokenizer) if params.logprobs is not None else None
         )
@@ -312,19 +343,42 @@ class OpenAIServer:
                 collector.add(chunk.logprobs)
         if final is None:
             raise RuntimeError("request produced no output")
+        splitter, tool_parser = _build_parsers(body)
+        message = ChatCompletionMessage(content=final.text)
+        finish = final.finish_reason
+        if splitter is not None or tool_parser is not None:
+            reasoning, content = "", final.text
+            if splitter is not None:
+                reasoning, content = splitter.feed(final.text)
+                tail_reasoning, tail_content = splitter.finish()
+                reasoning, content = reasoning + tail_reasoning, content + tail_content
+            calls: list[ToolCall] = []
+            if tool_parser is not None:
+                content, calls = tool_parser.parse(content)
+            message = ChatCompletionMessage(
+                content=content,
+                reasoning_content=reasoning or None,
+                tool_calls=[_message_tool_call(call) for call in calls] or None,
+            )
+            # A length cut may have sliced the markup mid-call; the cut is the
+            # honest finish reason, the calls it produced are still reported.
+            if calls and finish != "length":
+                finish = "tool_calls"
         return ChatCompletionResponse(
             model=self.model_name,
             choices=[
                 ChatCompletionChoice(
-                    message=ChatCompletionMessage(content=final.text),
-                    finish_reason=final.finish_reason,
+                    message=message,
+                    finish_reason=finish,
                     logprobs=collector.chat_block() if collector is not None else None,
                 )
             ],
             usage=self._usage(final),
         )
 
-    async def _stream_chat(self, prompt: str, params: SamplingParams) -> AsyncIterator[str]:
+    async def _stream_chat(
+        self, prompt: str, params: SamplingParams, body: ChatCompletionRequest
+    ) -> AsyncIterator[str]:
         response_id = _request_id("chatcmpl")
 
         def frame(
@@ -344,15 +398,81 @@ class OpenAIServer:
         collector = (
             _LogprobsCollector(self.engine.tokenizer) if params.logprobs is not None else None
         )
+        splitter, tool_parser = _build_parsers(body)
+        saw_calls = False
 
         # OpenAI opens with a role-only delta, before any text exists.
         yield frame(ChatCompletionDelta(role="assistant"), None)
+        finish: str | None = None
         async for chunk in self.engine.generate(prompt, params):
             block = None
             if collector is not None and chunk.logprobs is not None:
                 collector.add(chunk.logprobs)
                 block = collector.chat_block(last_only=True)
-            yield frame(ChatCompletionDelta(content=chunk.delta), chunk.finish_reason, block)
+            reasoning_text, content_text = "", chunk.delta
+            if splitter is not None:
+                reasoning_text, content_text = splitter.feed(chunk.delta)
+            tool_deltas: list[ToolCallDelta] = []
+            if tool_parser is not None:
+                step = tool_parser.feed(content_text)
+                content_text, tool_deltas = step.content, step.calls
+            saw_calls = saw_calls or bool(tool_deltas)
+            finish = chunk.finish_reason or finish
+            # A chunk whose text the suffix window swallowed emits no frame;
+            # its logprob block rides whichever frame the chunk does emit.
+            first = True
+            if reasoning_text:
+                yield frame(
+                    ChatCompletionDelta(reasoning_content=reasoning_text),
+                    None,
+                    block if first else None,
+                )
+                first = False
+            if content_text:
+                yield frame(
+                    ChatCompletionDelta(content=content_text), None, block if first else None
+                )
+                first = False
+            if tool_deltas:
+                yield frame(
+                    ChatCompletionDelta(
+                        tool_calls=[_delta_tool_call(delta) for delta in tool_deltas]
+                    ),
+                    None,
+                    block if first else None,
+                )
+        # End-of-stream flush: the suffix windows release what they held and a
+        # truncated call surfaces its pieces — all before the terminal frame,
+        # because clients stop reading at finish_reason.
+        tail_reasoning, tail_content = "", ""
+        if splitter is not None:
+            tail_reasoning, tail_content = splitter.finish()
+        if tail_reasoning:
+            yield frame(ChatCompletionDelta(reasoning_content=tail_reasoning), None)
+        if tool_parser is not None:
+            step = tool_parser.feed(tail_content)
+            tail_content, tail_deltas = step.content, step.calls
+            step = tool_parser.finish()
+            tail_content += step.content
+            tail_deltas += step.calls
+            saw_calls = saw_calls or bool(tail_deltas)
+            if tail_content:
+                yield frame(ChatCompletionDelta(content=tail_content), None)
+            if tail_deltas:
+                yield frame(
+                    ChatCompletionDelta(
+                        tool_calls=[_delta_tool_call(delta) for delta in tail_deltas]
+                    ),
+                    None,
+                )
+        elif tail_content:
+            yield frame(ChatCompletionDelta(content=tail_content), None)
+        # The finish reason rides its own empty delta — OpenAI's own shape —
+        # so no content can arrive after it.
+        reason = finish
+        if saw_calls and finish != "length":
+            reason = "tool_calls"
+        yield frame(ChatCompletionDelta(), reason)
         yield _SSE_DONE
 
     def _render_chat(self, body: ChatCompletionRequest) -> str:

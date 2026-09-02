@@ -95,6 +95,11 @@ class ChatCompletionRequest(_GenerationOptions):
     messages: list[ChatMessage] = Field(min_length=1)
     logprobs: bool = False
     top_logprobs: int | None = Field(default=None, ge=0, le=20)
+    # Request-scoped parsing switches — lite_llama's own extension. vLLM and
+    # SGLang fix one parser per server process; here each request states what
+    # its model emits, so one deployment can serve mixed clients.
+    reasoning_parser: Literal["deepseek_r1"] | None = None
+    tool_parser: Literal["deepseek", "qwen"] | None = None
 
     @field_validator("top_logprobs")
     @classmethod
@@ -148,9 +153,29 @@ class CompletionResponse(BaseModel):
     prompt_logprobs: list[dict | None] | None = None
 
 
+class FunctionCall(BaseModel):
+    """The callable half of a tool call: a name plus its raw JSON text."""
+
+    name: str
+    arguments: str = ""
+
+
+class MessageToolCall(BaseModel):
+    """A finished tool call as it sits inside an assistant message."""
+
+    id: str
+    type: Literal["function"] = "function"
+    function: FunctionCall
+
+
 class ChatCompletionMessage(BaseModel):
     role: Literal["assistant"] = "assistant"
     content: str = ""
+    # DeepSeek-style extension for thinking models: the chain-of-thought
+    # channel, split from content only when the request asks for it.
+    reasoning_content: str | None = None
+    # OpenAI semantics: present only when the model actually placed calls.
+    tool_calls: list[MessageToolCall] | None = None
 
 
 class ChatTopLogprob(BaseModel):
@@ -185,15 +210,35 @@ class ChatCompletionResponse(BaseModel):
     usage: UsageInfo = Field(default_factory=UsageInfo)
 
 
+class DeltaFunctionCall(BaseModel):
+    """Streaming half of a tool call: each field optional until it arrives."""
+
+    name: str | None = None
+    arguments: str | None = None
+
+
+class DeltaToolCall(BaseModel):
+    """One incremental piece of a tool call, keyed by its call index."""
+
+    index: int
+    id: str | None = None
+    type: Literal["function"] = "function"
+    function: DeltaFunctionCall = Field(default_factory=DeltaFunctionCall)
+
+
 class ChatCompletionDelta(BaseModel):
     """Incremental content of a streamed chat chunk.
 
     ``role`` appears on the first chunk only, matching OpenAI, so clients can
-    start rendering before any text arrives.
+    start rendering before any text arrives. ``reasoning_content`` and
+    ``tool_calls`` ride the same wire shape OpenAI clients already merge by
+    index; they stay ``None`` unless the request turned parsing on.
     """
 
     role: Literal["assistant"] | None = None
     content: str | None = None
+    reasoning_content: str | None = None
+    tool_calls: list[DeltaToolCall] | None = None
 
 
 class ChatCompletionChunkChoice(BaseModel):
