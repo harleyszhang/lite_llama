@@ -193,6 +193,8 @@ class AsyncLLMEngine:
         request_id = request_id or f"async-{next(self._request_ids)}"
         stream = _RequestStream(request_id, asyncio.get_running_loop())
         with self._lock:
+            if request_id in self._streams:
+                raise ValueError(f"request id {request_id!r} is already active")
             self._streams[request_id] = stream
 
         self._commands.put(("add", (request_id, prompt, sampling_params)))
@@ -206,7 +208,11 @@ class AsyncLLMEngine:
                     return
         finally:
             with self._lock:
-                self._streams.pop(request_id, None)
+                # An older coroutine must never remove a newer stream sharing
+                # its id (the admission guard normally prevents this; identity
+                # makes cleanup safe even if a future caller bypasses it).
+                if self._streams.get(request_id) is stream:
+                    self._streams.pop(request_id)
             if not stream.finished:
                 self._commands.put(("abort", request_id))
 

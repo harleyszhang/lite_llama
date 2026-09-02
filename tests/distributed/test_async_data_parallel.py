@@ -165,6 +165,19 @@ async def test_concurrent_requests_are_spread_over_both_replicas(grid):
     assert [chunks[-1].text for chunks in both] == ["ok", "ok"]
 
 
+async def test_duplicate_live_request_id_is_rejected(grid):
+    first = grid.generate("a", request_id="same")
+    task = asyncio.create_task(_first_chunk(first))
+    await _await_dispatch(grid, "same")
+
+    with pytest.raises(ValueError, match="already active"):
+        await anext(grid.generate("b", request_id="same"))
+
+    grid._result_queue.put(("finished", "same", "eos", "ok", 1, 1))
+    await asyncio.wait_for(task, _TIMEOUT)
+    await first.aclose()
+
+
 async def test_a_failed_request_raises_in_its_consumer(grid):
     """A refused prompt is that one caller's exception, not a server fault."""
     task = asyncio.create_task(_collect(grid, "hi", request_id="mine"))

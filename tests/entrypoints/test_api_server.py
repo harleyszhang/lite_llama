@@ -529,6 +529,38 @@ def test_streamed_completion_chunks_carry_logprobs(client):
     )
 
 
+def test_streamed_chat_preserves_logprobs_when_a_parser_withholds_text():
+    """Token metadata is still observable when parser buffering emits no text frame."""
+
+    class EmptyDeltaEngine(FakeEngine):
+        async def generate(self, prompt, sampling_params=None, request_id=None):
+            record = PositionLogprobs(10, -0.5, (11,), (-0.6,))
+            yield StreamedOutput(
+                request_id=request_id or "fake",
+                delta="",
+                text="",
+                finish_reason="eos",
+                prompt_tokens=1,
+                completion_tokens=1,
+                logprobs=record,
+            )
+
+    with make_client(EmptyDeltaEngine()) as local:
+        response = local.post(
+            "/v1/chat/completions",
+            json={
+                "model": _MODEL,
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+                "logprobs": True,
+            },
+        )
+
+    frames = parse_sse(response.text)
+    blocks = [frame["choices"][0].get("logprobs") for frame in frames]
+    assert any(block is not None and block["content"][0]["token"] == "<10>" for block in blocks)
+
+
 def test_chat_logprobs_follow_the_openai_shape(client, engine):
     body = client.post(
         "/v1/chat/completions",
@@ -680,17 +712,13 @@ def test_streamed_chat_channels_merge_to_the_one_shot_message():
     assert frames[-1]["choices"][0]["finish_reason"] == "tool_calls"
     assert all(f["choices"][0]["finish_reason"] is None for f in frames[:-1])
     deltas = [f["choices"][0]["delta"] for f in frames]
-    assert "".join(d.get("reasoning_content") or "" for d in deltas) == message[
-        "reasoning_content"
-    ]
+    assert "".join(d.get("reasoning_content") or "" for d in deltas) == message["reasoning_content"]
     assert "".join(d.get("content") or "" for d in deltas) == message["content"]
     # tool_calls merge by index, identity first, arguments streaming after
     streamed: dict[int, dict] = {}
     for delta in deltas:
         for piece in delta.get("tool_calls") or []:
-            call = streamed.setdefault(
-                piece["index"], {"id": None, "name": "", "arguments": ""}
-            )
+            call = streamed.setdefault(piece["index"], {"id": None, "name": "", "arguments": ""})
             call["id"] = call["id"] or piece.get("id")
             call["name"] += piece["function"].get("name") or ""
             call["arguments"] += piece["function"].get("arguments") or ""
@@ -742,9 +770,7 @@ def test_a_length_cut_still_streams_its_truncated_call_before_finishing():
     assert tail["choices"][0]["finish_reason"] == "length"
     assert tail["choices"][0]["delta"]["content"] is None
     pieces = [
-        piece
-        for f in frames[:-1]
-        for piece in f["choices"][0]["delta"].get("tool_calls") or []
+        piece for f in frames[:-1] for piece in f["choices"][0]["delta"].get("tool_calls") or []
     ]
     assert pieces[0]["id"] == "call_0"
     assert "".join(p["function"].get("arguments") or "" for p in pieces) == '{"city": "To'

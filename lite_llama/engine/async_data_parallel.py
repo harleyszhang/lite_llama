@@ -22,7 +22,7 @@ from ..utils.logger import get_logger
 from .async_engine import StreamedOutput, _RequestStream
 from .data_parallel import DataParallelEngine
 from .sampler import SamplingParams
-from .scheduler import DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_NUM_SEQS
+from .scheduler import DEFAULT_MAX_CHUNK_SIZE, DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_NUM_SEQS
 
 logger = get_logger(__name__)
 
@@ -77,7 +77,10 @@ class AsyncDataParallelEngine(DataParallelEngine):
         load_balancer: str = "round_robin",
         max_num_seqs: int = DEFAULT_MAX_NUM_SEQS,
         max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS,
+        max_chunk_size: int = DEFAULT_MAX_CHUNK_SIZE,
         enable_prefix_cache: bool = False,
+        prefix_cache_blocks: int | None = None,
+        enable_preemption: bool = False,
         **engine_kwargs: Any,
     ) -> None:
         super().__init__(
@@ -87,7 +90,10 @@ class AsyncDataParallelEngine(DataParallelEngine):
             load_balancer=load_balancer,
             max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
+            max_chunk_size=max_chunk_size,
             enable_prefix_cache=enable_prefix_cache,
+            prefix_cache_blocks=prefix_cache_blocks,
+            enable_preemption=enable_preemption,
             **engine_kwargs,
         )
         self._streams: dict[str, _RequestStream] = {}
@@ -187,6 +193,8 @@ class AsyncDataParallelEngine(DataParallelEngine):
         request_id = request_id or f"dp-{next(self._request_ids)}"
         stream = _RequestStream(request_id, asyncio.get_running_loop())
         with self._lock:
+            if request_id in self._streams:
+                raise ValueError(f"request id {request_id!r} is already active")
             self._streams[request_id] = stream
 
         token_ids = self._tokenize_for_routing([prompt])
@@ -204,7 +212,8 @@ class AsyncDataParallelEngine(DataParallelEngine):
                     return
         finally:
             with self._lock:
-                self._streams.pop(request_id, None)
+                if self._streams.get(request_id) is stream:
+                    self._streams.pop(request_id)
             if not stream.finished and not self._closed:
                 # A dead replica's queue is not ours to notice: the put is
                 # best-effort the same way the parent's shutdown puts are.

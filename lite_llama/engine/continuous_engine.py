@@ -49,6 +49,7 @@ from .detokenizer import IncrementalDetokenizer
 from .outputs import CompletionOutput, RequestOutput
 from .sampler import PositionLogprobs, SamplingParams
 from .scheduler import (
+    DEFAULT_MAX_CHUNK_SIZE,
     DEFAULT_MAX_NUM_BATCHED_TOKENS,
     DEFAULT_MAX_NUM_SEQS,
     Request,
@@ -358,6 +359,7 @@ class ContinuousBatchingEngine:
         max_seq_len: int = 2048,
         max_num_seqs: int = DEFAULT_MAX_NUM_SEQS,
         max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS,
+        max_chunk_size: int = DEFAULT_MAX_CHUNK_SIZE,
         max_gpu_num_blocks: int | None = None,
         device: str = "cuda",
         use_cuda_graph: bool = True,
@@ -365,6 +367,8 @@ class ContinuousBatchingEngine:
         tensor_parallel_size: int = 1,
         kv_cache_dtype: str = "auto",
         enable_prefix_cache: bool = False,
+        prefix_cache_blocks: int | None = None,
+        enable_preemption: bool = False,
         decode_window_steps: int = 0,
         cuda_graph_lazy: bool = False,
         async_tokenize: bool = False,
@@ -379,6 +383,8 @@ class ContinuousBatchingEngine:
             max_seq_len: Context window, and the per-slot cache size.
             max_num_seqs: Concurrency ceiling.
             max_num_batched_tokens: Padded token budget for one prefill group.
+            max_chunk_size: Maximum tokens a request may prefill in one step;
+                ``0`` disables chunking.
             max_gpu_num_blocks: Manual KV-cache size in tokens; profiled when ``None``.
             device: Torch device string.
             use_cuda_graph: Capture decode graphs. Worth keeping on: continuous
@@ -402,6 +408,10 @@ class ContinuousBatchingEngine:
                 resident in the cache. Off by default: it only pays when prompts
                 share a prefix, and otherwise costs a hash per block. See
                 :mod:`lite_llama.engine.prefix_cache`.
+            prefix_cache_blocks: Optional physical prefix-cache capacity in
+                16-token blocks.  ``None`` uses the profiled KV capacity.
+            enable_preemption: Allow the scheduler to recompute and evict a
+                young decode request when logical concurrency exceeds slots.
             decode_window_steps: O9 decode window — how many pure-decode steps
                 a fresh prompt waits at most before it may interrupt them.
                 ``0`` (default) admits immediately; ``N > 0`` trades a little
@@ -484,7 +494,10 @@ class ContinuousBatchingEngine:
             max_seq_len=engine.max_seq_len,
             max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
+            max_chunk_size=max_chunk_size,
             enable_prefix_cache=enable_prefix_cache,
+            prefix_cache_blocks=prefix_cache_blocks,
+            enable_preemption=enable_preemption,
             decode_window_steps=decode_window_steps,
         )
         executor: Executor | None = None
@@ -525,8 +538,10 @@ class ContinuousBatchingEngine:
         """
         if request_id is None:
             request_id = f"req-{next(self._request_ids)}"
-            while request_id in self._detokenizers or request_id in self._tokenizing:
+            while self._request_id_in_use(request_id):
                 request_id = f"req-{next(self._request_ids)}"
+        elif self._request_id_in_use(request_id):
+            raise ValueError(f"request id {request_id!r} is already active")
 
         if prompt_token_ids is None and self._async_tokenize:
             # O10: encode off this thread. The request joins the scheduler (or
@@ -557,6 +572,20 @@ class ContinuousBatchingEngine:
         )
         self._register_request(request)
         return request
+
+    def _request_id_in_use(self, request_id: str) -> bool:
+        """Check every live phase of the engine's request-id namespace.
+
+        A tokenisation job is not yet visible to :class:`Scheduler`, so the
+        scheduler's duplicate check alone used to let a second explicit id
+        overwrite the first job in ``_tokenizing``.  Keep this check at the
+        public admission boundary so all backends observe one namespace.
+        """
+        return (
+            request_id in self._tokenizing
+            or request_id in self._detokenizers
+            or self.scheduler.has_request_id(request_id)
+        )
 
     def _register_request(self, request: Request) -> None:
         """Hand a fully tokenised request to the scheduler and open its buffers."""

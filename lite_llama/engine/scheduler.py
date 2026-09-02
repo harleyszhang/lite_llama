@@ -149,6 +149,7 @@ class Request:
 
 DEFAULT_MAX_NUM_SEQS = 32
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
+DEFAULT_MAX_CHUNK_SIZE = 512
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,7 +192,7 @@ class SchedulerConfig:
     max_seq_len: int = 2048
     max_num_seqs: int = DEFAULT_MAX_NUM_SEQS
     max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS
-    max_chunk_size: int = 512
+    max_chunk_size: int = DEFAULT_MAX_CHUNK_SIZE
     enable_prefix_cache: bool = False
     prefix_cache_blocks: int | None = None
     enable_preemption: bool = False
@@ -345,6 +346,17 @@ class Scheduler:
         request.max_new_tokens = min(requested, room) if requested else room
         self._requests[request.request_id] = request
         self._waiting[request.request_id] = request
+
+    def has_request_id(self, request_id: str) -> bool:
+        """Whether ``request_id`` belongs to a live scheduler request.
+
+        The engine owns a few request states that have not reached the
+        scheduler yet (notably background tokenisation), but the scheduler is
+        authoritative once admission succeeds.  Exposing this narrow query
+        keeps callers from reaching into ``_requests`` merely to protect the
+        public request-id namespace.
+        """
+        return request_id in self._requests
 
     def abort(self, request_id: str) -> Request | None:
         """Drop a request wherever it is; returns it, or ``None`` if unknown.
