@@ -44,7 +44,7 @@
 | A3 | 调度策略 policy 化:one-shot / continuous / chunked-prefill 共用一个 step 循环 | 待建 | 顺带消灭现有"两套生成循环"债务 |
 | A4 | 模型定义薄:一个模型 = 一个类体十几行 + 一行注册 | 已有 | 他们的模型文件动辄上千行 |
 | A5 | 每个 Triton kernel 旁并排 PyTorch 参考实现,作为语义定义者 | 部分已有 | 他们参考实现散在测试里 |
-| A6 | **算子一等公民分发**:ABC 签名 + 声明式清单 + 确定性 dispatch,从现有 `registry.py` 雏形(probe+priority)升级到完整链路 | 待建(雏形已有) | 对标 sglang `KernelSpec`+selector;自有:实测排序自动选最快,sglang 甩给用户手选 |
+| A6 | **算子一等公民分发**:ABC 签名 + 声明式清单 + 确定性 dispatch,从现有 `registry.py` 雏形(availability+priority)升级到完整链路 | 待建(雏形已有) | 对标 sglang `KernelSpec`+selector;自有:实测排序自动选最快,sglang 甩给用户手选 |
 | A7 | **运行时可观测性内置**:metrics/tracing 是一等 API,非离线工具;每个 step 产出 per-request 延迟、KV 占用、后端选择、overlap 气泡 | 已有(v0.10) | vLLM 的 metrics 面向运维仪表盘;这里面向开发者 debug,粒度到算子级 |
 | A8 | **前沿注意力可插拔**:MLA/DSA/SWA/HCA 作为 `attention.*` 逻辑算子的不同实现,共享 paged KV 接口 | 待建 | vLLM 的 MLA 是独立类(`MLAAttention`);这里走统一 dispatch,新增变体只注册不写新类 |
 | A10 | **多进程隔离引擎**(地基 0,对齐 vLLM/SGLang 进程模型):EngineCore(调度)与 Worker(GPU 执行)分离,调度决策只算一次、广播 SchedulerOutput;单卡默认仍单进程 | 待建 | vLLM `EngineCoreProc`+`MultiprocExecutor`/SGLang scheduler 进程网格是多年踩坑后的定论;当前 TP"镜像进程"/DP 一次性批处理是最大架构债(详见地基 0) |
@@ -180,7 +180,7 @@ DP:                    Frontend ── Router(P10) ── EngineCore 进程 × d
 
 参考 sglang `python/sglang/kernels`(spec/registry/selector/fused_op)的成熟设计,并补上它刻意留白的一环:**如何自动调到性能最佳的实现**。
 
-> **现状(v0.9.0)**:五根支柱的**机制**已按三层落地——机制层 `kernels/dispatcher/`(ABC 签名 `interfaces.py`、声明式 KernelSpec、确定性 dispatch + 逐条拒绝理由的 `explain` + 调用 trace),注册行在九个算子域组 `kernels/ops/<group>/__init__.py`(native 行与外部后端的行同处一地),接入层 `kernels/backend/<lib>/` 一库一包(INSTALL 元数据 + available 探测 + adapter)。v0.8 的雏形 `kernels/backends/registry.py` 与整个平铺 `backends/` 目录已随本迁移删除;它唯一未被吸收的能力(per-op 环境变量)已泛化为对每个注册 op 都生效的 `op_backend_env()`。
+> **现状(v0.9.0)**:五根支柱的**机制**已按三层落地——机制层 `kernels/dispatcher/`(ABC 签名 `interfaces.py`、声明式 KernelSpec、确定性 dispatch + 逐条拒绝理由的 `explain` + 调用 trace),注册行在九个算子域组 `kernels/ops/<group>/__init__.py`(native 行与外部后端的行同处一地),接入层 `kernels/backend/<lib>/` 一库一包(INSTALL 元数据 + available() 检测 + adapter)。v0.8 的雏形 `kernels/backends/registry.py` 与整个平铺 `backends/` 目录已随本迁移删除;它唯一未被吸收的能力(per-op 环境变量)已泛化为对每个注册 op 都生效的 `op_backend_env()`。
 >
 > **仍缺的是数据而非机制**:`golden.verified` 与 `perf_key` 两个字段 dispatch 已在过滤/排序时读取,但对齐门禁工具与冻结的实测记录分别要到 M3.1 / M3.2 才产出;`layout` 目前只做"不满足即排除",尚不会自动插入转换。
 
@@ -212,9 +212,9 @@ kernels/
     # 每组 __init__.py 持该算子的全部注册行: native 行与外部后端的行同处一地
   dispatcher/     # 怎么选: spec.py + registry.py + dispatch.py + interfaces.py,torch-free
     autotune/     # 实测记录的冻结与复用(地基 3)
-  backend/        # 能算什么: 一库一包,INSTALL 元数据 + available() 探测 + adapter
+  backend/        # 能算什么: 一库一包,INSTALL 元数据 + available() 检测 + adapter
     flashinfer/  deepgemm/  flashmla/  deepep/   # adapter 按 ABC 契约签名写
-    probe.py      # 真 import 探测 + 安装配方(BackendInstall),survey() 打印
+    availability.py # 真 import 检测 + 安装配方(BackendInstall),survey() 打印
 ```
 **刻意不做的事**:不建 `impls/` 这类中间目录,也不写转发适配器。KernelSpec 的 `target` 是 `"module:attr"` 字符串,直接指向真实 kernel 函数,所以 `modules/attention.py` 里读到的仍是 `flash_attention2_no_pad` / `flash_decoding` 这种一眼可辨的算子名,而不是某个包装层。代价是 kernel 的公开签名必须干净——例如 `flash_attention2_no_pad` 原先要求调用方自己乘 `log2(e)`,这个 kernel 私有约定已下沉到 wrapper 内部,契约统一成 plain `1/sqrt(d)`。
 
@@ -224,7 +224,7 @@ kernels/
 
 | 字段 | 作用 | 借鉴 |
 |---|---|---|
-| `available()` | import 探测 | sglang 惰性 load |
+| `available()` | import 检测 | sglang 惰性 load |
 | `capability`(device + SM 窗口,OR 语义) | 硬过滤,如 DeepGEMM `>=sm90` | sglang `CapabilityRequirement` |
 | `dtypes` / `scheme` | 支持的精度/量化方案 | 合并现有量化 method |
 | `shape`(hard 约束 + prefer 偏好) | 过滤 + 排序 | 本项目新增 |
@@ -251,7 +251,7 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
 
 - **强制后端开关**:对标 sglang `SGLANG_FORCE_FUSED_OP_BACKEND`,二分数值 bug 时把整模型钉到 native。两级粒度,越窄越优先——`backend=` 参数 > per-op `LITE_LLAMA_<OP>_BACKEND`(如 `LITE_LLAMA_ATTENTION_DECODE_BACKEND`) > 全局 `LITE_LLAMA_FORCE_BACKEND`。per-op 才是实际需要的粒度:一台机器可能想让 attention 走 flashinfer 而 linear 留在 native Triton GEMM。
 - **调用 trace**(对标 sglang `enable_fused_op_trace`):记录每次调用的 (op, backend, shape/dtype),**直接产出 ops-collector(地基 3 的 collect 阶段)要的真实 shape 清单**。
-- 外部后端各自占一个 `kernels/backend/<backend>/` 包(注册行在 `ops/<group>/__init__.py`,包内是 adapter + INSTALL 元数据),永不进核心依赖。**探测用真 import 而非 `find_spec`**:这些库是编译扩展或 JIT,"目录在"与"这张卡上能加载"是两个问题,dispatch 只关心后者(`backend/probe.py`)。
+- 外部后端各自占一个 `kernels/backend/<backend>/` 包(注册行在 `ops/<group>/__init__.py`,包内是 adapter + INSTALL 元数据),永不进核心依赖。**检测用真 import 而非 `find_spec`**:这些库是编译扩展或 JIT,"目录在"与"这张卡上能加载"是两个问题,dispatch 只关心后者(`backend/availability.py`)。
 - **安装方式不是一句话**:四个后端里只有 flashinfer 是 wheel(`lite-llama[flashinfer]`),DeepGEMM / FlashMLA / DeepEP 是带 submodule 的源码编译(DeepEP 还要先装 NVSHMEM)。所以后三者**不给 extra**——给一个装不了东西的 extra 比不给更误导——安装配方作为数据写在各自包的 `INSTALL` 里,由 `survey()` 打出来。
 
 ### 落地顺序
@@ -673,10 +673,10 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - 地基 2:实际落地形态超出本版"雏形"目标,直接按三层建满
     - `kernels/ops/` 按算子域分组(gemm / attention / moe / layernorm / rope / activation / sampling / kvcache / embeddings / quantization),每组 `__init__.py` 持有该算子全部注册行,共 11 个算子 21 行
     - `kernels/dispatcher/` 是 torch-free 机制层:KernelSpec 六维声明(available / capability / dtypes+schemes / shape 硬约束+偏好 / layout / golden)+ 注册表 + dispatch 四步(filter → rank → cache → report)。explain 打印逐条拒绝理由与落选者排名,`LITE_LLAMA_KERNEL_TRACE=1` 输出 JSON 决策线
-    - `kernels/backend/` 一库一包(flashinfer / deepgemm / flashmla / deepep)+ probe 真 import 探测:缺库是排名事件,不是崩溃
+    - `kernels/backend/` 一库一包(flashinfer / deepgemm / flashmla / deepep)+ available() 真 import 检测:缺库是排名事件,不是崩溃
     - golden gate:未验证(verified=False)的行默认不参与 dispatch,只有显式 `backend=`(参数或 `LITE_LLAMA_*_BACKEND` 环境变量)可越过;flashinfer 的 attention / rmsnorm / rope / sample 行已带 max-abs-diff 记录
     - 默认全 native:外部行 priority=UNMEASURED(-1) 排在 native(0) 之下,翻盘等 v0.10 冻结实测数据接线
-  - A9 Platform 抽象:设备探测 + 能力声明(CapabilityRequirement),dispatch 按 capability 过滤(deepgemm / flashmla 的 sm90+ 窗口在 A10 上被拒),可 mock 测试
+  - A9 Platform 抽象:设备检测 + 能力声明(CapabilityRequirement),dispatch 按 capability 过滤(deepgemm / flashmla 的 sm90+ 窗口在 A10 上被拒),可 mock 测试
   - prefix caching 支持 DP:负载均衡按前缀亲和路由,各副本的 cache 合成一个池
   - overlap 调度器抽象 + L1 跨 stream 重叠(本版收尾时完成 ModelWorker 集成 + deferred harvest,timeline 相交证据见 release 文档)
 - **refactor(已完成)**
@@ -708,7 +708,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
     峰值显存与 dispatch 决策(MLA 侧 `MinimalMlaLayer` 继续作 benchmark 载体)
 - **benchmark**
   - (已达成)dispatch 开销:`benchmarks/kernels/bench_dispatch.py`——A10 上首次决策 761 ms
-    (一次性,全在后端探测的 import 上)、换 key 后的 filter+rank 27 us、命中缓存 15 us
+    (一次性,全在后端检测的 import 上)、换 key 后的 filter+rank 27 us、命中缓存 15 us
     (其中真正的缓存查找 0.5 us,余下是每次重取的平台快照);调用点在构造期决策一次并存成
     属性,每步 forward 连这次查找都不做。冻结实测排序相对 v0.9 静态 priority 的端到端差值
     在噪声内(见下),因为这张 GPU 上实测赢家与静态顺序的首选一致——排序换成实测的意义是

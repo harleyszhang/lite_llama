@@ -39,8 +39,8 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 VERIFIED = GoldenRecord(verified=True, max_abs_diff=0.0, baseline="self")
 
 
-# Probes referenced by specs below; module-level so they resolve through this
-# test module's own import path.
+# Availability checks referenced by specs below; module-level so they resolve
+# through this test module's own import path.
 def _available_yes() -> bool:
     return True
 

@@ -171,13 +171,13 @@ lite-llama batch --model-dir my_weight/Qwen2.5-1.5B-Instruct --show-stats
 ├─────────────────────────────────────────────────────────────────────────────────────────────────┤
 │  Kernels           LogicalOp + KernelSpec dispatch → Triton FA2 / flashinfer / deepgemm / ...   │
 ├─────────────────────────────────────────────────────────────────────────────────────────────────┤
-│  Hardware          PlatformInfo · probe · device_utils — the device the layers assume           │
+│  Hardware          PlatformInfo · device detection — the device the layers assume              │
 └─────────────────────────────────────────────────────────────────────────────────────────────────┘
 
   Cross-cutting support:
   ┌─────────────────────────┐  ┌───────────────────────────┐  ┌──────────────────────────┐
   │ Platform                │  │ Distributed               │  │ Tools                    │
-  │ PlatformInfo / probe /  │  │ dp×tp grid · NCCL + gloo  │  │ logger · profiling ·     │
+  │ PlatformInfo / check /  │  │ dp×tp grid · NCCL + gloo  │  │ logger · profiling ·     │
   │ device_utils            │  │ parallel_state · stats    │  │ prompt · image utils     │
   └─────────────────────────┘  └───────────────────────────┘  └──────────────────────────┘
 ```
@@ -213,7 +213,7 @@ lite_llama/
 │   └── protocol.py          # request/response schemas
 ├── kernels/                 # Triton kernels used by the models
 │   ├── quantization/        # w8a16 / w4a16 / w8a8 / fp8 GEMMs
-│   ├── backends/            # probe + priority registry, per op
+│   ├── backends/            # availability + priority registry, per op
 │   ├── autotune/            # config search, keying and persistence
 │   ├── flashattention2_nopad.py / flashdecoding.py
 │   └── fused_moe.py         # MoE grouped GEMM (fp16/fp8/int8)

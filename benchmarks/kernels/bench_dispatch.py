@@ -1,6 +1,6 @@
 """Dispatch overhead: pure-Python cost, paid once at startup.
 
-``probe_op`` times one dispatch through filter / rank / cache, and
+``time_op`` times one dispatch through filter / rank / cache, and
 ``breakdown`` splits the cost per stage — the number that decides
 whether dispatch can run per-call or must be cached.
 
@@ -40,7 +40,7 @@ def median_us(call, iters: int, before=None) -> float:
     return statistics.median(samples)
 
 
-def probe_op(op: str, scheme: str, layout: frozenset[str], iters: int) -> dict:
+def time_op(op: str, scheme: str, layout: frozenset[str], iters: int) -> dict:
     key = {"dtype": DTYPE, "scheme": scheme, "layout": layout}
 
     first = median_us(lambda: dispatch(op, **key), iters=1)
@@ -73,9 +73,9 @@ def main() -> int:
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
 
-    print(f"dtype={DTYPE}, {args.iters} iters (first 只有一次,含后端探测)\n")
+    print(f"dtype={DTYPE}, {args.iters} iters (first 只有一次,含后端检测)\n")
     results = {
-        op: probe_op(op, case.scheme, case.layout, args.iters) for op, case in MEASURERS.items()
+        op: time_op(op, case.scheme, case.layout, args.iters) for op, case in MEASURERS.items()
     }
 
     for op, row in results.items():

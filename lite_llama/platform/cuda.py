@@ -1,4 +1,4 @@
-"""The CUDA platform: device probe for NVIDIA GPUs (sm75 through sm100+).
+"""The CUDA platform: device detection for NVIDIA GPUs (sm75 through sm100+).
 
 :class:`CudaPlatform` reads the device name, capability and memory from
 torch at first use, so the platform layer can filter kernels by real
@@ -32,5 +32,5 @@ class CudaPlatform(Platform):
         return PlatformInfo("cuda", major, minor, torch.cuda.get_device_name())
 
 
-# Probe ahead of the cpu fallback: any CUDA runtime outranks it.
+# Register ahead of the cpu fallback: any CUDA runtime outranks it.
 register_platform(CudaPlatform, first=True)

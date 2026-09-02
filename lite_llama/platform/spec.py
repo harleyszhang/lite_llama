@@ -40,7 +40,7 @@ class PlatformInfo:
 
     @classmethod
     def detect(cls) -> PlatformInfo:
-        """Probe the live process; imports torch only when actually called."""
+        """Detect the live process; imports torch only when actually called."""
         import torch
 
         if not torch.cuda.is_available():

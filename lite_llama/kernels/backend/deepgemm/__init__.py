@@ -17,8 +17,8 @@ from ..capability import BackendInstall, library_present
 #: Capability window shared by every DeepGEMM row: Hopper and newer.
 CUDA_SM90 = (CapabilityRequirement("cuda", min_cc=(9, 0)),)
 
-#: Availability probe every DeepGEMM row points at.
-PROBE = "lite_llama.kernels.backend.deepgemm:available"
+#: Availability entry every DeepGEMM row points at.
+AVAILABLE = "lite_llama.kernels.backend.deepgemm:available"
 
 INSTALL = BackendInstall(
     backend="deepgemm",

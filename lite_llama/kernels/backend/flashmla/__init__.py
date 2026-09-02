@@ -17,8 +17,8 @@ from ..capability import BackendInstall, library_present
 #: Capability window shared by every FlashMLA row: Hopper and newer.
 CUDA_SM90 = (CapabilityRequirement("cuda", min_cc=(9, 0)),)
 
-#: Availability probe every FlashMLA row points at.
-PROBE = "lite_llama.kernels.backend.flashmla:available"
+#: Availability entry every FlashMLA row points at.
+AVAILABLE = "lite_llama.kernels.backend.flashmla:available"
 
 INSTALL = BackendInstall(
     backend="flashmla",
