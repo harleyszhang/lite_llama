@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import itertools
+import math
 import os
 import time
 from collections import deque
@@ -56,6 +57,12 @@ from .stop_criteria import POLL_INTERVAL, detect_repetition
 
 if TYPE_CHECKING:
     from .llm_engine import LLMEngine
+
+#: Set to ``0`` to keep the pre-fused behaviour: resumed chunks (and prefix-cache
+#: hit remainders) extend one decode-style row per token instead of running as
+#: a grid pass through the chunked prefill kernel. A kill-switch rather than a
+#: config field because the engine decides once, from the cache dtype.
+_FUSED_CHUNK_ENV = "LITE_LLAMA_FUSED_CHUNK_PREFILL"
 
 
 class _Work(NamedTuple):
@@ -140,21 +147,40 @@ def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
     )
 
 
-def _prefill_work(group: list[Request], chunk_lens: list[int]) -> list[_Work]:
+def _prefill_work(
+    group: list[Request], chunk_lens: list[int], chunked_min_rows: float = math.inf
+) -> list[_Work]:
     """Split the step's prompt chunks by the kernel each may legally use.
 
     A *first* chunk (``num_computed_tokens == chunk``) runs as a padded grid
     through the prefill kernel — nothing of the prompt is cached yet. A
-    *resumed* chunk cannot: the prefill kernel never reads the cache, so its
-    tokens would silently drop the prefix. Those extend instead, one row per
-    token, each attending over its slot's whole cached history.
+    *resumed* chunk lands on cached rows, and its pass is routed by row count:
+
+    * a short remainder whose rows fit inside a captured CUDA-graph batch
+      extends instead — decode-style rows replay a decode graph, the cheapest
+      pass of all;
+    * a longer one (``rows >= chunked_min_rows``) runs as a grid pass through
+      the chunked prefill kernel — queries are the chunk's rows, keys/values
+      its slot's own cache rows, tensor-core tiled. An extend pass of that
+      width cannot replay (it exceeds every captured batch) and pays one
+      decode-style row per token, roughly an order of magnitude more per token
+      than the grid.
+
+    ``chunked_min_rows`` is ``math.inf`` when the chunked kernel may not run
+    at all (an fp8 cache the kernel cannot decode, or the
+    ``LITE_LLAMA_FUSED_CHUNK_PREFILL=0`` kill-switch), and the smallest value
+    that cannot replay a graph (one past the largest captured batch size, so
+    ``1`` with graphs off) otherwise.
     """
     pairs = list(zip(group, chunk_lens, strict=True))
-    routes = (
-        (PassKind.PREFILL, [pair for pair in pairs if pair[0].num_computed_tokens == pair[1]]),
-        (PassKind.EXTEND, [pair for pair in pairs if pair[0].num_computed_tokens > pair[1]]),
-    )
-    return [_chunk_work(kind, chunks) for kind, chunks in routes if chunks]
+    fresh = [pair for pair in pairs if pair[0].num_computed_tokens == pair[1]]
+    resumed = [pair for pair in pairs if pair[0].num_computed_tokens > pair[1]]
+    works = [_chunk_work(PassKind.PREFILL, fresh)] if fresh else []
+    if resumed:
+        rows = sum(chunk for _, chunk in resumed)
+        kind = PassKind.PREFILL if rows >= chunked_min_rows else PassKind.EXTEND
+        works.append(_chunk_work(kind, resumed))
+    return works
 
 
 def _decode_work(running: list[Request], *, from_device: bool = False) -> _Work:
@@ -271,9 +297,23 @@ class ContinuousBatchingEngine:
                 "enable_preemption or leave the pipeline off"
             )
 
+        # Resumed chunks route by row count (see ``_prefill_work``): a short
+        # remainder extends as rows that replay a decode graph, a longer one
+        # runs through the chunked prefill kernel, whose tensor-core tiling
+        # beats paying one decode-style row per token — the per-token cost
+        # that kept prefix-cache hits from lowering TTFT. An fp8 cache stores
+        # e4m3 bytes the chunk kernel cannot decode, so those keep extending.
+        kv_fp8 = engine.model_runner.config.kv_cache_torch_dtype == torch.uint8
+        fused = os.environ.get(_FUSED_CHUNK_ENV, "1") != "0" and not kv_fp8
+
         self._executor: Executor = executor or UniProcExecutor(
             engine, config.max_num_seqs, config.max_seq_len, pipeline=self._pipeline
         )
+        # The replay cap reads the runner's live graph manager, so it is
+        # settled after the executor; ``math.inf`` disables the chunked route.
+        manager = self._graph_manager()
+        cap = max(manager.batch_sizes, default=0) if manager else 0
+        self._chunked_min_rows = cap + 1 if fused else math.inf
         # The executor owns the cache, so it decides how many requests can be in
         # flight; the scheduler hands out exactly those slots, and pages out of a
         # pool sized by the cache the executor actually profiled.
@@ -711,7 +751,9 @@ class ContinuousBatchingEngine:
                 self.metrics.observe_queue_time(request)
         work: list[_Work] = []
         if scheduled.prefill:
-            work += _prefill_work(scheduled.prefill, scheduled.prefill_chunk_lens)
+            work += _prefill_work(
+                scheduled.prefill, scheduled.prefill_chunk_lens, self._chunked_min_rows
+            )
         if scheduled.decode:
             work.append(_decode_work(scheduled.decode))
 
@@ -802,6 +844,16 @@ class ContinuousBatchingEngine:
     def timeline_summary(self) -> str:
         """Stream region table of the steps run so far; empty unless tracing is on."""
         return self._executor.timeline_summary()
+
+    def _graph_manager(self):
+        """The driver-side CUDA-graph manager, or ``None`` when absent.
+
+        Test doubles stand in for the executor without a worker, so every hop
+        of the chain is optional.
+        """
+        worker = getattr(self._executor, "_worker", None)
+        runner = getattr(worker, "_runner", None)
+        return getattr(runner, "_graph_manager", None)
 
     # ---------------------------------------------------------------- harvest #
     def _attribute_prompt_logprobs(

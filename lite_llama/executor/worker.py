@@ -50,12 +50,16 @@ class PassKind(StrEnum):
     """Which kernel path a plan takes through attention.
 
     Attributes:
-        PREFILL: A padded ``[sequences, width]`` grid through the prefill kernel.
-            Pure self-attention over the grid, so it is only correct when nothing
-            of the sequence is cached yet.
+        PREFILL: A padded ``[sequences, width]`` grid through a prefill kernel.
+            First chunks (nothing cached yet) run pure self-attention over the
+            grid; long resumed chunks — ``seq_starts > 0``, on a cache the
+            chunked kernel can read verbatim — run the same grid with their keys
+            and values coming from the slot's own cache rows instead.
         EXTEND: One decode-style row per token, each query attending over its
-            slot's whole cached history — what a prompt chunk resuming on top of
-            a cached prefix needs, at one row per token.
+            slot's whole cached history. The route for resumed chunks too wide
+            to replay a decode graph — short remainders, fp8 caches the chunked
+            kernel cannot serve, and the ``LITE_LLAMA_FUSED_CHUNK_PREFILL=0``
+            kill-switch's wholesale restore.
         DECODE: One row per sequence, one token each.
     """
 

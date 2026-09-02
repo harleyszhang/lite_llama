@@ -40,6 +40,15 @@ class AttentionMetadata:
             an exp2-scaled softmax, decode gathers history from the paged buffer —
             and deriving the phase from ``seq_len > 1`` silently misroutes a
             single-token prompt onto the decode path.
+        b_prefix_len: Chunked prefill only — cached rows preceding each
+            sequence's chunk (a resumed chunk or a prefix-cache hit). ``None``
+            on every other pass, which is what routes ``context_forward``
+            between the plain and the chunk-aware prefill kernel.
+        b_kv_base: Chunked prefill only — cache row holding each sequence's
+            KV row 0; the chunk kernel addresses a slot's history as one
+            contiguous run from this base, no per-token table lookup.
+        max_chunk_len: Chunked prefill only — widest chunk in the grid,
+            sizing the query-block grid.
     """
 
     kv_buffer: list[torch.Tensor] = field(default_factory=list)
@@ -50,3 +59,6 @@ class AttentionMetadata:
     b_seq_len: torch.Tensor | None = None
     max_actual_seq_len: int = 0
     is_prefill: bool = True
+    b_prefix_len: torch.Tensor | None = None
+    b_kv_base: torch.Tensor | None = None
+    max_chunk_len: int = 0

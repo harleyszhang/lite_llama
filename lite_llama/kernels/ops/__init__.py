@@ -18,6 +18,7 @@ from . import rope as rope
 from . import sampling as sampling
 from .interfaces import (
     LOGICAL_OPS,
+    AttentionChunkedPrefillOp,
     AttentionDecodeOp,
     AttentionPrefillOp,
     CombineOp,
@@ -37,6 +38,7 @@ from .interfaces import (
 
 __all__ = [
     "LOGICAL_OPS",
+    "AttentionChunkedPrefillOp",
     "AttentionDecodeOp",
     "AttentionPrefillOp",
     "CombineOp",

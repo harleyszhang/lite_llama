@@ -55,6 +55,7 @@ class PagedAttention(nn.Module):
         # op's scheme key encodes the cache dtype this module writes.
         self._kv_write = dispatch("kv_write", dtype=kv_cache_dtype, layout=PAGED_KV_TAGS).load()
         self._prefill = dispatch("attention.prefill", dtype=dtype).load()
+        self._chunked = dispatch("attention.chunked_prefill", dtype=dtype).load()
         self._decode = dispatch(
             "attention.decode",
             dtype=dtype,
@@ -85,13 +86,32 @@ class PagedAttention(nn.Module):
     ) -> torch.Tensor:
         """Prefill: causal attention over the freshly computed q/k/v.
 
-        The kernel reads the unquantised tensors it was handed, not the cache —
-        the write only has to make K/V available to later decode steps.
+        The plain kernel reads the unquantised tensors it was handed, not the
+        cache — the write above only has to make them available to later decode
+        steps. A chunk resuming on cached rows (``b_prefix_len`` armed) cannot
+        use it: self-attention over the grid alone would drop the prefix. Its
+        queries instead run through the chunked kernel, whose keys and values
+        are the slot's own cache rows — prefix plus this chunk, contiguous from
+        ``b_kv_base`` — at tensor-core prefill prices rather than the one-row-
+        per-token extend path.
 
         Returns:
             ``[tokens, num_heads, head_dim]``.
         """
         self._write_cache(xk, xv, atten_info, layer_index)
+        if atten_info.b_prefix_len is not None:
+            kv_buffer = atten_info.kv_buffer[layer_index]
+            return self._chunked(
+                xq,
+                kv_buffer[:, : self.num_kv_heads, :],
+                kv_buffer[:, self.num_kv_heads :, :],
+                self.scale,
+                atten_info.b_start_loc,
+                atten_info.b_kv_base,
+                atten_info.b_prefix_len,
+                atten_info.b_seq_len,
+                atten_info.max_chunk_len,
+            )
         return self._prefill(
             xq,
             xk,
