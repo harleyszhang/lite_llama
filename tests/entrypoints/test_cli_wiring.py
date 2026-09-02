@@ -261,6 +261,7 @@ class TestTensorParallelSurface:
     """Which commands take extra GPUs, and which say so plainly."""
 
     def test_serve_passes_the_process_grid_to_the_server(self, model_dir, monkeypatch):
+        pytest.importorskip("fastapi", reason="needs the `serve` extra")
         captured: dict = {}
         from lite_llama.entrypoints import api_server
 
@@ -308,6 +309,7 @@ class TestDataParallelSurface:
 
     @pytest.fixture
     def captured_server(self, monkeypatch):
+        pytest.importorskip("fastapi", reason="needs the `serve` extra")
         captured: dict = {}
         from lite_llama.entrypoints import api_server
 

@@ -30,7 +30,6 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from ...kernels.ops.quantization import NVFP4_BLOCK, quantize_nvfp4_blockwise
 from .base_config import (
     LinearMethodBase,
     QuantizationConfig,
@@ -38,6 +37,18 @@ from .base_config import (
     run_quant_linear,
 )
 from .parameter import RawParameter
+
+
+def _nvfp4_block() -> int:
+    """The format's block length, read from the kernel layer on first use.
+
+    Deferred because importing any ``kernels`` submodule registers every spec
+    row as a side effect, and ``tests/test_imports.py`` pins ``lite_llama.modules``
+    to import without touching that registry.
+    """
+    from ...kernels.ops.quantization import NVFP4_BLOCK
+
+    return NVFP4_BLOCK
 
 #: Weight elements per byte.
 _PACK_FACTOR = 2
@@ -62,7 +73,7 @@ class NVFP4Config(QuantizationConfig):
     def __init__(self, ignored: tuple[str, ...] = ()) -> None:
         super().__init__()
         self.group_n = 1
-        self.group_k = NVFP4_BLOCK
+        self.group_k = _nvfp4_block()
         self.ignored = ignored
         self.method = "nvfp4"
 
@@ -87,10 +98,10 @@ class NVFP4Config(QuantizationConfig):
         bits = int(config.get("bits", 4))
         if bits != 4:
             raise ValueError(f"only 4-bit NVFP4 is supported, got {bits}")
-        group_size = int(config.get("group_size", NVFP4_BLOCK))
-        if group_size != NVFP4_BLOCK:
+        group_size = int(config.get("group_size", _nvfp4_block()))
+        if group_size != _nvfp4_block():
             raise ValueError(
-                f"NVFP4 block size is fixed at {NVFP4_BLOCK} by the format, "
+                f"NVFP4 block size is fixed at {_nvfp4_block()} by the format, "
                 f"checkpoint declares {group_size}"
             )
         ignored = tuple(config.get("modules_to_not_convert") or ())
@@ -135,9 +146,10 @@ class NVFP4LinearMethod(LinearMethodBase):
     """NVFP4 weight-only linear; runs ``native/linear_nvfp4``."""
 
     def create_weights(self, layer: nn.Module, input_size: int, output_size: int, **kw) -> None:
-        if input_size % NVFP4_BLOCK != 0:
+        block = _nvfp4_block()
+        if input_size % block != 0:
             raise ValueError(
-                f"NVFP4 needs in_features divisible by {NVFP4_BLOCK}, got {input_size}"
+                f"NVFP4 needs in_features divisible by {block}, got {input_size}"
             )
         config: NVFP4Config = layer.quant  # type: ignore[assignment]
         layer.weight = RawParameter(
@@ -164,6 +176,8 @@ class NVFP4LinearMethod(LinearMethodBase):
         )
 
     def quantize_from_fp16(self, layer: nn.Module, config: QuantizationConfig) -> None:
+        from ...kernels.ops.quantization import quantize_nvfp4_blockwise
+
         packed, block_scale, global_scale = quantize_nvfp4_blockwise(layer.weight.data)
         layer.weight = RawParameter(packed)
         layer.weight_scale = RawParameter(block_scale)
