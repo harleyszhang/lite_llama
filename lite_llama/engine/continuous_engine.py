@@ -31,7 +31,10 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
-from ..distributed.parallel_state import get_tp_rank, get_tp_world_size
+from ..distributed.parallel_state import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from ..executor.executor import (
     Executor,
     MultiprocExecutor,
@@ -461,10 +464,10 @@ class ContinuousBatchingEngine:
         # Followers must exist before this rank builds its engine: sharded
         # layers read their width from the process group.
         followers: tuple[BaseProcess, ...] = ()
-        joined = get_tp_world_size()
+        joined = get_tensor_model_parallel_world_size()
         if joined > 1 and joined != tensor_parallel_size:
             raise ValueError(
-                f"this process is already rank {get_tp_rank()} of a {joined}-way "
+                f"this process is already rank {get_tensor_model_parallel_rank()} of a {joined}-way "
                 f"tensor-parallel group, but tensor_parallel_size={tensor_parallel_size}"
             )
         if joined == 1 and tensor_parallel_size > 1:
@@ -483,7 +486,7 @@ class ContinuousBatchingEngine:
             decode_window_steps=decode_window_steps,
         )
         executor: Executor | None = None
-        if get_tp_world_size() > 1:
+        if get_tensor_model_parallel_world_size() > 1:
             executor = MultiprocExecutor(
                 engine, config.max_num_seqs, config.max_seq_len, followers,
                 pipeline=resolved_pipeline,

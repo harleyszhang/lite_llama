@@ -21,10 +21,12 @@ from lite_llama.kernels.ops.moe.fused_moe import (
     fused_moe_w8a8_int8,
     moe_align_block_size,
 )
+from lite_llama.kernels.ops.quantization import repack_int4_experts, unpack_int8_experts
 from lite_llama.modules.quantization.utils import (
     quantize_fp8_per_channel,
     quantize_fp8_per_token,
     quantize_int4_groupwise,
+    quantize_int8_groupwise_asym,
     quantize_int8_per_channel,
 )
 from tests.reference import fused_moe_reference
@@ -177,10 +179,33 @@ def _int4_experts(w: torch.Tensor):
     nibbles = ((q.unsqueeze(-1) >> shifts) & 0xF).reshape(e, n, k).float()
     groups = nibbles.reshape(e, n, k // _INT4_GROUP, _INT4_GROUP)
     deq = ((groups - z.unsqueeze(-1)) * s.unsqueeze(-1)).reshape(e, n, k)
-    return (q, s, z), deq
+    # The kernel eats the byte layout (two nibbles per uint8); cross the same
+    # bridge process_weights_after_loading does at load, after the reference
+    # has unpacked the words it was derived from.
+    return (repack_int4_experts(q), s, z), deq
 
 
-_QUANT_FORMATS = {"fp8": _fp8_experts, "int8": _int8_experts, "int4": _int4_experts}
+def _int8_asym_experts(w: torch.Tensor):
+    # Like the int4 helper: the quantiser is 2D-only, and the reference
+    # dequantises from the *packed* words so both sides share one bit stream.
+    parts = [quantize_int8_groupwise_asym(w[e], _INT4_GROUP) for e in range(w.shape[0])]
+    q, s, z = (torch.stack(t) for t in zip(*parts, strict=True))
+    e, n, _ = q.shape
+    k = w.shape[-1]
+    # The kernel eats one int8 byte per element — the layout
+    # process_weights_after_loading leaves after unpacking the words.
+    un = unpack_int8_experts(q)
+    groups = un.reshape(e, n, k // _INT4_GROUP, _INT4_GROUP)
+    deq = ((groups - z.unsqueeze(-1)) * s.unsqueeze(-1)).reshape(e, n, k)
+    return (un, s, z), deq
+
+
+_QUANT_FORMATS = {
+    "fp8": _fp8_experts,
+    "int8": _int8_experts,
+    "int8_asym": _int8_asym_experts,
+    "int4": _int4_experts,
+}
 
 
 @pytest.mark.parametrize("fmt", sorted(_QUANT_FORMATS))
@@ -189,9 +214,10 @@ def test_fused_moe_quantised_matches_reference(fmt, dtype):
     """Every 8/4-bit expert format, at both activation dtypes.
 
     Each format runs a different branch of the kernel's inner loop -- an e4m3 bit
-    trick, an int8 convert, a nibble unpack with a zero point -- so a format
-    verified through a sibling is unverified. The reference multiplies the
-    *dequantised* weights, which isolates the kernel's arithmetic from the
+    trick, a symmetric int8 convert, an int8 convert with a zero point (the
+    GPTQ ``bits=8`` asymmetric mode), a nibble unpack with a zero point -- so a
+    format verified through a sibling is unverified. The reference multiplies
+    the *dequantised* weights, which isolates the kernel's arithmetic from the
     format's own error: both sides see the same numbers.
 
     Both dtypes, because neither axis used to work. The quantised branches widened
@@ -218,7 +244,9 @@ def test_fused_moe_quantised_matches_reference(fmt, dtype):
     # Per-channel scales are one group spanning all of K, and the two GEMMs have
     # different K (hidden for gate_up, inter for down) but share one group_k, which
     # the launcher clamps with min(group_k, K) -- so the larger K covers both.
-    group_k = _INT4_GROUP if fmt == "int4" else max(hidden, inter)
+    # int8_asym shares the int4 group size: both are the group-wise GPTQ layout.
+    grouped = fmt in ("int4", "int8_asym")
+    group_k = _INT4_GROUP if grouped else max(hidden, inter)
     out = fused_moe(
         x,
         q1,

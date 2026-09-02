@@ -1,0 +1,388 @@
+{
+ "meta": {
+  "header": "device    NVIDIA H100 80GB HBM3  (3352 GB/s peak, 989 TFLOP/s dense tc, 50 MiB L2)\nsoftware  torch 2.13.0+cu130, triton 3.7.1, python 3.14.7\ncommit    v0.10.0-26-gb6e0a1b-dirty\ncommand   benchmarks/kernels/bench_fused_moe.py --json docs/benchmark_logs/bench_fused_moe_h100_20260902_int4byte.json\nenv       (none set)",
+  "device": "NVIDIA H100 80GB HBM3",
+  "peak_gbps": 3352.32,
+  "peak_tflops": 989.0,
+  "recorded": "2026-09-02T16:29:21",
+  "geometries": [
+   {
+    "label": "qwen3-30b-a3b",
+    "hidden": 2048,
+    "intermediate": 768,
+    "num_experts": 128,
+    "top_k": 8
+   }
+  ],
+  "tokens": [
+   1,
+   8,
+   64,
+   512,
+   4096
+  ],
+  "act_dtype": "torch.bfloat16"
+ },
+ "rows": [
+  {
+   "impl": "native/fused_moe [bf16]",
+   "case": "qwen3-30b-a3b t1_E128_top8_h2048_i768",
+   "us": 108.15999656915665,
+   "flops": 75497472,
+   "moved": 75505664,
+   "tflops": 0.6980165901884762,
+   "gbps": 698.092329835849
+  },
+  {
+   "impl": "native/fused_moe [fp8_w8a16]",
+   "case": "qwen3-30b-a3b t1_E128_top8_h2048_i768",
+   "us": 113.10399696230888,
+   "flops": 75497472,
+   "moved": 37871616,
+   "tflops": 0.6675048983915132,
+   "gbps": 334.838882949649
+  },
+  {
+   "impl": "native/fused_moe_w8a8_fp8 [fp8_w8a8]",
+   "case": "qwen3-30b-a3b t1_E128_top8_h2048_i768",
+   "us": 120.7360029220581,
+   "flops": 75497472,
+   "moved": 37871616,
+   "tflops": 0.6253103479724923,
+   "gbps": 313.67293171406595
+  },
+  {
+   "impl": "native/fused_moe_w8a8_int8 [int8_w8a8]",
+   "case": "qwen3-30b-a3b t1_E128_top8_h2048_i768",
+   "us": 117.53600090742111,
+   "flops": 75497472,
+   "moved": 37871616,
+   "tflops": 0.6423348711639989,
+   "gbps": 322.21290249470127
+  },
+  {
+   "impl": "native/fused_moe [int8]",
+   "case": "qwen3-30b-a3b t1_E128_top8_h2048_i768",
+   "us": 111.80800199508667,
+   "flops": 75497472,
+   "moved": 37871616,
+   "tflops": 0.675242117315697,
+   "gbps": 338.72008554150034
+  },
+  {
+   "impl": "native/fused_moe [int4]",
+   "case": "qwen3-30b-a3b t1_E128_top8_h2048_i768",
+   "us": 113.21599781513214,
+   "flops": 75497472,
+   "moved": 21241856,
+   "tflops": 0.6668445578095609,
+   "gbps": 187.62238914932632
+  },
+  {
+   "impl": "ablation: moe_align_block_size",
+   "case": "qwen3-30b-a3b t1_E128_top8_h2048_i768",
+   "us": 5.632000043988228,
+   "flops": 0,
+   "moved": 0,
+   "tflops": null,
+   "gbps": null
+  },
+  {
+   "impl": "ablation: bf16 with BLOCK_K=32 (pre-fix heuristic)",
+   "case": "qwen3-30b-a3b t1_E128_top8_h2048_i768",
+   "us": 104.12800312042236,
+   "flops": 75497472,
+   "moved": 75505664,
+   "tflops": 0.7250448461273994,
+   "gbps": 725.1235185282379
+  },
+  {
+   "impl": "native/fused_moe [bf16]",
+   "case": "qwen3-30b-a3b t8_E128_top8_h2048_i768",
+   "us": 186.14399433135986,
+   "flops": 603979776,
+   "moved": 481361920,
+   "tflops": 3.24469117668572,
+   "gbps": 2585.965352946681
+  },
+  {
+   "impl": "native/fused_moe [fp8_w8a16]",
+   "case": "qwen3-30b-a3b t8_E128_top8_h2048_i768",
+   "us": 118.72000247240067,
+   "flops": 603979776,
+   "moved": 241444864,
+   "tflops": 5.087430621814632,
+   "gbps": 2033.733650368898
+  },
+  {
+   "impl": "native/fused_moe_w8a8_fp8 [fp8_w8a8]",
+   "case": "qwen3-30b-a3b t8_E128_top8_h2048_i768",
+   "us": 123.77600371837616,
+   "flops": 603979776,
+   "moved": 241444864,
+   "tflops": 4.879619294982387,
+   "gbps": 1950.6597138921393
+  },
+  {
+   "impl": "native/fused_moe_w8a8_int8 [int8_w8a8]",
+   "case": "qwen3-30b-a3b t8_E128_top8_h2048_i768",
+   "us": 132.22399353981018,
+   "flops": 603979776,
+   "moved": 241444864,
+   "tflops": 4.56785307893573,
+   "gbps": 1826.029130842319
+  },
+  {
+   "impl": "native/fused_moe [int8]",
+   "case": "qwen3-30b-a3b t8_E128_top8_h2048_i768",
+   "us": 114.9120032787323,
+   "flops": 603979776,
+   "moved": 241444864,
+   "tflops": 5.256019900157667,
+   "gbps": 2101.1283165462505
+  },
+  {
+   "impl": "native/fused_moe [int4]",
+   "case": "qwen3-30b-a3b t8_E128_top8_h2048_i768",
+   "us": 129.98400628566742,
+   "flops": 603979776,
+   "moved": 135430144,
+   "tflops": 4.646569937786241,
+   "gbps": 1041.8985217486184
+  },
+  {
+   "impl": "ablation: moe_align_block_size",
+   "case": "qwen3-30b-a3b t8_E128_top8_h2048_i768",
+   "us": 6.6559999249875546,
+   "flops": 0,
+   "moved": 0,
+   "tflops": null,
+   "gbps": null
+  },
+  {
+   "impl": "ablation: bf16 with BLOCK_K=32 (pre-fix heuristic)",
+   "case": "qwen3-30b-a3b t8_E128_top8_h2048_i768",
+   "us": 254.04798984527588,
+   "flops": 603979776,
+   "moved": 481361920,
+   "tflops": 2.3774239519385483,
+   "gbps": 1894.7676787097046
+  },
+  {
+   "impl": "native/fused_moe [bf16]",
+   "case": "qwen3-30b-a3b t64_E128_top8_h2048_i768",
+   "us": 415.9039855003357,
+   "flops": 4831838208,
+   "moved": 1189609472,
+   "tflops": 11.617677099649,
+   "gbps": 2860.298322385371
+  },
+  {
+   "impl": "native/fused_moe [fp8_w8a16]",
+   "case": "qwen3-30b-a3b t64_E128_top8_h2048_i768",
+   "us": 239.99999463558197,
+   "flops": 4831838208,
+   "moved": 596873216,
+   "tflops": 20.13265965000001,
+   "gbps": 2486.9717889214844
+  },
+  {
+   "impl": "native/fused_moe_w8a8_fp8 [fp8_w8a8]",
+   "case": "qwen3-30b-a3b t64_E128_top8_h2048_i768",
+   "us": 236.25600337982178,
+   "flops": 4831838208,
+   "moved": 596873216,
+   "tflops": 20.451705518068877,
+   "gbps": 2526.3832768745547
+  },
+  {
+   "impl": "native/fused_moe_w8a8_int8 [int8_w8a8]",
+   "case": "qwen3-30b-a3b t64_E128_top8_h2048_i768",
+   "us": 234.40000414848328,
+   "flops": 4831838208,
+   "moved": 596873216,
+   "tflops": 20.613643867255302,
+   "gbps": 2546.3873952062904
+  },
+  {
+   "impl": "native/fused_moe [int8]",
+   "case": "qwen3-30b-a3b t64_E128_top8_h2048_i768",
+   "us": 234.1119945049286,
+   "flops": 4831838208,
+   "moved": 596873216,
+   "tflops": 20.639003218172483,
+   "gbps": 2549.520016102526
+  },
+  {
+   "impl": "native/fused_moe [int4]",
+   "case": "qwen3-30b-a3b t64_E128_top8_h2048_i768",
+   "us": 242.15999990701675,
+   "flops": 4831838208,
+   "moved": 334954496,
+   "tflops": 19.953081474460284,
+   "gbps": 1383.1949790577055
+  },
+  {
+   "impl": "ablation: moe_align_block_size",
+   "case": "qwen3-30b-a3b t64_E128_top8_h2048_i768",
+   "us": 9.119999594986439,
+   "flops": 0,
+   "moved": 0,
+   "tflops": null,
+   "gbps": null
+  },
+  {
+   "impl": "ablation: bf16 with BLOCK_K=32 (pre-fix heuristic)",
+   "case": "qwen3-30b-a3b t64_E128_top8_h2048_i768",
+   "us": 606.3680052757263,
+   "flops": 4831838208,
+   "moved": 1189609472,
+   "tflops": 7.968491355019428,
+   "gbps": 1961.8605560480776
+  },
+  {
+   "impl": "native/fused_moe [bf16]",
+   "case": "qwen3-30b-a3b t512_E128_top8_h2048_i768",
+   "us": 469.7279930114746,
+   "flops": 38654705664,
+   "moved": 1212153856,
+   "tflops": 82.291679949029,
+   "gbps": 2580.5442171516256
+  },
+  {
+   "impl": "native/fused_moe [fp8_w8a16]",
+   "case": "qwen3-30b-a3b t512_E128_top8_h2048_i768",
+   "us": 355.0400137901306,
+   "flops": 38654705664,
+   "moved": 610009088,
+   "tflops": 108.87422308080848,
+   "gbps": 1718.1417989708207
+  },
+  {
+   "impl": "native/fused_moe_w8a8_fp8 [fp8_w8a8]",
+   "case": "qwen3-30b-a3b t512_E128_top8_h2048_i768",
+   "us": 280.38400411605835,
+   "flops": 38654705664,
+   "moved": 610009088,
+   "tflops": 137.86344832995465,
+   "gbps": 2175.6201461032747
+  },
+  {
+   "impl": "native/fused_moe_w8a8_int8 [int8_w8a8]",
+   "case": "qwen3-30b-a3b t512_E128_top8_h2048_i768",
+   "us": 275.9360074996948,
+   "flops": 38654705664,
+   "moved": 610009088,
+   "tflops": 140.08576123956112,
+   "gbps": 2210.6904188670433
+  },
+  {
+   "impl": "native/fused_moe [int8]",
+   "case": "qwen3-30b-a3b t512_E128_top8_h2048_i768",
+   "us": 312.99200654029846,
+   "flops": 38654705664,
+   "moved": 610009088,
+   "tflops": 123.50061616996317,
+   "gbps": 1948.9605972459872
+  },
+  {
+   "impl": "native/fused_moe [int4]",
+   "case": "qwen3-30b-a3b t512_E128_top8_h2048_i768",
+   "us": 403.5840034484863,
+   "flops": 38654705664,
+   "moved": 343932928,
+   "tflops": 95.77858719302264,
+   "gbps": 852.1966308406962
+  },
+  {
+   "impl": "ablation: moe_align_block_size",
+   "case": "qwen3-30b-a3b t512_E128_top8_h2048_i768",
+   "us": 17.952000722289085,
+   "flops": 0,
+   "moved": 0,
+   "tflops": null,
+   "gbps": null
+  },
+  {
+   "impl": "ablation: bf16 with BLOCK_K=32 (pre-fix heuristic)",
+   "case": "qwen3-30b-a3b t512_E128_top8_h2048_i768",
+   "us": 640.720009803772,
+   "flops": 38654705664,
+   "moved": 1212153856,
+   "tflops": 60.3301053073689,
+   "gbps": 1891.8620262401923
+  },
+  {
+   "impl": "native/fused_moe [bf16]",
+   "case": "qwen3-30b-a3b t4096_E128_top8_h2048_i768",
+   "us": 1062.399983406067,
+   "flops": 309237645312,
+   "moved": 1241513984,
+   "tflops": 291.07459538975183,
+   "gbps": 1168.593753192363
+  },
+  {
+   "impl": "native/fused_moe [fp8_w8a16]",
+   "case": "qwen3-30b-a3b t4096_E128_top8_h2048_i768",
+   "us": 1320.847988128662,
+   "flops": 309237645312,
+   "moved": 639369216,
+   "tflops": 234.1205408126628,
+   "gbps": 484.05965088067336
+  },
+  {
+   "impl": "native/fused_moe_w8a8_fp8 [fp8_w8a8]",
+   "case": "qwen3-30b-a3b t4096_E128_top8_h2048_i768",
+   "us": 868.9280152320862,
+   "flops": 309237645312,
+   "moved": 639369216,
+   "tflops": 355.88407772697286,
+   "gbps": 735.8137898560306
+  },
+  {
+   "impl": "native/fused_moe_w8a8_int8 [int8_w8a8]",
+   "case": "qwen3-30b-a3b t4096_E128_top8_h2048_i768",
+   "us": 673.088014125824,
+   "flops": 309237645312,
+   "moved": 639369216,
+   "tflops": 459.4312167534639,
+   "gbps": 949.9043254103753
+  },
+  {
+   "impl": "native/fused_moe [int8]",
+   "case": "qwen3-30b-a3b t4096_E128_top8_h2048_i768",
+   "us": 1148.0319499969482,
+   "flops": 309237645312,
+   "moved": 639369216,
+   "tflops": 269.3632745263074,
+   "gbps": 556.9263259630532
+  },
+  {
+   "impl": "native/fused_moe [int4]",
+   "case": "qwen3-30b-a3b t4096_E128_top8_h2048_i768",
+   "us": 1701.8879652023315,
+   "flops": 309237645312,
+   "moved": 373293056,
+   "tflops": 181.70270407619682,
+   "gbps": 219.34055803468854
+  },
+  {
+   "impl": "ablation: moe_align_block_size",
+   "case": "qwen3-30b-a3b t4096_E128_top8_h2048_i768",
+   "us": 40.192000567913055,
+   "flops": 0,
+   "moved": 0,
+   "tflops": null,
+   "gbps": null
+  },
+  {
+   "impl": "ablation: bf16 with BLOCK_K=32 (pre-fix heuristic)",
+   "case": "qwen3-30b-a3b t4096_E128_top8_h2048_i768",
+   "us": 1189.0720129013062,
+   "flops": 309237645312,
+   "moved": 1241513984,
+   "tflops": 260.0663727316799,
+   "gbps": 1044.1032759409893
+  }
+ ]
+}

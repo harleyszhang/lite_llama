@@ -180,7 +180,7 @@ method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 - **int8-blockwise（W8A16）**：group-wise scale 粒度更细；scale 读取更多，因此略慢
 - **smoothquant（W8A8 int8）**：最快的方案——两个操作数都是 int8，吃满 int8 tensor core（6.9×）
 - **fp8 W8A8**：A10（sm86 无原生 fp8 GEMM）上 per-token 激活量化开销大；在 H100/sm90 上表现更好
-- **INT4 MoE（AWQ/GPTQ）**：fused_moe kernel 支持带 group-wise scales+zeros 的 int4 打包权重
+- **INT4 MoE（AWQ/GPTQ）**：fused_moe kernel 支持带 group-wise scales+zeros 的 int4 权重，byte 布局（2 nibble/uint8）+ 寄存器 nibble 分离的双 dot kernel；见[下文 INT4 byte 布局与双 dot kernel](#int4-byte-布局与双-dot-kernel)
 - **KV cache fp8**：未反映在上表中（与权重量化正交）；把 KV cache 占用减半，可支持约 2× 更长的序列
 
 ## NVFP4 仅权重 FP4
@@ -218,17 +218,17 @@ int4/AWQ 是一个有启发性的对照，但故事不同：它读的权重字�
 
 `W8A8Fp8MoEMethod` 与 `W8A8Int8MoEMethod` 在量化专家权重的同时也量化**激活**（入口 `fused_moe_w8a8_fp8` / `fused_moe_w8a8_int8`）：GEMM1 之前 per-token，silu 输出在 GEMM2 之前 per-row（低于 32 行时两者都融进 GEMM kernel 内部，见 `_INLINE_A_QUANT_MAX_ROWS`），全程不做 host 同步，因此 MoE 层仍可被 graph 捕获。在此之前，`W8A8Fp8MoEMethod.apply` 与 `Fp8MoEMethod.apply` 是同一个函数，`W8A8Int8MoEMethod.apply` 调的是 weight-only 的 `fused_moe`——激活始终是 bf16，W8A8 只是个标签，不是一条路径。
 
-Qwen3-30B-A3B 几何（E=128，top_k=8，hidden 2048，moe_intermediate 768），测于 NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7），数据来自 [`bench_fused_moe_h100_20260902_fp8cvt.json`](benchmark_logs/bench_fused_moe_h100_20260902_fp8cvt.json)（以 `LITE_LLAMA_AUTOTUNE=0` 运行，即用户没有调优缓存时拿到的启发式 tile）。基线与激活 dtype 为 bf16——即该 checkpoint 实际服务的精度（`torch_dtype: bfloat16`）；fp8 W8A16 的 e4m3 加宽在 sm89+ 上走单条硬件 `cvt`（kernel 开关 `FP8_CVT`，修正因子 256 随之消失）。前一天的 fp16 基线测量保留在 [`bench_fused_moe_h100_20260901.json`](benchmark_logs/bench_fused_moe_h100_20260901.json)，同日早间的 [`bench_fused_moe_h100_20260902.json`](benchmark_logs/bench_fused_moe_h100_20260902.json) 是修复中途的快照（其 t1 行与自身消融行矛盾，勿引用）：
+Qwen3-30B-A3B 几何（E=128，top_k=8，hidden 2048，moe_intermediate 768），测于 NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7），数据来自 [`bench_fused_moe_h100_20260902_int4byte.json`](benchmark_logs/bench_fused_moe_h100_20260902_int4byte.json)（以 `LITE_LLAMA_AUTOTUNE=0` 运行，即用户没有调优缓存时拿到的启发式 tile）；int4 列是 byte 布局 + 双 dot kernel（见[下文](#int4-byte-布局与双-dot-kernel)），其余列与 [`bench_fused_moe_h100_20260902_fp8cvt.json`](benchmark_logs/bench_fused_moe_h100_20260902_fp8cvt.json) 一致（t1 档存在 ~8% 的整机漂移，launch-bound 档的格式间差异无意义）。基线与激活 dtype 为 bf16——即该 checkpoint 实际服务的精度（`torch_dtype: bfloat16`）；fp8 W8A16 的 e4m3 加宽在 sm89+ 上走单条硬件 `cvt`（kernel 开关 `FP8_CVT`，修正因子 256 随之消失）。前一天的 fp16 基线测量保留在 [`bench_fused_moe_h100_20260901.json`](benchmark_logs/bench_fused_moe_h100_20260901.json)，同日早间的 [`bench_fused_moe_h100_20260902.json`](benchmark_logs/bench_fused_moe_h100_20260902.json) 是修复中途的快照（其 t1 行与自身消融行矛盾，勿引用）：
 
 | tokens | bf16 | fp8 W8A16 | fp8 W8A8 | **int8 W8A8** | int8 W8A16 | int4 |
 |---|---|---|---|---|---|---|
-| 1 | 99.2 µs | 103.6 µs | 109.5 µs | 109.2 µs | 103.1 µs | 104.7 µs |
-| 8 | 186.3 µs | 118.3 µs | 124.0 µs | 132.5 µs | **115.0 µs** | 174.7 µs |
-| 64 | 416.0 µs | 240.6 µs | 236.3 µs | **234.1 µs** | 234.4 µs | 376.4 µs |
-| 512 | 469.1 µs | 348.1 µs | 279.8 µs | **275.2 µs** | 313.6 µs | 461.0 µs |
-| 4096 | 1036.2 µs | 1329.7 µs | 856.3 µs | **672.7 µs** | 1130.9 µs | 1917.1 µs |
+| 1 | 108.2 µs | 113.1 µs | 120.7 µs | 117.5 µs | 111.8 µs | 113.2 µs |
+| 8 | 186.1 µs | 118.7 µs | 123.8 µs | 132.2 µs | **114.9 µs** | 130.0 µs |
+| 64 | 415.9 µs | 240.0 µs | 236.3 µs | **234.4 µs** | 234.1 µs | 242.2 µs |
+| 512 | 469.7 µs | 355.0 µs | 280.4 µs | **275.9 µs** | 313.0 µs | 403.6 µs |
+| 4096 | 1062.4 µs | 1320.8 µs | 868.9 µs | **673.1 µs** | 1148.0 µs | 1701.9 µs |
 
-decode 与 prefill 在这里是两个不同的操作，不平均成一个加速比。1 token 时所有格式挤在 bf16 的 ±10% 内（99-110 µs）：这层是五个背靠背的 kernel（align、GEMM1、silu、GEMM2、sum），launch 而不是字节决定下限。W8A8 的激活量化已不再增加 launch——低于 32 行时量化融进 GEMM 内部（`_INLINE_A_QUANT_MAX_ROWS`），silu 输出在 store 时量化（`QUANT_OUT`）——代价是每个 GEMM program 重新推导 amax，t1 残留约 10%，t8 起被字节优势吞没（int8 weight-only 快 62%，W8A8 fp8 快 50%）。64 token 起 slot 数超过行块、每个专家载入被摊销，所有量化行都胜过 bf16：int8 W8A8（234.1 µs，1.78×）是此档下限，int8 W8A16 与 W8A8 fp8 落在其 1% 内；int4 只打平（1.11×）——它读的字节最少、GB/s 却最低：受限于每个 int32 解包 8 个 nibble，不是流量。512 token 起 weight-only 收益反转、W8A8 接管：int8 W8A8（275.2 µs，1.70×）是该档最快一行；4096 时 weight-only 全线倒退（fp8 慢 28%、int8 慢 9%、int4 慢 85%）——GEMM 一旦 compute-bound，逐 row-block 反量化权重 tile 就不再摊销——而 W8A8 不付这笔账：int8 W8A8 以 672.7 µs（1.54×，460 TFLOP/s）成为全表任意 shape 的最快行，比 fp8 W8A8（856.3 µs，1.21×）快 21%——int8 imma 从 `BLOCK_M=16` 就能用 tensor core（fp8 要 64 才发 wgmma），且 int32 累加精确、无 `K_PROMOTE` 式精度税。A8 的收益在 MMA 里，所以恰好出现在 weight-only 收益消失的地方。fp8 W8A16 的 28% 残值已是 `FP8_CVT` 之后的数字（换入硬件 `cvt` 值 5.3%：1404.0→1329.7 µs）；再往下是逐 row-block 重读权重 tile 的结构性成本——`BLOCK_M=256` 试图消它反而全面变慢（0.26-0.90×，shared memory 逼 `num_stages=2`、accumulator 寄存器压力压垮 occupancy，而 `GROUP_M=8` 的 L2 分组已吸收大部分重读）。
+decode 与 prefill 在这里是两个不同的操作，不平均成一个加速比。1 token 时所有格式挤在 bf16 的 ±12% 内（108-121 µs）：这层是五个背靠背的 kernel（align、GEMM1、silu、GEMM2、sum），launch 而不是字节决定下限。W8A8 的激活量化已不再增加 launch——低于 32 行时量化融进 GEMM 内部（`_INLINE_A_QUANT_MAX_ROWS`），silu 输出在 store 时量化（`QUANT_OUT`）——代价是每个 GEMM program 重新推导 amax，t1 残留约 10%，t8 起被字节优势吞没（int8 weight-only 快 62%，W8A8 fp8 快 50%，int4 快 43%）。64 token 起 slot 数超过行块、每个专家载入被摊销，所有量化行都胜过 bf16：int8 W8A8（234.4 µs，1.77×）是此档下限，int8 W8A16 与 W8A8 fp8 落在其 1% 内，int4（242.2 µs，1.72×）咬住 8-bit 行——byte 布局的 dense 加载拿到流量收益，寄存器 nibble 分离只比 8-bit 格式的单次加宽贵一点。512 token 起 weight-only 收益反转、W8A8 接管：int8 W8A8（275.9 µs，1.70×）是该档最快一行；4096 时 weight-only 全线倒退（fp8 慢 24%、int8 慢 8%、int4 慢 60%）——GEMM 一旦 compute-bound，逐 row-block 反量化权重 tile 就不再摊销——而 W8A8 不付这笔账：int8 W8A8 以 673.1 µs（1.58×，459 TFLOP/s）成为全表任意 shape 的最快行，比 fp8 W8A8（868.9 µs，1.22×）快 22%——int8 imma 从 `BLOCK_M=16` 就能用 tensor core（fp8 要 64 才发 wgmma），且 int32 累加精确、无 `K_PROMOTE` 式精度税。A8 的收益在 MMA 里，所以恰好出现在 weight-only 收益消失的地方。fp8 W8A16 的 24% 残值已是 `FP8_CVT` 之后的数字（换入硬件 `cvt` 值 5.3%：1404.0→1329.7 µs）；再往下是逐 row-block 重读权重 tile 的结构性成本——`BLOCK_M=256` 试图消它反而全面变慢（0.26-0.90×，shared memory 逼 `num_stages=2`、accumulator 寄存器压力压坍 occupancy，而 `GROUP_M=8` 的 L2 分组已吸收大部分重读）。
 
 一个表里看不出的告诫：Triton 只有在 `BLOCK_M >= 64` 时才发射 Hopper 的 fp8 `wgmma`，而 `_launch_config` 的 fp8 W8A8 分档要到 4096 token 才到这个行块（512 的 tier-1 tile 是 `BLOCK_M=32`）。低于它的两个 e4m3 操作数加宽成 fp16 走 `mma.sync`，所以除 t4096 外的 fp8-A8 行都没测到 fp8 tensor core——t512 的领先来自字节与跳过的 bit-trick，不是 MMA。int8-A8 没有这个门槛（imma 从 `BLOCK_M=16` 起可用）。
 

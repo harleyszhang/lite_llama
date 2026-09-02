@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from ..distributed.parallel_state import broadcast_object
+from ..distributed.parallel_state import tensor_model_parallel_broadcast_object_list
 from ..utils.logger import get_logger
 from .worker import ModelInput, ModelWorker, PassLogprobs
 
@@ -182,7 +182,7 @@ class MultiprocExecutor(Executor):
 
     def execute(self, model_input: ModelInput) -> tuple[torch.Tensor, PassLogprobs | None]:
         ensure_followers_alive(self._followers)
-        broadcast_object(model_input)
+        tensor_model_parallel_broadcast_object_list(model_input)
         return self._worker.execute(model_input)
 
     def readback_async(
@@ -214,7 +214,7 @@ class MultiprocExecutor(Executor):
             return
         self._live = False
         if all(process.is_alive() for process in self._followers):
-            broadcast_object(None)
+            tensor_model_parallel_broadcast_object_list(None)
         for process in self._followers:
             process.join(timeout=SHUTDOWN_TIMEOUT_S)
             if process.is_alive():
@@ -317,7 +317,7 @@ def serve_plans(engine: LLMEngine, max_num_seqs: int) -> None:
             scratch, so reading it here cannot desynchronise anything.
     """
     worker = ModelWorker(engine, max_num_seqs, engine.max_seq_len)
-    while (plan := broadcast_object()) is not None:
+    while (plan := tensor_model_parallel_broadcast_object_list()) is not None:
         # The records are discarded exactly as the tokens are: every rank
         # computed identical ones, and rank 0 is the one that reports them.
         worker.execute(plan)

@@ -15,7 +15,7 @@ from collections.abc import Iterator
 
 from PIL import Image
 
-from ..distributed.parallel_state import get_tp_world_size
+from ..distributed.parallel_state import get_tensor_model_parallel_world_size
 from ..models.config import read_model_type
 from ..models.registry import ModelRegistry, ModelSpec
 from .llm_engine import LLMEngine
@@ -103,7 +103,7 @@ class LLM(LLMEngine):
         # sends any. Left unchecked the argument was silently ignored and the run
         # went single-GPU — which reads as a working TP configuration in a
         # benchmark table, so it has to be an error rather than a warning.
-        if tensor_parallel_size > 1 and get_tp_world_size() == 1:
+        if tensor_parallel_size > 1 and get_tensor_model_parallel_world_size() == 1:
             raise ValueError(
                 f"LLM cannot start a tensor-parallel group: its generate loop does not "
                 f"broadcast plans to follower ranks. Use "

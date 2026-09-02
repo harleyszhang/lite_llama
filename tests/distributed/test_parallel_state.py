@@ -28,10 +28,10 @@ def _reset_grid():
 
 
 def test_defaults_to_a_world_of_one():
-    assert ps.get_tp_rank() == 0
-    assert ps.get_tp_world_size() == 1
-    assert ps.get_dp_rank() == 0
-    assert ps.get_dp_world_size() == 1
+    assert ps.get_tensor_model_parallel_rank() == 0
+    assert ps.get_tensor_model_parallel_world_size() == 1
+    assert ps.get_data_parallel_rank() == 0
+    assert ps.get_data_parallel_world_size() == 1
     assert ps.get_world_size() == 1
 
 
@@ -99,8 +99,8 @@ def test_init_parallel_records_pure_dp_without_a_process_group():
 
     ps.init_parallel(global_rank=1, tp_size=1, dp_size=2)
 
-    assert (ps.get_dp_rank(), ps.get_tp_rank()) == (1, 0)
-    assert ps.get_dp_world_size() == 2
+    assert (ps.get_data_parallel_rank(), ps.get_tensor_model_parallel_rank()) == (1, 0)
+    assert ps.get_data_parallel_world_size() == 2
     assert ps.get_world_size() == 2
     assert not dist.is_initialized()
 
@@ -112,26 +112,26 @@ def test_init_parallel_validates_before_mutating_state():
     with pytest.raises(ValueError):
         ps.init_parallel(global_rank=9, tp_size=1, dp_size=2)
 
-    assert ps.get_dp_rank() == 1
-    assert ps.get_dp_world_size() == 2
+    assert ps.get_data_parallel_rank() == 1
+    assert ps.get_data_parallel_world_size() == 2
 
 
 def test_init_tensor_parallel_is_the_dp_1_case():
     """The TP entry point must place the process in a single-replica grid."""
     ps.init_tensor_parallel(rank=0, world_size=1)
 
-    assert ps.get_tp_world_size() == 1
-    assert ps.get_dp_world_size() == 1
+    assert ps.get_tensor_model_parallel_world_size() == 1
+    assert ps.get_data_parallel_world_size() == 1
 
 
 def test_destroy_parallel_restores_the_world_of_one():
     ps.init_parallel(global_rank=2, tp_size=1, dp_size=4)
-    assert ps.get_dp_rank() == 2
+    assert ps.get_data_parallel_rank() == 2
 
     ps.destroy_parallel()
 
-    assert ps.get_dp_rank() == 0
-    assert ps.get_dp_world_size() == 1
+    assert ps.get_data_parallel_rank() == 0
+    assert ps.get_data_parallel_world_size() == 1
 
 
 def test_collectives_are_no_ops_without_tensor_parallelism():
@@ -145,14 +145,14 @@ def test_collectives_are_no_ops_without_tensor_parallelism():
     ps.init_parallel(global_rank=1, tp_size=1, dp_size=2)
     tensor = torch.ones(4)
 
-    assert ps.all_reduce(tensor) is tensor
-    assert ps.all_gather(tensor) is tensor
+    assert ps.tensor_model_parallel_all_reduce(tensor) is tensor
+    assert ps.tensor_model_parallel_all_gather(tensor) is tensor
     assert ps.reduce_scatter(tensor) is tensor
     assert ps.all_to_all(tensor) is tensor
-    assert ps.broadcast(tensor) is tensor
+    assert ps.tensor_model_parallel_broadcast(tensor) is tensor
     ps.send(tensor, dst=0)  # no peer: must do nothing, not deadlock
     assert ps.recv(tensor, src=0) is tensor
-    assert ps.all_reduce_min(7) == 7
+    assert ps.tensor_model_parallel_all_reduce_min(7) == 7
 
 
 def test_divide_names_the_dimension_that_does_not_fit():
@@ -170,7 +170,7 @@ def _reduce_scatter_is_all_reduce_then_slice(rank: int) -> bool:
 
     tensor = torch.arange(8, dtype=torch.float32).reshape(2, 4) * (rank + 1)
     shard = ps.reduce_scatter(tensor.clone(), dim=-1)
-    reduced = ps.all_reduce(tensor.clone())
+    reduced = ps.tensor_model_parallel_all_reduce(tensor.clone())
     return bool(torch.equal(shard, reduced[:, rank * 2 : (rank + 1) * 2]))
 
 
@@ -202,9 +202,10 @@ def _default_group_is_the_tp_group(rank: int) -> bool:
     import torch.distributed as dist
 
     explicit = dist.new_group([0, 1], backend="gloo")
-    implicit = ps.all_reduce(torch.full((4,), float(rank + 1)))
-    over_explicit = ps.all_reduce(torch.full((4,), float(rank + 1)), group=explicit)
-    return bool(torch.equal(implicit, over_explicit)) and float(over_explicit[0]) == 3.0
+    tensor = torch.arange(4, dtype=torch.float32) * (rank + 1)
+    implicit = ps.reduce_scatter(tensor.clone(), dim=0)
+    over_explicit = ps.reduce_scatter(tensor.clone(), dim=0, group=explicit)
+    return bool(torch.equal(implicit, over_explicit))
 
 
 class TestGlooCollectives:

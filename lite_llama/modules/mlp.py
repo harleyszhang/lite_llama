@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ..distributed.parallel_state import divide, get_tp_world_size
+from ..distributed.parallel_state import divide, get_tensor_model_parallel_world_size
 from ..kernels import swiglu_forward_fused
 from ..models.config import ModelConfig
 from .linear import ColumnParallelLinear, RowParallelLinear, _check_shard_alignment
@@ -51,7 +51,7 @@ class FusedMLP(nn.Module):
         # half, so scale-block alignment is checked against inter_local —
         # 2 * inter_local can be block-aligned while inter_local alone would
         # split a block in half.
-        local_inter = divide(inter, get_tp_world_size(), "MLP intermediate")
+        local_inter = divide(inter, get_tensor_model_parallel_world_size(), "MLP intermediate")
         _check_shard_alignment(quant, local_inter, "MLP intermediate")
         self.gate_up_proj = ColumnParallelLinear(
             hidden, 2 * inter, quant=quant, dtype=config.dtype, what="MLP intermediate"

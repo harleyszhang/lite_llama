@@ -51,12 +51,24 @@ def linear_w8a16(
     group_n: int = 0,
     group_k: int = 0,
 ) -> torch.Tensor:
-    """8-bit weight-only GEMM (fp8-e4m3 ``uint8`` or symmetric ``int8``)."""
+    """8-bit weight-only GEMM: fp8-e4m3 or symmetric ``int8`` bytes, or the
+    asymmetric int8 of a GPTQ ``bits=8`` checkpoint (``weight_zeros`` present,
+    routed here under the ``gptq_int8`` scheme once the load-time unpack has
+    expanded the checkpoint's packed words to one byte per element).
+    """
     from ..quantization import w8a16_matmul
 
     if weight_scale is None:
         raise ValueError("linear_w8a16 needs weight_scale (fp8 or blockwise-int8 row)")
-    return w8a16_matmul(x, weight, weight_scale, group_n=group_n or 1, group_k=group_k, bias=bias)
+    return w8a16_matmul(
+        x,
+        weight,
+        weight_scale,
+        zeros=weight_zeros,
+        group_n=group_n or 1,
+        group_k=group_k,
+        bias=bias,
+    )
 
 
 def linear_w4a16(

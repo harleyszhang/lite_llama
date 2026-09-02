@@ -118,7 +118,7 @@ python benchmarks/bench_data_parallel.py --model my_weight/Qwen2.5-1.5B-Instruct
 - **并发上限在建副本时定，不随批大小走。** `max_num_seqs`（默认 32）是常驻引擎的 slot 数，一次发进来 256 条就分批入场。这是服务该有的行为（显存有上限），但离线批处理要吃满卡就得把它开到批的宽度——`DataParallelEngine(..., max_num_seqs=256)`。上面那张表就是这么测的。
 - **文本模型离线批处理。** 多模态的逐请求 processor 输出不走这条路径。
 - **每卡一份完整权重。** 这是 DP 的定义，不是限制——放不下单卡就要叠加 TP （`tensor_parallel_size > 1`），两者按网格组合。
-- **副本独立 profile 各自的 KV cache。** `all_reduce_min` 只在副本内的 TP 组里取最小值， DP 副本之间不参与，所以忙卡上的副本可以自持一份更小的 cache。规约张量落在 `torch.cuda.current_device()` 上而不是 `cuda:{tp_rank}`：DP×TP 下进程占的是 `dp_rank * tp_size + tp_rank` 号卡，`CUDA_VISIBLE_DEVICES` 还会再重映射一次，用 tp rank 当设备号会让副本 1 从副本 0 的卡上发起规约。
+- **副本独立 profile 各自的 KV cache。** `tensor_model_parallel_all_reduce_min` 只在副本内的 TP 组里取最小值， DP 副本之间不参与，所以忙卡上的副本可以自持一份更小的 cache。规约张量落在 `torch.cuda.current_device()` 上而不是 `cuda:{tp_rank}`：DP×TP 下进程占的是 `dp_rank * tp_size + tp_rank` 号卡，`CUDA_VISIBLE_DEVICES` 还会再重映射一次，用 tp rank 当设备号会让副本 1 从副本 0 的卡上发起规约。
 
 ## 相关文档
 

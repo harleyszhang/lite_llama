@@ -26,7 +26,7 @@ from .kv_cache import BaseKVCacheMethod, Fp8KVCacheMethod, get_kv_cache_method
 from .nvfp4 import NVFP4Config
 from .parameter import RawParameter
 from .unquant import UnquantizedConfig, UnquantizedFusedMoEMethod, UnquantizedLinearMethod
-from .utils import adapt_int4_checkpoint
+from .utils import adapt_int4_checkpoint, adapt_packed_checkpoint
 from .w8a8_fp8 import W8A8Fp8Config
 from .w8a8_int8 import W8A8Int8Config
 
@@ -155,6 +155,7 @@ __all__ = [  # noqa: RUF022
     "BASE_QUANTIZATION_METHODS",
     "RUNTIME_SCHEMES",
     "adapt_int4_checkpoint",
+    "adapt_packed_checkpoint",
     # Factories
     "get_quantization_config",
     "get_quant_config_from_hf",

@@ -74,6 +74,10 @@ class AWQConfig(QuantizationConfig):
     def is_int4(self) -> bool:
         return True
 
+    @property
+    def is_packed(self) -> bool:
+        return True
+
 
 class AWQLinearMethod(LinearMethodBase):
     """Group-wise int4 from an AutoAWQ checkpoint; runs the w4a16 kernel."""
@@ -113,8 +117,10 @@ class AWQLinearMethod(LinearMethodBase):
 class AWQMoEMethod(FusedMoEMethodBase):
     """AWQ int4 MoE: group-wise int4 stacked experts through fused_moe w4a16 path.
 
-    Expert weights are stored as ``[E, N, K//8]`` int32 (8 nibbles per word),
-    with ``[E, N, K//group_k]`` fp32 scales and zeros.
+    Expert weights load in the checkpoint's ``[E, N, K//8]`` int32 packing
+    (8 nibbles per word) with ``[E, N, K//group_k]`` fp32 scales and zeros;
+    :meth:`process_weights_after_loading` then swaps each stacked tensor for
+    the fused kernel's byte packing (``[E, N, K//2]`` uint8) in one repack.
     """
 
     def create_weights(self, block: nn.Module) -> dict[str, nn.Parameter]:
@@ -148,6 +154,21 @@ class AWQMoEMethod(FusedMoEMethodBase):
                 torch.empty(block.num_experts, down_n, num_groups_d, dtype=torch.float32)
             ),
         }
+
+    def process_weights_after_loading(self, block: nn.Module) -> None:
+        """Repack the int32 word layout into the GEMM kernel's byte layout.
+
+        ``create_weights`` allocates the checkpoint's ``[E, N, K//8]`` int32 so
+        the expert loader (and its TP narrow) fills it directly; the fused MoE
+        kernel instead consumes ``[E, N, K//2]`` uint8, two nibbles per byte
+        along K -- vLLM's layout, whose replicated addressing this cannot pay
+        per call. One repack here, on the load device, exactly the role
+        ``awq_marlin_repack`` plays in vLLM's same-named hook.
+        """
+        from ...kernels import repack_int4_experts
+
+        for name in ("gate_up_proj", "down_proj"):
+            block.experts[name] = RawParameter(repack_int4_experts(block.experts[name].data))
 
     def apply(self, block, x, topk_weights, topk_ids) -> torch.Tensor:
         from ...kernels import fused_moe

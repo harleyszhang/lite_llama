@@ -14,7 +14,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..distributed.parallel_state import all_reduce, divide, get_tp_rank, get_tp_world_size
+from ..distributed.parallel_state import (
+    divide,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from ..kernels import vocab_parallel_embedding
 
 
@@ -28,8 +33,8 @@ def vocab_shard(vocab_size: int, *, rank: int | None = None, tp_size: int | None
     Raises:
         ValueError: If ``vocab_size`` does not divide across the ranks.
     """
-    tp_size = get_tp_world_size() if tp_size is None else tp_size
-    rank = get_tp_rank() if rank is None else rank
+    tp_size = get_tensor_model_parallel_world_size() if tp_size is None else tp_size
+    rank = get_tensor_model_parallel_rank() if rank is None else rank
     local = divide(vocab_size, tp_size, "vocabulary")
     return range(rank * local, (rank + 1) * local)
 
@@ -82,10 +87,10 @@ class VocabParallelEmbedding(nn.Module):
         narrowed to this rank's rows — the same :attr:`shard` the gather masks
         with. Never packed, so ``shard_id`` is unused.
         """
-        world_size = get_tp_world_size()
+        world_size = get_tensor_model_parallel_world_size()
         if world_size > 1:
             size = loaded.shape[0] // world_size
-            loaded = loaded.narrow(0, get_tp_rank() * size, size)
+            loaded = loaded.narrow(0, get_tensor_model_parallel_rank() * size, size)
         if param.shape != loaded.shape:
             raise ValueError(
                 f"checkpoint tensor of shape {tuple(loaded.shape)} does not fit "
@@ -100,12 +105,12 @@ class VocabParallelEmbedding(nn.Module):
         return len(self.shard)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        if get_tp_world_size() == 1:
+        if get_tensor_model_parallel_world_size() == 1:
             return F.embedding(input_ids, self.weight)
         out = vocab_parallel_embedding(
             input_ids, self.weight, self.shard.start, self.local_vocab_size
         )
-        return all_reduce(out.view(*input_ids.shape, self.hidden_size))
+        return tensor_model_parallel_all_reduce(out.view(*input_ids.shape, self.hidden_size))
 
     def extra_repr(self) -> str:
         return (

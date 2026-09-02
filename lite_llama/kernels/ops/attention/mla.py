@@ -283,12 +283,12 @@ def mla_decode_reference(
     qk_rope_head_dim: int = QK_ROPE_HEAD_DIM,
 ) -> torch.Tensor:
     """Pure-PyTorch reference for MLA decode over paged latent cache."""
-    
+
     batch, num_heads, _ = q.shape
     _num_pages, page_size, latent_dim = kv_cache.shape
     lora_rank = latent_dim - qk_rope_head_dim
     out = torch.empty((batch, num_heads, lora_rank), dtype=q.dtype, device=q.device)
-    
+
     for b in range(batch):
         length = int(cache_seqlens[b])
         num_pages = (length + page_size - 1) // page_size
@@ -359,5 +359,5 @@ def mla_prefill(
     out = flash_attention2_no_pad(
         q_pad, k_pad, v_pad, sm_scale, b_start_loc, b_seq_len, max_seq_len
     )
-    
+
     return out[..., :v_dim]

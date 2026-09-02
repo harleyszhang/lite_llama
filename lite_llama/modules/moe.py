@@ -20,7 +20,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..distributed.parallel_state import all_reduce, divide, get_tp_rank, get_tp_world_size
+from ..distributed.parallel_state import (
+    divide,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from ..kernels import grouped_topk
 from ..models.config import ModelConfig
 from .mlp import FusedMLP
@@ -59,7 +64,7 @@ class SparseMoeBlock(nn.Module):
         # Each rank owns a slice of every expert's intermediate dimension, the
         # same split a dense MLP gets, applied to all experts at once.
         self.moe_intermediate_size = divide(
-            config.moe_intermediate_size, get_tp_world_size(), "MoE intermediate"
+            config.moe_intermediate_size, get_tensor_model_parallel_world_size(), "MoE intermediate"
         )
         self.quant = quant
         # The model dtype drives every unquantised tensor this block owns: the
@@ -117,7 +122,7 @@ class SparseMoeBlock(nn.Module):
         only without tensor parallelism.
         """
         if shard_id is None:
-            if get_tp_world_size() > 1:
+            if get_tensor_model_parallel_world_size() > 1:
                 raise ValueError(
                     "a checkpoint with pre-stacked experts cannot be TP-sharded on "
                     "load; use the per-expert layout"
@@ -137,10 +142,10 @@ class SparseMoeBlock(nn.Module):
             dim = 0
         else:
             dim = 1
-        world_size = get_tp_world_size()
+        world_size = get_tensor_model_parallel_world_size()
         if world_size > 1:
             size = loaded.shape[dim] // world_size
-            loaded = loaded.narrow(dim, get_tp_rank() * size, size)
+            loaded = loaded.narrow(dim, get_tensor_model_parallel_rank() * size, size)
         if view.shape != loaded.shape:
             raise ValueError(
                 f"checkpoint tensor of shape {tuple(loaded.shape)} does not fit "
@@ -194,7 +199,7 @@ class SparseMoeBlock(nn.Module):
         # Each rank's routed partial sum joined the all_reduce; the shared MLP's
         # down_proj is row-parallel and reduces on its own, and summing after is
         # the same total (all_reduce(a) + all_reduce(b) == all_reduce(a + b)).
-        out = all_reduce(out)
+        out = tensor_model_parallel_all_reduce(out)
         if self.shared_experts is not None:
             out = out + self.shared_experts(x)
         return out.reshape(*leading_shape, self.hidden_size)
@@ -206,5 +211,6 @@ class SparseMoeBlock(nn.Module):
             return
         method = quant.get_quant_method(self)
         method.quantize_from_fp16(self, quant)
+        method.process_weights_after_loading(self)
         self.quant = quant
         self.quant_method = method

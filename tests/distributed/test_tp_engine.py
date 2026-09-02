@@ -519,9 +519,9 @@ def test_shutdown_returns_the_process_to_a_world_of_one(model_dir: Path):
         tensor_parallel_size=2,
     )
     try:
-        assert ps.get_tp_world_size() == 2
+        assert ps.get_tensor_model_parallel_world_size() == 2
         list(engine.generate([_prompt_at("single", 0)], _GREEDY))
     finally:
         engine.shutdown()
-    assert ps.get_tp_world_size() == 1
+    assert ps.get_tensor_model_parallel_world_size() == 1
     assert ps.get_world_size() == 1

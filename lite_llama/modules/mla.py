@@ -19,7 +19,7 @@ import math
 import torch
 import torch.nn as nn
 
-from ..distributed.parallel_state import divide, get_tp_world_size
+from ..distributed.parallel_state import divide, get_tensor_model_parallel_world_size
 from ..kernels import dispatch, rope_emb_forward, skip_rmsnorm
 from ..kernels.dispatcher import MLA_LATENT_TAGS
 from ..models.config import ModelConfig
@@ -92,7 +92,7 @@ class DeepseekV2MLAAttention(nn.Module):
         # a world size that does not divide the heads then fails on the head
         # count it actually breaks, and the equal output split provably lands
         # on head boundaries.
-        self.num_heads = divide(config.num_heads, get_tp_world_size(), "attention heads")
+        self.num_heads = divide(config.num_heads, get_tensor_model_parallel_world_size(), "attention heads")
         self.scale = self.qk_head_dim**-0.5
 
         dtype = config.dtype

@@ -6,7 +6,7 @@ decisions get numbers instead of guesses.
 
 Usage:
     with CollectiveStats.collect() as stats:
-        all_reduce(x)
+        tensor_model_parallel_all_reduce(x)
     print(stats.report())
 """
 

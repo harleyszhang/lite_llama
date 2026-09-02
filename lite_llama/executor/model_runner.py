@@ -17,10 +17,10 @@ import torch
 import torch.nn as nn
 
 from ..distributed.parallel_state import (
-    all_ranks_agree,
-    all_reduce_min,
     divide,
-    get_tp_world_size,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce_min,
+    tensor_model_parallel_ranks_agree,
 )
 from ..kernels import update_kv_index
 from ..models.config import ModelConfig
@@ -78,7 +78,7 @@ class ModelRunner:
         else:
             # Attention heads are dealt out across tensor-parallel ranks, so this
             # rank caches only the K/V of the heads it owns.
-            kv_heads = divide(config.num_kv_heads, get_tp_world_size(), "key/value heads")
+            kv_heads = divide(config.num_kv_heads, get_tensor_model_parallel_world_size(), "key/value heads")
             self.kv_row = (2 * kv_heads, config.head_dim)
         self.vocab_size = config.vocab_size
         self.max_seq_len = config.max_seq_len
@@ -106,7 +106,7 @@ class ModelRunner:
             # Every rank must reach the same answer: the cache row a rank hands
             # out is derived from its own capacity, and two ranks with different
             # capacities would write the same token to different rows.
-            max_gpu_num_blocks = all_reduce_min(
+            max_gpu_num_blocks = tensor_model_parallel_all_reduce_min(
                 profiler.available_kv_blocks(model, self.vocab_size)
             )
 
@@ -344,7 +344,7 @@ class ModelRunner:
         if self._graph_manager is not None:
             return  # idempotent
 
-        tp_size = get_tp_world_size()
+        tp_size = get_tensor_model_parallel_world_size()
         if tp_size > 1 and os.environ.get(_TP_GRAPH_ENV, "1") == "0":
             logger.warning(
                 "%s=0: CUDA Graph disabled under tensor parallelism; running eager.",
@@ -428,7 +428,7 @@ class ModelRunner:
         rank branches the same way without a second round of agreement.
         """
         fingerprint = manager.grid_fingerprint() if captured else 0
-        if not all_ranks_agree(fingerprint) or fingerprint == 0:
+        if not tensor_model_parallel_ranks_agree(fingerprint) or fingerprint == 0:
             logger.warning(
                 "tensor-parallel ranks captured different CUDA graph grids "
                 "(this rank: %d); dropping graphs on every rank and decoding eager",
@@ -441,7 +441,7 @@ class ModelRunner:
         # difference — the signature of a graph reading freed memory — fails the
         # gate instead of slipping through a negated comparison.
         local_ok = error <= TP_GRAPH_PARITY_ATOL
-        if all_reduce_min(int(local_ok)) != 1:
+        if tensor_model_parallel_all_reduce_min(int(local_ok)) != 1:
             logger.warning(
                 "CUDA graph replay disagrees with eager decode by %.3e (tolerance %.1e) "
                 "on at least one rank; dropping graphs and decoding eager",

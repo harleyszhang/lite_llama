@@ -347,6 +347,7 @@ def _fused_moe_kernel(
     DEQUANT_SCALE: tl.constexpr,
     HAS_ZEROS: tl.constexpr,
     SCALE_HOISTED: tl.constexpr,
+    EVEN_K: tl.constexpr,
     compute_type: tl.constexpr,
     A_QUANT: tl.constexpr,
     A_QMAX: tl.constexpr,
@@ -404,23 +405,24 @@ def _fused_moe_kernel(
 
     if QUANT_MODE == 3:
         # INT4: B is [E, N, K//2] uint8, two nibbles per byte along K;
-        # stride_bk is per byte. Replicated addressing (vLLM's idiom): logical
-        # k reads byte k // 2 and shifts by (k % 2) * 4, so the tile loads as
-        # one 2-D [BLOCK_K, BLOCK_N] with every byte appearing in its two
-        # nibble rows. The previous format packed 8 nibbles per int32 word and
-        # unpacked through a [words, 8, N] expand plus ``tl.reshape``; running
-        # that word layout under replicated addressing instead (each word
-        # fetched 8x as int32, a [BLOCK_K, BLOCK_N] int32 tile) measured ~10x
-        # slower on an H100 at t4096 -- the bytes are repacked once at load
-        # (``repack_int4_experts``) rather than shuffled in the loop.
+        # stride_bk is per byte. The load is the *dense* [BLOCK_K // 2, BLOCK_N]
+        # byte tile -- affine in both axes, so it vectorises and the software
+        # pipeliner keeps it on cp.async. Replicated addressing (vLLM's idiom:
+        # logical k reads byte k // 2 inside a [BLOCK_K, BLOCK_N] tile, every
+        # byte appearing in its two nibble rows) compiles to 128 scalar
+        # ``ld.global.b8`` here: the non-affine ``k // 2`` index defeats
+        # Triton's coalescing analysis, and vLLM's own kernel measures 13-18
+        # ms/GEMM on these same bytes and GPU (they ship int4 on the Marlin
+        # CUDA kernel instead). The byte's two nibble planes are separated in
+        # registers instead, and the A tile's even/odd k columns line them
+        # back up as two half-K dots (in the loop below).
+        offs_kh = tl.arange(0, BLOCK_K // 2)
         b_ptrs = (
             b_ptr
             + off_experts * stride_be
             + offs_bn[None, :] * stride_bn
-            + (offs_k[:, None] // 2) * stride_bk
+            + offs_kh[:, None] * stride_bk
         )
-        # Low nibble for even k, high for odd; constant across the k-loop.
-        b_shifter = (offs_k[:, None] % 2) * 4
     else:
         b_ptrs = (
             b_ptr
@@ -488,34 +490,65 @@ def _fused_moe_kernel(
                 other=0,
             )
         if QUANT_MODE == 3:
-            # INT4 path: one [BLOCK_K, BLOCK_N] uint8 tile, nibbles out by shift-and-mask
-            b_byte = tl.load(
-                b_ptrs,
-                mask=offs_k[:, None] < K - k * BLOCK_K,
-                other=0,
-            )  # [BLOCK_K, BLOCK_N]; each byte in its two nibble rows
-            b = ((b_byte >> b_shifter) & 0xF).to(tl.float32)
+            # INT4 path: one dense [BLOCK_K // 2, BLOCK_N] byte tile; the two
+            # nibble planes come out in registers (see the addressing note
+            # above the loop). The masked form predicates per element along k,
+            # which decomposes the load into scalar bytes -- the same reason
+            # replicated addressing was slow -- so it is compiled out whenever
+            # K is tile-aligned, which both Qwen3-30B-A3B GEMMs are.
+            if EVEN_K:
+                b_byte = tl.load(b_ptrs)
+            else:
+                rem = K - k * BLOCK_K
+                b_byte = tl.load(
+                    b_ptrs,
+                    # ceil: the low plane covers k = 2i and the high one
+                    # k = 2i + 1, so an odd remainder leaves one dead high
+                    # nibble -- whose A column the a-load's own mask has
+                    # already zeroed.
+                    mask=offs_kh[:, None] < (rem + 1) // 2,
+                    other=0,
+                )
+            # Straight to compute_type: both planes are small integers and the
+            # zero point is an integer in [0, 15], so the difference is exact
+            # in the 16-bit formats -- no fp32 detour, and the epilogue's fp32
+            # scale multiply is where the precision budget belongs anyway.
+            b_lo = (b_byte & 0xF).to(compute_type)
+            b_hi = ((b_byte >> 4) & 0xF).to(compute_type)
             # Load scale and optionally zero point
             if not SCALE_HOISTED:
                 b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
             if HAS_ZEROS:
+                # The zero point joins its plane in compute_type: an fp32 zero
+                # would promote the subtraction and drag the operand back out
+                # of the dtype the dot needs.
                 b_zero = tl.load(
                     b_zeros_ptr
                     + off_experts * stride_bse
                     + (offs_bn // GROUP_N) * stride_bsn
                     + ((k * BLOCK_K) // GROUP_K) * stride_bsk
-                )
-                b = b - b_zero[None, :]
-            # Only the zero point enters the operand; the fp32 scale stays
-            # outside the dot, as in the 8-bit branches below. Both the nibble
-            # and the zero point are integers in [0, 15], so ``b`` is an exact
-            # small integer in ``compute_type`` and folding the scale in here
-            # would cost precision as well as the operand's dtype.
+                ).to(compute_type)
+                b_lo = b_lo - b_zero[None, :]
+                b_hi = b_hi - b_zero[None, :]
+            # (m, k) with k = 2i + j reshapes row-major to
+            # [BLOCK_M, BLOCK_K // 2, 2], so tl.split hands out the even and
+            # odd k columns with no memory round trip; each half multiplies
+            # its own nibble plane and the pair sums to the old full-K dot.
+            a_even, a_odd = tl.split(tl.reshape(a, (BLOCK_M, BLOCK_K // 2, 2)))
             if SCALE_HOISTED:
-                accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
+                accumulator = tl.dot(a_even, b_lo, acc=accumulator)
+                accumulator = tl.dot(a_odd, b_hi, acc=accumulator)
             else:
-                accumulator += tl.dot(a, b.to(compute_type)) * b_scale[None, :]
-            b_ptrs += (BLOCK_K // _INT4_PACK_FACTOR) * stride_bk
+                # Both planes share the k-block's scale (GROUP_K is a multiple
+                # of BLOCK_K -- the group_k check in _fused_moe guarantees it),
+                # so one multiply covers the two half-K dots together.
+                accumulator += (
+                    tl.dot(a_even, b_lo) + tl.dot(a_odd, b_hi)
+                ) * b_scale[None, :]
+            # ``_INT4_PACK_FACTOR`` spelled as its literal: Triton kernels only
+            # resolve globals that are tl.constexpr instances (see the modes'
+            # note above), so the kernel body cannot name the launcher's constant.
+            b_ptrs += (BLOCK_K // 2) * stride_bk
         else:
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0)
             if QUANT_MODE == 0:
@@ -676,17 +709,22 @@ def _launch_config(num_tokens: int, quant_mode: int, rows_per_expert: float) -> 
     At the 4096-token prefill those tiles bought 19-28% over the old two-tier
     heuristic (all in us): unquantised 1430 -> 1058, fp8 W8A8 1073 -> 869 (with
     ``_FP8_A8_PROMOTE_EVERY=128``, without which the 64x128 tile loses ~12%),
-    fp8 W8A16 1949 -> 1418, int8 W8A16 1585 -> 1148, int4 2366 -> 1834. The
-    int8 W8A8 row was written after the sweep and inherits int8 W8A16's tiles:
-    its B bytes are identical and the int8 tensor cores only ever compute faster
-    than the widened dot, so the memory-bound tile preference transfers.
+    fp8 W8A16 1949 -> 1418, int8 W8A16 1585 -> 1148. The int4 row was reswept
+    after the dual-dot kernel replaced the int32-format unpacking (that
+    sweep's 2366 -> 1834 is void): the tiles survived, and BLOCK_K=256 (four
+    half-K dots per k-iteration) and BLOCK_N=256 both measured 1.6-2x slower
+    at t4096. The int8 W8A8 row was written after the sweep and inherits int8
+    W8A16's tiles: its B bytes are identical and the int8 tensor cores only
+    ever compute faster than the widened dot, so the memory-bound tile
+    preference transfers.
 
     ``BLOCK_N`` stops at 128 for the unquantised mode by shared memory, not by
     preference: a bf16 tile of (128, 128) + (128, 256) operands needs 288 KB over
     three stages against H100's 228 KB. The 8-bit modes store B as one byte per
     element and fit the wider tile; int4 and fp8 W8A8 measured *slower* on it --
-    int4's unpacking and mode 4's epilogue want the narrower tile -- so only the
-    two weight-only 8-bit modes take it.
+    int4's nibble planes are (BLOCK_K, BLOCK_N) compute_type tiles held in
+    registers, and mode 4's epilogue wants the narrower tile -- so only the two
+    weight-only 8-bit modes take it.
 
     ``num_tokens`` and ``quant_mode`` stay in the signature because callers pass
     them and a future divergence on either belongs here rather than at the call
@@ -797,6 +835,7 @@ def _invoke_moe_gemm(
         K_PROMOTE=min(_FP8_A8_PROMOTE_EVERY, config["BLOCK_K"]),
         DEQUANT_SCALE=dequant_scale,
         HAS_ZEROS=b_zeros is not None,
+        EVEN_K=k_logical % config["BLOCK_K"] == 0,
         # Per-output-channel scales (one group spanning K) are the common case for
         # every 8-bit expert format here, and they let the k-loop accumulate
         # inside ``tl.dot``. Int4's group scales and block-wise fp8 keep the

@@ -56,7 +56,7 @@ def test_no_offset_without_tensor_parallelism():
 
 
 def _offset_payload(rank: int) -> int | None:
-    return local_vocab_offset(VOCAB // ps.get_tp_world_size())
+    return local_vocab_offset(VOCAB // ps.get_tensor_model_parallel_world_size())
 
 
 @needs_gpus(2)

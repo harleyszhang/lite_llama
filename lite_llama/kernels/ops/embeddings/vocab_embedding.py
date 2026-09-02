@@ -72,7 +72,7 @@ def vocab_parallel_embedding(
 
     Ids inside ``[shard_start, shard_start + local_vocab)`` gather their rows;
     every other id produces a zero row, so summing the outputs of all TP ranks
-    (``all_reduce``) yields the full unsharded embedding.
+    (``tensor_model_parallel_all_reduce``) yields the full unsharded embedding.
 
     Args:
         input_ids: Token ids of any shape; each is looked up independently.
