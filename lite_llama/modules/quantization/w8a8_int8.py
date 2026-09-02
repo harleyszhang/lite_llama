@@ -125,9 +125,14 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
         }
 
     def apply(self, block, x, topk_weights, topk_ids) -> torch.Tensor:
-        from ...kernels import fused_moe
+        from ...kernels import fused_moe_w8a8_int8
 
-        return fused_moe(
+        # The W8A8 entry point, not the weight-only ``fused_moe``: both store
+        # int8 experts with per-channel scales, so the dtype cannot tell the
+        # modes apart -- the entry point is the only thing that quantises the
+        # activation, which is what makes this SmoothQuant rather than an int8
+        # weight-only model with extra steps.
+        return fused_moe_w8a8_int8(
             x,
             block.experts["gate_up_proj"],
             block.experts["down_proj"],

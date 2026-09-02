@@ -60,6 +60,97 @@ def _quantize_activations_kernel(
     tl.store(scale_ptr + pid_m, scale)
 
 
+#: Largest magnitude symmetric int8 stores.
+_INT8_MAX = 127.0
+
+
+# --------------------------------------------------------------------------- #
+# Per-token activation quantisation (the MoE W8A8 path's separate quantiser)
+# --------------------------------------------------------------------------- #
+@triton.jit
+def _quantize_int8_per_token_kernel(
+    x_ptr,
+    q_ptr,
+    s_ptr,
+    K,
+    stride_xm,
+    stride_qm,
+    QMAX: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Quantise one row of ``x`` to int8 with its own scale.
+
+    Same two-pass shape as :func:`_quantize_activations_kernel`, as a standalone
+    function because the MoE path quantises *before* its GEMM launch rather
+    than inside the dense one: the amax must be known before any element can be
+    scaled, and both passes stay in one program so the scale is a register.
+    """
+    row = tl.program_id(0)
+    x_row = x_ptr + row * stride_xm
+
+    amax = 0.0
+    for k0 in range(0, K, BLOCK_K):
+        offs = k0 + tl.arange(0, BLOCK_K)
+        x = tl.load(x_row + offs, mask=offs < K, other=0.0).to(tl.float32)
+        amax = tl.maximum(amax, tl.max(tl.abs(x)))
+
+    # An all-zero row would divide by zero; 1.0 leaves it exactly zero instead.
+    scale = tl.where(amax > 0.0, amax / QMAX, 1.0)
+    tl.store(s_ptr + row, scale)
+
+    q_row = q_ptr + row * stride_qm
+    for k0 in range(0, K, BLOCK_K):
+        offs = k0 + tl.arange(0, BLOCK_K)
+        mask = offs < K
+        x = tl.load(x_row + offs, mask=mask, other=0.0).to(tl.float32)
+        # rint, not a plain .to(int8): torch's .round() — and the fused MoE
+        # kernel's inline A-quantiser — round to nearest even, while .to
+        # truncates toward zero, a different byte wherever the quotient's
+        # fraction exceeds one half. The clamp is a no-op by construction; it
+        # guards a non-finite input instead of producing an int8 overflow.
+        r = tl.extra.cuda.libdevice.rint(x / scale)
+        r = tl.minimum(tl.maximum(r, -QMAX), QMAX)
+        tl.store(q_row + offs, r.to(tl.int8), mask=mask)
+
+
+def int8_quantize_per_token(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantise activations to int8, one scale per row, in one launch.
+
+    The separate quantiser of the W8A8-int8 MoE path — the grouped GEMM
+    quantises inline on the launch-bound small shapes, this serves the rest —
+    mirroring
+    :func:`~lite_llama.kernels.ops.quantization.fp8.fp8_quantize_per_token`. No
+    host synchronisation, so a layer holding it on its critical path stays
+    CUDA-graph capturable.
+
+    Args:
+        x: ``[..., K]`` fp16/bf16 activations. Leading dims are flattened to rows.
+
+    Returns:
+        ``(qx, scales)`` with ``qx`` int8 shaped like ``x`` and ``scales``
+        ``[..., 1]`` fp32.
+    """
+    k = x.shape[-1]
+    flat = x.reshape(-1, k)
+    if flat.stride(-1) != 1:
+        flat = flat.contiguous()
+    m = flat.shape[0]
+
+    qx = torch.empty_like(flat, dtype=torch.int8)
+    scale = torch.empty(m, dtype=torch.float32, device=x.device)
+    _quantize_int8_per_token_kernel[(m,)](
+        flat,
+        qx,
+        scale,
+        k,
+        flat.stride(0),
+        qx.stride(0),
+        QMAX=_INT8_MAX,
+        BLOCK_K=min(triton.next_power_of_2(k), 1024),
+    )
+    return qx.reshape(x.shape), scale.reshape(*x.shape[:-1], 1)
+
+
 # --------------------------------------------------------------------------- #
 # GEMM kernel
 # --------------------------------------------------------------------------- #

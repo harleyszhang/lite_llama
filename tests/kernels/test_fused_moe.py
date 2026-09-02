@@ -14,9 +14,11 @@ from __future__ import annotations
 import pytest
 import torch
 
+import lite_llama.kernels.ops.moe.fused_moe as _fused_moe_mod
 from lite_llama.kernels.ops.moe.fused_moe import (
     fused_moe,
     fused_moe_w8a8_fp8,
+    fused_moe_w8a8_int8,
     moe_align_block_size,
 )
 from lite_llama.modules.quantization.utils import (
@@ -295,6 +297,23 @@ def _fp8_round_trip(t: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     return q.view(torch.float8_e4m3fn).float() * scale
 
 
+def _int8_round_trip(t: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """Per-token symmetric int8 quantise-dequantise, in torch, at the kernel's
+    precision.
+
+    Mirrors :func:`_fp8_round_trip`: the kernel quantises what it stored, so the
+    reference downcasts to ``dtype`` first. ``round`` — round to nearest even —
+    matches both A-quantising routes under test, the inline one in the GEMM and
+    ``int8_quantize_per_token``; a truncating spelling would compare the kernel
+    against a pipeline it does not run.
+    """
+    flat = t.to(dtype).reshape(-1, t.shape[-1]).float()
+    scale = flat.abs().amax(dim=-1, keepdim=True) / 127.0
+    scale = torch.where(scale > 0, scale, torch.ones_like(scale))
+    q = (flat / scale).round().clamp(-127, 127)
+    return (q * scale).reshape(t.shape)
+
+
 @pytest.mark.parametrize("tokens", [1, 33, 129])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_fused_moe_fp8_a8_matches_reference(tokens, dtype):
@@ -397,3 +416,222 @@ def test_fused_moe_fp8_a8_rejects_non_fp8_experts():
         fused_moe_w8a8_fp8(
             x, q1, q2, weights, ids, w1_scale=s1, w2_scale=s2, group_n=1, group_k=hidden
         )
+
+
+# --------------------------------------------------------------------------- #
+# int8 W8A8 experts (activation quantised too)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("tokens", [1, 33, 129])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fused_moe_int8_a8_matches_reference(tokens, dtype):
+    """``fused_moe_w8a8_int8`` against a torch reference that quantises both
+    sides, symmetric to the fp8 A8 test above.
+
+    The tolerance is shared with fp8 deliberately: int8's own error is smaller
+    (7 significant bits against e4m3's 3-mantissa-bit values, ~0.4% per element
+    against ~3%), so what the gate measures here is the fp16/bf16 intermediate
+    storage — the silu output and each slot's GEMM2 row — which both modes pay
+    equally.
+
+    The token counts pick the same BLOCK_M tiers as the fp8 row. Unlike fp8,
+    whose wgmma only exists from BLOCK_M=64, int8's ``imma`` runs at every tier
+    from Turing on, and its int32 accumulation is exact — the reason mode 5 has
+    no ``K_PROMOTE`` analogue to tune.
+    """
+    hidden, inter, num_experts, top_k = 256, 128, 8, 2
+    torch.manual_seed(0)
+    w1 = torch.randn(num_experts, 2 * inter, hidden, device="cuda") / hidden**0.5
+    w2 = torch.randn(num_experts, hidden, inter, device="cuda") / inter**0.5
+    q1, s1 = quantize_int8_per_channel(w1)
+    q2, s2 = quantize_int8_per_channel(w2)
+    # Dequantised from the same bytes, so the reference's weights are the kernel's.
+    d1 = q1.float() * s1
+    d2 = q2.float() * s2
+
+    x = torch.randn(tokens, hidden, device="cuda", dtype=dtype)
+    ids = torch.rand(tokens, num_experts, device="cuda").topk(top_k, dim=-1).indices
+    ids = ids.to(torch.int32)
+    weights = torch.softmax(torch.randn(tokens, top_k, device="cuda"), dim=-1).to(dtype)
+
+    out = fused_moe_w8a8_int8(
+        x,
+        q1,
+        q2,
+        weights,
+        ids,
+        w1_scale=s1,
+        w2_scale=s2,
+        group_n=1,
+        group_k=max(hidden, inter),
+    )
+    ref = fused_moe_reference(
+        x, d1, d2, weights, ids, act_quant=lambda t: _int8_round_trip(t, dtype)
+    )
+
+    assert out.dtype == dtype
+    err = (out.float() - ref).abs()
+    rms_rel = (err.pow(2).mean().sqrt() / ref.pow(2).mean().sqrt()).item()
+    assert rms_rel < _A8_RMS_REL[dtype], f"rms relative error {rms_rel:.3e}"
+    peak_rel = (err.max() / ref.abs().max()).item()
+    assert peak_rel < _A8_MAX_OVER_PEAK, f"worst element {peak_rel:.3e} of peak"
+
+
+def test_fused_moe_int8_a8_differs_from_weight_only():
+    """The two int8 entry points are not aliases of one another.
+
+    ``W8A8Int8MoEMethod.apply`` used to call the weight-only ``fused_moe`` — a
+    scheme named W8A8 that never quantised an activation — so the divergence
+    this pins is not hypothetical decoration.
+    """
+    hidden, inter, num_experts, top_k = 256, 128, 8, 2
+    torch.manual_seed(0)
+    w1 = torch.randn(num_experts, 2 * inter, hidden, device="cuda") / hidden**0.5
+    w2 = torch.randn(num_experts, hidden, inter, device="cuda") / inter**0.5
+    q1, s1 = quantize_int8_per_channel(w1)
+    q2, s2 = quantize_int8_per_channel(w2)
+    x = torch.randn(64, hidden, device="cuda", dtype=torch.float16)
+    ids = torch.rand(64, num_experts, device="cuda").topk(top_k, dim=-1).indices.to(torch.int32)
+    weights = torch.softmax(torch.randn(64, top_k, device="cuda"), dim=-1).to(torch.float16)
+
+    kw = {"w1_scale": s1, "w2_scale": s2, "group_n": 1, "group_k": max(hidden, inter)}
+    a16 = fused_moe(x, q1, q2, weights, ids, **kw)
+    a8 = fused_moe_w8a8_int8(x, q1, q2, weights, ids, **kw)
+
+    assert not torch.equal(a16, a8)
+    # int8's quantisation cost sits well under e4m3's, so the fp8-vs-A16 bound
+    # (6.0e-2) holds with room to spare: it stays a bound on "same operation,
+    # one extra rounding per operand", not a tighter int8-specific one.
+    rel = (
+        (a8.float() - a16.float()).pow(2).mean().sqrt() / a16.float().pow(2).mean().sqrt()
+    ).item()
+    assert rel < _A8_VS_A16_RMS_REL, f"the two int8 paths diverge by {rel:.3e}"
+
+
+def test_fused_moe_int8_a8_rejects_non_int8_experts():
+    """Mode 5 cannot be inferred from a dtype, so a wrong caller must be told."""
+    hidden, inter, num_experts, top_k = 128, 64, 4, 2
+    w1 = torch.randn(num_experts, 2 * inter, hidden, device="cuda") / hidden**0.5
+    w2 = torch.randn(num_experts, hidden, inter, device="cuda") / inter**0.5
+    q1, s1 = quantize_fp8_per_channel(w1)
+    q2, s2 = quantize_fp8_per_channel(w2)
+    x = torch.randn(3, hidden, device="cuda", dtype=torch.float16)
+    ids = torch.randint(0, num_experts, (3, top_k), device="cuda", dtype=torch.int32)
+    weights = torch.rand(3, top_k, device="cuda", dtype=torch.float16)
+
+    with pytest.raises(ValueError, match="int8 bytes with scales"):
+        fused_moe_w8a8_int8(
+            x, q1, q2, weights, ids, w1_scale=s1, w2_scale=s2, group_n=1, group_k=hidden
+        )
+
+
+def test_fused_moe_int8_a8_rejects_zero_points():
+    """Symmetric int8 has no zero points; the int4-style arguments are a bug."""
+    hidden, inter, num_experts, top_k = 128, 64, 4, 2
+    w1 = torch.randn(num_experts, 2 * inter, hidden, device="cuda") / hidden**0.5
+    w2 = torch.randn(num_experts, hidden, inter, device="cuda") / inter**0.5
+    q1, s1 = quantize_int8_per_channel(w1)
+    q2, s2 = quantize_int8_per_channel(w2)
+    x = torch.randn(3, hidden, device="cuda", dtype=torch.float16)
+    ids = torch.randint(0, num_experts, (3, top_k), device="cuda", dtype=torch.int32)
+    weights = torch.rand(3, top_k, device="cuda", dtype=torch.float16)
+
+    with pytest.raises(ValueError, match="no zero points"):
+        fused_moe_w8a8_int8(
+            x,
+            q1,
+            q2,
+            weights,
+            ids,
+            w1_scale=s1,
+            w2_scale=s2,
+            w1_zeros=torch.zeros_like(s1),
+            group_n=1,
+            group_k=hidden,
+        )
+
+
+@pytest.mark.parametrize("mode", ["fp8", "int8"])
+def test_fused_moe_a8_inline_quant_matches_separate(mode, monkeypatch):
+    """The two activation-quantising routes produce identical output, not close
+    output.
+
+    Below ``_INLINE_A_QUANT_MAX_ROWS`` rows the quantisation happens inside the
+    GEMM kernel (an amax pass over the gathered rows, then scaling on the fly);
+    above it a separate quantiser kernel runs before the GEMM. Both compute
+    ``scale = amax / QMAX`` in fp32 and round with the same instruction (the
+    e4m3 cvt, or libdevice rint for int8), so the quantised operand — and with
+    it the whole layer — must agree bitwise. Any relaxation here would be a
+    silent divergence between the decode and the prefill answer.
+
+    600 tokens sends both GEMMs over the default threshold at once (600 rows
+    into GEMM1, ``600 * top_k`` slot rows into GEMM2), and inter=1536 — over
+    the silu kernel's 1024-wide block cap and not a power of two — keeps
+    GEMM2's quantisation on the route under test instead of fused into the
+    silu output. Raising the threshold then flips every branch at once.
+    """
+    hidden, inter, num_experts, top_k = 256, 1536, 8, 2
+    torch.manual_seed(0)
+    w1 = torch.randn(num_experts, 2 * inter, hidden, device="cuda") / hidden**0.5
+    w2 = torch.randn(num_experts, hidden, inter, device="cuda") / inter**0.5
+    if mode == "fp8":
+        q1, s1 = quantize_fp8_per_channel(w1)
+        q2, s2 = quantize_fp8_per_channel(w2)
+        call = fused_moe_w8a8_fp8
+    else:
+        q1, s1 = quantize_int8_per_channel(w1)
+        q2, s2 = quantize_int8_per_channel(w2)
+        call = fused_moe_w8a8_int8
+    x = torch.randn(600, hidden, device="cuda", dtype=torch.float16)
+    ids = torch.rand(600, num_experts, device="cuda").topk(top_k, dim=-1).indices
+    ids = ids.to(torch.int32)
+    weights = torch.softmax(torch.randn(600, top_k, device="cuda"), dim=-1).to(torch.float16)
+    kw = {"w1_scale": s1, "w2_scale": s2, "group_n": 1, "group_k": max(hidden, inter)}
+
+    separate = call(x, q1, q2, weights, ids, **kw)
+    monkeypatch.setattr(_fused_moe_mod, "_INLINE_A_QUANT_MAX_ROWS", 1 << 30)
+    inline = call(x, q1, q2, weights, ids, **kw)
+
+    torch.testing.assert_close(inline, separate, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("act_dtype", [torch.float16, torch.bfloat16])
+def test_fused_moe_fp8_blockwise_matches_reference(act_dtype):
+    """fp8-e4m3 expert weights with 128x128 block scales, in either activation
+    dtype.
+
+    Regression: the dequantised operand used to be hardcoded fp16, so bf16
+    activations (Qwen3-30B-A3B-Instruct-2507-FP8) failed kernel compilation
+    with "Both operands must be same dtype. Got bf16 and fp16".
+    """
+    torch.manual_seed(0)
+    hidden, inter, num_experts, top_k = 256, 128, 8, 2
+    gn = gk = 128
+    x = torch.randn(7, hidden, device="cuda", dtype=act_dtype) / hidden**0.5
+    w1 = torch.randn(num_experts, 2 * inter, hidden, device="cuda", dtype=torch.float32) * 0.05
+    w2 = torch.randn(num_experts, hidden, inter, device="cuda", dtype=torch.float32) * 0.05
+    qw1 = w1.to(torch.float8_e4m3fn).view(torch.uint8)
+    qw2 = w2.to(torch.float8_e4m3fn).view(torch.uint8)
+    s1 = (
+        torch.rand(
+            (num_experts, (2 * inter + gn - 1) // gn, (hidden + gk - 1) // gk), device="cuda"
+        )
+        + 0.5
+    )
+    s2 = (
+        torch.rand((num_experts, (hidden + gn - 1) // gn, (inter + gk - 1) // gk), device="cuda")
+        + 0.5
+    )
+    ids = torch.randint(0, num_experts, (7, top_k), device="cuda")
+    weights = torch.softmax(torch.randn(7, top_k, device="cuda", dtype=torch.float32), dim=-1)
+
+    out = fused_moe(x, qw1, qw2, weights, ids, w1_scale=s1, w2_scale=s2, group_n=gn, group_k=gk)
+
+    # Reference: dequantise (the e4m3 values are exact in fp32) and matmul in fp32.
+    deq1 = qw1.view(torch.float8_e4m3fn).float() * s1.repeat_interleave(gn, 1).repeat_interleave(
+        gk, 2
+    )
+    deq2 = qw2.view(torch.float8_e4m3fn).float() * s2.repeat_interleave(gn, 1).repeat_interleave(
+        gk, 2
+    )
+    ref = fused_moe_reference(x, deq1, deq2, weights.to(act_dtype), ids)
+    torch.testing.assert_close(out.float(), ref, rtol=2e-2, atol=2e-2)

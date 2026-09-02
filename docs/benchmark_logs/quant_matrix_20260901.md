@@ -68,6 +68,10 @@ Qwen3-30B-A3B 几何（E=128, top_k=8, h=2048, i=768），单位 µs，运行时
 - **64 tokens**：weight-only 赢。int8 快 25.0%，W8A16 fp8 快 17.4%。int4 不赢——比 fp16 慢 18.5%，全表 GB/s 最低却读最少字节，解包受限而非流量受限。
 - **≥512 tokens**：排序反转。W8A8 fp8 最快（512 档比 fp16 快 18.1%，4096 档快 6.6%，210 TFLOP/s——本轮所有数据中最高的算术速率），而 W8A16 fp8 与 int8 相对纯 fp16 变成彻底的回归（4096 档分别慢 46% 与 33%）。
 
+> 后记（2026-09-02）：上表是修复前的行为。`moe_align` 已 Triton 化（t1 约 5.8 µs，不再是半层开销）；W8A8 的激活量化在 ≤32 行时融进 GEMM、silu 输出在 store 时量化，fp8 W8A8 从 t1 的 0.75× 修到 0.92×，自 t8 起全面胜过基线（t4096 达 1.20×）；tile 分档重扫后新增 int8 W8A8 路径（t4096 1.54×，459 TFLOP/s，全表任意 shape 最快行）。现行数据见 [`bench_fused_moe_h100_20260902.json`](bench_fused_moe_h100_20260902.json) 与 [`quantization.md`](../quantization.md)。
+>
+> 后记二（2026-09-02 下午）：fp8 W8A16 的 e4m3→fp16 加宽在 sm89+ 上改走单条硬件 `cvt`（kernel 开关 `FP8_CVT`，bit-trick 的五条整数指令与 256× 修正因子一并退场，pre-sm89 不变、golden 逐位一致），t4096 从 1404.0 → 1329.7 µs（0.74×→0.78×），t512 从 382.6 → 348.1 µs（1.23×→1.35×）。同轮证伪三个方向并留档：**BLOCK_M=256**（旨在消 t4096 专家权重 2× 重读）在所有格式上 0.26-0.90×——shared memory 逼 `num_stages=2`、256 行 accumulator 的寄存器压力压垮 occupancy，而 `GROUP_M=8` 的 L2 分组已吸收大部分重读；**int4 改 vLLM 式复制寻址**（逻辑 k 直读所在 word、免 3D reshape）在 int32 打包格式上慢约 10×（t4096 18109 µs）——vLLM 是每字节 2 nibble、重复率 2×，本框架是每 int32 8 nibble、重复率 8×，结论随注释固化在 kernel 里；**int4 BLOCK_K=256** 全档 0.38-0.79×。int4 的 0.54× 因此定性为当前打包格式的结构性成本，消除它需要换 byte 级打包（牵动 checkpoint 布局与 `quantize_int4_groupwise`），不是 kernel 微调。现行权威数据：[`bench_fused_moe_h100_20260902_fp8cvt.json`](bench_fused_moe_h100_20260902_fp8cvt.json)（同日早间的 0902 JSON 是修复中途快照，其 t1 行与自身消融行自相矛盾，勿引用）。
+
 TFLOP/s 列藏着一个陷阱：Triton 只在 `BLOCK_M ≥ 64` 时才发射 Hopper fp8 `wgmma`，启发式在 64 tokens 以上才达到这个条件。t1/t8/t64 的 W8A8 行把两个 e4m3 操作数加宽成 fp16 走 `mma.sync`，根本没有测到 fp8 张量核——与"赢面从 512 开始"相互印证。
 
 ### 1.3 基线列暴露的缺陷
@@ -219,7 +223,7 @@ python benchmarks/bench_quant.py --model-dir $LITE_LLAMA_MODELZOO/Qwen3/Qwen3-4B
     --schemes fp8 int4 --tp 1 2 --engine continuous --cuda-graph --no-cuda-graph --skip-hf
 
 # 在线
-python benchmarks/bench_serving.py --model-dir $LITE_LLAMA_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \
+python benchmarks/bench_scheduler.py serving --model-dir $LITE_LLAMA_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \
     --schemes bf16 fp8 int4 --tp 1 2 --concurrency 1 8 32 --max-tokens 64 --max-seq-len 1024
 
 # kv fp8 误差

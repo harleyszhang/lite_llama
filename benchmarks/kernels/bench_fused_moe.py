@@ -5,63 +5,67 @@ layer touches ``top_k`` experts for a single token, so it reads ``top_k`` full
 expert weight matrices to produce one row of output. That makes the small-token
 rows the most memory-bound shapes in the model — far past the dense projections
 — and it is why a quantised expert format pays off here before it pays off
-anywhere else. Read the table as three regimes, and read the ``moe_align_block_size``
-ablation before any of the format rows — on this device (H100, E=128, top_k=8,
-h=2048, i=768) that one row accounts for more of the decode spread than every
-format difference combined:
+anywhere else. Read the table as three regimes (H100, E=128, top_k=8, h=2048,
+i=768, bf16 activation; the two ablations follow the regimes):
 
 ``tokens <= 8`` (decode)
-    Each of the ``top_k`` selected experts is read whole for one token. Arithmetic
-    intensity is ~2 FLOP/byte, so the ranking *should* be bytes of expert weight
-    — except that it is not: bf16 and all three weight-only formats land inside
-    1.5% of each other (367-372 us) while reading 4x different weight bytes. The
-    ``ablation: moe_align_block_size`` row is why. The routing bookkeeping alone
-    costs ~188 us, over half the layer, and it is identical for every format. Read
-    these rows as "the formats are indistinguishable behind a fixed cost", not as
-    "quantisation does not help". W8A8 fp8 is the one row that is distinguishable
-    here, and it is *worse*: 494 us, 35% over bf16, because quantising the
-    activation costs two more kernel launches on a layer that is already
-    launch-bound.
-``tokens = 64`` (where weight-only quantisation wins)
-    Slots per expert first exceed the row-block, so the grouped GEMM amortises each
-    expert load. int8 at 379.4 us beats bf16's 535.1 by 29.1%, weight-only fp8 at
-    473.1 by 11.6%, and W8A8 fp8 at 502.9 by 6.0% — the last from the skipped
-    dequant alone, since ``BLOCK_M`` is still 32 here and the dot has not reached
-    the fp8 tensor cores. int4 does not win: 626.2 us, 17.0% *slower* than bf16,
-    and its GB/s is the lowest in the table despite reading the fewest bytes —
-    that path is bound by unpacking 8 nibbles per int32, not by traffic.
+    Each of the ``top_k`` selected experts is read whole for one token, so the
+    ranking *should* be bytes of expert weight — and at exactly 1 token it still
+    is not: every format lands within 10% of bf16 (102-112 us) because the floor
+    is launches, not bytes. The layer is five kernels back to back (align, GEMM1,
+    silu, GEMM2, sum) and a W8A8 row's activation quantiser used to add two more
+    launches — that was the old table's 35% W8A8 decode loss. Both quantisations
+    are fused now (into the GEMMs below 32 rows, ``_INLINE_A_QUANT_MAX_ROWS``, and
+    into silu's store, ``QUANT_OUT``), which trades the launch for an amax
+    re-derived in every GEMM program: ~9% at t1, gone by t8. From 8 tokens bytes
+    take over and the ranking returns — int8 weight-only at 116.5 us leads
+    bf16's 186.6 by 60%, W8A8 fp8 by 52%, and even int4 finally moves (1.07x).
+``tokens = 64`` (where quantisation wins)
+    Slots per expert first exceed the row-block, so the grouped GEMM amortises
+    each expert load and every quantised row beats bf16's 418.3. int8 W8A8 at
+    234.6 (1.78x) is the floor here, with int8 weight-only and W8A8 fp8 inside
+    1% of it (234.8 / 237.0) and weight-only fp8 at 279.7 (1.50x). The A8 rows
+    win on the skipped bit trick alone — ``BLOCK_M`` is 16 here, below the fp8
+    wgmma threshold — so the byte savings and the compute savings stack instead
+    of competing. int4 only draws level (1.11x): it reads a quarter of the bytes
+    but is bound by unpacking 8 nibbles per int32, not by traffic — its GB/s is
+    the lowest in the table despite the fewest bytes.
 ``tokens >= 512`` (prefill)
-    The weight-only wins fade, and W8A8 takes over. Against bf16's 588.1 us,
-    int8's 544.7 still leads by 7.4% while weight-only fp8's 654.1 is an 11.2%
-    *loss*; by 4096 tokens both are outright regressions (1901.1
-    and 2442.5 against 1578.9, i.e. 20% and 55% slower). Each expert tile is
-    re-read across row-blocks and dequantised again every time, so in-loop widening
-    stops being amortised weight traffic and becomes arithmetic on the critical
-    path. W8A8 fp8 does not pay that: 492.2 us at t512 (16.3% under bf16, the
-    fastest row in the regime) and 1479.4 at t4096 (6.3% under it) at 209 TFLOP/s
-    — the highest arithmetic rate anywhere in this table. Its gain is in the MMA,
-    so it appears exactly where the weight-only gains disappear.
+    The weight-only wins invert, and W8A8 takes over. At t512 int8 weight-only
+    still leads bf16 (309.2 against 469.4) but the W8A8 rows have passed it —
+    int8 W8A8 at 275.7 (1.70x) is the fastest row in the regime, fp8 W8A8 at
+    280.7 (1.67x) close behind. At t4096 the weight-only formats are outright
+    regressions (fp8 1404.0, int8 1145.0, int4 1916.4 against 1036.4): each
+    expert tile is re-read across row-blocks and widened again every time, so
+    in-loop dequant stops being amortised weight traffic and becomes arithmetic
+    on the critical path. The W8A8 rows never pay it — both operands are already
+    8-bit, and no widening exists to hoist. int8 W8A8 at 673.3 (1.54x) is the
+    fastest row in the table at any shape, 22% ahead of fp8 W8A8 (866.0, 1.20x):
+    the int8 imma reaches the tensor cores from ``BLOCK_M=16`` while fp8 needs 64
+    for wgmma, and int32 accumulation is exact, with no ``K_PROMOTE``-style
+    precision tax. Its gain is in the MMA, so it appears exactly where the
+    weight-only gains disappear.
 
 The second ablation was not about quantisation at all and was the larger finding,
 and it has since been fixed: ``_launch_config`` used to return
 ``BLOCK_K = 128 if quant_mode else 32``, so the unquantised row ran four times as
 many k-iterations as the rows it was the baseline for. At t512 that handicap was
-the difference between weight-only fp8 reading as an 18% win and the 11% loss
-above — the opposite conclusion — and it only ever depressed the baseline, which is why
-no test caught it and why every quantisation number on this kernel used to look
-better than it was. The tile sweep (``--tune``) found no winning config with
+the difference between weight-only fp8 reading as a win and the loss it really
+was — the opposite conclusion — and it only ever depressed the baseline, which is
+why no test caught it and why every quantisation number on this kernel used to
+look better than it was. The tile sweep (``--tune``) found no winning config with
 ``BLOCK_K`` below 64 at any token count, the heuristic now gives every mode 128,
 and the row survives as a regression guard: it runs the baseline dtype on the old
-narrow tile, so its margin over the plain bf16 row is what the fix bought — 25.1% at t64
-(714.0 -> 535.1), 22.4% at t512 (757.4 -> 588.1), 10.4% at t4096 (1761.9 ->
-1578.9), nothing at t1/t8 where the layer is launch-bound. Two rows converging is
-a reinstated defect.
+narrow tile, so its margin over the plain bf16 row is what the fix bought — 26.3%
+at t8 (252.9 -> 186.6), 30.8% at t64 (605.0 -> 418.3), 26.8% at t512
+(641.3 -> 469.4), 12.9% at t4096 (1189.2 -> 1036.4), nothing at t1 where the
+layer is launch-bound. Two rows converging is a reinstated defect.
 
 What each row measures. The prefix is the registry entry and the ``[label]`` suffix
-names the format: all but one row are ``native/fused_moe``, because the kernel picks
-the format off ``w1.dtype`` rather than from a spec row (see
-``lite_llama/kernels/ops/moe/__init__.py``), and the exception is W8A8 fp8, whose
-bytes are identical to weight-only fp8's:
+names the format: all but two rows are ``native/fused_moe``, because the kernel
+picks the format off ``w1.dtype`` rather than from a spec row (see
+``lite_llama/kernels/ops/moe/__init__.py``), and the exceptions are the two W8A8
+rows, whose bytes are identical to their weight-only formats':
 
 ``[unquantized]``
     bf16 experts, ``tl.dot`` straight from the loaded tile. The floor to beat.
@@ -71,11 +75,18 @@ bytes are identical to weight-only fp8's:
     MMA is unchanged and the entire gain is bytes.
 ``[fp8_w8a8]``
     The same fp8 expert bytes with the activation quantised per token, so both
-    operands stay 8-bit into the dot and the bit trick is skipped. The only row on
-    a different registry entry, because nothing in the weights distinguishes it —
-    see :data:`_IMPL_A8`. Read it separately per regime: it *loses* 35% at decode
-    and wins 16% at t512, and averaging those into one speedup would describe
-    neither.
+    operands stay 8-bit into the dot and the bit trick is skipped. One of the two
+    rows on a different registry entry, because nothing in the weights
+    distinguishes either — see :data:`_IMPL_A8`. Read it separately per regime:
+    ~9% behind at t1 (the launch floor; its quantisation is fused in below 32
+    rows), ahead of bf16 from t8 on, and averaging those into one speedup would
+    describe neither.
+``[int8_w8a8]``
+    The same int8 expert bytes with the activation quantised per token. Both
+    operands stay int8 into the dot and the integer tensor cores accumulate in
+    int32 — exact, and available from ``BLOCK_M=16`` on every device since
+    Turing, so unlike the fp8 A8 row there is no tile threshold where the
+    instruction underneath changes.
 ``[int8]``
     int8 experts, per-output-channel scales, converted in the loop. Same bytes as
     fp8, cheaper widening, coarser format.
@@ -83,12 +94,14 @@ bytes are identical to weight-only fp8's:
     int4 experts packed 8-per-int32 with group scales and zero points. A quarter
     of the bytes and the most unpacking work per byte.
 
-One caveat the A8 row's TFLOP/s column does not show: Triton emits Hopper's fp8
-``wgmma`` only from ``BLOCK_M >= 64``, and ``_launch_config`` reaches that at
-``tokens > 64``. At and below that the two e4m3 operands are widened to an fp16
-``mma.sync``, so the t1/t8/t64 A8 rows are not measuring the fp8 tensor cores at
-all — which is consistent with the gain appearing only from t512. The correctness
-gate covers both instructions (see :data:`CHECK_TOKENS`).
+One caveat the A8 rows' TFLOP/s column does not show: Triton emits Hopper's fp8
+``wgmma`` only from ``BLOCK_M >= 64``, and ``_launch_config``'s fp8 W8A8 tiles
+reach that only at t4096 — t512's tier-1 tile is ``BLOCK_M=32``. Below it the two
+e4m3 operands are widened to an fp16 ``mma.sync``, so no fp8 A8 row but t4096
+measures the fp8 tensor cores; the t512 lead there is bytes and the skipped bit
+trick, not the MMA. The int8 A8 row has no such threshold (imma from
+``BLOCK_M=16``). The correctness gate covers both instructions (see
+:data:`CHECK_TOKENS`).
 
 Two defects surfaced while writing this file, both of which had to be fixed before
 there was anything to time, and neither of which any test would have caught:
@@ -132,6 +145,7 @@ from lite_llama.kernels.ops.moe.fused_moe import (
     _launch_config,
     fused_moe,
     fused_moe_w8a8_fp8,
+    fused_moe_w8a8_int8,
     moe_align_block_size,
 )
 from lite_llama.modules.quantization.utils import (
@@ -142,34 +156,11 @@ from lite_llama.modules.quantization.utils import (
 )
 from tests.reference import fused_moe_reference
 
-#: The registry row the weight-only schemes route to. Kept in one constant so the
-#: table's labels and :func:`show_dispatch`'s assertion cannot drift apart.
 _IMPL = "native/fused_moe"
-
-#: The second native row: same kernel, different entry point. ``fused_moe`` reads
-#: the expert format off ``w1.dtype``, which cannot tell weight-only fp8 from W8A8
-#: fp8 — both are uint8 e4m3 experts — so the activation's fate has to be the
-#: function you call, and therefore the row.
 _IMPL_A8 = "native/fused_moe_w8a8_fp8"
-
-#: Token counts spanning the serving range: 1 is a single-sequence decode step,
-#: 4096 a prefill tile. 64 sits where slots-per-expert first exceeds the 32-row
-#: block at E=128/top_k=8, which is where the grouped GEMM stops wasting padding.
+_IMPL_A8_INT8 = "native/fused_moe_w8a8_int8"
 TOKENS: tuple[int, ...] = (1, 8, 64, 512, 4096)
-
-#: int4 group size, matching what AWQ/GPTQ checkpoints ship.
 INT4_GROUP_SIZE = 128
-
-#: Activation dtype for every row, quantised and not.
-#:
-#: bf16 because that is what the Qwen3-MoE checkpoints this table models actually
-#: run — the unquantised row must be the floor a real bf16 layer beats, and an
-#: fp16 floor would flatter every quantised format by a dtype switch the serving
-#: path never makes. The tests cover the dtype:
-#: ``test_fused_moe_quantised_matches_reference`` runs every format at both
-#: dtypes, and the A8 gates below are per-dtype like theirs. (The 2026-09-01
-#: tables in this docstring and ``docs/quantization.md`` were fp16 numbers;
-#: their record is ``docs/benchmark_logs/bench_fused_moe_h100_20260901.json``.)
 ACT_DTYPE = torch.bfloat16
 
 
@@ -314,8 +305,10 @@ def _build_fp8_a8(w1: torch.Tensor, w2: torch.Tensor) -> Built:
     that both operands enter the dot as 8-bit, so the inner loop skips the
     ``dequant_fp8e4m3`` bit trick. Whether that dot lands on Hopper's fp8 tensor
     cores is Triton's call: it emits ``wgmma`` only from ``BLOCK_M >= 64``, which
-    ``_launch_config`` reaches at ``tokens > 64``. Below that the operands are
-    widened to an fp16 ``mma.sync`` and only the skipped dequant remains.
+    ``_launch_config`` reserves for experts holding more than 32 rows — on this
+    geometry that is the 4096-token grid point only, since 512 lands at 32 rows
+    per expert and stays on tier 1. Below that the operands are widened to an
+    fp16 ``mma.sync`` and only the skipped dequant remains.
     """
     q1, s1 = quantize_fp8_per_channel(w1)
     q2, s2 = quantize_fp8_per_channel(w2)
@@ -329,6 +322,40 @@ def _build_fp8_a8(w1: torch.Tensor, w2: torch.Tensor) -> Built:
     ref1 = q1.view(torch.float8_e4m3fn).float() * s1
     ref2 = q2.view(torch.float8_e4m3fn).float() * s2
     return call, ref1, ref2, nbytes(s1, s2)
+
+
+def _int8_round_trip(t: torch.Tensor) -> torch.Tensor:
+    """Per-row symmetric int8 quantise-then-widen, the rounding the A8 kernel imposes.
+
+    Plain torch, like :func:`_fp8_round_trip`: the reference must reproduce the
+    rounding — round-to-nearest-even, which is what both the inline quantiser and
+    ``int8_quantize_per_token`` use — without borrowing the kernel's arithmetic.
+    """
+    flat = t.to(ACT_DTYPE).reshape(-1, t.shape[-1]).float()
+    scale = flat.abs().amax(dim=-1, keepdim=True) / 127.0
+    scale = torch.where(scale > 0, scale, torch.ones_like(scale))
+    return ((flat / scale).round().clamp(-127, 127) * scale).reshape(t.shape)
+
+
+def _build_int8_a8(w1: torch.Tensor, w2: torch.Tensor) -> Built:
+    """Same int8 experts as :func:`_build_int8`, with the activation quantised too.
+
+    The mirror of the fp8 A8 row one entry up, with two asymmetries: the integer
+    tensor cores (from Turing on) accumulate in int32, which is exact — no
+    ``K_PROMOTE`` analogue to tune — and the imma path exists from
+    ``BLOCK_M=16``, so there is no tile threshold where the instruction
+    underneath changes and every token count measures the same MMA.
+    """
+    q1, s1 = quantize_int8_per_channel(w1)
+    q2, s2 = quantize_int8_per_channel(w2)
+    gk = _group_k(w1, w2)
+
+    def call(x, tw, ids):
+        return fused_moe_w8a8_int8(
+            x, q1, q2, tw, ids, w1_scale=s1, w2_scale=s2, group_n=1, group_k=gk
+        )
+
+    return call, q1.float() * s1, q2.float() * s2, nbytes(s1, s2)
 
 
 def _build_int8(w1: torch.Tensor, w2: torch.Tensor) -> Built:
@@ -395,44 +422,12 @@ def _build_int4(w1: torch.Tensor, w2: torch.Tensor) -> Built:
     return call, ref1, ref2, nbytes(s1, s2, z1, z2)
 
 
-#: Tolerance against ``fused_moe_reference`` on the *dequantised* weights, one
-#: number for every scheme. It bounds the kernel's arithmetic and nothing else:
-#: the reference multiplies exactly the weights the kernel will reconstruct, so
-#: the format's own quantisation error cancels out of the comparison and what is
-#: left is 16-bit operand storage against an fp32 reference.
-#:
-#: One number rather than four because the measurement says the residual does not
-#: depend on the format: at the check shapes all four rows land at 2e-6..5e-6
-#: max_abs_diff, including int4. An earlier version of this file graded the
-#: tolerance per scheme (3e-2 for the 8-bit rows, 6e-2 for int4) on the reasoning
-#: that a coarser format accumulates more error; that reasoning was wrong, because
-#: the coarseness is in the reference too. The value matches
-#: ``tests/kernels/test_fused_moe.py`` and is three orders above what was measured
-#: — headroom for a shape change, not a description of the residual.
-_RTOL, _ATOL = 2e-2, 2e-2
 
-#: The A8 row's gate, on two statistics instead of elementwise. Mirrors
-#: ``tests/kernels/test_fused_moe.py``, deliberately: the benchmark must not grade
-#: on a looser scale than the test that owns the kernel. The RMS bound is per
-#: activation dtype like the test's — bf16 stores the mode's three intermediates
-#: (silu output, each slot's GEMM2 row, the sum) in 8 mantissa bits where fp16
-#: keeps 11, so its residual runs ~2.5x larger.
-#:
-#: Elementwise ``assert_close`` is not available for this row. The weight-only
-#: rows are compared against a reference holding *exactly* the weights the kernel
-#: reconstructs, so the format's error cancels and the residual is 2e-6. Here the
-#: activation is rounded to three mantissa bits twice — once before each GEMM —
-#: and the reference can only reproduce the rounding, not the order the kernel
-#: sums in, so an irreducible ~6e-3 remains. Against near-zero output elements
-#: that is an unbounded *relative* error while being negligible against the
-#: tensor, which is what the two statistics below say instead.
+_RTOL, _ATOL = 2e-2, 2e-2
 _A8_RMS_REL = {torch.float16: 1.5e-2, torch.bfloat16: 4.0e-2}[ACT_DTYPE]
 _A8_MAX_OVER_PEAK = 5.0e-2
 
 SCHEMES: tuple[Scheme, ...] = (
-    # tune_dtype follows the kernel's TuneKey table, which keys the unquantised
-    # mode on the *activation* dtype — "bf16" here, so a --tune run writes
-    # entries the bf16 path actually looks up.
     Scheme("unquantized", "bf16", _build_bf16, 16, tune_dtype="bf16"),
     Scheme("fp8", "fp8_w8a16", _build_fp8, 8, tune_dtype="fp8"),
     Scheme(
@@ -443,6 +438,15 @@ SCHEMES: tuple[Scheme, ...] = (
         _IMPL_A8,
         _fp8_round_trip,
         tune_dtype="fp8_a8",
+    ),
+    Scheme(
+        "w8a8_int8",
+        "int8_w8a8",
+        _build_int8_a8,
+        8,
+        _IMPL_A8_INT8,
+        _int8_round_trip,
+        tune_dtype="int8_a8",
     ),
     Scheme("blockwise_int8", "int8", _build_int8, 8, tune_dtype="int8"),
     Scheme("awq", "int4", _build_int4, 4, tune_dtype="int4"),
@@ -489,41 +493,26 @@ def align_only(tokens: int, geo: MoeGeometry, ids: torch.Tensor) -> Callable[[],
 # --------------------------------------------------------------------------- #
 _ABLATION_BASELINE_NARROW = "ablation: bf16 with BLOCK_K=32 (pre-fix heuristic)"
 
-#: The k-tile ``_launch_config`` gave an unquantised weight before the sweep in
-#: :func:`tune` showed no winner below 64 at any token count. Kept as a row so
-#: the cost of that choice stays visible after the fix removed it. (The sweep
-#: that fixed it ran on the fp16 baseline; the row itself tracks ``ACT_DTYPE``.)
 _OLD_BASELINE_BLOCK_K = 32
 
 
 @contextmanager
 def forced_block_k(block_k: int) -> Iterator[None]:
     """Run ``fused_moe`` with one ``BLOCK_K``, whatever its heuristic would pick.
-
-    This row started as the fair baseline: ``_launch_config`` returned
-    ``BLOCK_K = 128 if quant_mode else 32``, so the unquantised baseline ran four
-    times as many k-iterations as every row it was the baseline for, and at 512
-    tokens that handicap was the difference between fp8 reading as an 18% win and
-    a 6% loss -- the opposite conclusion. The tile sweep (``--tune``) then found no
-    winning config with ``BLOCK_K`` below 64 anywhere, so the heuristic now gives
-    every mode 128 and the handicap is gone from the default path.
-
-    What remains is this row's second job: holding the defect measured. It now runs
-    the baseline dtype on the *old* narrow tile, so its margin over the plain
-    baseline row is the cost the kernel used to pay, and a regression that
-    reinstates the narrow tile shows up as the two rows converging.
-
-    Patches the module attribute rather than the imported name, because that is
-    where ``fused_moe`` looks the function up. It is a no-op if a tuned config is
-    persisted for this shape, since ``get_best_config`` is consulted first -- run
-    with ``LITE_LLAMA_AUTOTUNE=0`` to measure the heuristic path.
     """
     original = fused_moe_module._launch_config
     fused_moe_module._launch_config = lambda n, q, r: {**original(n, q, r), "BLOCK_K": block_k}
+
+    previous = os.environ.get("LITE_LLAMA_AUTOTUNE")
+    os.environ["LITE_LLAMA_AUTOTUNE"] = "0"
     try:
         yield
     finally:
         fused_moe_module._launch_config = original
+        if previous is None:
+            os.environ.pop("LITE_LLAMA_AUTOTUNE", None)
+        else:
+            os.environ["LITE_LLAMA_AUTOTUNE"] = previous
 
 
 # --------------------------------------------------------------------------- #
@@ -531,16 +520,6 @@ def forced_block_k(block_k: int) -> Iterator[None]:
 # --------------------------------------------------------------------------- #
 def routing(tokens: int, geo: MoeGeometry) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Router output for one case, plus how many distinct experts it selected.
-
-    Built here rather than inside the timed callable because a real router's
-    logits come from a matmul that is not part of this op, and because the expert
-    count feeds the traffic formula: at ``tokens=1`` only ``top_k`` of the ``E``
-    expert matrices are ever read, and charging the op for all ``E`` would report
-    a decode step as moving 16x the bytes it moves.
-
-    Sampling is without replacement per token, which is what a top-k router
-    guarantees and what ``fused_moe`` assumes when it maps slot ``i`` to token
-    ``i // top_k``.
     """
     ids = torch.rand(tokens, geo.num_experts, device="cuda").topk(geo.top_k, dim=-1).indices
     ids = ids.to(torch.int32)
@@ -566,21 +545,6 @@ def moe_work(
     ``[H, I]`` down projection, so ``2 * T * top_k * H * (2I + I)`` — the padding
     slots the grouped GEMM computes and masks are implementation work and are not
     counted.
-
-    Bytes assume every input byte is read once and every output byte written once:
-    the activation in, the *selected* experts' weights and their scales, the
-    result out. Three things are deliberately excluded, and all three make the
-    reported GB/s a lower bound rather than an inflated one:
-
-    - ``gate_up``, ``act`` and ``expanded``, the three ``[T * top_k, ...]``
-      intermediates the pipeline materialises between its four kernels. Fusing
-      them away is a legitimate optimisation, so charging the operation for them
-      would make an improvement look like a slowdown.
-    - Experts nobody routed to. Their weights are never loaded.
-    - Re-reads of an expert whose slots span several row-blocks.
-
-    ``scale_bytes`` arrives as the total over all ``E`` experts and is prorated by
-    the active fraction, matching how the weights are counted.
     """
     act = torch.empty((), dtype=ACT_DTYPE).element_size()
     flops = 6 * tokens * geo.top_k * geo.hidden * geo.intermediate
@@ -596,18 +560,8 @@ def moe_work(
 # --------------------------------------------------------------------------- #
 # Correctness, before any timing
 # --------------------------------------------------------------------------- #
-#: Small geometry for the correctness gate. K is a multiple of 128 on both GEMMs
-#: (``hidden`` for gate_up, ``intermediate`` for down) so every scheme's group
-#: constraint holds, and the two widths differ so a swapped stride shows up.
-CHECK_GEOMETRY = MoeGeometry("check", hidden=256, intermediate=128, num_experts=8, top_k=2)
 
-#: Token counts for the gate. 33 is not a multiple of any row-block the kernel
-#: picks, so the padded slots and their sentinel mask are exercised; 1 is the
-#: single-token decode shape where most of the ``BLOCK_M`` rows are padding; 129
-#: is the first count that reaches ``BLOCK_M = 64``, which for the A8 row is the
-#: threshold where Triton switches from an fp16 ``mma.sync`` to Hopper's fp8
-#: ``wgmma``. Without it the gate would certify a different instruction from the
-#: one every ``tokens >= 512`` row below is timing.
+CHECK_GEOMETRY = MoeGeometry("check", hidden=256, intermediate=128, num_experts=8, top_k=2)
 CHECK_TOKENS: tuple[int, ...] = (1, 33, 129)
 
 
@@ -635,17 +589,6 @@ def verify_a8(name: str, out: torch.Tensor, ref: torch.Tensor) -> float:
 
 def check_correctness() -> None:
     """Verify every scheme against a torch reference on the dequantised weights.
-
-    Each format runs different code inside the kernel — bit-trick widening, an
-    int8 convert, a nibble unpack with a zero point, an 8-bit dot with no widening
-    at all — so a row verified through a sibling is an unverified row. The
-    reference is ``tests/reference.py::fused_moe_reference``, which loops over
-    experts in fp32 and shares no code with the kernel; the dequant that feeds it
-    is built here out of plain torch ops for the same reason.
-
-    The A8 row additionally hands the reference its ``act_quant`` round trip, so
-    the comparison isolates the kernel's arithmetic from the activation rounding
-    both sides now perform.
     """
     geo = CHECK_GEOMETRY
     print("Correctness (per-expert torch gather-matmul on dequantised weights):")
@@ -685,12 +628,13 @@ def check_correctness() -> None:
 def show_dispatch() -> None:
     """Print the decision chain and pin every table label to a registry row.
 
-    Every scheme but ``w8a8_fp8`` must land on the *same* row: ``fused_moe`` reads
-    the format off ``w1.dtype``, so for those the format is a branch inside one
-    kernel and not a choice between specs. ``w8a8_fp8`` is the exception because
-    its bytes are indistinguishable from weight-only fp8 — see :data:`_IMPL_A8`.
-    If a later change moves a scheme between rows, these assertions are what say
-    the table's labels went stale.
+    Every scheme but the W8A8 pair must land on the *same* row: ``fused_moe``
+    reads the format off ``w1.dtype``, so for those the format is a branch
+    inside one kernel and not a choice between specs. The two W8A8 schemes are
+    the exceptions because their bytes are indistinguishable from the
+    weight-only formats' — see :data:`_IMPL_A8`. If a later change moves a
+    scheme between rows, these assertions are what say the table's labels went
+    stale.
     """
     print("\nDispatch for moe:")
     for scheme in SCHEMES:
@@ -708,11 +652,15 @@ def show_dispatch() -> None:
 # --------------------------------------------------------------------------- #
 # Tuning — replace the heuristic's guess with a measured winner
 # --------------------------------------------------------------------------- #
-#: Candidate tiles. Hand-picked, not a cross product: the full grid over the six
-#: fields is 288 configs, and at five schemes and five token counts that is a
-#: compile budget rather than a search. These span the axes the heuristic fixes —
-#: ``BLOCK_N`` at 64, ``num_warps`` at 4, ``num_stages`` at 3 — plus both k-tiles
-#: it chooses between, at every ``BLOCK_M`` it can pick.
+_TUNE_QUANT_MODE = {
+    "unquantized": 0,
+    "fp8": 1,
+    "blockwise_int8": 2,
+    "awq": 3,
+    "w8a8_fp8": 4,
+    "w8a8_int8": 5,
+}
+
 _TUNE_SPACE: tuple[dict[str, int], ...] = tuple(
     {
         "BLOCK_M": bm,
@@ -858,8 +806,10 @@ def tune(
                     inputs.append((x, weights, ids))
                 # The reference every candidate is checked against: the same kernel
                 # on the heuristic's config, which check_correctness() already
-                # verified against the torch reference this run.
-                quant_mode = 0 if scheme.key == "unquantized" else 1
+                # verified against the torch reference this run. The mode must be
+                # the scheme's own or the "heuristic" baseline is some other
+                # format's tile: _TILE_TABLE is per mode.
+                quant_mode = _TUNE_QUANT_MODE[scheme.key]
                 baseline_config = _launch_config(
                     group[-1], quant_mode, group[-1] * geo.top_k / geo.num_experts
                 )
@@ -1078,42 +1028,45 @@ def main() -> None:
     rows = measure(geometries, tuple(args.tokens))
     report(rows)
     print(
-        "\nRead the moe_align_block_size ablation before any format row; at decode it\n"
-        "carries more of the spread than the formats do.\n"
+        "\nRead the two ablations with the regime structure above: moe_align is a\n"
+        "fixed cost, the narrow-k row is a regression guard.\n"
         "\n"
-        "1. moe_align_block_size costs ~188 us on its own, does not move with the\n"
-        "   token count, and is identical for every format. At tokens<=8 that is\n"
-        "   over half the layer, which is why bf16 and the three weight-only\n"
-        "   formats land inside 1.5% of each other there while reading 4x different\n"
-        "   weight bytes. A fixed cost hiding the ranking, not evidence that\n"
-        "   quantisation cannot help -- and the single largest target on this path.\n"
+        "1. moe_align_block_size costs 5.8-40 us on its own (4-6% of the layer\n"
+        "   at every shape) and is identical for every format. It used to be\n"
+        "   ~188 us -- over half a decode step, and the reason the formats used\n"
+        "   to be indistinguishable at t1. That is fixed, so at t1 the residual\n"
+        "   spread is the launch floor itself: five kernels back to back, every\n"
+        "   format within 10% of bf16 while reading 4x different weight bytes.\n"
         "2. The second ablation is a regression guard, not a baseline.\n"
         "   _launch_config used to give the unquantised row BLOCK_K=32 and every\n"
         "   quantised path 128, handicapping the baseline by 4x the k-iterations;\n"
         "   the tile sweep (--tune) found no winner below 64 anywhere, so all\n"
         "   modes now get 128. This row runs the old narrow tile, so its margin is\n"
-        "   what the fix bought: 25.1% at t64, 22.4% at t512, 10.4% at t4096,\n"
-        "   nothing at t1/t8. The two rows converging means the defect came back.\n"
+        "   what the fix bought: 26.3% at t8, 30.8% at t64, 26.8% at t512, 12.9%\n"
+        "   at t4096, nothing at t1. The two rows converging means the defect\n"
+        "   came back.\n"
         "\n"
         "The two kinds of quantisation win in disjoint regimes, and neither wins\n"
         "everywhere:\n"
         "\n"
-        "  weight-only int8 holds its lead through t512 -- 29.1% at t64, 7.4% at\n"
-        "  t512 -- while fp8_w8a16 wins only t64 (11.6%). At t4096 both are\n"
-        "  outright regressions (20% and 55% slower). Each expert tile is\n"
-        "  re-read across row-blocks and dequantised again every time, so the\n"
-        "  widening stops being amortised weight traffic and becomes arithmetic on\n"
-        "  the critical path. int4 never wins at any token count -- 17.0% slower\n"
-        "  than bf16 already at t64 -- and has the lowest GB/s in the table while\n"
-        "  reading the fewest bytes: it is unpack-bound, not traffic-bound.\n"
+        "  weight-only int8 wins from t8 through t512 (1.60x at t8, 1.78x at t64,\n"
+        "  1.52x at t512) and loses at t4096 (0.90x): each expert tile is re-read\n"
+        "  across row-blocks and widened again every time, so past t512 the\n"
+        "  widening stops being amortised weight traffic and becomes arithmetic\n"
+        "  on the critical path. fp8_w8a16 is the same shape one tier milder\n"
+        "  (1.34x at t8, 0.74x at t4096). int4 never clearly wins: 1.07x at t8 is\n"
+        "  its best, and at t4096 it is 0.54x -- it reads a quarter of the bytes\n"
+        "  and has the lowest GB/s in the table: unpack-bound, not traffic-bound.\n"
         "\n"
-        "  W8A8 fp8 is the mirror image: ~35% slower at decode (t1/t8), where two\n"
-        "  extra quantisation launches land on an already launch-bound layer, and\n"
-        "  only 6.0% ahead at t64 where BLOCK_M=32 keeps the dot off the fp8\n"
-        "  tensor cores. From t512 it is the fastest row in the table -- 16.3%\n"
-        "  under bf16 at t512, 6.3% at t4096, at 209 TFLOP/s, the highest rate\n"
-        "  here. These are reported separately on purpose: one speedup number\n"
-        "  spanning a 35% loss and a 16% win would describe neither regime.\n"
+        "  The W8A8 rows lose ~9% at t1 -- the launch floor again; their\n"
+        "  quantisation is fused in below 32 rows and what remains is the inline\n"
+        "  amax re-derived in every GEMM program -- and lead everywhere else.\n"
+        "  From t512 the fastest row in the table is int8 W8A8: 1.70x at t512,\n"
+        "  1.54x at t4096 at 459 TFLOP/s, 22% ahead of fp8 W8A8 there -- int8\n"
+        "  imma reaches the tensor cores from BLOCK_M=16 while fp8 needs 64 for\n"
+        "  wgmma, and int32 accumulation is exact. These are reported separately\n"
+        "  on purpose: one speedup number spanning a 9% loss and a 70% win would\n"
+        "  describe neither regime.\n"
         "\n"
         "GB/s is a lower bound -- moe_work() excludes the three per-slot\n"
         "intermediates the pipeline materialises, the W8A8 row's quantised copies\n"

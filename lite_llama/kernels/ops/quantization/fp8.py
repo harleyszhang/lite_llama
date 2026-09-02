@@ -11,6 +11,8 @@ Usage:
 
 from __future__ import annotations
 
+import functools
+
 import torch
 import triton
 import triton.language as tl
@@ -31,6 +33,22 @@ FP8_E4M3_MAX = 448.0
 #: pass. A row is walked in tiles rather than loaded whole so that a 9728-wide
 #: FFN row does not need 38 KB of registers per program.
 _QUANT_BLOCK_K = 1024
+
+
+@functools.cache
+def has_native_fp8(device_index: int | None) -> bool:
+    """Whether this device has the fp8 MMA (sm89+), cached because the query is
+    not free.
+
+    ``torch.cuda.get_device_capability`` costs ~2.7 us of host time per call, and
+    this module's entry points ask on *every* launch — twice per W8A8 layer —
+    while the fused MoE GEMM launcher asks per GEMM. On a launch-bound decode
+    step that is real money for a property that cannot change while the process
+    lives. Importers use the device *index* as the cache key because that is
+    what a tensor's ``.device.index`` gives; pass ``None`` for the current
+    device, mirroring ``torch.cuda.get_device_capability``.
+    """
+    return torch.cuda.get_device_capability(device_index) >= (8, 9)
 
 
 # --------------------------------------------------------------------------- #
@@ -112,7 +130,7 @@ def fp8_quantize_per_token(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]
         ``(qx, scales)`` with ``qx`` the ``uint8`` e4m3 bit pattern shaped like
         ``x`` and ``scales`` ``[..., 1]`` fp32.
     """
-    if torch.cuda.get_device_capability(x.device) < (8, 9):
+    if not has_native_fp8(x.device.index):
         # Triton cannot emit an e4m3 cast below sm89, and there is no cheap bit
         # trick in this direction (rounding and subnormals both need handling),
         # so pre-Hopper keeps the torch path. It is the slow one, but fp8 W8A8
@@ -329,7 +347,7 @@ def fp8_matmul(
     a_scale = x_scale.reshape(-1).contiguous()
 
     out = torch.empty((m, n), dtype=out_dtype, device=qx.device)
-    native = torch.cuda.get_device_capability(qx.device) >= (8, 9)
+    native = has_native_fp8(qx.device.index)
 
     cfg = _launch_config(m)
     grid = (triton.cdiv(m, cfg["BLOCK_M"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
