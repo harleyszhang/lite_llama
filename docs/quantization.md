@@ -1,94 +1,93 @@
-# Quantization Support
+# 量化支持
 
-lite_llama supports multiple weight quantization schemes, with an architecture aligned to [sglang](https://github.com/sgl-project/sglang) for extensibility.
+lite_llama 支持多种权重量化方案，架构与 [sglang](https://github.com/sgl-project/sglang) 对齐，便于扩展。
 
-## Supported Schemes
+## 支持的方案
 
-| Scheme | Config Class | Weight | Activation | Scale Granularity | Use Case |
+| 方案 | 配置类 | 权重 | 激活 | Scale 粒度 | 适用场景 |
 |---|---|---|---|---|---|
-| **fp8** | `Fp8Config` | fp8-e4m3 | fp16 | 128×128 block | Qwen/DeepSeek FP8 checkpoints |
-| **w8a8_fp8** | `W8A8Fp8Config` | fp8-e4m3 | fp8-e4m3 (dynamic) | per-channel / per-token | True W8A8 runtime (`--quantization fp8`), dense **and** MoE |
-| **blockwise_int8** | `BlockInt8Config` | int8 | fp16 | per-channel / group-wise | Runtime int8 (`--quantization int8`) |
-| **w8a8_int8** | `W8A8Int8Config` | int8 | int8 (dynamic) | per-channel / per-token | SmoothQuant (`--quantization smoothquant`) |
-| **nvfp4** | `NVFP4Config` | fp4-e2m1 | bf16/fp16 | 16-element block + per-tensor | Weight-only 4-bit (`--quantization nvfp4`), dense only |
-| **awq** | `AWQConfig` | int4 | fp16 | group-wise (128) | Pre-quantised AWQ checkpoints |
-| **gptq** | `GPTQConfig` | int4 | fp16 | group-wise (128) | Pre-quantised GPTQ checkpoints |
-| **fp8 KV cache** | `Fp8KVCacheMethod` | — | — | per-tensor | `--kv-cache-dtype fp8` halves KV memory |
+| **fp8** | `Fp8Config` | fp8-e4m3 | fp16 | 128×128 block | Qwen/DeepSeek FP8 checkpoint |
+| **w8a8_fp8** | `W8A8Fp8Config` | fp8-e4m3 | fp8-e4m3（动态） | per-channel / per-token | 真 W8A8 运行时（`--quantization fp8`），dense 与 MoE 均可 |
+| **blockwise_int8** | `BlockInt8Config` | int8 | fp16 | per-channel / group-wise | 运行时 int8（`--quantization int8`） |
+| **w8a8_int8** | `W8A8Int8Config` | int8 | int8（动态） | per-channel / per-token | SmoothQuant（`--quantization smoothquant`） |
+| **nvfp4** | `NVFP4Config` | fp4-e2m1 | bf16/fp16 | 16 元素 block + per-tensor | 仅权重 4-bit（`--quantization nvfp4`），仅 dense |
+| **awq** | `AWQConfig` | int4 | fp16 | group-wise（128） | 预量化 AWQ checkpoint |
+| **gptq** | `GPTQConfig` | int4 | fp16 | group-wise（128） | 预量化 GPTQ checkpoint |
+| **fp8 KV cache** | `Fp8KVCacheMethod` | — | — | per-tensor | `--kv-cache-dtype fp8` 把 KV 显存减半 |
 
-## Quick Start
+## 快速上手
 
-### FP8 Checkpoints (Qwen3-30B-A3B-FP8)
+### FP8 checkpoint（Qwen3-30B-A3B-FP8）
 
-FP8 checkpoints are detected automatically from `config.json`:
+FP8 checkpoint 会从 `config.json` 自动检测：
 
 ```bash
 python -m lite_llama.cli --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8
 ```
 
-### Runtime INT8 Quantisation
+### 运行时 INT8 量化
 
-Quantise an fp16 checkpoint to int8 at load time:
+加载时把 fp16 checkpoint 量化为 int8：
 
 ```bash
 python -m lite_llama.cli --model-dir my_weight/Qwen3-0.6B --quantization int8
 ```
 
-### True W8A8 FP8 (no weight dequantisation)
+### 真 W8A8 FP8（权重不反量化）
 
 ```bash
 python -m lite_llama.cli --model-dir my_weight/Qwen3-0.6B --quantization fp8
 ```
 
-### FP8 KV Cache (halves decode memory)
+### FP8 KV Cache（decode 显存减半）
 
 ```bash
 python -m lite_llama.cli --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype fp8
 ```
 
-### NVFP4 Weight-Only 4-bit
+### NVFP4 仅权重 4-bit
 
 ```bash
 python -m lite_llama.cli --model-dir my_weight/Qwen3-4B --quantization nvfp4
 ```
 
-Smallest weights of any scheme here (2.85× below bf16), and **slower than bf16 at
-every shape measured on H100** — see [NVFP4](#nvfp4-weight-only-fp4) before choosing it.
+本文所有方案中权重最小的（比 bf16 低 2.85×），但在 H100 上测过的每个 shape 都**比 bf16 慢**——选它之前先读 [NVFP4 仅权重 FP4](#nvfp4-仅权重-fp4) 一节。
 
-## Architecture
+## 架构
 
 ```
 lite_llama/modules/quantization/
-├── __init__.py            # BASE_QUANTIZATION_METHODS registry + factory functions
-├── base_config.py         # QuantizeMethodBase / LinearMethodBase / FusedMoEMethodBase / QuantizationConfig ABC
+├── __init__.py            # BASE_QUANTIZATION_METHODS 注册表 + 工厂函数
+├── base_config.py         # QuantizeMethodBase / LinearMethodBase / FusedMoEMethodBase / QuantizationConfig 抽象基类
 ├── fp8.py                 # Fp8Config + Fp8LinearMethod + Fp8MoEMethod
-├── w8a8_fp8.py            # W8A8Fp8Config + W8A8Fp8LinearMethod + W8A8Fp8MoEMethod (A8 experts)
+├── w8a8_fp8.py            # W8A8Fp8Config + W8A8Fp8LinearMethod + W8A8Fp8MoEMethod（A8 专家）
 ├── w8a8_int8.py           # W8A8Int8Config + W8A8Int8LinearMethod + W8A8Int8MoEMethod
 ├── blockwise_int8.py      # BlockInt8Config + BlockInt8LinearMethod + BlockInt8MoEMethod
-├── nvfp4.py               # NVFP4Config + NVFP4LinearMethod (weight-only, dense only)
+├── nvfp4.py               # NVFP4Config + NVFP4LinearMethod（仅权重，仅 dense）
 ├── awq.py                 # AWQConfig + AWQLinearMethod + AWQMoEMethod
 ├── gptq.py                # GPTQConfig + GPTQLinearMethod + GPTQMoEMethod
-├── unquant.py             # UnquantizedConfig (fp16 default)
+├── unquant.py             # UnquantizedConfig（fp16 默认）
 ├── kv_cache.py            # BaseKVCacheMethod + Fp8KVCacheMethod
-├── parameter.py           # RawParameter (loader must not cast to fp16)
-└── utils.py               # Quantise helpers + checkpoint layout adapters (AWQ/GPTQ)
+├── parameter.py           # RawParameter（loader 不得转型为 fp16）
+└── utils.py               # 量化辅助函数 + checkpoint 布局适配器（AWQ/GPTQ）
 ```
 
-### sglang Alignment Table
+### 与 sglang 的对齐表
 
-| lite_llama | sglang equivalent | Notes |
+| lite_llama | sglang 对应 | 说明 |
 |---|---|---|
-| `QuantizationConfig` | `QuantizationConfig` | ABC with `get_quant_method(layer, prefix)` |
+| `QuantizationConfig` | `QuantizationConfig` | 抽象基类，含 `get_quant_method(layer, prefix)` |
 | `LinearMethodBase` | `LinearMethodBase` | `create_weights` + `apply` |
-| `FusedMoEMethodBase` | `FusedMoEMethodBase` | Stacked expert strategy |
-| `Fp8Config` | `Fp8Config` | Weight-only fp8 (block-wise scales) |
-| `W8A8Fp8Config` | `W8A8Fp8Config` | True W8A8 fp8 (per-token act quantisation) |
+| `FusedMoEMethodBase` | `FusedMoEMethodBase` | 堆叠专家（stacked expert）策略 |
+| `Fp8Config` | `Fp8Config` | 仅权重 fp8（block-wise scales） |
+| `W8A8Fp8Config` | `W8A8Fp8Config` | 真 W8A8 fp8（per-token 激活量化） |
 | `W8A8Int8Config` | `W8A8Int8Config` | SmoothQuant W8A8 |
-| `BlockInt8Config` | `BlockInt8Config` | Weight-only int8 |
-| `AWQConfig` | `AWQConfig` | Int4 AWQ checkpoints |
-| `GPTQConfig` | `GPTQConfig` | Int4 GPTQ checkpoints |
-| `BASE_QUANTIZATION_METHODS` | `BASE_QUANTIZATION_METHODS` | `{name: ConfigClass}` registry |
+| `BlockInt8Config` | `BlockInt8Config` | 仅权重 int8 |
+| `AWQConfig` | `AWQConfig` | Int4 AWQ checkpoint |
+| `GPTQConfig` | `GPTQConfig` | Int4 GPTQ checkpoint |
+| `BASE_QUANTIZATION_METHODS` | `BASE_QUANTIZATION_METHODS` | `{name: ConfigClass}` 注册表 |
 
-### Registry & Config Flow
+### 注册表与配置流转
 
 ```python
 from lite_llama.modules.quantization import (
@@ -98,40 +97,35 @@ from lite_llama.modules.quantization import (
     for_runtime_scheme,
 )
 
-# Checkpoint auto-detection: config.json → Config class → from_config()
+# checkpoint 自动检测：config.json → Config 类 → from_config()
 quant = get_quant_config_from_hf(hf_config)  # Fp8Config / AWQConfig / None
 
-# Runtime quantisation: --quantization int8
+# 运行时量化：--quantization int8
 quant = for_runtime_scheme("int8")  # BlockInt8Config.per_channel()
 
-# Layer asks its config for the right method:
+# 层向自己的配置索要对应的 method：
 method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 ```
 
-## Performance Benchmark
+## 性能基准测试
 
-Single NVIDIA A10 (24 GB, sm86), decode batch size 4, max_gen_len=64, greedy; measured 2026-08-23 (the run's JSON predates environment logging — the A10 host's stack at the time was torch 2.11.0+cu129 / triton 3.6.0 / python 3.12, per the same week's e2e logs). Baseline: HuggingFace transformers fp16 (eager, same prompts).
+单卡 NVIDIA A10（24 GB，sm86），decode batch size 4，max_gen_len=64，greedy；测量于 2026-08-23（该次运行的 JSON 早于环境日志功能——按同一周的 e2e 日志推断，A10 主机当时的软件栈为 torch 2.11.0+cu129 / triton 3.6.0 / python 3.12）。基线：HuggingFace transformers fp16（eager，相同 prompts）。
 
-### Qwen3-0.6B (dense, 28 layers, hidden=1024)
+### Qwen3-0.6B（dense，28 层，hidden=1024）
 
 | Config | Model Mem | KV Capacity | TPOT (ms) | TPS | vs HF Speedup |
 |---|---|---|---|---|---|
-| HF fp16 (baseline) | 1.17 GB | — | 28.19 | 141.7 | 1.0× |
+| HF fp16（基线） | 1.17 GB | — | 28.19 | 141.7 | 1.0× |
 | lite fp16 | 1.40 GB | 147,875 tok | 4.14 | 918.8 | 6.5× |
 | lite int8 | 0.99 GB | 141,549 tok | 4.16 | 904.1 | 6.4× |
 | lite int8-blockwise | 1.00 GB | 138,385 tok | 4.44 | 849.4 | 6.0× |
-| lite fp8 (W8A8) | 0.99 GB | 139,153 tok | 8.35 | 448.1 | 3.2× |
-| lite smoothquant (W8A8) | 0.99 GB | 135,642 tok | 3.70 | 983.8 | 6.9× |
+| lite fp8（W8A8） | 0.99 GB | 139,153 tok | 8.35 | 448.1 | 3.2× |
+| lite smoothquant（W8A8） | 0.99 GB | 135,642 tok | 3.70 | 983.8 | 6.9× |
 
-> Model Mem = model weights only; KV Capacity = max cached tokens (paged pool fills remaining GPU memory).
-> Benchmark logs: [`docs/benchmark_logs/`](../docs/benchmark_logs/)
+> Model Mem 仅指模型权重；KV Capacity 为最大缓存 token 数（分页池占满剩余 GPU 显存）。
+> 基准日志：[`docs/benchmark_logs/`](../docs/benchmark_logs/)
 >
-> The table above is an A10 result on a 0.6B model. For the full 2×H100 matrix on
-> Qwen3-4B and Qwen3-30B-A3B — every scheme × TP/DP × CUDA graph × KV dtype, offline
-> and online, with both accuracy references — see
-> [`quant_matrix_20260901.md`](benchmark_logs/quant_matrix_20260901.md). Its headline
-> result contradicts the ordering here: on an H100 at 4B, **no quantisation scheme
-> beats bf16 on speed**, and quantisation buys KV capacity instead.
+> 上表是 0.6B 模型在 A10 上的结果。Qwen3-4B 与 Qwen3-30B-A3B 在 2×H100 上的完整矩阵——每种方案 × TP/DP × CUDA graph × KV dtype，离线与在线，附两套精度参照——见 [`quant_matrix_20260901.md`](benchmark_logs/quant_matrix_20260901.md)。其头条结论与此处的排序相反：在 H100 的 4B 上，**没有任何量化方案在速度上胜过 bf16**，量化换来的是 KV 容量。
 
 ### Qwen3-30B-A3B-Instruct-2507-FP8 (MoE, 2×H100)
 
@@ -179,43 +173,32 @@ Single NVIDIA A10 (24 GB, sm86), decode batch size 4, max_gen_len=64, greedy; me
 - **Qwen3.8-27B-FP8**（`model_type: qwen3_5`，`Qwen3_5ForConditionalGeneration`）：64 层中 48 层是 linear attention（gated-delta-net：conv kernel 4、16 key heads × 128 dim、48 value heads × 128 dim）、每 4 层插一层 full attention，另带 vision tower。`lite_llama/models/` 支持到 qwen3_moe / qwen3_vl，尚无 qwen3_5——需要 linear attention 的 chunked-scan 内核与混合层调度，属新模型实现而非量化路径问题（其 fp8 格式与 30B-A3B 完全一致：e4m3 + 128×128 block scales + dynamic activation）。
 - **Qwen3-VL-235B-A22B-Instruct-FP8**：本地副本不完整——index 要求 24 个 shard 仅存在 3 个（22/23/24），且无 config.json（27 GB ≄ ~235 GB），物理上无法加载。
 
-### Performance Notes
+### 性能说明
 
-- **lite fp16 vs HF**: 6.5× speedup from CUDA graphs + fused kernels + paged KV
-- **int8 per-channel (W8A16)**: Matches fp16 throughput, saves ~0.4 GB weight memory
-- **int8-blockwise (W8A16)**: Group-wise scales give finer granularity; slightly slower due to more scale loads
-- **smoothquant (W8A8 int8)**: Fastest scheme — both operands are int8, leveraging int8 tensor cores (6.9×)
-- **fp8 W8A8**: Per-token activation quantisation overhead on A10 (sm86 lacks native fp8 GEMM); improves on H100/sm90
-- **INT4 MoE (AWQ/GPTQ)**: fused_moe kernel supports int4 packed weights with group-wise scales+zeros
-- **KV cache fp8**: Not reflected in the table (orthogonal to weight quantisation); halves the KV cache footprint, enabling ~2× longer sequences
+- **lite fp16 vs HF**：6.5× 提速来自 CUDA graphs + 融合 kernel + 分页 KV
+- **int8 per-channel（W8A16）**：吞吐与 fp16 持平，节省 ~0.4 GB 权重显存
+- **int8-blockwise（W8A16）**：group-wise scale 粒度更细；scale 读取更多，因此略慢
+- **smoothquant（W8A8 int8）**：最快的方案——两个操作数都是 int8，吃满 int8 tensor core（6.9×）
+- **fp8 W8A8**：A10（sm86 无原生 fp8 GEMM）上 per-token 激活量化开销大；在 H100/sm90 上表现更好
+- **INT4 MoE（AWQ/GPTQ）**：fused_moe kernel 支持带 group-wise scales+zeros 的 int4 打包权重
+- **KV cache fp8**：未反映在上表中（与权重量化正交）；把 KV cache 占用减半，可支持约 2× 更长的序列
 
-## NVFP4 Weight-Only FP4
+## NVFP4 仅权重 FP4
 
-NVIDIA ModelOpt / TensorRT-LLM layout, implemented as `lite_llama/kernels/ops/quantization/nvfp4.py`
-and dispatched as `native/linear_nvfp4`:
+NVIDIA ModelOpt / TensorRT-LLM 布局，实现于 `lite_llama/kernels/ops/quantization/nvfp4.py`，以 `native/linear_nvfp4` 派发：
 
-- weights fp4-e2m1, two values per `uint8` byte (low nibble = even index);
-- one fp8-e4m3 block scale per 16 consecutive `k` elements, so a `BLOCK_K` that is a
-  multiple of 16 keeps every k-tile inside one scale;
-- one fp32 `weight_global_scale` per tensor;
-- `w = e2m1(nibble) * dequant_e4m3(block_scale) * global_scale`.
+- 权重为 fp4-e2m1，每个 `uint8` 字节存两个值（低 nibble = 偶数下标）；
+- 每 16 个连续 `k` 元素一个 fp8-e4m3 block scale，因此 `BLOCK_K` 取 16 的倍数即可让每个 k-tile 都落在同一个 scale 内；
+- 每个 tensor 一个 fp32 `weight_global_scale`；
+- `w = e2m1(nibble) * dequant_e4m3(block_scale) * global_scale`。
 
-TP sharding requires shards to be multiples of 32 (2 values/byte × 16-element block),
-enforced by `NVFP4Config.shard_is_aligned`, so no shard splits a byte or a block scale.
-MoE experts are **not** implemented: `get_quant_method` raises on a fused-MoE layer
-rather than silently falling back to bf16 experts.
+TP 切分要求每个分片都是 32 的倍数（2 值/字节 × 16 元素 block），由 `NVFP4Config.shard_is_aligned` 强制执行，因此任何分片都不会切开一个字节或一个 block scale。MoE 专家**未实现**：`get_quant_method` 遇到 fused-MoE 层会直接报错，而不是悄悄回退到 bf16 专家。
 
-### What it costs and what it buys
+### 成本与收益
 
-sm90 has no fp4 MMA and Triton has no fp4 dtype, so this is weight-only by
-construction: the nibbles are unpacked in registers and the `tl.dot` still runs at
-bf16. The saving is bytes, and on an H100 bytes are not the decode bottleneck.
+sm90 没有 fp4 MMA，Triton 也没有 fp4 dtype，所以它在构造上就是 weight-only：nibble 在寄存器里解包，`tl.dot` 仍以 bf16 运行。省下的是字节数，而在 H100 上字节并不是 decode 的瓶颈。
 
-`qwen3-4b/qkv` (N=6144, K=2560), measured on an NVIDIA H100 80GB HBM3
-(torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7), from
-[`bench_quant_gemm_h100_20260901.json`](benchmark_logs/bench_quant_gemm_h100_20260901.json)
-(run with `LITE_LLAMA_AUTOTUNE=0`, so these are the heuristic tiles a user gets
-without a tuning cache):
+`qwen3-4b/qkv`（N=6144，K=2560），测于 NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7），数据来自 [`bench_quant_gemm_h100_20260901.json`](benchmark_logs/bench_quant_gemm_h100_20260901.json)（以 `LITE_LLAMA_AUTOTUNE=0` 运行，即用户没有调优缓存时拿到的启发式 tile）：
 
 | M | bf16 | fp8 W8A8 | int4 (awq) | nvfp4 |
 |---|---|---|---|---|
@@ -223,266 +206,135 @@ without a tuning cache):
 | 128 | 21.5 µs | 28.5 µs | 50.6 µs | **68.5 µs** |
 | 2048 | 89.1 µs | 166.1 µs | 334.8 µs | **755.3 µs** |
 
-End to end on Qwen3-4B-Thinking-2507 on the same H100 stack (batch 4, 64 new tokens,
-greedy): weights 2.63 GB against bf16's 7.49 GB, TPOT 13.66 ms against bf16's 4.77 ms.
+同一 H100 环境下 Qwen3-4B-Thinking-2507 的端到端结果（batch 4，64 个新 token，greedy）：权重 2.63 GB，对 bf16 的 7.49 GB；TPOT 13.66 ms，对 bf16 的 4.77 ms。
 
-**Read that as a memory result, not a speed result.** The NVFP4 row moves ~3.6× fewer
-weight bytes and is still 2.3× slower at decode and 8.5× slower at prefill, because
-unpacking a nibble, widening e2m1 through bit arithmetic and applying two scales
-costs more ALU work than an H100's HBM3 saves in time. NVFP4 is the right choice
-when a checkpoint does not otherwise fit, and the wrong one when it does.
+**请把它读作显存结果，而不是速度结果。** NVFP4 一行搬运的权重字节少 ~3.6×，decode 仍慢 2.3×、prefill 慢 8.5×——解包 nibble、用位运算展开 e2m1、再乘两个 scale 的 ALU 开销，超过了 H100 的 HBM3 省下的时间。NVFP4 适合 checkpoint 别处放不下的场合；放得下时，它就是错误的选择。
 
-int4/AWQ is the instructive contrast, and it is not the same story: it reaches
-**within 2% of cuBLAS at M=1** while reading a quarter of the weight bytes. That is
-two different limits meeting rather than one shared one — bf16 streams 31 MB at 43%
-of peak HBM and is bandwidth-bound, int4 streams 7.9 MB at 11.9% and is
-unpack-bound — so the parity does not transfer to a wider weight, and by M=2048 the
-gap is 3.8×. It also only holds after a heuristic fix that `--tune` found; see
-[the tile heuristic section](#a-second-tile-heuristic-defect-in-w4a16) below.
+int4/AWQ 是一个有启发性的对照，但故事不同：它读的权重字节只有四分之一，却在 M=1 时达到**距 cuBLAS 2% 以内**。那是两个不同极限的相遇，而不是同一个极限——bf16 以峰值 HBM 的 43% 流式读取 31 MB，是带宽受限；int4 以 11.9% 读取 7.9 MB，是解包受限——所以这种持平不会转移到更宽的权重上，到 M=2048 差距拉开到 3.8×。而且它只在 `--tune` 找到的那个启发式修复之后才成立；见[下文 w4a16 的 tile 启发式缺陷](#w4a16-中的第二个-tile-启发式缺陷)。
 
-Accuracy is the other cost: greedy prefix agreement against the bf16 baseline is
-0.233 on Qwen3-4B, against 0.617 for fp8 and 0.822 for int8. Two of the three fp4
-mantissa states are subnormal, and a 16-element block is a coarse unit to share an
-exponent across.
+精度是另一项成本：对 bf16 基线的 greedy prefix 一致率在 Qwen3-4B 上为 0.233，fp8 为 0.617，int8 为 0.822。fp4 的三个尾数状态里有两个是非规格化数（subnormal），而 16 元素的 block 是一个相当粗糙的共享指数单位。
 
-## FP8 W8A8 Fused MoE
+## FP8 W8A8 融合 MoE
 
-`W8A8Fp8MoEMethod` quantises the *activations* as well as the expert weights
-(`fused_moe(..., act_fp8=True)`): per-token fp8 before GEMM1, per-row fp8 on the silu
-output before GEMM2, both without a host synchronisation, so an MoE layer stays
-capturable. Before this, `W8A8Fp8MoEMethod.apply` and `Fp8MoEMethod.apply` were the
-same function and the activations were always bf16 — W8A8 was a label, not a path.
+`W8A8Fp8MoEMethod` 在量化专家权重的同时也量化**激活**（`fused_moe(..., act_fp8=True)`）：GEMM1 之前 per-token fp8，silu 输出在 GEMM2 之前 per-row fp8，两者都不做 host 同步，因此 MoE 层仍可被 graph 捕获。在此之前，`W8A8Fp8MoEMethod.apply` 与 `Fp8MoEMethod.apply` 是同一个函数，激活始终是 bf16——W8A8 只是个标签，不是一条路径。
 
-Qwen3-30B-A3B geometry (E=128, top_k=8, hidden 2048, moe_intermediate 768), measured on
-an NVIDIA H100 80GB HBM3 (torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7), from
-[`bench_fused_moe_h100_20260901.json`](benchmark_logs/bench_fused_moe_h100_20260901.json)
-(run with `LITE_LLAMA_AUTOTUNE=0`, so these are the heuristic tiles a user gets
-without a tuning cache):
+Qwen3-30B-A3B 几何（E=128，top_k=8，hidden 2048，moe_intermediate 768），测于 NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7），数据来自 [`bench_fused_moe_h100_20260902.json`](benchmark_logs/bench_fused_moe_h100_20260902.json)（以 `LITE_LLAMA_AUTOTUNE=0` 运行，即用户没有调优缓存时拿到的启发式 tile）。基线与激活 dtype 为 bf16——即该 checkpoint 实际服务的精度（`torch_dtype: bfloat16`）；2026-09-01 的一轮 fp16 基线测量保留在 [`bench_fused_moe_h100_20260901.json`](benchmark_logs/bench_fused_moe_h100_20260901.json)：
 
-| tokens | fp16 | fp8 W8A16 | **fp8 W8A8** | int8 | int4 |
+| tokens | bf16 | fp8 W8A16 | **fp8 W8A8** | int8 | int4 |
 |---|---|---|---|---|---|
-| 1 | 360.7 µs | 365.2 µs | 481.1 µs | 364.3 µs | 366.2 µs |
-| 8 | 363.7 µs | 368.5 µs | 481.5 µs | 367.3 µs | 367.2 µs |
-| 64 | 531.7 µs | 439.1 µs | 484.8 µs | **398.9 µs** | 630.0 µs |
-| 512 | 583.4 µs | 615.5 µs | **477.8 µs** | 576.9 µs | 691.8 µs |
-| 4096 | 1573.2 µs | 2301.0 µs | **1469.4 µs** | 2096.7 µs | 2598.7 µs |
+| 1 | 366.5 µs | 371.5 µs | 494.4 µs | 369.9 µs | 370.3 µs |
+| 8 | 371.5 µs | 378.8 µs | 499.5 µs | 377.4 µs | 376.1 µs |
+| 64 | 535.1 µs | 473.1 µs | 502.9 µs | **379.4 µs** | 626.2 µs |
+| 512 | 588.1 µs | 654.1 µs | **492.2 µs** | 544.7 µs | 695.9 µs |
+| 4096 | 1578.9 µs | 2442.5 µs | **1479.4 µs** | 1901.1 µs | 2606.2 µs |
 
-Decode and prefill are different operations here and are not averaged into one
-speedup. At 1-8 tokens fp8-A8 is the **slowest** row: the quantisation kernels are
-pure overhead on a layer that is launch-bound (the `moe_align_block_size` ablation
-alone accounts for ~188 µs of every row, over half the decode time, and it is why
-fp16 and all three weight-only formats land inside 1.5% of each other there while
-reading 4× different weight bytes). At 64 tokens the weight-only formats win — int8
-by 25.0%, W8A16 fp8 by 17.4% — and int4 does not, at 18.5% *slower* than fp16: that
-path is bound by unpacking 8 nibbles per int32, not by traffic, and has the lowest
-GB/s in the table while reading the fewest bytes. From 512 tokens on the ordering
-inverts: fp8-A8 is the fastest row (18.1% under fp16 at 512, 6.6% at 4096, at
-210 TFLOP/s) while W8A16 fp8 and int8 become regressions against plain fp16 (46%
-and 33% slower at 4096), because dequantising a weight tile per row-block does not
-amortise once the GEMM is compute-bound. The A8 gain is in the MMA, so it appears
-exactly where the weight-only gains disappear.
+decode 与 prefill 在这里是两个不同的操作，不平均成一个加速比。1-8 token 时 fp8-A8 是**最慢**的一行：在一个 launch-bound 的层上，量化 kernel 是纯开销（仅 `moe_align_block_size` 一项消融就占每行 ~188 µs，超过 decode 时间的一半——这也是 bf16 与三种 weight-only 格式在那里互相只差 1.5% 以内、读的权重字节却差 4× 的原因）。64 token 时 weight-only 格式胜出——int8 快 29.1%，W8A16 fp8 快 11.6%——int4 则不然，比 bf16 还*慢* 17.0%：那条路径受限于每个 int32 解包 8 个 nibble，而不是流量，它在表中读的字节最少、GB/s 却最低。从 512 token 起 fp8-A8 接管排序：成为最快一行（512 时比 bf16 低 16.3%，4096 时低 6.3%，达 209 TFLOP/s），int8 在 512 时仍领先 7.4%、W8A16 fp8 则落后 11.2%，到 4096 两者都是倒退（分别慢 20% 与 55%）——GEMM 一旦 compute-bound，逐 row-block 反量化权重 tile 就不再摊销。A8 的收益在 MMA 里，所以恰好出现在 weight-only 收益消失的地方。
 
-One caveat the table does not show: Triton emits Hopper's fp8 `wgmma` only from
-`BLOCK_M >= 64`, which `_launch_config` reaches above 64 tokens. The t1/t8/t64 A8
-rows are widening both e4m3 operands to an fp16 `mma.sync`, so they are not
-measuring the fp8 tensor cores at all — consistent with the win starting at 512.
+一个表里看不出的告诫：Triton 只有在 `BLOCK_M >= 64` 时才发射 Hopper 的 fp8 `wgmma`，而 `_launch_config` 要到 64 token 以上才会到这个档位。t1/t8/t64 的 A8 行是把两个 e4m3 操作数加宽成 fp16 走 `mma.sync`，所以它们根本没有测到 fp8 tensor core——这与收益从 512 开始的现象一致。
 
-### A tile heuristic defect these numbers found
+### 这批数字发现的 tile 启发式缺陷
 
-`_launch_config` returned `BLOCK_K = 128 if quant_mode else 32`. Correct about the
-memory transaction (an fp16 tile fills one at 32 elements, a byte tile needs 128),
-wrong about this layer: an expert GEMM here is 768 wide against a 2048 hidden size,
-so a narrow k-tile just multiplies the loop count. A tile sweep over the 17-config
-space in `benchmarks/kernels/bench_fused_moe.py --tune` found **no** winning fp16
-config with `BLOCK_K` below 64 at any token count, and the narrow tile was costing
-25.5% at 64 tokens, 22.6% at 512 and 10.4% at 4096.
+`_launch_config` 原来返回 `BLOCK_K = 128 if quant_mode else 32`。对内存事务而言这是对的（fp16 tile 32 个元素就能填满一次，字节 tile 需要 128 个），对这个层却是错的：这里的专家 GEMM 宽 768、对 2048 的 hidden size，窄 k-tile 只会把循环次数放大。用 `benchmarks/kernels/bench_fused_moe.py --tune` 对 17 配置空间做 tile 扫描（当时是 fp16 基线），发现任何 token 数下未量化行的优胜配置 `BLOCK_K` 都**不低于** 64；基准里保留的窄 tile 消融行在 bf16 上复现同样的形状——64 token 时损失 25.1%、512 时 22.4%、4096 时 10.4%。
 
-The defect only ever depressed the *unquantised baseline*, which is why no test
-caught it and why every quantisation comparison on this kernel used to read better
-than it was — at 512 tokens it was the difference between W8A16 fp8 looking like an
-18% win and the 5.5% loss above. All modes now get 128. The benchmark keeps the
-narrow tile as an ablation row so the fix stays measured: the two fp16 rows
-converging means it came back.
+这个缺陷只会压低*未量化基线*，这正是没有任何测试抓到它的原因，也是这个 kernel 上过去的量化对比都读起来比实际更好的原因——512 token 时，它就是「W8A16 fp8 看起来赢 18%」与上面实际的「输 11%」之间的差别。现在所有模式都用 128。基准测试保留窄 tile 作为消融行，让修复保持被度量：两行（基线与窄 tile）收敛就意味着它复发了。
 
-The same sweep, persisted to `ConfigStore`, improved 13 of 15 store keys over the
-heuristic (largest: fp16 at the M512 bucket, 2502.8 → 1694.1 µs, +32.3%). Search is
-per `TuneKey`, not per token count, because `bucket_m` rounds M up to the next of
-(16, 32, 64, 128, 256, 512) — t1 and t8 share one entry, so a per-token search would
-have them overwrite each other. Run `--tune` on a new device; the persisted cache is
-not committed.
+同一次扫描持久化到 `ConfigStore` 后，15 个 store key 中 13 个相对启发式有提升（最大：fp16 在 M512 档，2502.8 → 1694.1 µs，+32.3%）。搜索按 `TuneKey` 进行而不是按 token 数，因为 `bucket_m` 会把 M 向上取整到 (16, 32, 64, 128, 256, 512) 的下一档——t1 与 t8 共享一个条目，按 token 数搜索会让它们互相覆盖。注意未量化模式现在按*激活 dtype* 键入（`bf16` 与 `fp16` 是两个条目），这批 fp16 扫描条目不会覆盖 bf16 路径——切到 bf16 基线后请重跑 `--tune`。换新设备同理；持久化的缓存不入库。
 
-## A second tile heuristic defect, in w4a16
+## w4a16 中的第二个 tile 启发式缺陷
 
-The dense GEMMs have the same class of problem and only one of them can be fixed
-through the cache. Of the five quantised kernels, **`w4a16_matmul` is the only one
-that consults `ConfigStore`** — fp8 W8A8, fp8/int8 W8A16 and NVFP4 compute their
-launch configuration unconditionally, so `bench_quant_gemm.py --tune` reports them as
-having no consumer rather than writing entries no kernel would read. (`v0.5`'s
-changelog claims autotune covers "量化 GEMM"; for the dense path that is one kernel of
-five.)
+dense GEMM 存在同类问题，而且其中只有一个能通过缓存修复。五个量化 kernel 里，**`w4a16_matmul` 是唯一会查 `ConfigStore` 的**——fp8 W8A8、fp8/int8 W8A16 与 NVFP4 都无条件计算 launch 配置，因此 `bench_quant_gemm.py --tune` 对它们如实报告「无消费者」，而不是写入没有任何 kernel 会读的条目。（`v0.5` 的 changelog 声称 autotune 覆盖「量化 GEMM」；对 dense 路径而言，那只是五个 kernel 中的一个。）
 
-On that one kernel the sweep found a heuristic defect rather than a per-shape tuning
-opportunity. The `m <= 32` branch used `GROUP_M=1, num_stages=2`, and
-`GROUP_M=8, num_stages=4` — the *same* 16×64 tile — won at **all 16** `m <= 32` store
-keys (two Qwen3 geometries × four projections × the M16/M32 buckets) by 9.0–41.5%,
-with the tile held fixed so those two knobs are the only variables. `GROUP_M=1` groups
-nothing, so consecutive programs walk the grid row-major and share no weight tile in
-L2; the deeper pipeline then covers a nibble unpack that a 16-row tile cannot hide.
-Because the win was uniform, the fix belongs in the kernel's fallback, not in a cache
-keyed on shape — it now ships to every device without a tuning run, and it is what
-moved the M=1 int4 row above from 34.0 to 22.2 µs.
+就在这一个 kernel 上，扫出来的不是按 shape 的调优机会，而是一个启发式缺陷。`m <= 32` 分支原来用 `GROUP_M=1, num_stages=2`，而 `GROUP_M=8, num_stages=4`——*同一个* 16×64 tile——在**全部 16 个** `m <= 32` store key（两个 Qwen3 几何 × 四个投影 × M16/M32 两档）上赢 9.0–41.5%，且 tile 固定不变，这两个旋钮是仅有的变量。`GROUP_M=1` 什么也不分组，于是相邻 program 按行主序遍历网格，在 L2 里共享不到任何权重 tile；更深的流水线随后盖住了 16 行 tile 盖不住的 nibble 解包。因为收益是一致的，修复应该放进 kernel 的 fallback，而不是按 shape 键入的缓存——现在它随每一个没跑过调优的设备一起生效，也正是它把上面的 M=1 int4 行从 34.0 µs 移到 22.2 µs。
 
-After the fix, per-shape tuning still has plenty left: 29 of 32 keys improve on the
-corrected heuristic, by 9.7–46.0%. Only three report "heuristic already best" — the
-M16 keys of `qwen3-4b/qkv`, `qwen3-4b/gate_up` and `qwen3-30b-a3b/qkv`, where 16×64 is
-already right. Elsewhere the winners are *narrower* than the heuristic at decode
-(16×32 or 64×32 across M16/M32) and much wider at prefill (128×64 through 128×256 at
-M512). That spread is what a three-branch fallback cannot cover, and it is why this is
-the one dense kernel worth keeping a cache for.
+修复之后，按 shape 的调优仍有大量空间：32 个 key 中 29 个相对修正后的启发式有提升，幅度 9.7–46.0%。只有三个报告「启发式已是最优」——`qwen3-4b/qkv`、`qwen3-4b/gate_up` 与 `qwen3-30b-a3b/qkv` 的 M16 key，那里 16×64 已经是对的。其他地方的赢家在 decode 时*更窄*（M16/M32 上为 16×32 或 64×32），prefill 时宽得多（M512 上从 128×64 到 128×256）。这种散布是三分支 fallback 覆盖不了的，也正是这一个 dense kernel 值得留缓存的原因。
 
-One structural caveat: a shared bucket entry is chosen for the *total* over the token
-counts in it, so a width inside a bucket can regress while the entry is still a net
-win. Spot-checking the M512 entry on `qwen3-30b-a3b/qkv` and `qwen3-4b/qkv`, both
-widths improved on both keys (t512 +0.7% / +12.2%, t2048 +25.5% / +24.3%), so no
-regression was observed here — but a decode-only deployment should still narrow
-`--tokens` to the widths it serves rather than inherit a prefill-weighted entry.
+一个结构性告诫：共享的 bucket 条目是按桶内 token 数的*总量*选出的，所以桶内某个宽度可能回退，而条目整体仍是净赢。抽查 `qwen3-30b-a3b/qkv` 与 `qwen3-4b/qkv` 的 M512 条目，两个宽度在两个 key 上都有提升（t512 +0.7% / +12.2%，t2048 +25.5% / +24.3%），因此这里没有观察到回退——但只做 decode 的部署仍应把 `--tokens` 收窄到它实际服务的宽度，而不是继承一个 prefill 加权的条目。
 
-The fix is worth 1.32× end to end on the configuration that exposes it: Qwen3-4B
-int4 with decode graphs went 419.0 → 551.3 TPS (TPOT 9.28 → 6.97 ms) at tp1, 471.9 →
-583.1 at tp2 and 816.8 → 1057.6 at dp2, with the greedy match rate unchanged at 0.157
-as a tile change must leave it. The eager rows moved by 2-4%, which is the useful
-control: with no graph, launch overhead dominates decode and a better tile has
-nothing to reveal. Re-measured rows are in
-[`quant_matrix_20260901.md`](benchmark_logs/quant_matrix_20260901.md) §2.
+这个修复在暴露它的那个配置上值 1.32× 端到端：Qwen3-4B int4 + decode graph 在 tp1 从 419.0 → 551.3 TPS（TPOT 9.28 → 6.97 ms），tp2 471.9 → 583.1，dp2 816.8 → 1057.6；greedy 匹配率如 tile 变更所应有的那样保持 0.157 不变。eager 行只动了 2-4%，这是有用的对照：没有 graph 时 launch 开销主导 decode，更好的 tile 无从显现。重测的行见 [`quant_matrix_20260901.md`](benchmark_logs/quant_matrix_20260901.md) §2。
 
-## Tensor Parallelism × CUDA Graphs
+## Tensor 并行 × CUDA Graph
 
-Decode graphs used to be refused whenever `tp_world_size > 1`. They are captured now,
-behind three gates in `ModelRunner.enable_cuda_graph`, because a wrong graph under TP
-fails by hanging in a collective rather than by raising:
+decode graph 过去在 `tp_world_size > 1` 时一律拒绝。现在它们会被捕获，但要通过 `ModelRunner.enable_cuda_graph` 里的三道闸门——TP 下错误的 graph 不是抛异常，而是在集合通信里挂死：
 
-| Gate | What it checks | On failure |
+| 闸门 | 检查内容 | 失败时 |
 |---|---|---|
-| `LITE_LLAMA_TP_CUDA_GRAPH=0` | kill-switch | eager, with a warning |
-| grid agreement | all-reduce of `(len(batch_sizes), len(seq_len_buckets), hash(grid))` | **every** rank drops its graphs |
-| numerical | graph vs eager output per `(bs, bucket)`, atol 1e-2 | drop graphs, fall back to eager |
+| `LITE_LLAMA_TP_CUDA_GRAPH=0` | 总开关（kill-switch） | 转为 eager，并给出警告 |
+| grid 一致性 | 对 `(len(batch_sizes), len(seq_len_buckets), hash(grid))` 做 all-reduce | **每个** rank 丢弃自己的 graph |
+| 数值 | 按 `(bs, bucket)` 对比 graph 与 eager 输出，atol 1e-2 | 丢弃 graph，回退 eager |
 
-Capture also needs `NCCL_GRAPH_MIXING_SUPPORT=1` (set in `init_parallel`) because
-prefill stays eager while decode replays, mixing captured and uncaptured collectives
-on one communicator, and a `warmup_collectives()` pass so no communicator is lazily
-created inside the capture region.
+捕获还需要 `NCCL_GRAPH_MIXING_SUPPORT=1`（在 `init_parallel` 里设置），因为 prefill 保持 eager 而 decode 走 replay，同一个通信域上混合了已捕获与未捕获的集合通信；另需 `warmup_collectives()` 一轮，确保没有通信域在捕获区域内被惰性创建。
 
-Measured on 2× NVIDIA H100 80GB HBM3 (torch 2.13.0+cu130 / triton 3.7.1, 2026-09-01)
-with Qwen3-4B-Thinking-2507, `fp8+tp2+graph`: 77 replays, weights
-2.06 GB per rank (against 4.11 GB at tp1), KV capacity 955,832 tokens (against
-465,750) — the freed weight memory becomes cache. Throughput is *lower* than tp1 for
-this model (622 vs 664 tok/s): at 4B the per-step all-reduce costs more than the
-second card's compute buys. TP here is a capacity feature, not a speed feature.
+测于 2× NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1，2026-09-01），Qwen3-4B-Thinking-2507，`fp8+tp2+graph`：77 次 replay，每 rank 权重 2.06 GB（tp1 为 4.11 GB），KV 容量 955,832 token（对 465,750）——省下的权重显存变成了缓存。这个模型的吞吐*低于* tp1（622 vs 664 tok/s）：4B 时每步 all-reduce 的代价超过第二张卡算力的收益。这里的 TP 是容量特性，不是速度特性。
 
-### Which engine can run TP
+### 哪个引擎能跑 TP
 
-`LLM` (and therefore `TextGenerator`) cannot: its generate loop broadcasts sampled
-tokens but never the step plan, so follower ranks would wait forever. It now raises
-instead of accepting `tensor_parallel_size > 1` and silently running on one GPU —
-which is what it did before, and what made a benchmark row labelled `tp2` a tp1
-measurement. Use `ContinuousBatchingEngine.from_pretrained(...)`, `lite-llama serve`,
-or `lite-llama batch`, whose executor broadcasts each step's plan.
+`LLM`（因此 `TextGenerator`）不能：它的 generate 循环只广播采样出的 token，从不广播步计划，follower rank 会永远等待。它现在对 `tensor_parallel_size > 1` 直接报错，而不是默默在单卡上跑——那是它过去的行为，也正是让某行标注 `tp2` 的基准实际测成 tp1 的原因。请改用 `ContinuousBatchingEngine.from_pretrained(...)`、`lite-llama serve` 或 `lite-llama batch`，它们的 executor 会广播每一步的计划。
 
-## Accuracy
+## 精度
 
-Token-level accuracy comparison on Qwen3-0.6B (A10, greedy decode, same prompt set and
-same 2026-08-23 run as the [Performance Benchmark](#performance-benchmark) table):
+Qwen3-0.6B 的 token 级精度对比（A10，greedy decode，与[性能基准测试](#性能基准测试)表相同的 prompt 集与同一次 2026-08-23 运行）：
 
-| Scheme | Token Match vs HF fp16 | Expected |
+| 方案 | 对 HF fp16 的 token 匹配率 | 解读 |
 |---|---|---|
-| lite fp16 | ~25% | Normal — different attention kernel numerics cause divergence after first mismatch |
-| int8 per-channel | ~23% | Within fp16 divergence range |
-| fp8 W8A8 | ~5% | e4m3's 3 mantissa bits cause earlier divergence |
+| lite fp16 | ~25% | 正常——attention kernel 数值不同，首个分叉之后即发散 |
+| int8 per-channel | ~23% | 在 fp16 的发散范围内 |
+| fp8 W8A8 | ~5% | e4m3 只有 3 个尾数位，发散更早 |
 
-> **Logits-level accuracy** (measured per-token before greedy argmax) shows much higher
-> agreement: int8 <0.03% relative error, fp8 <0.04% — confirming the quantisation does
-> not degrade model quality, only greedy decode amplifies rounding differences.
+> **logits 级精度**（在 greedy argmax 之前逐 token 测量）一致率高得多：int8 相对误差 <0.03%，fp8 <0.04%——确认量化没有损害模型质量，只是 greedy decode 放大了舍入差异。
 
-## FP8 KV Cache: Why `k_scale = v_scale = 1.0`
+## FP8 KV Cache：为什么 `k_scale = v_scale = 1.0`
 
-`Fp8KVCacheMethod` ships fixed unit scales. That looks like an omission, so it was
-measured rather than argued about: `scripts/quant_kv_error.py` on Qwen3-4B-Thinking-2507
-(36 layers; NVIDIA H100 80GB HBM3, torch 2.13.0+cu130 / python 3.14.7), full log in
-[`kv_fp8_error_qwen3-4b_20260901.json`](benchmark_logs/kv_fp8_error_qwen3-4b_20260901.json).
+`Fp8KVCacheMethod` 附带固定为 1 的 scale。这看起来像遗漏，但我们用测量代替争论：`scripts/quant_kv_error.py` 在 Qwen3-4B-Thinking-2507（36 层；NVIDIA H100 80GB HBM3，torch 2.13.0+cu130 / python 3.14.7）上运行，完整日志见 [`kv_fp8_error_qwen3-4b_20260901.json`](benchmark_logs/kv_fp8_error_qwen3-4b_20260901.json)。
 
-| Measurement | Result | Reads as |
+| 测量项 | 结果 | 解读 |
 |---|---|---|
-| Largest \|K\|/\|V\| seen, any layer | 294.0 (`layers.0…attn.k`) | Below e4m3's 448 |
-| Values clamped at 448 | **0 / 47,112,192** | Unit scale clips nothing |
-| Non-finite values written | 0 | — |
-| Mean relative RMS error at scale 1.0 | 2.66e-02 | The cost of 3 mantissa bits |
-| Mean relative RMS with a per-call *oracle* scale | 2.59e-02 | **1.030× better** |
-| Best single layer with the oracle scale | 1.185× | One layer, not the model |
-| Largest subnormal share | 56.7% (`layers.0…attn.v`) | Where a scale *could* help |
-| Greedy token agreement, `auto` vs `fp8_e4m3` | **0.3164** (162/512) | Real divergence |
-| Same, `auto` vs `auto` (control) | 1.0000 | The divergence is fp8's, not noise |
-| GSM8K exact match, 500 questions | 0.1920 → 0.1640 (**−2.8 pp**) | 1.96·se = 4.74 pp → **not resolved** |
+| 任意层观测到的最大 \|K\|/\|V\| | 294.0（`layers.0…attn.k`） | 低于 e4m3 的 448 |
+| 在 448 处被截断的值 | **0 / 47,112,192** | 单位 scale 没截掉任何值 |
+| 写入的非有限值 | 0 | — |
+| scale 1.0 时的平均相对 RMS 误差 | 2.66e-02 | 3 个尾数位的代价 |
+| 用 per-call *oracle* scale 的平均相对 RMS | 2.59e-02 | **好 1.030×** |
+| oracle scale 下最好的单层 | 1.185× | 只是一层，不是整个模型 |
+| 最大的 subnormal 占比 | 56.7%（`layers.0…attn.v`） | scale *可能*起作用的地方 |
+| greedy token 一致率，`auto` vs `fp8_e4m3` | **0.3164**（162/512） | 真实发散 |
+| 同上，`auto` vs `auto`（对照） | 1.0000 | 发散来自 fp8，不是噪声 |
+| GSM8K 精确匹配，500 题 | 0.1920 → 0.1640（**−2.8 pp**） | 1.96·se = 4.74 pp → **未能判定** |
 
-Three findings that do not all point the same way, kept that way on purpose:
+三条发现并不指向同一个方向，而且是有意保持这种状态：
 
-1. **Nothing is being clipped.** A per-tensor scale changes an e4m3 result in exactly two
-   places: above 448, where it clamps, and near 2⁻⁶, where values go subnormal and lose
-   mantissa bits. e4m3 is a *floating* format — 3 mantissa bits means ~6% relative spacing
-   in every binade — so multiplying by a constant mostly just slides values along the
-   exponent axis without changing their relative error. This is the opposite of int8, where
-   the step size is absolute and calibration is unconditionally worth doing.
-2. **The divergence is real.** 0.3164 token agreement against a 1.0000 same-dtype control
-   rules out benchmark noise: fp8 KV does change what the model says. Greedy decoding is
-   chaotic, so one flipped argmax rewrites the rest of the completion — first divergence
-   lands at token 22 / 11 / 74 / 33 of 128.
-3. **Calibration is not the fix.** The oracle scale here is `amax/448` computed *per call*,
-   i.e. an optimistic upper bound on any static per-tensor calibration — no offline scale
-   can beat a scale chosen with the data in hand. It buys 1.030× on the mean over layers.
-   The decision uses the mean, not the best layer: every layer feeds the same residual
-   stream, so what reaches the logits is the aggregate error. A single layer at 1.185× is
-   evidence that one layer's activations sit further from a power of two, not that
-   calibration helps.
+1. **没有任何值被截断。** per-tensor scale 恰好在两处改变 e4m3 的结果：高于 448 处会截断，以及接近 2⁻⁶ 处值进入 subnormal 并丢失尾数位。e4m3 是*浮点*格式——3 个尾数位意味着每个 binade 内约 6% 的相对间隔——所以乘一个常数大多只是沿指数轴平移数值，并不改变相对误差。这与 int8 恰好相反：int8 的步长是绝对的，标定无条件值得做。
+2. **发散是真实的。** 相对 1.0000 的同 dtype 对照，0.3164 的 token 一致率排除了基准噪声：fp8 KV 确实改变了模型说什么。greedy decoding 是混沌的，一个翻转的 argmax 会重写补全的剩余部分——首个分叉落在 128 个 token 中的第 22 / 11 / 74 / 33 个。
+3. **标定不是解法。** 这里的 oracle scale 是*逐调用*算出的 `amax/448`，即任何静态 per-tensor 标定的乐观上界——没有哪个离线 scale 能胜过拿着数据现选的 scale。它在各层均值上买来 1.030×。决策用的是均值而不是最好的层：每一层都喂同一条残差流，到达 logits 的是聚合误差。单层 1.185× 只说明该层的激活离 2 的幂更远，而不是标定有用。
 
-**Conclusion:** the error is the format, not the scale. Offline calibration
-(`scripts/calibrate_kv_scale.py`, per-layer per-tensor) was therefore **not** implemented —
-it would remove ~3% of a 2.7% error. What is *not* claimed is that fp8 KV cache is free:
-it demonstrably moves tokens, and the GSM8K arm came out 2.8 pp lower. At 500 questions
-that is inside noise (unpaired 1.96·se = 4.74 pp), so the honest statement is that the task
-effect is **unmeasured at this sample size**, not that it is zero. The 56.7% subnormal share
-in the V tensors is the one place a scale *below* 1.0 could still buy something, and is
-where to look first if a future model does show a task regression.
+**结论：** 误差来自格式，而不是 scale。因此离线标定（`scripts/calibrate_kv_scale.py`，per-layer per-tensor）**没有**实现——它只能削掉 2.7% 误差中的 ~3%。我们*没有*声称 fp8 KV cache 是免费的：它可测地改变了 token，GSM8K 一侧低了 2.8 pp。在 500 题的样本量下这在噪声以内（非配对 1.96·se = 4.74 pp），所以诚实的说法是任务效应**在这个样本量下未测出**，而不是它为零。V 张量中 56.7% 的 subnormal 占比是低于 1.0 的 scale *可能*仍有收益的唯一一处，也是未来某个模型真出现任务回退时的首选排查点。
 
-Throughput note from the same run: fp8 KV decoded at 1952 tok/s against 2297 tok/s for
-bf16 KV. The read path is dequant-bound, not bandwidth-bound (see
-`benchmarks/kernels/bench_paged_decode.py`), so halving the bytes does not halve the time —
-fp8 KV buys **capacity**, roughly 2× the cached tokens, not speed.
+同一次运行的吞吐注记：fp8 KV decode 1952 tok/s，bf16 KV 为 2297 tok/s。读路径受反量化限制而不是带宽限制（见 `benchmarks/kernels/bench_paged_decode.py`），所以字节数减半并不会让时间减半——fp8 KV 买的是**容量**（约 2× 的缓存 token），不是速度。
 
-Reproduce:
+复现：
 
 ```bash
 python scripts/quant_kv_error.py --model-dir $LITE_LLAMA_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \
     --max-gen-len 128 --gsm8k 500 --json docs/benchmark_logs/kv_fp8_error.json
 ```
 
-## Running Benchmarks
+## 运行基准测试
 
 ```bash
-# Single model with specific schemes
+# 单模型 + 指定方案
 python benchmarks/bench_quant.py --model-dir /data/shared/llm_weights/Qwen3-0.6B \
     --schemes fp16 int8 fp8
 
-# All representative models (plan subset)
+# 全部代表性模型（plan 子集）
 python benchmarks/bench_quant.py --all
 
-# Output JSON for CI tracking
+# 输出 JSON 供 CI 跟踪
 python benchmarks/bench_quant.py --model-dir ... --json results.json
 ```
 
-## Vision-Language Model Support
+## 视觉-语言模型支持
 
-Both TP and quantization extend to multimodal (VLM) checkpoints. The vision tower stays replicated in its native dtype; only the language-model projections are sharded or quantised.
+TP 与量化都延伸到多模态（VLM）checkpoint。视觉塔以原生 dtype 保持整卡复制不动；只有语言模型的投影会被切分或量化。
 
-| Model | Weights | TP | INT8 | vl-chat |
+| 模型 | 权重 | TP | INT8 | vl-chat |
 |-------|---------|----|----|--------|
 | Qwen3-VL-4B-Instruct | BF16 | ✓ | ✓ | ✓ |
 | LLaVA-1.5-7B (HF) | FP16 | ✓ | ✓ | ✓ |
