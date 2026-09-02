@@ -107,7 +107,11 @@ def _per_token_group_quant_kernel(
         # rint, not a plain .to(int8): round-to-nearest-even matches torch's
         # .round() (and the per-token int8 quantiser), where .to truncates
         # toward zero — a different byte wherever the quotient's fraction
-        # exceeds one half.
+        # exceeds one half. Like the e4m3 cast above, it agrees with the torch
+        # chain everywhere except on a quotient landing exactly on a .5
+        # boundary, where a 1 ULP difference between this kernel's and torch's
+        # fp32 division flips the tie (~4e-4 of elements on a 512x7168 row);
+        # the byte-difference tests gate that bound.
         q = tl.extra.cuda.libdevice.rint(q).to(tl.int8)
     tl.store(q_ptr + row * stride_qm + offs, q, mask=mask)
 
