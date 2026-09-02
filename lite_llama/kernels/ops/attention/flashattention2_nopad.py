@@ -437,9 +437,7 @@ def flash_attention2_chunked(
     batchs = b_seq_len.shape[0]
     n_heads, HEAD_DIM = q.shape[1], q.shape[2]
 
-    BLOCK_M, BLOCK_N, num_warps, num_stages = _nopad_blocks(
-        max_chunk_len, HEAD_DIM, q.dtype
-    )
+    BLOCK_M, BLOCK_N, num_warps, num_stages = _nopad_blocks(max_chunk_len, HEAD_DIM, q.dtype)
     num_kv_groups = q.shape[1] // k_cache.shape[1]  # num_q_heads // num_k_heads
     grid = (triton.cdiv(max_chunk_len, BLOCK_M), batchs * n_heads, 1)
 
