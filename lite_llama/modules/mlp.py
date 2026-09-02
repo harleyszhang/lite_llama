@@ -35,9 +35,18 @@ class FusedMLP(nn.Module):
     :class:`~lite_llama.models.base.Attention` is fused the same way.
     """
 
-    def __init__(self, config: ModelConfig, quant: QuantizationConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        quant: QuantizationConfig | None = None,
+        *,
+        intermediate_size: int | None = None,
+    ) -> None:
         super().__init__()
-        hidden, inter = config.hidden_size, config.intermediate_size
+        # ``intermediate_size`` overrides the config's dense width for the MoE
+        # shared expert, whose FFN is ``moe_intermediate_size * n_shared_experts``
+        # wide — same SwiGLU, same fusion, a different width.
+        hidden, inter = config.hidden_size, intermediate_size or config.intermediate_size
         # The parameter is [2 * inter_local, hidden], and the shape check inside
         # the linear layer sees that whole width. The *logical* shard is one
         # half, so scale-block alignment is checked against inter_local —

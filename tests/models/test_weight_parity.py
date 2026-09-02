@@ -92,6 +92,38 @@ CASES: dict[str, tuple[dict, str]] = {
         },
         "transformers:Qwen3MoeForCausalLM",
     ),
+    # MLA: separate projections (no fused qkv), the query-lora pair, the
+    # latent layernorm folded like q/k norms, and MoE with a shared expert
+    # whose gate/up fuse like every other SwiGLU. ``norm_topk_prob`` is False
+    # — DeepSeek's router scales the raw softmax topk weights instead of
+    # renormalising them — and the rope width is the real 64, the fixed split
+    # boundary of the decode kernel's latent rows.
+    "deepseek_v2": (
+        {
+            "model_type": "deepseek_v2",
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "moe_intermediate_size": 32,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "n_shared_experts": 2,
+            "n_routed_experts": 4,
+            "num_experts_per_tok": 2,
+            "routed_scaling_factor": 2.5,
+            "first_k_dense_replace": 1,
+            "norm_topk_prob": False,
+            "kv_lora_rank": 16,
+            "q_lora_rank": 32,
+            "qk_nope_head_dim": 32,
+            "qk_rope_head_dim": 64,
+            "v_head_dim": 32,
+            "vocab_size": 128,
+            "max_position_embeddings": 256,
+            "rms_norm_eps": 1e-6,
+            "tie_word_embeddings": False,
+        },
+        "transformers:DeepseekV2ForCausalLM",
+    ),
     "llava": (
         {
             "model_type": "llava",
@@ -206,33 +238,47 @@ def test_decoder_weights_land_in_the_right_place(model_type: str, tmp_path: Path
     same(f"{hf}embed_tokens.weight", f"{lite}embed_tokens.weight")
     same(f"{hf}norm.weight", f"{lite}norm_weight")
 
-    q, kv = config.q_size, config.kv_size
     for i in range(config.num_layers):
         attn, lite_attn = f"{hf}layers.{i}.self_attn", f"{lite}layers.{i}.self_attn"
         same(f"{attn}.o_proj.weight", f"{lite_attn}.o_proj.weight")
-        # The fused blocks are the whole reason a mapping layer exists: under GQA they
-        # have different widths, yet permuting them keeps every shape and every count
-        # valid, so only an element-wise check can tell them apart.
-        same(f"{attn}.q_proj.weight", f"{lite_attn}.qkv_proj.weight", (slice(0, q),))
-        same(f"{attn}.k_proj.weight", f"{lite_attn}.qkv_proj.weight", (slice(q, q + kv),))
-        same(f"{attn}.v_proj.weight", f"{lite_attn}.qkv_proj.weight", (slice(q + kv, q + 2 * kv),))
+        if f"{attn}.kv_a_proj_with_mqa.weight" in state:
+            # MLA: the projections are separate modules that pass through by
+            # name; only the latent/query layernorms fold their ``weight`` leaf
+            # (the same _FLATTENED rule as the q/k norms).
+            same(f"{attn}.kv_a_proj_with_mqa.weight", f"{lite_attn}.kv_a_proj_with_mqa.weight")
+            same(f"{attn}.kv_a_layernorm.weight", f"{lite_attn}.kv_a_layernorm_weight")
+            same(f"{attn}.kv_b_proj.weight", f"{lite_attn}.kv_b_proj.weight")
+            if f"{attn}.q_proj.weight" in state:
+                same(f"{attn}.q_proj.weight", f"{lite_attn}.q_proj.weight")
+            else:  # the query-lora pair
+                same(f"{attn}.q_a_proj.weight", f"{lite_attn}.q_a_proj.weight")
+                same(f"{attn}.q_a_layernorm.weight", f"{lite_attn}.q_a_layernorm_weight")
+                same(f"{attn}.q_b_proj.weight", f"{lite_attn}.q_b_proj.weight")
+        else:
+            # The fused blocks are the whole reason a mapping layer exists: under GQA they
+            # have different widths, yet permuting them keeps every shape and every count
+            # valid, so only an element-wise check can tell them apart.
+            q, kv = config.q_size, config.kv_size
+            same(f"{attn}.q_proj.weight", f"{lite_attn}.qkv_proj.weight", (slice(0, q),))
+            same(f"{attn}.k_proj.weight", f"{lite_attn}.qkv_proj.weight", (slice(q, q + kv),))
+            same(f"{attn}.v_proj.weight", f"{lite_attn}.qkv_proj.weight", (slice(q + kv, q + 2 * kv),))
 
-        norms = f"{attn}.q_norm.weight" in state
-        assert norms == (f"{lite_attn}.q_norm_weight" in params)
-        if norms:
-            same(f"{attn}.q_norm.weight", f"{lite_attn}.q_norm_weight")
-            same(f"{attn}.k_norm.weight", f"{lite_attn}.k_norm_weight")
+            norms = f"{attn}.q_norm.weight" in state
+            assert norms == (f"{lite_attn}.q_norm_weight" in params)
+            if norms:
+                same(f"{attn}.q_norm.weight", f"{lite_attn}.q_norm_weight")
+                same(f"{attn}.k_norm.weight", f"{lite_attn}.k_norm_weight")
 
-        # Qwen2 is the only family here with a q/k/v bias, i.e. the only one that
-        # exercises the fused ``qkv_proj.bias``.
-        if f"{attn}.q_proj.bias" in state:
-            same(f"{attn}.q_proj.bias", f"{lite_attn}.qkv_proj.bias", (slice(0, q),))
-            same(f"{attn}.k_proj.bias", f"{lite_attn}.qkv_proj.bias", (slice(q, q + kv),))
-            same(
-                f"{attn}.v_proj.bias",
-                f"{lite_attn}.qkv_proj.bias",
-                (slice(q + kv, q + 2 * kv),),
-            )
+            # Qwen2 is the only family here with a q/k/v bias, i.e. the only one that
+            # exercises the fused ``qkv_proj.bias``.
+            if f"{attn}.q_proj.bias" in state:
+                same(f"{attn}.q_proj.bias", f"{lite_attn}.qkv_proj.bias", (slice(0, q),))
+                same(f"{attn}.k_proj.bias", f"{lite_attn}.qkv_proj.bias", (slice(q, q + kv),))
+                same(
+                    f"{attn}.v_proj.bias",
+                    f"{lite_attn}.qkv_proj.bias",
+                    (slice(q + kv, q + 2 * kv),),
+                )
 
         mlp, lite_mlp = f"{hf}layers.{i}.mlp", f"{lite}layers.{i}.mlp"
         if f"{mlp}.gate.weight" not in state:  # dense SwiGLU
@@ -259,6 +305,23 @@ def test_decoder_weights_land_in_the_right_place(model_type: str, tmp_path: Path
         same(f"{mlp}.gate.weight", f"{lite_mlp}.gate_weight")
         same(f"{mlp}.experts.gate_up_proj", f"{lite_mlp}.experts.gate_up_proj")
         same(f"{mlp}.experts.down_proj", f"{lite_mlp}.experts.down_proj")
+        # DeepSeek's shared expert rides the MoE layers: one dense MLP every
+        # token passes through, its gate/up fused exactly like the dense
+        # layers' — n_shared_experts × moe_intermediate_size wide.
+        if f"{mlp}.shared_experts.gate_proj.weight" in state:
+            shared = f"{lite_mlp}.shared_experts"
+            inter = config.moe_intermediate_size * config.n_shared_experts
+            same(
+                f"{mlp}.shared_experts.gate_proj.weight",
+                f"{shared}.gate_up_proj.weight",
+                (slice(0, inter),),
+            )
+            same(
+                f"{mlp}.shared_experts.up_proj.weight",
+                f"{shared}.gate_up_proj.weight",
+                (slice(inter, 2 * inter),),
+            )
+            same(f"{mlp}.shared_experts.down_proj.weight", f"{shared}.down_proj.weight")
 
 
 def test_per_expert_checkpoint_matches_the_stacked_one(tmp_path: Path):
@@ -364,7 +427,9 @@ def test_a_dropped_checkpoint_key_fails_loudly(model_type: str, tmp_path: Path):
     a truncated or mis-mapped checkpoint has to raise instead of loading.
     """
     state, config = write_hf_checkpoint(tmp_path, model_type)
-    victim = next(k for k in state if k.endswith("self_attn.v_proj.weight"))
+    # MLA has no v_proj; the first attention weight of any layout works — the
+    # check is that a missing tensor fails the load, whatever its name.
+    victim = next(k for k in state if ".self_attn." in k and k.endswith(".weight"))
     del state[victim]
     _save(state, tmp_path)
 

@@ -14,7 +14,7 @@ import pytest
 
 from lite_llama.models.registry import ModelRegistry, ModelSpec
 
-EXPECTED_TYPES = {"llama", "qwen2", "qwen3", "qwen3_moe", "llava", "qwen3_vl"}
+EXPECTED_TYPES = {"llama", "qwen2", "qwen3", "qwen3_moe", "llava", "qwen3_vl", "deepseek_v2"}
 
 
 def test_supported_types_covers_every_supported_model():

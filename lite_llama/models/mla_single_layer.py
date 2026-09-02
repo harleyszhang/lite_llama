@@ -15,10 +15,8 @@ import math
 import torch
 import torch.nn as nn
 
-from ..kernels.dispatcher import dispatch
-
-#: Layout tag of the latent cache — matches the flashmla row's requirement.
-MLA_LATENT = frozenset({"kv:mla_latent"})
+from ..kernels.dispatcher import MLA_LATENT_TAGS, dispatch
+from ..kernels.ops.attention.mla import mla_decode_reference
 
 
 def flashmla_decode_fn(
@@ -33,11 +31,11 @@ def flashmla_decode_fn(
     """The flashmla row, selected explicitly behind the contract signature.
 
     The row is ``verified=False`` and gated on ``kv:mla_latent`` plus the
-    library probe, so default dispatch would never hand it out; asking for it
+    library availability check, so default dispatch would never hand it out; asking for it
     by backend bypasses the golden gate (never the physical ones) and returns
     a callable with :class:`MlaDecodeOp`'s exact signature.
     """
-    sel = dispatch("attention.mla_decode", dtype=q.dtype, layout=MLA_LATENT, backend="flashmla")
+    sel = dispatch("attention.mla_decode", dtype=q.dtype, layout=MLA_LATENT_TAGS, backend="flashmla")
     return sel.load()(
         q, kv_cache, block_table, cache_seqlens, max_seq_len=max_seq_len, sm_scale=sm_scale
     )
@@ -97,22 +95,21 @@ class MinimalMlaLayer(nn.Module):
     ) -> torch.Tensor:
         """Pure-PyTorch decode over the paged latent cache.
 
-        The golden baseline the flashmla row's ``max_abs_diff`` is measured
-        against: gather each sequence's pages into a dense ``[len, lora]``
-        key matrix, softmax the single-KV-head logits, mix the keys.
+        The 1.2 kernel reference with the rope segment width pinned to zero —
+        this harness's cache rows are all latent, no ``[c_kv | k_pe]`` split —
+        which degenerates to exactly the V-is-the-whole-row semantics the
+        golden diff wants. One implementation, kept honest by the kernel's
+        own tests, instead of a second one drifting beside it.
         """
-        batch = q.shape[0]
-        page_size = kv_cache.shape[1]
-        out = torch.empty_like(q)
-        for b in range(batch):
-            length = int(cache_seqlens[b])
-            num_pages = (length + page_size - 1) // page_size
-            pages = block_table[b, :num_pages].tolist()
-            keys = torch.cat([kv_cache[p] for p in pages], dim=0)[:length]
-            logits = torch.einsum("hd,sd->hs", q[b].float(), keys.float()) * sm_scale
-            probs = logits.softmax(dim=-1)
-            out[b] = torch.einsum("hs,sd->hd", probs, keys.float()).to(q.dtype)
-        return out
+        return mla_decode_reference(
+            q,
+            kv_cache,
+            block_table,
+            cache_seqlens,
+            max_seq_len=max_seq_len,
+            sm_scale=sm_scale,
+            qk_rope_head_dim=0,
+        )
 
     def write_kv(
         self,

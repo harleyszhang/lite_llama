@@ -108,7 +108,7 @@ class AttentionDecodeOp(LogicalOp):
 
 
 class MlaDecodeOp(LogicalOp):
-    """Multi-head latent attention decode (placeholder until v0.10 wiring).
+    """Multi-head latent attention decode over the latent KV cache.
 
     The latent cache is single-head (MQA over the compressed ``c_kv``), which
     is the part every MLA backend shares; backend-specific head layouts stay
@@ -140,6 +140,55 @@ class MlaDecodeOp(LogicalOp):
 
         Returns:
             ``[batch, num_heads, v_head_dim]`` attention output.
+        """
+        raise NotImplementedError
+
+
+class MlaPrefillOp(LogicalOp):
+    """MLA prefill: up-project the fresh latent, then varlen attention.
+
+    Decode keeps ``q`` absorbed and attends the latent cache directly; prefill
+    cannot absorb — every new token queries every other new token, so the
+    absorbed form would pay the wide latent dot per pair. The contract takes
+    the up-projection weights so each backend picks its own workspace
+    strategy (the native row chunks them; an external one may fuse them).
+    """
+
+    op_id = "attention.mla_prefill"
+
+    @abstractmethod
+    def __call__(
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        c_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        w_uk: torch.Tensor,
+        w_uv: torch.Tensor,
+        sm_scale: float,
+        b_start_loc: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        max_seq_len: int,
+    ) -> torch.Tensor:
+        """Up-project the fresh latent and attend the packed batch.
+
+        Args:
+            q_nope: ``[tokens, num_heads, qk_nope_head_dim]`` un-absorbed query.
+            q_pe: ``[tokens, num_heads, qk_rope_head_dim]`` rope segment of q.
+            c_kv: ``[tokens, kv_lora_rank]`` fresh latent rows.
+            k_pe: ``[tokens, qk_rope_head_dim]`` rope keys, one per token,
+                shared by all heads.
+            w_uk: ``[num_heads, kv_lora_rank, qk_nope_head_dim]`` per-head K
+                up-projection (a transposed view of the ``kv_b_proj`` K half).
+            w_uv: ``[num_heads, kv_lora_rank, v_head_dim]`` per-head V
+                up-projection, same source.
+            sm_scale: Softmax scale.
+            b_start_loc: ``[batch]`` first packed row of each sequence.
+            b_seq_len: ``[batch]`` true length of each sequence.
+            max_seq_len: Longest sequence, sizing the flash tiles.
+
+        Returns:
+            ``[tokens, num_heads, v_head_dim]`` attention output.
         """
         raise NotImplementedError
 
@@ -443,6 +492,7 @@ LOGICAL_OPS: dict[str, type[LogicalOp]] = {
         AttentionPrefillOp,
         AttentionDecodeOp,
         MlaDecodeOp,
+        MlaPrefillOp,
         LinearOp,
         MoeOp,
         DispatchOp,

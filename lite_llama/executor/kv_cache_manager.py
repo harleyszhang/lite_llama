@@ -33,8 +33,10 @@ class MemoryProfiler:
 
     Args:
         num_layers: Decoder layer count.
-        num_kv_heads: Key/value heads per layer.
-        head_dim: Size of one attention head.
+        kv_row: ``(slots, dim)`` of one token's per-layer cache row —
+            ``(2 * kv_heads, head_dim)`` for MHA/GQA (K and V of the heads this
+            rank owns), ``(1, kv_lora_rank + qk_rope_head_dim)`` for MLA, whose
+            latent row has no head axis to shard and is replicated across ranks.
         gpu_memory_utilization: Fraction of total GPU memory the cache may occupy.
         dtype: KV-cache dtype.
         device: Torch device string.
@@ -45,24 +47,22 @@ class MemoryProfiler:
     def __init__(
         self,
         num_layers: int,
-        num_kv_heads: int,
-        head_dim: int,
+        kv_row: tuple[int, int],
         gpu_memory_utilization: float = 0.9,
         dtype: torch.dtype = torch.float16,
         device: str = "cuda",
         reserved_bytes: int = 0,
     ) -> None:
         self.num_layers = num_layers
-        self.num_kv_heads = num_kv_heads
-        self.head_dim = head_dim
+        self.kv_row = kv_row
         self.gpu_memory_utilization = gpu_memory_utilization
         self.dtype = dtype
         self.device = device
         self.reserved_bytes = reserved_bytes
 
     def _kv_bytes_per_token(self) -> int:
-        # Both K and V for every layer: factor of 2 for K+V.
-        return self.num_kv_heads * self.head_dim * 2 * self.num_layers * get_dtype_size(self.dtype)
+        slots, dim = self.kv_row
+        return slots * dim * self.num_layers * get_dtype_size(self.dtype)
 
     def _run_dummy_forward(self, model, vocab_size: int, seq_len: int = 32) -> None:
         """Drive one prefill pass so peak activation memory is recorded."""
@@ -72,7 +72,7 @@ class MemoryProfiler:
         dummy = AttentionMetadata()
         dummy.kv_buffer = [
             torch.empty(
-                (seq_len, 2 * self.num_kv_heads, self.head_dim),
+                (seq_len, *self.kv_row),
                 dtype=self.dtype,
                 device=self.device,
             )
@@ -142,8 +142,8 @@ class KVCacheManager:
 
     Args:
         num_layers: Decoder layer count.
-        num_kv_heads: Key/value heads per layer.
-        head_dim: Size of one attention head.
+        kv_row: ``(slots, dim)`` of one token's per-layer cache row, as in
+            :class:`MemoryProfiler`; the model side declares it.
         gpu_num_blocks: Cache capacity in blocks, either profiled by
             :class:`MemoryProfiler` or set by the caller.
         block_size: Tokens per block; only 1 is implemented.
@@ -154,17 +154,16 @@ class KVCacheManager:
     def __init__(
         self,
         num_layers,
-        num_kv_heads,
-        head_dim,
+        kv_row,
         gpu_num_blocks,
         block_size=1,
         dtype=torch.float16,
         device="cuda",
         watermark: float = 0.1,
+        hysteresis: float = 0.05,
     ):
         self.num_layers = num_layers
-        self.num_kv_heads = num_kv_heads
-        self.head_dim = head_dim
+        self.kv_row = tuple(kv_row)
         self.gpu_num_blocks = gpu_num_blocks
         self.block_size = block_size
         self.max_num_tokens = gpu_num_blocks * block_size
@@ -174,12 +173,20 @@ class KVCacheManager:
         self.can_use_mem_size = gpu_num_blocks  # rows currently free
 
         # Watermark: refuse new requests when free blocks drop below this fraction.
+        # Hysteresis: once free space has dipped under the watermark, admission
+        # only resumes after it climbs back above watermark + recovery band — a
+        # single threshold would flap admit/preempt while the level oscillates
+        # around it (O9).
         self._watermark_blocks = int(gpu_num_blocks * watermark)
+        self._recover_blocks = int(gpu_num_blocks * hysteresis)
+        self._under_pressure = False
         logger.info(
-            "KV cache: %d blocks, watermark=%d blocks (%.0f%%)",
+            "KV cache: %d blocks, watermark=%d blocks (%.0f%%), "
+            "recovery band=%d blocks",
             gpu_num_blocks,
             self._watermark_blocks,
             watermark * 100,
+            self._recover_blocks,
         )
 
         # Row indices to hand out, and the per-row reference count.
@@ -198,17 +205,30 @@ class KVCacheManager:
         self._bump_is_exact = True
 
         # Initialize the gpu_kv_buffer
-        self.init_kv_buffers(self.max_num_tokens, head_dim, num_kv_heads, num_layers, dtype, device)
+        self.init_kv_buffers(self.max_num_tokens, self.kv_row, num_layers, dtype, device)
 
     def can_admit(self, need_blocks: int) -> bool:
         """Check if a new request requiring *need_blocks* can be admitted.
 
         Returns False when free capacity after allocation would drop below the
         watermark, preventing cache pressure from causing eviction cascades.
-        This is a pure read — no allocation happens.
+        This is a pure read — no allocation happens — but it remembers which
+        side of the watermark the level last sat on: after a dip under the
+        watermark the bar rises by the recovery band until the level has
+        climbed back above it, so a level oscillating around one threshold
+        cannot flap admission on and off (O9 hysteresis).
         """
-        remaining = self.can_use_mem_size - need_blocks
-        return remaining >= self._watermark_blocks
+        if self._under_pressure:
+            if self.can_use_mem_size >= self._watermark_blocks + self._recover_blocks:
+                self._under_pressure = False
+        elif self.can_use_mem_size < self._watermark_blocks:
+            self._under_pressure = True
+        floor = (
+            self._watermark_blocks + self._recover_blocks
+            if self._under_pressure
+            else self._watermark_blocks
+        )
+        return self.can_use_mem_size - need_blocks >= floor
 
     @property
     def utilization(self) -> float:
@@ -218,20 +238,20 @@ class KVCacheManager:
     def init_kv_buffers(
         self,
         max_num_tokens,
-        head_dim,
-        num_kv_heads,
+        kv_row,
         num_layers,
         dtype,
         device: str = "cuda",
     ) -> None:
-        """Pre-allocate one KV tensor per layer, ``[max_num_tokens, 2 * kv_heads, head_dim]``.
+        """Pre-allocate one KV tensor per layer, ``[max_num_tokens, *kv_row]``.
 
-        K and V share the tensor along dim 1 — K heads first, then V heads — so a
-        decode step writes both with one kernel launch.
+        For MHA/GQA the row is ``(2 * kv_heads, head_dim)`` — K heads first, then
+        V heads, so a decode step writes both with one kernel launch. For MLA it
+        is ``(1, latent_dim)``: K and V share one latent vector, written whole.
         """
         # TODO: reshape into [blocks, block_size, ...] to support PagedAttention.
         self.gpu_kv_buffer = [
-            torch.empty((max_num_tokens, 2 * num_kv_heads, head_dim), dtype=dtype, device=device)
+            torch.empty((max_num_tokens, *kv_row), dtype=dtype, device=device)
             for _ in range(num_layers)
         ]
         logger.debug(f"gpu_kv_buffer per layer shape: {self.gpu_kv_buffer[0].shape}")

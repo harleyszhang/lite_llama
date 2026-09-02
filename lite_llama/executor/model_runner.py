@@ -56,10 +56,16 @@ class ModelRunner:
         # ModelConfig already normalises the geometry across HF field names and
         # unwraps the nested text config of a vision-language checkpoint.
         self.num_layers = config.num_layers
-        # Attention heads are dealt out across tensor-parallel ranks, so this rank
-        # caches only the K/V of the heads it owns.
-        self.num_kv_heads = divide(config.num_kv_heads, get_tp_world_size(), "key/value heads")
-        self.head_dim = config.head_dim
+        if config.is_mla:
+            # MLA caches one latent vector per token: there is no head axis to
+            # shard, so every TP rank holds the full row (as vLLM does) — and the
+            # occupancy report below is honest about it.
+            self.kv_row = (1, config.kv_lora_rank + config.qk_rope_head_dim)
+        else:
+            # Attention heads are dealt out across tensor-parallel ranks, so this
+            # rank caches only the K/V of the heads it owns.
+            kv_heads = divide(config.num_kv_heads, get_tp_world_size(), "key/value heads")
+            self.kv_row = (2 * kv_heads, config.head_dim)
         self.vocab_size = config.vocab_size
         self.max_seq_len = config.max_seq_len
         # Element type of the paged KV cache: fp16 verbatim, or uint8 holding
@@ -72,8 +78,7 @@ class ModelRunner:
             reserved = estimate_capture_workspace(self.max_seq_len) if use_cuda_graph else 0
             profiler = MemoryProfiler(
                 num_layers=self.num_layers,
-                num_kv_heads=self.num_kv_heads,
-                head_dim=self.head_dim,
+                kv_row=self.kv_row,
                 dtype=kv_dtype,
                 device=device,
                 reserved_bytes=reserved,
@@ -87,8 +92,7 @@ class ModelRunner:
 
         self.kv_cache_manager = KVCacheManager(
             num_layers=self.num_layers,
-            num_kv_heads=self.num_kv_heads,
-            head_dim=self.head_dim,
+            kv_row=self.kv_row,
             gpu_num_blocks=max_gpu_num_blocks,
             dtype=kv_dtype,
             device=device,

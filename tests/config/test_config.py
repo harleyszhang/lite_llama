@@ -245,6 +245,81 @@ def test_vision_language_config_unwraps_its_text_config(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------- #
+# MLA and DeepSeek-MoE field groups (DeepSeek-V2-Lite geometry)
+# --------------------------------------------------------------------------- #
+DEEPSEEK_V2_BODY = {
+    "model_type": "deepseek_v2",
+    "hidden_size": 2048,
+    "num_attention_heads": 16,
+    "num_hidden_layers": 27,
+    "intermediate_size": 1408,
+    "moe_intermediate_size": 1408,
+    "vocab_size": 102400,
+    "max_position_embeddings": 163840,
+    "kv_lora_rank": 512,
+    "q_lora_rank": None,
+    "qk_rope_head_dim": 64,
+    "qk_nope_head_dim": 128,
+    "v_head_dim": 128,
+    "n_shared_experts": 2,
+    "n_routed_experts": 64,
+    "num_experts_per_tok": 6,
+    "routed_scaling_factor": 1.0,
+    "first_k_dense_replace": 1,
+    "scoring_func": "softmax",
+}
+
+
+def test_mla_geometry_is_read_off_the_hf_config(tmp_path: Path):
+    cfg = ModelConfig.from_pretrained(write_config(tmp_path / "dsv2", DEEPSEEK_V2_BODY))
+    assert cfg.is_mla
+    assert cfg.kv_lora_rank == 512
+    assert cfg.q_lora_rank is None  # V2-Lite projects q in one shot
+    assert (cfg.qk_rope_head_dim, cfg.qk_nope_head_dim, cfg.v_head_dim) == (64, 128, 128)
+
+
+def test_deepseek_moe_knobs_default_for_dense_models(qwen2_dir: Path):
+    """A dense checkpoint must read as no-shared-experts, no scaling, softmax routing."""
+    cfg = ModelConfig.from_pretrained(qwen2_dir)
+    assert not cfg.is_mla
+    assert cfg.kv_lora_rank is None
+    assert cfg.n_shared_experts == 0
+    assert cfg.routed_scaling_factor == 1.0
+    assert cfg.first_k_dense_replace == 0
+    assert cfg.scoring_func == "softmax"
+
+
+def test_deepseek_moe_knobs_come_from_the_config(tmp_path: Path):
+    cfg = ModelConfig.from_pretrained(write_config(tmp_path / "dsv2", DEEPSEEK_V2_BODY))
+    assert cfg.n_shared_experts == 2
+    assert cfg.routed_scaling_factor == 1.0
+    assert cfg.first_k_dense_replace == 1
+    assert cfg.scoring_func == "softmax"
+
+
+def test_an_mla_config_missing_head_dims_is_rejected():
+    """kv_lora_rank alone does not describe MLA; the head widths are not derivable.
+
+    Built on a bare ``PretrainedConfig`` rather than a config.json: transformers 5.x
+    validates registered config classes strictly, so a malformed DeepSeek body never
+    reaches ``ModelConfig`` — this guard is for the non-standard construction path.
+    """
+    from transformers import PretrainedConfig
+
+    hf_config = PretrainedConfig(
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_hidden_layers=27,
+        intermediate_size=1408,
+        vocab_size=102400,
+        max_position_embeddings=163840,
+        kv_lora_rank=512,  # but no qk_rope_head_dim / qk_nope_head_dim / v_head_dim
+    )
+    with pytest.raises(ValueError, match="missing"):
+        ModelConfig(hf_config)
+
+
+# --------------------------------------------------------------------------- #
 # read_model_type
 # --------------------------------------------------------------------------- #
 def test_read_model_type_returns_the_lowercased_type(qwen2_dir: Path):

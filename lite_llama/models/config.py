@@ -181,6 +181,58 @@ class ModelConfig:
     def max_position_embeddings(self) -> int:
         return int(self.text_config.max_position_embeddings)
 
+    # ---- MLA geometry (DeepSeek-V2/V3) ------------------------------------- #
+    @property
+    def kv_lora_rank(self) -> int | None:
+        """Latent KV rank; ``None`` marks a per-head-K/V (MHA/GQA) model."""
+        return getattr(self.text_config, "kv_lora_rank", None)
+
+    @property
+    def q_lora_rank(self) -> int | None:
+        """Latent query rank; ``None`` when q is projected in one shot (V2-Lite)."""
+        return getattr(self.text_config, "q_lora_rank", None)
+
+    @property
+    def qk_rope_head_dim(self) -> int | None:
+        """Per-head width of the rotary (pe) slice of q/k under MLA."""
+        return getattr(self.text_config, "qk_rope_head_dim", None)
+
+    @property
+    def qk_nope_head_dim(self) -> int | None:
+        """Per-head width of the non-rotary slice of q/k under MLA."""
+        return getattr(self.text_config, "qk_nope_head_dim", None)
+
+    @property
+    def v_head_dim(self) -> int | None:
+        """Per-head value width under MLA, which may differ from the q/k width."""
+        return getattr(self.text_config, "v_head_dim", None)
+
+    @property
+    def is_mla(self) -> bool:
+        """Whether attention caches one latent vector per token instead of per-head K/V."""
+        return self.kv_lora_rank is not None
+
+    # ---- DeepSeek MoE geometry --------------------------------------------- #
+    @property
+    def n_shared_experts(self) -> int:
+        """Experts every token passes through; 0 for a purely routed MoE."""
+        return int(getattr(self.text_config, "n_shared_experts", 0) or 0)
+
+    @property
+    def routed_scaling_factor(self) -> float:
+        """Scale applied to the routed experts' combined output."""
+        return float(getattr(self.text_config, "routed_scaling_factor", 1.0))
+
+    @property
+    def first_k_dense_replace(self) -> int:
+        """Leading decoder layers that use a dense MLP instead of MoE."""
+        return int(getattr(self.text_config, "first_k_dense_replace", 0) or 0)
+
+    @property
+    def scoring_func(self) -> str:
+        """Router scoring: ``softmax`` (V2) or ``sigmoid`` (V2.5+/V3)."""
+        return str(getattr(self.text_config, "scoring_func", "softmax"))
+
     @property
     def tie_word_embeddings(self) -> bool:
         """Whether ``lm_head`` shares the embedding table (and is absent from the checkpoint)."""
@@ -195,6 +247,44 @@ class ModelConfig:
     def kv_size(self) -> int:
         """Width of one of the key/value projections."""
         return self.num_kv_heads * self.head_dim
+
+    @property
+    def kv_cache_row(self) -> tuple[int, int]:
+        """Shape of one token's per-layer KV-cache row, for a world of one rank.
+
+        ``(2 * num_kv_heads, head_dim)`` for MHA/GQA — K heads first, then V
+        heads, so a decode step writes both halves in one launch — and
+        ``(1, kv_lora_rank + qk_rope_head_dim)`` under MLA, whose latent row has
+        no head axis to shard. A tensor-parallel rank caches only the KV heads
+        it owns, so :class:`~lite_llama.executor.model_runner.ModelRunner`
+        divides the head count itself before asking the same question.
+        """
+        if self.is_mla:
+            # validate() guarantees both MLA dims exist once kv_lora_rank is set.
+            assert self.kv_lora_rank is not None and self.qk_rope_head_dim is not None
+            return (1, self.kv_lora_rank + self.qk_rope_head_dim)
+        return (2 * self.num_kv_heads, self.head_dim)
+
+    # ---- mixture of experts ------------------------------------------------ #
+    @property
+    def num_experts(self) -> int:
+        """Number of routed experts, under either HF generation's spelling.
+
+        ``n_routed_experts`` is what DeepSeek's config.json — and the
+        remote-code class its checkpoints auto-map to — writes, while
+        transformers' built-in configs expose the same count as
+        ``num_experts`` (every other MoE family's spelling). The two never
+        coexist in one config; carrying neither means not an MoE at all, which
+        stays an error so a typo cannot silently drop the router.
+        """
+        for name in ("num_experts", "n_routed_experts"):
+            value = getattr(self.text_config, name, None)
+            if value is not None:
+                return int(value)
+        raise AttributeError(
+            f"no routed-expert count under either spelling (num_experts, "
+            f"n_routed_experts) on {type(self.text_config).__name__}"
+        )
 
     # ---- positional encoding --------------------------------------------- #
     @property
@@ -221,13 +311,18 @@ class ModelConfig:
     def rope_config(self) -> dict[str, Any]:
         """Flat mapping consumed by :mod:`lite_llama.modules.rotary_embedding`."""
         return {
-            "head_dim": self.head_dim,
+            # MLA rotates only the rope slice of q/k, so the rotary table
+            # is built at the pe width, not at the attention head dim.
+            "head_dim": self.qk_rope_head_dim if self.is_mla else self.head_dim,
             "hidden_size": self.hidden_size,
             "num_heads": self.num_heads,
             "partial_rotary_factor": getattr(self.text_config, "partial_rotary_factor", 1.0),
             # Lets the RoPE layer precompute one (cos, sin) row per position;
             # validate() keeps this >= every position id the engine can feed.
             "max_seq_len": self.max_seq_len,
+            # YaRN derives its factor from this when the checkpoint states the
+            # extended length instead (DeepSeek-V3 spelling).
+            "max_position_embeddings": self.max_position_embeddings,
             **self.rope_parameters,
         }
 
@@ -254,6 +349,16 @@ class ModelConfig:
                 f"max_seq_len ({self.max_seq_len}) exceeds the model's "
                 f"max_position_embeddings ({self.max_position_embeddings})"
             )
+        if self.is_mla:
+            missing = [
+                name
+                for name in ("qk_rope_head_dim", "qk_nope_head_dim", "v_head_dim")
+                if getattr(self, name) is None
+            ]
+            if missing:
+                raise ValueError(
+                    f"MLA model (kv_lora_rank={self.kv_lora_rank}) is missing {missing}"
+                )
 
     # ---- fall-through ----------------------------------------------------- #
     def __getattr__(self, name: str) -> Any:

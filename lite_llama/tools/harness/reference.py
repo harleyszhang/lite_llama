@@ -93,6 +93,10 @@ class HFLayerReference(LayerReference):
         self.name = f"transformers {layer_cls.__name__}"
         self._cache: object | None = None
         self._hf_config = hf_config
+        # The Deepseek family's layer rotates with a polar ``freqs_cis`` tensor
+        # rather than the (cos, sin) tuple every other family takes (its
+        # ``apply_rotary_emb`` is the original view_as_complex spelling).
+        self._freqs_cis = str(getattr(hf_config, "model_type", "")).startswith("deepseek")
 
     def state_dict(self) -> dict[str, torch.Tensor]:
         """This layer's parameters, under HuggingFace's own names.
@@ -137,6 +141,15 @@ class HFLayerReference(LayerReference):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         mask: torch.Tensor | None,
     ) -> torch.Tensor:
+        if self._freqs_cis:
+            # cos/sin arrive doubled-width (first half == second half); the
+            # complex form wants one entry per frequency pair. Both halves of
+            # the tables already carry the YaRN attention scaling.
+            cos, sin = position_embeddings
+            half = cos.shape[-1] // 2
+            position_embeddings = torch.complex(
+                cos[..., :half].float(), sin[..., :half].float()
+            )
         with torch.no_grad():
             out = self.layer(
                 hidden_states,
