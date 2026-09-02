@@ -50,6 +50,7 @@ def _nvfp4_block() -> int:
 
     return NVFP4_BLOCK
 
+
 #: Weight elements per byte.
 _PACK_FACTOR = 2
 
@@ -148,9 +149,7 @@ class NVFP4LinearMethod(LinearMethodBase):
     def create_weights(self, layer: nn.Module, input_size: int, output_size: int, **kw) -> None:
         block = _nvfp4_block()
         if input_size % block != 0:
-            raise ValueError(
-                f"NVFP4 needs in_features divisible by {block}, got {input_size}"
-            )
+            raise ValueError(f"NVFP4 needs in_features divisible by {block}, got {input_size}")
         config: NVFP4Config = layer.quant  # type: ignore[assignment]
         layer.weight = RawParameter(
             torch.empty(output_size, input_size // _PACK_FACTOR, dtype=torch.uint8)

@@ -356,7 +356,8 @@ def _fused_moe_kernel(
     A: ``[num_tokens, K]`` activations. B: ``[E, N, K]`` stacked expert weights,
     fp16 or 8-bit or int4 packed. C: ``[num_tokens * top_k, N]`` (each token's per-slot output row).
     When ``QUANT_MODE`` is non-zero, ``b_scale_ptr`` holds dequantisation scales.
-    When ``QUANT_MODE == 3`` (INT4), B is ``[E, N, K//8]`` int32 packed (8 nibbles per word),
+    When ``QUANT_MODE == 3`` (INT4), B is ``[E, N, K//2]`` uint8 (two nibbles per
+    byte along K, the layout :func:`repack_int4_experts` produces),
     ``b_scale_ptr`` is ``[E, N, K//group_k]``, and optionally ``b_zeros_ptr`` holds zero points.
     When ``QUANT_MODE`` is 4 or 5 (fp8 / int8 W8A8), A is 8-bit too and
     ``a_scale_ptr`` holds one fp32 scale per A row; ``NATIVE_FP8`` then picks
@@ -740,7 +741,8 @@ def _invoke_moe_gemm(
     em = sorted_token_ids.numel()
     num_slots = c.shape[0]
     n, k = b.shape[1], b.shape[2]
-    # For INT4 mode, K in the tensor is K_logical // 8 (packed), but we pass K_logical.
+    # For INT4 mode, K in the tensor is K_logical // 2 (two nibbles per byte),
+    # but the kernel walks logical k and addresses bytes as k // 2.
     k_logical = k * _INT4_PACK_FACTOR if quant_mode == _QUANT_INT4 else k
     # Only mode 4 puts A through the tensor cores as fp8, so only it cares which
     # of the two widenings the kernel compiles; the weight-only modes always take
@@ -892,7 +894,9 @@ def _moe_sum_kernel(
 # --------------------------------------------------------------------------- #
 # Facade
 # --------------------------------------------------------------------------- #
-def _quant_mode(weight: torch.Tensor, scale: torch.Tensor | None) -> int:
+def _quant_mode(
+    weight: torch.Tensor, scale: torch.Tensor | None, zeros: torch.Tensor | None = None
+) -> int:
     """Classify an expert weight tensor into one of the ``QUANT_MODE`` values.
 
     Never returns the W8A8 modes: the dtype cannot tell weight-only fp8 from W8A8
@@ -910,13 +914,21 @@ def _quant_mode(weight: torch.Tensor, scale: torch.Tensor | None) -> int:
     if scale is None:
         return _QUANT_NONE
     if zeros is not None:
-        if weight.dtype != torch.uint8:
+        if weight.dtype == torch.uint8:
+            return _QUANT_INT4
+        if weight.dtype == torch.int8:
+            # int8 experts are symmetric: no zero points exist to pass. Zeros
+            # with int8 bytes are the int4-style argument set on the wrong
+            # format, and the int4 uint8 check below would only re-describe it.
             raise ValueError(
-                "int4 expert weights must be byte-packed uint8 [E, N, K//2], got "
-                f"{weight.dtype}; convert the [E, N, K//8] int32 checkpoint layout "
-                "once at load with repack_int4_experts"
+                "int8 experts are symmetric and carry no zero points; zero "
+                "points belong to int4 (byte-packed uint8, [E, N, K//2])"
             )
-        return _QUANT_INT4
+        raise ValueError(
+            "int4 expert weights must be byte-packed uint8 [E, N, K//2], got "
+            f"{weight.dtype}; convert the [E, N, K//8] int32 checkpoint layout "
+            "once at load with repack_int4_experts"
+        )
     if weight.dtype == torch.uint8:
         return _QUANT_FP8
     if weight.dtype == torch.int8:
