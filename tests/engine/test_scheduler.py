@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from lite_llama.engine.prefix_cache import PREFIX_CACHE_BLOCK_SIZE
 from lite_llama.engine.sampler import SamplingParams
 from lite_llama.engine.scheduler import (
     Request,
@@ -764,13 +765,14 @@ class TestPrefixCacheIntegration:
     def test_preemption_releases_prefix_cache_references(self):
         """Regression: preemption used to leak the victim's prefix references.
 
-        ``register`` takes one reference per block and only ``release`` returns
-        it, so a preempt cycle without the release inflated every shared
-        block's ref_cnt once per cycle — and referenced blocks are never
-        eviction candidates. All three requests share the same four blocks, so
-        the *sum* of reference counts must stay at one per running request:
-        folded output keeps each prompt under a fifth block, so no new blocks
-        can appear either.
+        Adopting a hit takes one reference per shared block and only ``free``
+        returns it, so a preempt cycle that skipped the release inflated every
+        shared block's ref_cnt once per cycle — and referenced blocks are never
+        eviction candidates, so capacity drained one cycle at a time.
+
+        The invariant is one reference per (running request, block it holds): a
+        preempted victim holds nothing, so a reference it failed to return shows
+        up here as a surplus.
         """
         sched = self._sched(
             enable_preemption=True,
@@ -786,10 +788,51 @@ class TestPrefixCacheIntegration:
             out = sched.schedule()
             for r in out.decode:
                 r.output_token_ids.append(999)
-            total_refs = sum(block.ref_cnt for block in cache._blocks.values())
-            assert total_refs == 4 * sched.num_running
-            assert cache.num_cached_blocks == 4
+            held = sum(
+                len(blocks)
+                for r in sched._requests.values()
+                if r.slot is not None
+                for blocks in cache.block_ids(r.request_id)
+            )
+            total = sum(block.ref_cnt for block in cache.pool.blocks) - 1  # null block
+            assert total == held, f"{total} references for {held} held blocks"
         assert sched.num_preemptions >= 1, "scenario never reached the bug path"
+
+    def test_a_shared_prefix_is_the_same_physical_blocks(self):
+        """The baseline that replaced copy segments: reuse is shared rows.
+
+        Two requests over the same prompt must hold *identical* block ids for
+        the hit prefix — that is what makes reuse cost a reference count instead
+        of a K/V copy.
+        """
+        sched = self._sched()
+        shared = list(range(64))
+        sched.add_request(make_request_with_tokens("a", shared))
+        sched.schedule()
+        sched.add_request(make_request_with_tokens("b", shared))
+        out = sched.schedule()
+        b = next(r for r in out.prefill if r.request_id == "b")
+
+        cache = sched._prefix_cache
+        num_shared = b.num_cached_tokens // PREFIX_CACHE_BLOCK_SIZE
+        assert num_shared >= 3
+        assert cache.block_ids("b")[0][:num_shared] == cache.block_ids("a")[0][:num_shared]
+        # b's own tail is its own: writing it into a's rows would corrupt a.
+        assert cache.block_ids("b")[0][num_shared] not in cache.block_ids("a")[0]
+
+    def test_a_hit_costs_only_the_uncached_tail_of_the_pool(self):
+        sched = self._sched()
+        shared = list(range(64))
+        sched.add_request(make_request_with_tokens("a", shared))
+        sched.schedule()
+        sched.schedule()  # a's blocks committed
+
+        cache = sched._prefix_cache
+        before = cache.num_free_blocks
+        sched.add_request(make_request_with_tokens("b", shared))
+        sched.schedule()
+        # Only b's own last block was drawn; three were shared.
+        assert before - cache.num_free_blocks == 1
 
 
 # --------------------------------------------------------------------------- #

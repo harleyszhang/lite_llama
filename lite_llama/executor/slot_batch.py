@@ -1,6 +1,6 @@
 """Slot-based KV layout and per-step attention metadata for continuous batching.
 
-:class:`SlotBatch` gives every active sequence one KV row range ("slot")
+:class:`SlotBatch` gives every active sequence one block table row ("slot")
 and builds the flat row indices each phase needs: prefill rows, extend rows
 via :func:`flatten_extend_rows`, or padded decode rows for graph replay.
 
@@ -14,6 +14,8 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
+
+from ..engine.prefix_cache import PREFIX_CACHE_BLOCK_SIZE
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
     from .model_runner import ModelRunner
@@ -47,31 +49,29 @@ def flatten_extend_rows(
 
 
 class SlotBatch:
-    """Continuous-batching view of the KV cache: fixed slot regions, stable metadata.
+    """Continuous-batching view of the KV cache: paged blocks, stable metadata.
 
     Two decisions keep a steady-state decode step free of host-device traffic.
 
-    **Fixed slot regions.** Slot ``s`` permanently owns cache rows
-    ``[s * max_seq_len, (s + 1) * max_seq_len)``, so ``b_req_tokens_table`` is the
-    identity map and is written once here instead of being patched by
-    ``update_kv_index`` on every step. Reserving a request's cache becomes a
-    host-side slot handout and releasing it a host-side push: no allocator search,
-    no fragmentation, no synchronisation. The price is that a slot reserves
-    ``max_seq_len`` rows whether the request fills them or not, which caps
-    concurrency at :attr:`num_slots`; the paged allocator in
-    :class:`~lite_llama.executor.kv_cache_manager.KVCacheManager` stays the denser
-    choice for the one-shot batch path, which knows all its prompts up front.
+    **A block table per slot.** Slot ``s`` owns row ``s`` of
+    ``b_req_tokens_table``, whose entry at position ``p`` is the cache row that
+    token ``p`` of the sequence lives in. Nothing about that mapping has to be
+    contiguous, which is the whole point: the scheduler hands out fixed-size
+    blocks of cache rows and two sequences sharing a prefix get table entries
+    pointing at *the same* physical rows, so reuse costs a reference count and
+    no K/V movement at all. A slot's cost is the tokens it actually holds rather
+    than ``max_seq_len``, so concurrency is bounded by the block pool instead of
+    by the slot count.
 
     **Composition-stable metadata.** ``b_req_idx`` and ``b_seq_len`` are rebuilt
     from the host only when a request joins or leaves. While the running set holds
     steady a step just increments the lengths on-device, and ``cur_select_index``
-    falls out of a gather against the slot table — so the metadata for a decode
+    falls out of a gather against the block table — so the metadata for a decode
     step costs two device kernels and no transfers.
 
     Args:
-        runner: The executor whose cache, slot table and attention metadata this
-            object drives. Constructing a :class:`SlotBatch` takes the cache over:
-            the rows behind the slot table are claimed from the paged allocator.
+        runner: The executor whose cache, block table and attention metadata this
+            object drives.
     """
 
     def __init__(self, runner: ModelRunner) -> None:
@@ -79,6 +79,7 @@ class SlotBatch:
         self._atten = runner.atten_info
         self.device = runner.device
         self.max_seq_len = runner.max_seq_len
+        self.block_size = PREFIX_CACHE_BLOCK_SIZE
 
         table = runner.b_req_tokens_table
         total_slots, row_len = table.shape
@@ -90,26 +91,26 @@ class SlotBatch:
         self._filler_slot: int | None = total_slots - 1 if total_slots > 1 else None
         self.num_slots = total_slots - 1 if total_slots > 1 else 1
 
-        table.copy_(
-            torch.arange(total_slots * row_len, dtype=table.dtype, device=self.device).view(
-                total_slots, row_len
-            )
-        )
+        # Everything starts pointed at block 0, the reserved null block the
+        # allocator never hands out: an entry nobody has mapped yet names rows no
+        # live sequence reads, instead of naming row 0 of the cache.
+        table.zero_()
         if self._filler_slot is not None:
-            # Filler rows attend over this region. Uninitialised fp16 can hold
-            # NaN, and while a NaN there cannot reach a real sequence (no kernel
-            # reduces across batch rows), a cache full of them makes any future
-            # debugging session lie to you.
-            start = self._filler_slot * row_len
+            # Filler rows attend over the null block, tiled across the row so any
+            # position they are padded to lands inside it. Uninitialised fp16 can
+            # hold NaN, and while a NaN there cannot reach a real sequence (no
+            # kernel reduces across batch rows), a cache full of them makes any
+            # future debugging session lie to you.
+            table[self._filler_slot] = (
+                torch.arange(row_len, dtype=table.dtype, device=self.device) % self.block_size
+            )
             for layer in runner.kv_cache_manager.gpu_kv_buffer:
-                layer[start : start + row_len].zero_()
-
-        # Every row the table names now belongs to a slot; take them out of the
-        # paged allocator so the two schemes cannot hand out the same row.
-        runner.kv_cache_manager.claim(total_slots * row_len)
+                layer[: self.block_size].zero_()
 
         # Offsets of each sequence in a flattened prefill grid, scaled per call.
         self._row_offsets = torch.arange(total_slots, dtype=torch.int32, device=self.device)
+        # Row offsets within one block, reused by every table write.
+        self._block_offsets = torch.arange(self.block_size, dtype=table.dtype, device=self.device)
 
         # Device metadata plus the host mirror used to decide whether the next
         # step can reuse it.
@@ -119,41 +120,47 @@ class SlotBatch:
         self._host_lens: list[int] = []
 
     # ------------------------------------------------------------------ steps #
-    def copy_prefix(self, segments: Sequence[tuple[int, int, int, int]]) -> None:
-        """Move reused prefix K/V between slots, before the pass that reads it.
+    def write_block_tables(
+        self, writes: Sequence[tuple[int, int, int, tuple[int, ...]]]
+    ) -> None:
+        """Point slots' table entries at the physical blocks they were given.
 
-        Fixed slot regions buy a decode step free of index bookkeeping, but they
-        leave no indirection to share rows through: slot ``s`` owns rows
-        ``[s * max_seq_len, (s + 1) * max_seq_len)`` and its attention reads that
-        region and nothing else. Reusing a prefix therefore means physically
-        moving its K/V -- one contiguous run per layer, costing the K/V bytes,
-        against a prefill that would have run the whole transformer over those
-        tokens instead.
+        This is the entire device-side cost of prefix reuse. Where the fixed-slot
+        layout had to *move* a reused prefix's K/V into the new occupant's rows,
+        a paged table only has to name the rows the prefix already lives in — so
+        two sequences sharing 2 000 tokens share them for the price of a few
+        hundred int32 writes, and neither can tell it is not alone.
 
-        Source and destination share their in-slot offset: a chained block hash
-        pins a block to one absolute prompt position, so a prefix that matches at
-        all matches at the same rows.
-
-        Runs execute in the order given, and that order matters: a slot freed this
-        step can be handed to a new occupant while an earlier request is still
-        copying out of it. The scheduler emits runs in admission order, so every
-        read of a slot precedes the write that repurposes it, and the whole list
-        precedes the forward that overwrites the rest.
+        Entries past ``max_seq_len`` are dropped rather than raising: the last
+        block of a sequence at the context limit is a whole block wide, and its
+        tail names positions the sequence will never reach.
 
         Args:
-            segments: ``(src_slot, dst_slot, start_token, num_tokens)`` runs.
-                Empty on a prefix-cache miss, which is the common case, and also
-                when the reuse needed no move because the request landed on the
-                slot already holding its prefix.
+            writes: ``(slot, group_id, start_block, block_ids)`` per grant, in
+                the order the scheduler produced them.
+
+        Raises:
+            NotImplementedError: A plan named a KV cache group other than 0.
+                The table is per-group by design, but only homogeneous models
+                are wired through the executor today.
         """
-        if not segments:
+        if not writes:
             return
-        width = self.max_seq_len
-        for layer in self._runner.kv_cache_manager.gpu_kv_buffer:
-            for src_slot, dst_slot, start, length in segments:
-                src = src_slot * width + start
-                dst = dst_slot * width + start
-                layer[dst : dst + length].copy_(layer[src : src + length])
+        table = self._atten.b_req_tokens_table
+        width = table.shape[1]
+        size = self.block_size
+        for slot, group_id, start_block, block_ids in writes:
+            if group_id != 0:
+                raise NotImplementedError(
+                    f"KV cache group {group_id} has no block table on the device yet"
+                )
+            start = start_block * size
+            if not block_ids or start >= width:
+                continue
+            ids = torch.tensor(block_ids, dtype=table.dtype, device=self.device)
+            rows = (ids.unsqueeze(1) * size + self._block_offsets).reshape(-1)
+            end = min(start + rows.numel(), width)
+            table[slot, start:end] = rows[: end - start]
 
     def begin_prefill(
         self,

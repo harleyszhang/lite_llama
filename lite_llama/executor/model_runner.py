@@ -104,10 +104,18 @@ class ModelRunner:
             dtype=kv_dtype,
             device=device,
         )
-        self.max_request_num = max(1, max_gpu_num_blocks // self.max_seq_len)
+        # Rows in the block table, i.e. the concurrency ceiling. Paging decoupled
+        # this from the cache size: a slot's rows are pages it holds, not a
+        # reserved ``max_seq_len`` stripe, so the table is sized by how many
+        # requests may be in flight. One row above the largest captured batch
+        # covers every graph plus the filler slot, and it has to be decided here
+        # -- a capture bakes this tensor's pointer, so the table cannot be
+        # reallocated later.
+        self.max_request_num = max(DEFAULT_BATCH_SIZES) + 1
         # Request -> KV-cache-row mapping; row i holds the cache rows of the
         # request with ``b_req_idx == i``. Written by ``_init_req_tokens_table``
-        # at prefill and extended by ``update_kv_index`` at every decode step.
+        # at prefill and extended by ``update_kv_index`` at every decode step;
+        # under continuous batching it is a block table the scheduler fills in.
         self.b_req_tokens_table = torch.zeros(
             (self.max_request_num, self.max_seq_len), dtype=torch.int32, device=device
         )
@@ -259,12 +267,13 @@ class ModelRunner:
 
     # ------------------------------------------------------------- inference #
     def enable_slot_kv_cache(self) -> SlotBatch:
-        """Switch the KV cache to the fixed-slot layout continuous batching needs.
+        """Switch the KV cache to the paged block-table layout continuous batching needs.
 
         Idempotent, and mutually exclusive with the one-shot batch path: the
-        returned :class:`~lite_llama.executor.slot_batch.SlotBatch` claims every
-        row the slot table names, so ``prefill_alloc_kv_cache`` and
-        ``decode_alloc_kv_cache`` have nothing left to hand out afterwards.
+        returned :class:`~lite_llama.executor.slot_batch.SlotBatch` reads its rows
+        out of the block table the scheduler fills, while
+        ``prefill_alloc_kv_cache`` and ``decode_alloc_kv_cache`` allocate rows
+        themselves and would hand out pages the scheduler already owns.
 
         Call it *after* :meth:`enable_cuda_graph` so batch padding can see the
         captured grid.
