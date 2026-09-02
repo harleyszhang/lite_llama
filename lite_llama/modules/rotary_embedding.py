@@ -148,19 +148,16 @@ ROPE_INIT_FUNCTIONS: dict[str, Callable[..., tuple[torch.Tensor, float]]] = {
 class RotaryEmbedding(nn.Module):
     """Builds ``(cos, sin)`` for the given ``position_ids``.
 
-    When the flat config carries ``max_seq_len`` the ``(cos, sin)`` rows for every
-    position are precomputed once, and each step only gathers rows by position id
-    instead of redoing the outer product, the trigonometry and the cast. The
-    caches are non-persistent buffers allocated at construction, so their
-    addresses never change mid-run — which is what CUDA-graph replay needs — and
-    they follow the module onto the device with ``.to()`` like any buffer.
+    When the flat config carries ``max_seq_len``, the ``(cos, sin)`` rows for
+    every position are precomputed once and each step only gathers rows by
+    position id. The caches are non-persistent buffers allocated at
+    construction, so their addresses never change mid-run — which CUDA-graph
+    replay needs — and they follow the module onto the device with ``.to()``.
 
-    Args:
-        config: Flat RoPE settings — ``head_dim``, ``hidden_size``, ``num_heads``,
-            ``rope_theta``, ``rope_type``, ``max_seq_len`` and any variant-specific
-            keys. Built by :attr:`lite_llama.models.config.ModelConfig.rope_config`,
-            which is also where the transformers 4.x/5.x ``rope_scaling`` vs
-            ``rope_parameters`` difference is absorbed.
+    ``config`` is the flat RoPE settings mapping built by
+    :attr:`lite_llama.models.config.ModelConfig.rope_config`, which also
+    absorbs the transformers 4.x/5.x ``rope_scaling`` vs ``rope_parameters``
+    difference.
     """
 
     def __init__(self, config: Mapping[str, Any], device: torch.device | None = None) -> None:
@@ -180,16 +177,15 @@ class RotaryEmbedding(nn.Module):
 
         # ModelConfig validates max_seq_len <= max_position_embeddings, so every
         # position id the engine can produce lands inside the caches. A bare
-        # config without the key (unit tests) keeps the per-step computation
-        # as its fallback.
+        # config without the key (unit tests) falls back to per-step computation.
         self.max_seq_len = int(config.get("max_seq_len", 0) or 0)
         if self.max_seq_len > 0:
             self._build_caches(device)
 
     @staticmethod
     def _autocast_device(x: torch.Tensor) -> str:
-        """Autocast device key for *x*; mps has no autocast implementation,
-        so the disable-autocast block routes through the cpu key instead."""
+        """Autocast device key for *x*; mps has no autocast, so the disable-
+        autocast block routes through the cpu key instead."""
         return "cpu" if x.device.type == "mps" else x.device.type
 
     @staticmethod
@@ -202,9 +198,8 @@ class RotaryEmbedding(nn.Module):
     def _build_caches(self, device: torch.device | None) -> None:
         """Precompute ``[max_seq_len, rotary_dim]`` cos/sin rows, scaling applied."""
         positions = torch.arange(self.max_seq_len, device=device, dtype=torch.float32)
-        # Same outer product as the per-step path, evaluated once for every
-        # position; fp32 throughout so the fp16 cast later happens exactly
-        # where the fallback path does it.
+        # Same outer product as the per-step path, evaluated once per position;
+        # fp32 throughout so the fp16 cast happens where the fallback casts.
         freqs = torch.outer(positions, self.inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
         self.register_buffer("cos_cache", emb.cos() * self.attention_scaling, persistent=False)
@@ -249,11 +244,11 @@ class RotaryEmbedding(nn.Module):
 class MRotaryEmbedding(RotaryEmbedding):
     """Multimodal RoPE (mrope) with interleaved temporal/height/width sections.
 
-    Qwen3-VL assigns each vision token a 3-component position ``(t, h, w)`` instead
-    of a single index, and splits the rotary dimensions across those components.
-    ``mrope_section`` gives how many frequency pairs each component owns, and the
-    interleaved layout spreads them as ``T H W T H W ... T T`` rather than three
-    contiguous blocks, which keeps neighbouring frequencies continuous.
+    Qwen3-VL assigns each vision token a 3-component position ``(t, h, w)``
+    and splits the rotary dimensions across those components: ``mrope_section``
+    gives how many frequency pairs each component owns, interleaved as
+    ``T H W T H W ...`` rather than three contiguous blocks, which keeps
+    neighbouring frequencies continuous.
 
     The output shape is identical to plain RoPE (``[batch, seq_len, rotary_dim]``),
     so :func:`lite_llama.kernels.ops.rope.rope_emb_forward` is reused unchanged.
@@ -293,11 +288,9 @@ class MRotaryEmbedding(RotaryEmbedding):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return ``(cos, sin)`` shaped ``[batch, seq_len, rotary_dim]``.
 
-        Args:
-            x: Tensor carrying the target dtype/device.
-            position_ids: ``[3, batch, seq_len]`` mrope positions, or ``[batch, seq_len]``
-                for text-only steps (the same index is then used for all three
-                components, which reduces exactly to plain RoPE).
+        ``position_ids`` is ``[3, batch, seq_len]`` mrope positions, or
+        ``[batch, seq_len]`` for text-only steps (the same index is then used
+        for all three components, which reduces exactly to plain RoPE).
         """
         if self.mrope_section is None:
             return super().forward(x, position_ids)

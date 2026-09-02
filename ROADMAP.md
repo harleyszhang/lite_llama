@@ -664,7 +664,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - DP×TP 2×2 聚合吞吐与副本间负载倾斜度
 - **验收**
   - bug 修复:TP=2 采样不 diverge;DP×TP 2×2 能起能推理,不再死锁
-  - 引擎:TP=2 下 continuous golden 全绿;在线服务 × TP=2 可跑;单卡默认仍走单进程(pdb 能断点);mock 进程网格断言各 rank 收到的 SchedulerOutput 一致
+  - 引擎:TP=2 下 continuous golden 全绿;在线服务 × TP=2 可跑;单卡默认仍走单进程(pdb 能断点),mock 进程网格断言各 rank 收到的 SchedulerOutput 一致
   - module:TP=2 的采样 logprob 与 TP=1 逐元素一致;embed + lm_head 显存减半
 
 ## v0.9 多后端 + overlap 骨架(已发版)
@@ -685,7 +685,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - v0.11 的 MLA 算子侧:`MinimalMlaLayer` 单层 harness + flashmla 后端行(golden 未验证,默认不 dispatch)
   - v0.13 的 FlashInfer attention 后端行(prefill + decode 两行,golden 已验证)
 - **benchmark**
-  - (已完成)同 shape 下 native 与 flashinfer 逐一对照(`bench_flashinfer` 等已入库);静态 priority 顺序与实测顺序的出入,即是 v0.10 换成实测排序的依据
+  - (已完成)同 shape 下 native 与 flashinfer 逐一对照(`bench_flashinfer` 等已入库),静态 priority 顺序与实测顺序的出入,即是 v0.10 换成实测排序的依据
   - (已完成)L1 跨 stream 重叠 on/off 的端到端差值,附 timeline 佐证
 - **验收**
   - (已达成)一条命令切后端,并能解释为何选它
@@ -697,31 +697,18 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
 
 - **feat**
   - 地基 2 收尾:原计划"从雏形升级",但声明式 KernelSpec 清单、确定性 dispatch、registry 雏形与 `gen_backend_registry_gif.py` 的退场已随 v0.9 提前完成,本版只补两件
-    - 冻结实测排序接线:autotune store 经 `set_perf_provider` 接进 dispatch 的 rank 步,排序依据从静态 priority 换成预先冻结的实测记录——同一 key 永远选同一实现,外部后端实测更快时才真正翻盘
+    - 冻结实测排序接线:autotune store 经 `set_perf_provider` 接进 dispatch 的 rank 步,排序依据从静态 priority 换成预先冻结的实测记录——同一 key 永远选同一实现,外部后端实测更快时才翻盘
     - ABC 签名:评估给全部实现统一 `forward()` 语义(现以 target 字符串 + 各 ops 组注释钉死的调用契约替代);签名统一是"kernel 函数本体直接交给调用方、不必写转发适配器"的前提
   - F6 logprobs / prompt_logprobs
   - A7 运行时可观测性(observe.metrics + observe.trace)+ `/metrics` Prometheus 端点 + OTLP 追踪导出
 - **test**
-  - F1 单层 harness:`lite_llama/tools/harness/` + `scripts/layer_harness.py`——meta 骨架只给
-    指定层材料化存储,权重可来自 checkpoint(只读该层的 key)、transformers 同层镜像或随机;
-    prefill 与 decode 两形态各自对 HF 同层比 max-abs-diff,同时给逐模块 CUDA event 计时、
-    峰值显存与 dispatch 决策(MLA 侧 `MinimalMlaLayer` 继续作 benchmark 载体)
+  - F1 单层 harness:`lite_llama/tools/harness/` + `scripts/layer_harness.py`——meta 骨架只给指定层材料化存储,权重可来自 checkpoint(只读该层的 key)、transformers 同层镜像或随机;prefill 与 decode 两形态各自对 HF 同层比 max-abs-diff,同时给逐模块 CUDA event 计时、峰值显存与 dispatch 决策(MLA 侧 `MinimalMlaLayer` 继续作 benchmark 载体)
 - **benchmark**
-  - (已达成)dispatch 开销:`benchmarks/kernels/bench_dispatch.py`——A10 上首次决策 761 ms
-    (一次性,全在后端检测的 import 上)、换 key 后的 filter+rank 27 us、命中缓存 15 us
-    (其中真正的缓存查找 0.5 us,余下是每次重取的平台快照);调用点在构造期决策一次并存成
-    属性,每步 forward 连这次查找都不做。冻结实测排序相对 v0.9 静态 priority 的端到端差值
-    在噪声内(见下),因为这张 GPU 上实测赢家与静态顺序的首选一致——排序换成实测的意义是
-    "外部后端真快时才翻盘",不是无条件提速
-  - (已达成)logprobs / prompt_logprobs 开启后的额外开销:`benchmarks/bench_observability.py`
-    ——Qwen3-0.6B batch16 gen128,TPOT 4.75 -> 5.35 ms、吞吐 -10.4%(logprobs=5);
-    prompt_logprobs=5 只压在 prefill 上,TTFT 23 -> 32 ms 而吞吐 -1.5%;两个都开 -12.7%。
-    默认关闭,按请求 opt-in
-  - (已达成)metrics 与 trace 全开时的性能损耗:同上脚本,两者都低于基线自身的 0.5% 抖动,
-    无需降采样
+  - (已达成)dispatch 开销:`benchmarks/kernels/bench_dispatch.py`——A10 上首次决策 761 ms(一次性,全在后端检测的 import 上)、换 key 后的 filter+rank 27 us、命中缓存 15 us(其中真正的缓存查找 0.5 us,余下是每次重取的平台快照);调用点在构造期决策一次并存成属性,每步 forward 连这次查找都不做。冻结实测排序相对 v0.9 静态 priority 的端到端差值在噪声内(见下),因为这张 GPU 上实测赢家与静态顺序的首选一致——排序换成实测的意义是"外部后端真快时才翻盘",不是无条件提速
+  - (已达成)logprobs / prompt_logprobs 开启后的额外开销:`benchmarks/bench_observability.py`——Qwen3-0.6B batch16 gen128,TPOT 4.75 -> 5.35 ms、吞吐 -10.4%(logprobs=5);prompt_logprobs=5 只压在 prefill 上,TTFT 23 -> 32 ms 而吞吐 -1.5%;两个都开 -12.7%。默认关闭,按请求 opt-in
+  - (已达成)metrics 与 trace 全开时的性能损耗:同上脚本,两者都低于基线自身的 0.5% 抖动,无需降采样
 - **验收**
-  - (已达成)logprobs 与 HF 对齐:`tests/golden/test_logprob_parity.py` 对 transformers
-    teacher-forced 的 log_softmax 逐位置比对,一次性与 chunked prefill 两条采集路径各一遍
+  - (已达成)logprobs 与 HF 对齐:`tests/golden/test_logprob_parity.py` 对 transformers teacher-forced 的 log_softmax 逐位置比对,一次性与 chunked prefill 两条采集路径各一遍
   - (已达成)每 step 给出 per-request 的延迟分解(queue / TTFT / TPOT 三段)
   - (已达成)dispatcher 按 shape / dtype 选实现,并能 explain 决策链(v0.9 已达成,此处作回归项)
   - (已达成)Prometheus 能抓到标准 metric
@@ -729,40 +716,23 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
 ## v0.11.0 前沿架构 + 结构化输出(已发版)
 
 - **feat**
-  - (已达成)MLA:DeepSeek-V2-Lite 端到端(TP=2)——kv_lora_rank 512 + rope 64 的 latent cache 全链路(
-    投影/吸收/分页池/decode kernel);偏差:V3/V4 单层未做,V2 架构已覆盖 MLA 全部核心路径,
-    V3/V4 差异集中在 router 与权重组织,随下轮
+  - (已达成)MLA:DeepSeek-V2-Lite 端到端(TP=2)——kv_lora_rank 512 + rope 64 的 latent cache 全链路(投影/吸收/分页池/decode kernel);偏差:V3/V4 单层未做,V2 架构已覆盖 MLA 全部核心路径,V3/V4 差异集中在 router 与权重组织,随下轮
   - (偏差:F7 结构化输出明确移出本轮,见发版文档范围裁剪;grammar bitmask 接口位置已预留)
-  - (已达成)F8 reasoning parser / tool parser:`engine/reasoning.py`(think 标签流式状态机,
-    后缀窗口处理跨 delta 标签)+ `engine/tool_parser.py`(DeepSeek/Qwen 双族标记集,
-    JSON 字符级扫描器),protocol 层补 `reasoning_content`/`tool_calls`,解析器按**请求**声明
+  - (已达成)F8 reasoning parser / tool parser:`engine/reasoning.py`(think 标签流式状态机,后缀窗口处理跨 delta 标签)+ `engine/tool_parser.py`(DeepSeek/Qwen 双族标记集,JSON 字符级扫描器),protocol 层补 `reasoning_content`/`tool_calls`,解析器按**请求**声明
   - (偏差:SWA / HCA / DSA 明确移出本轮,相关接口预留)
-  - (已达成)通信原语补全:all_gather / reduce_scatter / all_to_all / P2P send-recv,
-    gloo 后端双进程数值正确性入测
-  - (已达成)TP 引擎释放对称化:MultiprocExecutor.shutdown 补销毁 rank-0 侧进程组——
-    拥有 followers 即拥有 group;同进程先 TP=2 后 TP=1 的切换挂死(bench_mla 实测踩到)
-    由此根除,golden/探针的手动规避序列随之删除,主进程回归测试反向验证过
-    (撤销修复即失败)
+  - (已达成)通信原语补全:all_gather / reduce_scatter / all_to_all / P2P send-recv,gloo 后端双进程数值正确性入测
+  - (已达成)TP 引擎释放对称化:MultiprocExecutor.shutdown 补销毁 rank-0 侧进程组——拥有 followers 即拥有 group;同进程先 TP=2 后 TP=1 的切换挂死(bench_mla 实测踩到)的问题由此根除,golden/探针的手动规避序列随之删除,主进程回归测试反向验证过(撤销修复即失败)
 - **test**
-  - (已达成)新增算子 / module / 模型的精度与性能测试:MLA 模块单测 + DeepSeek-V2-Lite
-    TP=2 golden(5 用例,drift 预算门禁)+ 通信原语双进程测试;全量回归 1359 passed
-  - (已达成,形态调整)计划里的 acc.bisect 换成 **acc.divergence**:整模型对 HF 逐层对比不变,
-    定位从"第一个超阈层"升为"逐层 diff + 扰动注入 + 预算式门禁"——BOS 热点排查证明
-    单层超阈可能只是 ULP 算术假热点,预算式门禁比硬阈值更诚实
+  - (已达成)新增算子 / module / 模型的精度与性能测试:MLA 模块单测 + DeepSeek-V2-Lite TP=2 golden(5 用例,drift 预算门禁)+ 通信原语双进程测试;全量回归 1359 passed
+  - (已达成)**acc.divergence**:整模型对 HF 逐层对比不变,定位从"第一个超阈层"升为"逐层 diff + 扰动注入 + 预算式门禁"——BOS 热点排查证明单层超阈可能只是 ULP 算术假热点,预算式门禁比硬阈值更诚实
 - **benchmark**
-  - (已达成)MLA 模型首份报告:`benchmarks/bench_mla.py`——KV 几何从各自 config.json 解析
-    (V2-Lite latent 576 vs 未压缩 5120 vs Qwen3-1.7B GQA 2048 elements/token/层),同负载
-    实测 TTFT/TPOT/峰值显存/KV 池容量;TP 下 latent 复制(每 rank 全量)的口径在报告里标明
-  - (已达成,部分)reasoning parser 开启后的开销:`benchmarks/bench_parser.py`——reasoning
-    +0.07 us/token、reasoning+tools +1.17 us/token(相对本版实测 decode TPOT 21.7–63.0 ms
-    占比 0.002%–0.005%,噪声内);bitmask 侧随 F7 移出
+  - (已达成)MLA 模型首份报告:`benchmarks/bench_mla.py`——KV 几何从各自 config.json 解析(V2-Lite latent 576 vs 未压缩 5120 vs Qwen3-1.7B GQA 2048 elements/token/层),同负载实测 TTFT/TPOT/峰值显存/KV 池容量;TP 下 latent 复制(每 rank 全量)的口径在报告里标明
+  - (已达成,部分)reasoning parser 开启后的开销:`benchmarks/bench_parser.py`——reasoning +0.07 us/token、reasoning+tools +1.17 us/token(相对本版实测 decode TPOT 21.7–63.0 ms 占比 0.002%–0.005%,噪声内);bitmask 侧随 F7 移出
   - (偏差:SWA 对照随 SWA 移出)
 - **验收**
-  - (已达成)HF 单层 max-abs-diff 达阈值:golden TP=2 逐 token + parity probe 校准
-    (prompt drift mean 0.046/max 0.298,decode 步 mean 0.221/max 1.967,greedy match 86%)
+  - (已达成)HF 单层 max-abs-diff 达阈值:golden TP=2 逐 token + parity probe 校准(prompt drift mean 0.046/max 0.298,decode 步 mean 0.221/max 1.967,greedy match 86%)
   - (偏差:JSON Schema 100% 合法随 F7 移出)
-  - (已达成)reasoning_content / tool_calls 与 vLLM 对齐:双族标记集对齐 vLLM
-    deepseek/qwen parser,流式分块==一次性解析的公理在 parser 层与 server 层各验证一遍
+  - (已达成)reasoning_content / tool_calls 与 vLLM 对齐:双族标记集对齐 vLLM deepseek/qwen parser,流式分块==一次性解析的公理在 parser 层与 server 层各验证一遍
   - (偏差:SWA 混用随 SWA 移出)
 
 ## v0.11.5 计算通信重叠

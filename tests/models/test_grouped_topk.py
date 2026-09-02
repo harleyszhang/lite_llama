@@ -9,12 +9,6 @@ tolerance — decides the outcome, and the whole function is checked against a
 naive per-token transcription of vLLM's implementation across parameter
 combinations.
 
-The rules are device-independent torch ops, so the grid runs on the CPU tier
-CI executes on every PR; a ``gpu``-marked section re-runs the reference
-agreement on the device production routes on — where ``torch.topk`` breaks
-ties and fp32 reductions round differently — plus the one input class that
-can differ by device: saturated sigmoid scores tying at exactly 1.0.
-
 Usage:
     pytest tests/models/test_grouped_topk.py            # rules + CPU grid
     pytest tests/models/test_grouped_topk.py -m gpu     # the device section

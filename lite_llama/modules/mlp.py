@@ -27,10 +27,9 @@ class FusedMLP(nn.Module):
     two matrices are concatenated at load time (:mod:`lite_llama.models.weights`),
     making the forward pass a single GEMM over ``2 * inter`` outputs instead of
     two over ``inter``. ``down`` is row-parallel, so the split intermediate
-    dimension never has to be gathered — only ``down``'s partial sums are
-    all-reduced.
+    dimension never has to be gathered — only its partial sums are all-reduced.
 
-    Each rank stores its own slice of *both* halves (gate rows then up rows),
+    Each rank stores its own slice of both halves (gate rows then up rows),
     which is the layout the fused activation kernel assumes; the K/V pair in
     :class:`~lite_llama.models.base.Attention` is fused the same way.
     """
@@ -44,8 +43,8 @@ class FusedMLP(nn.Module):
     ) -> None:
         super().__init__()
         # ``intermediate_size`` overrides the config's dense width for the MoE
-        # shared expert, whose FFN is ``moe_intermediate_size * n_shared_experts``
-        # wide — same SwiGLU, same fusion, a different width.
+        # shared expert (``moe_intermediate_size * n_shared_experts`` wide) —
+        # same SwiGLU, same fusion, a different width.
         hidden, inter = config.hidden_size, intermediate_size or config.intermediate_size
         # The parameter is [2 * inter_local, hidden], and the shape check inside
         # the linear layer sees that whole width. The *logical* shard is one

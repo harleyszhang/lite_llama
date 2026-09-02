@@ -36,9 +36,9 @@ def default_weight_loader(
 ) -> torch.Tensor:
     """Fill a parameter that carries no loader of its own; return the view written.
 
-    The fallback for parameters no layer claimed: norms, the MoE router and the
-    whole vision tower are replicated on every rank and never packed, so the whole
-    rule is "the shapes must match, then copy".
+    The fallback for parameters no layer claimed: norms, the MoE router and
+    the whole vision tower are replicated on every rank and never packed, so
+    the rule is "shapes must match, then copy".
     """
     if param.shape != loaded.shape:
         raise ValueError(
@@ -56,9 +56,8 @@ def default_weight_loader(
 #: HF module paths whose ``weight``/``bias`` leaf was folded into the parent's
 #: parameter name. Matched as a suffix of the checkpoint key's module path, so
 #: ``layers.7.self_attn.q_norm.weight`` becomes ``layers.7.self_attn.q_norm_weight``.
-#: The projections are absent because they are real submodules
-#: (:class:`~lite_llama.modules.linear.LinearBase`) whose parameter names already
-#: match HF's.
+#: The projections are absent because they are real submodules whose parameter
+#: names already match HF's.
 _FLATTENED: tuple[str, ...] = (
     "self_attn.q_norm",
     "self_attn.k_norm",
@@ -161,16 +160,16 @@ def load_weights(
             ``None`` to skip it (HF bookkeeping tensors, keys belonging to
             another submodule). The shard id is handed to the parameter's
             ``weight_loader``, which owns both the destination view and the
-            tensor-parallel narrow; parameters without one (norms, the MoE
-            router, vision towers) fall back to :func:`default_weight_loader`.
-        tied: ``{target parameter: source parameter}`` pairs to satisfy by *aliasing*
-            when the checkpoint omits the target. Checkpoints with
-            ``tie_word_embeddings: true`` ship no ``lm_head.weight`` at all, and
-            lite_llama keeps it as its own parameter, so it is pointed at the
-            embedding table rather than given a copy of it — which is both half the
-            memory and the only way ``lm_head.weight is embed_tokens.weight`` can hold
-            once the two are sharded. A checkpoint that *does* ship the target wins:
-            the tie is a fallback, not an override.
+            tensor-parallel narrow; parameters without one fall back to
+            :func:`default_weight_loader`.
+        tied: ``{target parameter: source parameter}`` pairs to satisfy by
+            *aliasing* when the checkpoint omits the target. Checkpoints with
+            ``tie_word_embeddings: true`` ship no ``lm_head.weight`` at all,
+            and lite_llama keeps it as its own parameter, so it is pointed at
+            the embedding table rather than given a copy — half the memory,
+            and the only way ``lm_head.weight is embed_tokens.weight`` holds
+            once the two are sharded. A checkpoint that *does* ship the
+            target wins: the tie is a fallback, not an override.
 
     Raises:
         ValueError: If a parameter ends up unfilled, partially filled or written
@@ -206,9 +205,9 @@ def load_weights(
 def _alias_parameter(model: nn.Module, dotted_name: str, source: nn.Parameter) -> None:
     """Rebind ``model.<dotted_name>`` to ``source``, freeing what was there.
 
-    ``nn.Module`` deduplicates shared parameters, so after this the aliased name no
-    longer appears in ``named_parameters()`` — which is the point: there is one tensor,
-    and reporting it twice would double every memory total computed from that iterator.
+    ``nn.Module`` deduplicates shared parameters, so the aliased name no
+    longer appears in ``named_parameters()`` — one tensor, reported once,
+    so memory totals computed from that iterator stay honest.
     """
     path, _, leaf = dotted_name.rpartition(".")
     owner = model.get_submodule(path) if path else model
@@ -218,9 +217,10 @@ def _alias_parameter(model: nn.Module, dotted_name: str, source: nn.Parameter) -
 def _verify_coverage(params: Mapping[str, nn.Parameter], filled: Mapping[str, int]) -> None:
     """Fail naming the offending parameters rather than with a bare count.
 
-    Three distinguishable failures: nothing wrote a parameter (a rename rule stopped
-    matching), something wrote only part of it (one block of a fused QKV arrived), or
-    something wrote more than fits (two keys competing for the same destination).
+    Three distinguishable failures: nothing wrote a parameter (a rename rule
+    stopped matching), something wrote only part of it (one block of a fused
+    QKV arrived), or something wrote more than fits (two keys competing for
+    one destination).
     """
     missing = sorted(name for name, count in filled.items() if count == 0)
     mismatched = sorted(

@@ -1,14 +1,11 @@
 """DeepSeek-V2/V3 model definitions: MLA attention over a latent KV cache.
 
-Composition mirrors vLLM's ``deepseek_v2.py``: :class:`DeepseekV2MLAAttention`
-(in :mod:`lite_llama.modules.mla`) owns the latent-cache attention, and
-:class:`DeepseekV2DecoderLayer` pairs it with a dense :class:`DeepseekV2MLP`
-for the first ``first_k_dense_replace`` layers and the routed
-:class:`DeepseekV2MoE` after — the same dense/MoE choice vLLM makes inside
-its ``DeepseekV2DecoderLayer``. :class:`DeepseekV2Model` stacks the layers on
-the shared CausalLM skeleton; :class:`DeepseekV3Model` is the V3 family,
-whose biased ``noaux_tc`` routing, sigmoid scoring and query LoRA all arrive
-through the config rather than a structural override.
+:class:`DeepseekV2DecoderLayer` pairs :class:`DeepseekV2MLAAttention` (in
+:mod:`lite_llama.modules.mla`) with a dense :class:`DeepseekV2MLP` for the
+first ``first_k_dense_replace`` layers and the routed :class:`DeepseekV2MoE`
+after; :class:`DeepseekV2Model` stacks the layers on the shared CausalLM
+skeleton and :class:`DeepseekV3Model` inherits it — V3's biased ``noaux_tc``
+routing, sigmoid scoring and query LoRA all arrive through the config.
 
 Usage:
     model = DeepseekV2Model(config)   # model_type deepseek_v2 / deepseek_v3
@@ -118,9 +115,6 @@ class DeepseekV2Model(CausalLM):
     The per-layer assembly is :class:`DeepseekV2DecoderLayer`; everything
     else — embeddings, RoPE, the LM head, weight loading — is the shared
     :class:`CausalLM` skeleton.
-
-    Usage:
-        model = DeepseekV2Model(config)
     """
 
     #: No fused QKV here — the MLA projections stay separate modules — but the

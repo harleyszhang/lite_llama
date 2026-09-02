@@ -282,17 +282,13 @@ def mla_decode_reference(
     sm_scale: float = 1.0,
     qk_rope_head_dim: int = QK_ROPE_HEAD_DIM,
 ) -> torch.Tensor:
-    """Pure-PyTorch decode over the paged latent cache — the semantic definer.
-
-    The kernel tests diff the Triton row against this; the layer-level golden
-    runs anchor *it* to HF. With ``qk_rope_head_dim=0`` it degenerates to the
-    ``MinimalMlaLayer`` harness semantics (no rope segment, V = the whole
-    latent row).
-    """
+    """Pure-PyTorch reference for MLA decode over paged latent cache."""
+    
     batch, num_heads, _ = q.shape
     _num_pages, page_size, latent_dim = kv_cache.shape
     lora_rank = latent_dim - qk_rope_head_dim
     out = torch.empty((batch, num_heads, lora_rank), dtype=q.dtype, device=q.device)
+    
     for b in range(batch):
         length = int(cache_seqlens[b])
         num_pages = (length + page_size - 1) // page_size
@@ -320,19 +316,6 @@ def mla_prefill(
     max_seq_len: int,
 ) -> torch.Tensor:
     """Prefill attention via chunked up-projection of the fresh latent.
-
-    Absorption is a decode-only trade: with up to ``max_seq_len`` new queries
-    attending each other, keeping ``q`` absorbed would make every score a
-    576-wide dot against the latent. Instead each chunk of the fresh latent is
-    up-projected to per-head K (``c_kv @ w_uk``) and V (``c_kv @ w_uv``), the
-    shared ``k_pe`` is broadcast onto every head's K, and the packed batch goes
-    to the existing no-pad prefill kernel.
-
-    The kernel's ``tl.arange`` head-dim loads demand a power of two, so q/k/v
-    are zero-padded from 192 to 256 and the output sliced back — the zero
-    columns contribute exactly nothing to the dot products. A split-width
-    prefill kernel (192-wide q/k, 128-wide V, no padding) is the documented
-    follow-up if the padding traffic shows up in profiles.
 
     Args:
         q_nope: ``[tokens, num_heads, qk_nope_head_dim]`` query, un-absorbed.
@@ -365,14 +348,16 @@ def mla_prefill(
     k_pad = q_nope.new_zeros((tokens, num_heads, pad_dim))
     v_pad = q_nope.new_zeros((tokens, num_heads, pad_dim))
 
+    # Chunked up-projection to avoid OOM on long sequences
     for start in range(0, tokens, _PREFILL_UPSAMPLE_CHUNK):
         end = min(start + _PREFILL_UPSAMPLE_CHUNK, tokens)
         latent = c_kv[start:end]  # [t, kv_lora_rank]
         k_pad[start:end, :, :nope_dim] = torch.einsum("tl,hld->thd", latent, w_uk)
-        # One k_pe row per token serves every head — MQA inside the K assembly.
         k_pad[start:end, :, nope_dim:qk_dim] = k_pe[start:end, None, :]
         v_pad[start:end, :, :v_dim] = torch.einsum("tl,hld->thd", latent, w_uv)
 
-    out = flash_attention2_no_pad(q_pad, k_pad, v_pad, sm_scale, b_start_loc, b_seq_len, max_seq_len)
-    # The padded columns are exact zeros; slicing them off is free (a view).
+    out = flash_attention2_no_pad(
+        q_pad, k_pad, v_pad, sm_scale, b_start_loc, b_seq_len, max_seq_len
+    )
+    
     return out[..., :v_dim]

@@ -45,7 +45,7 @@ class AWQConfig(QuantizationConfig):
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         # w4a16 unpacks to fp32 and casts to the activation dtype, so bf16
-        # activations run through the same kernel since v0.9.
+        # activations run through the same kernel.
         return [torch.float16, torch.bfloat16]
 
     @classmethod

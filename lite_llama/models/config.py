@@ -136,10 +136,9 @@ class ModelConfig:
         """Element type of the checkpoint's tensors; bf16 when undeclared.
 
         Every parameter and the KV cache (under ``"auto"``) are allocated in
-        this dtype, so bf16 checkpoints finally stop being narrowed to fp16.
-        A checkpoint that declares ``float32`` is *downgraded* to bf16: the
-        Triton kernels accumulate in fp32 but only load 16-bit inputs, and a
-        full-fp32 deployment was never possible in lite_llama anyway.
+        this dtype. A checkpoint that declares ``float32`` is *downgraded* to
+        bf16: the Triton kernels accumulate in fp32 but only load 16-bit
+        inputs, and a full-fp32 deployment was never possible in lite_llama.
         """
         raw = getattr(self.text_config, "torch_dtype", None)
         if isinstance(raw, torch.dtype):
@@ -283,9 +282,9 @@ class ModelConfig:
 
         ``(2 * num_kv_heads, head_dim)`` for MHA/GQA — K heads first, then V
         heads, so a decode step writes both halves in one launch — and
-        ``(1, kv_lora_rank + qk_rope_head_dim)`` under MLA, whose latent row has
-        no head axis to shard. A tensor-parallel rank caches only the KV heads
-        it owns, so :class:`~lite_llama.executor.model_runner.ModelRunner`
+        ``(1, kv_lora_rank + qk_rope_head_dim)`` under MLA, whose latent row
+        has no head axis. A tensor-parallel rank caches only the KV heads it
+        owns, so :class:`~lite_llama.executor.model_runner.ModelRunner`
         divides the head count itself before asking the same question.
         """
         if self.is_mla:
@@ -299,12 +298,11 @@ class ModelConfig:
     def num_experts(self) -> int:
         """Number of routed experts, under either HF generation's spelling.
 
-        ``n_routed_experts`` is what DeepSeek's config.json — and the
-        remote-code class its checkpoints auto-map to — writes, while
-        transformers' built-in configs expose the same count as
-        ``num_experts`` (every other MoE family's spelling). The two never
-        coexist in one config; carrying neither means not an MoE at all, which
-        stays an error so a typo cannot silently drop the router.
+        ``n_routed_experts`` is what DeepSeek's config.json writes, while
+        transformers' built-in configs expose the same count as ``num_experts``
+        (every other MoE family's spelling). The two never coexist; carrying
+        neither means not an MoE at all, which stays an error so a typo cannot
+        silently drop the router.
         """
         for name in ("num_experts", "n_routed_experts"):
             value = getattr(self.text_config, name, None)
@@ -393,8 +391,7 @@ class ModelConfig:
     def __getattr__(self, name: str) -> Any:
         """Forward unknown attributes to the text config.
 
-        Keeps model code reading HF field names directly — ``config.rms_norm_eps``,
-        ``config.num_experts``, ``config.moe_intermediate_size`` — instead of
+        Keeps model code reading HF field names directly instead of
         re-declaring each one here. Only reached for names this class does not
         define, so the normalised properties above always win.
         """

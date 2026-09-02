@@ -23,23 +23,11 @@ from .quantization.kv_cache import get_kv_cache_method
 class PagedAttention(nn.Module):
     """Writes K/V into the paged cache and runs the phase-appropriate kernel.
 
-    Both phases share the cache layout ``[2 * max_tokens, num_kv_heads, head_dim]``
-    where the K rows occupy the first half and the V rows the second.
-
-    Args:
-        num_kv_heads: Number of key/value heads on this rank (may be smaller
-            than the query head count for grouped-query attention). Needed here
-            to split the buffer's K half from its V half.
-        head_dim: Size of a single attention head; sets the softmax scale.
-        kv_cache_dtype: Element type of the cache — the activation dtype stores
-            K/V verbatim; ``torch.uint8`` stores e4m3 bytes (vLLM's fp8 KV
-            cache), quantised here on write and widened by the decode kernel.
-            The dequantisation scales come with the strategy object that
-            :func:`~lite_llama.modules.quantization.kv_cache.get_kv_cache_method`
-            returns, so write and read cannot disagree about them.
-        dtype: Activation dtype of q/k/v — the dispatch key for the prefill
-            and decode ops. bf16 in practice; the config dtype the caller
-            hands down.
+    Both phases share the cache layout ``[2 * max_tokens, num_kv_heads, head_dim]``:
+    K rows occupy the first half, V rows the second. ``kv_cache_dtype`` of
+    ``torch.uint8`` stores fp8-e4m3 bytes; the dequantisation scales come from
+    the strategy object that :func:`~lite_llama.modules.quantization.kv_cache.get_kv_cache_method`
+    returns, so write and read cannot disagree about them.
     """
 
     def __init__(
@@ -55,20 +43,16 @@ class PagedAttention(nn.Module):
         self.scale = 1.0 / math.sqrt(head_dim)
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_cache_method = get_kv_cache_method(kv_cache_dtype)
-        # Read the scales off the strategy that applied them. They used to be two
-        # more constructor arguments, which no caller ever passed: the fp8 cache
-        # was numerically correct only because that default and the method's own
-        # default were both 1.0, and a per-tensor scale would have gone missing
-        # silently the moment either side started computing one.
+        # Scales live on the strategy, not on this layer: the quantise-on-write
+        # and dequantise-on-read halves are only correct as a pair.
         method = self.kv_cache_method
         self.k_scale = method.k_scale if method is not None else 1.0
         self.v_scale = method.v_scale if method is not None else 1.0
 
-        # One dispatch decision per op, held for this module's lifetime.
-        # kv_write carries no dtype window on purpose — K/V arrive already
-        # quantised when the cache is fp8, so uint8 rows are as legal there
-        # as bf16 ones. The decode op's scheme key encodes which cache this
-        # module writes; the layout key is the paged pool both rows require.
+        # One dispatch decision per op, held for the module's lifetime. kv_write
+        # carries no dtype window on purpose: with an fp8 cache the K/V arrive
+        # already quantised, so uint8 rows are as legal as bf16 ones. The decode
+        # op's scheme key encodes the cache dtype this module writes.
         self._kv_write = dispatch("kv_write", dtype=kv_cache_dtype, layout=PAGED_KV_TAGS).load()
         self._prefill = dispatch("attention.prefill", dtype=dtype).load()
         self._decode = dispatch(
@@ -102,7 +86,7 @@ class PagedAttention(nn.Module):
         """Prefill: causal attention over the freshly computed q/k/v.
 
         The kernel reads the unquantised tensors it was handed, not the cache —
-        the write above only has to make them available to later decode steps.
+        the write only has to make K/V available to later decode steps.
 
         Returns:
             ``[tokens, num_heads, head_dim]``.
