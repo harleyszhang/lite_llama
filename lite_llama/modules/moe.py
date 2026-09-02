@@ -14,8 +14,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..distributed.parallel_state import all_reduce_tp, divide, get_tp_rank, get_tp_world_size
+from ..distributed.parallel_state import all_reduce, divide, get_tp_rank, get_tp_world_size
 from ..models.config import ModelConfig
+from .mlp import FusedMLP
 from .quantization import QuantizationConfig, UnquantizedFusedMoEMethod
 
 
@@ -25,7 +26,8 @@ class SparseMoeBlock(nn.Module):
     Args:
         config: Any config exposing the HF MoE fields ``num_experts``,
             ``num_experts_per_tok``, ``moe_intermediate_size`` and
-            ``norm_topk_prob``.
+            ``norm_topk_prob``; DeepSeek-V2 configs additionally drive the
+            shared expert (``n_shared_experts``) and ``routed_scaling_factor``.
         quant: Quantisation layout of the expert weights, or ``None``.
             The router always stays in the model dtype: it is
             ``num_experts x hidden``, small enough to be free and precise
@@ -38,6 +40,7 @@ class SparseMoeBlock(nn.Module):
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
+        self.routed_scaling_factor = config.routed_scaling_factor
         self.hidden_size = config.hidden_size
         # Each rank owns a slice of every expert's intermediate dimension, the
         # same split a dense MLP gets, applied to all experts at once.
@@ -65,6 +68,19 @@ class SparseMoeBlock(nn.Module):
         # (``gate_weight``) is replicated and keeps the default whole-copy loader.
         for param in self.experts.values():
             param.weight_loader = self._expert_loader
+        # DeepSeek-V2 routes top-k *and* runs one dense MLP every token passes
+        # through ("shared"), ``moe_intermediate_size * n_shared_experts`` wide.
+        # It rides the same quant-aware FusedMLP as the dense layers — TP splits
+        # its intermediate like any MLP, so only its partial sums join the
+        # routed all_reduce. Purely routed MoEs (qwen3_moe) leave this ``None``
+        # and their checkpoints carry no ``shared_experts`` keys at all.
+        self.shared_experts: FusedMLP | None = None
+        if config.n_shared_experts > 0:
+            self.shared_experts = FusedMLP(
+                config,
+                quant,
+                intermediate_size=config.moe_intermediate_size * config.n_shared_experts,
+            )
 
     def _expert_loader(self, param, loaded, shard_id) -> torch.Tensor:
         """Fill one expert's slice of a stacked parameter; return the view written.
@@ -123,12 +139,22 @@ class SparseMoeBlock(nn.Module):
         Returns:
             ``(weights, ids)``, each ``[tokens, top_k]``; weights in x.dtype.
         """
-        router_logits = F.linear(x, self.gate_weight)
+        # fp32 logits — the precision DeepSeek's router spells out (explicit
+        # ``.float()`` casts) and qwen3's reference semantics assume: a bf16/fp16
+        # GEMM can flip a topk pick on near-ties, and a wrong expert costs far
+        # more than the cast. The gate weight stays stored in the model dtype;
+        # only the GEMM is widened.
+        router_logits = F.linear(x.float(), self.gate_weight.float())
         # fp32 softmax over the full expert set — topk must come after softmax.
         routing_weights = F.softmax(router_logits, dim=-1, dtype=torch.float32)
         routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
         if self.norm_topk_prob:
             routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
+        # After the normalisation, exactly where DeepSeek-V2TopkRouter applies
+        # it: the scale widens the routed half only — the shared expert (if any)
+        # is added unscaled in ``forward``. qwen3_moe leaves the factor at 1.0,
+        # a multiply-by-one identity.
+        routing_weights = routing_weights * self.routed_scaling_factor
         return routing_weights.to(x.dtype), selected_experts
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -139,7 +165,12 @@ class SparseMoeBlock(nn.Module):
         out = self.quant_method.apply(self, x, weights, ids)
         # Each rank produced the partial sum from its slice of the experts'
         # intermediate dimension.
-        out = all_reduce_tp(out)
+        out = all_reduce(out)
+        if self.shared_experts is not None:
+            # The shared MLP's down_proj is row-parallel and all-reduces on its
+            # own; summing after the routed reduce is the same total as folding
+            # it in (all_reduce(a) + all_reduce(b) == all_reduce(a + b)).
+            out = out + self.shared_experts(x)
         return out.reshape(*leading_shape, self.hidden_size)
 
     @torch.no_grad()

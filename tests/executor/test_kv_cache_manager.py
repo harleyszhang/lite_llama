@@ -23,8 +23,7 @@ def manager() -> KVCacheManager:
     """A 9-row pool; small enough that exhaustion cases are easy to express."""
     return KVCacheManager(
         num_layers=2,
-        num_kv_heads=4,
-        head_dim=64,
+        kv_row=(8, 64),  # 4 kv heads, K and V
         gpu_num_blocks=_BLOCKS,
         dtype=torch.float32,
         device="cuda" if torch.cuda.is_available() else "cpu",
@@ -46,6 +45,21 @@ def test_allocates_one_kv_buffer_per_layer(manager):
     # 2x heads: K heads then V heads live in one tensor.
     assert manager.gpu_kv_buffer[0].shape == (_BLOCKS, 8, 64)
     assert manager.gpu_kv_buffer[0].data_ptr() != manager.gpu_kv_buffer[1].data_ptr()
+
+
+def test_mla_cache_rows_hold_one_latent_vector():
+    """MLA: K and V share one latent row — no head axis, no factor of two."""
+    mgr = KVCacheManager(
+        num_layers=2,
+        kv_row=(1, 576),  # kv_lora_rank 512 + qk_rope_head_dim 64
+        gpu_num_blocks=_BLOCKS,
+        dtype=torch.float32,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+    )
+
+    assert mgr.gpu_kv_buffer[0].shape == (_BLOCKS, 1, 576)
+    per_token = mgr.kv_row[0] * mgr.kv_row[1] * mgr.num_layers
+    assert per_token == 2 * 576  # not 2 * kv_heads * head_dim: the row *is* K and V
 
 
 # --------------------------------------------------------------------------- #
@@ -207,3 +221,54 @@ def test_repeated_generate_cycles_do_not_leak(manager):
     manager.free_all()
     assert manager.can_use_mem_size == _BLOCKS
     assert not manager.kv_mem_use_state.any()
+
+
+# --------------------------------------------------------------------------- #
+# Admission watermark with hysteresis (O9)
+# --------------------------------------------------------------------------- #
+def _pressured_manager() -> KVCacheManager:
+    """100 rows, watermark 30%, recovery band 10% — thresholds at 30 and 40."""
+    return KVCacheManager(
+        num_layers=1,
+        kv_row=(8, 64),
+        gpu_num_blocks=100,
+        dtype=torch.float32,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        watermark=0.3,
+        hysteresis=0.1,
+    )
+
+
+def test_admission_refuses_only_under_the_watermark():
+    """Above the watermark the single threshold still governs."""
+    mgr = _pressured_manager()
+    assert mgr.can_admit(65)  # 100 - 65 = 35 >= 30
+    assert not mgr.can_admit(71)  # 100 - 71 = 29 < 30
+
+
+def test_dip_under_the_watermark_raises_the_bar_until_recovery():
+    """After a dip, admission resumes only above watermark + recovery band."""
+    mgr = _pressured_manager()
+    mgr.alloc_kvcache(75)  # 25 free, under the 30-row watermark
+    assert not mgr.can_admit(0)
+
+    mgr.free(torch.arange(0, 10, device=mgr.device))  # 35 free: above the watermark...
+    assert not mgr.can_admit(0)  # ...but under watermark + band (40): still refused
+
+    mgr.free(torch.arange(10, 15, device=mgr.device))  # 40 free: recovered
+    assert mgr.can_admit(0)
+
+
+def test_level_oscillating_around_the_watermark_cannot_flap_admission():
+    """A level bouncing 25 ↔ 35 stays refused; a single threshold would flap."""
+    mgr = _pressured_manager()
+    mgr.alloc_kvcache(75)  # 25 free
+    assert not mgr.can_admit(0)  # trips the pressure latch
+    for _ in range(2):
+        mgr.free(torch.arange(0, 10, device=mgr.device))  # 35
+        assert not mgr.can_admit(0)
+        mgr.alloc_kvcache(10)  # 25 again
+        assert not mgr.can_admit(0)
+
+    mgr.free(torch.arange(10, 25, device=mgr.device))  # 40: recovered
+    assert mgr.can_admit(0)

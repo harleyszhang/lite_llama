@@ -149,8 +149,10 @@ class SingleLayerCache:
         batch: Number of sequences.
         seq_len: Prompt length, identical for every sequence.
         decode_steps: How many positions past the prompt to reserve.
-        num_kv_heads: KV heads this rank owns.
-        head_dim: Size of one attention head.
+        kv_row: Shape of one token's cache row — ``(2 * num_kv_heads, head_dim)``
+            for the paged buffer, ``(1, kv_lora_rank + qk_rope_head_dim)`` for the
+            MLA latent pool — sized exactly as :class:`ModelRunner` sizes its own,
+            so a layer proven here drops into service unchanged.
         dtype: KV-cache element type.
         device: Where the cache lives.
     """
@@ -161,8 +163,7 @@ class SingleLayerCache:
         seq_len: int,
         decode_steps: int,
         *,
-        num_kv_heads: int,
-        head_dim: int,
+        kv_row: tuple[int, int],
         dtype: torch.dtype,
         device: str | torch.device,
     ) -> None:
@@ -171,7 +172,7 @@ class SingleLayerCache:
         self.max_seq = seq_len + decode_steps
         rows = batch * self.max_seq
         # One entry: the layer under test is always addressed as layer 0.
-        kv_buffer = torch.zeros((rows, 2 * num_kv_heads, head_dim), dtype=dtype, device=device)
+        kv_buffer = torch.zeros((rows, *kv_row), dtype=dtype, device=device)
         self.table = torch.arange(rows, dtype=torch.int32, device=device).view(batch, self.max_seq)
         self.meta = AttentionMetadata(kv_buffer=[kv_buffer], b_req_tokens_table=self.table)
         self._filled = 0
@@ -513,8 +514,7 @@ class SingleLayerHarness:
             batch,
             seq_len,
             decode_steps,
-            num_kv_heads=self.config.num_kv_heads,
-            head_dim=self.config.head_dim,
+            kv_row=self.config.kv_cache_row,
             dtype=self.config.kv_cache_torch_dtype,
             device=self.device,
         )

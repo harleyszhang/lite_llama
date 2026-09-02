@@ -51,7 +51,8 @@ serve = ["fastapi>=0.110", "uvicorn[standard]>=0.27", "pydantic>=2.0"]
 trace = ["opentelemetry-sdk>=1.25", "opentelemetry-exporter-otlp-proto-http>=1.25"]
 # External kernel backends (ROADMAP foundation 2). Never core dependencies: a
 # missing library must degrade to the native Triton floor, which is what
-# lite_llama/kernels/backend/probe.py probes for and dispatch acts on.
+# lite_llama/kernels/backend/<lib>/__init__.py declares available() and dispatch
+# acts on it.
 #
 # Only flashinfer has anything pip can resolve (distribution `flashinfer-python`,
 # import `flashinfer`). DeepGEMM, FlashMLA and DeepEP are recursive clones built
@@ -71,6 +72,7 @@ dev = [
   "pre-commit>=4.0",
   # tests/evals reads its model configs from YAML.
   "pyyaml>=6.0",
+  "accelerate>=1.14.0",
 ]
 
 [project.scripts]
@@ -128,7 +130,7 @@ ignore = [
 # exemption. Benchmark scripts print and star-import on purpose.
 "examples/teaching/*" = ["RUF001"]
 # Benchmarks: `lambda: kernel(...)` is the shape triton.testing.do_bench wants,
-# `import apex` is an availability probe, and unused locals document the tuning
+# `import apex` is an availability check, and unused locals document the tuning
 # knobs a reader may want to switch on.
 "benchmarks/kernels/*" = ["E402", "E731", "F401", "F403", "F405", "F841", "RUF001"]
 

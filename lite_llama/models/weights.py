@@ -62,6 +62,11 @@ def default_weight_loader(
 _FLATTENED: tuple[str, ...] = (
     "self_attn.q_norm",
     "self_attn.k_norm",
+    # MLA: the latent/query layernorms are bare parameters on the attention
+    # module, folded the same way. ``q_norm`` above stays unmatched here because
+    # endswith is exact — ``q_a_layernorm`` is not ``q_norm``.
+    "self_attn.kv_a_layernorm",
+    "self_attn.q_a_layernorm",
     "input_layernorm",
     "post_attention_layernorm",
     # MoE router. The dense SwiGLU gate is ``mlp.gate_proj`` and therefore does

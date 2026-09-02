@@ -57,24 +57,30 @@ LINEAR_NATIVE_ROWS = {
 #: the external linear contender, gated on sm90 and on a golden run.
 LINEAR_EXTERNAL_ROWS = {"deepgemm/fp8_gemm_nt"}
 
-#: ``op -> native row``, the attention domain.
+#: ``op -> native row``, the attention domain. The MLA pair landed in v0.11:
+#: the latent decode kernel and the chunked-upsample prefill.
 ATTENTION_NATIVE_ROWS = {
     "attention.prefill": "native/flash_attention2_no_pad",
     "attention.decode": "native/flash_decoding",
+    "attention.mla_decode": "native/mla_decode",
+    "attention.mla_prefill": "native/mla_prefill",
     "kv_write": "native/update_kv_buffer",
 }
 
-#: ``op -> external rows``: the attention contenders. ``attention.mla_decode``
-#: has no native row at all — MLA's latent cache is a different layout, not a
-#: different size, and the tree has no MLA model to host a Triton fallback.
+#: ``op -> external rows``: the attention contenders. ``attention.mla_prefill``
+#: has no external row — FlashMLA ships decode only.
 ATTENTION_EXTERNAL_ROWS = {
     "attention.prefill": {"flashinfer/prefill"},
     "attention.decode": {"flashinfer/decode"},
     "attention.mla_decode": {"flashmla/mla_decode"},
+    "attention.mla_prefill": set(),
 }
 
 #: Layout tags the paged KV buffer of this repo satisfies.
 PAGED = frozenset({"kv:paged"})
+
+#: The MLA latent cache's layout tag — its own pool, not the per-head one.
+MLA_LATENT = frozenset({"kv:mla_latent"})
 
 #: ``op -> native row`` for the per-layer glue. ``elementwise.*`` is two rows
 #: because the two arities are two contracts: the fused projection hands over
@@ -111,7 +117,6 @@ OPS_WITHOUT_ROWS = {
 #: itself is legal to dispatch only where a backend survives them.
 EXTERNAL_ONLY_OPS = {
     "sample": "flashinfer serves it; engine.Sampler stays the default path",
-    "attention.mla_decode": "flashmla serves it; no MLA model in tree until v0.10",
 }
 
 #: The nine operator-domain groups whose ``__init__.py`` files hold the rows.
@@ -212,11 +217,14 @@ class TestAttentionCatalogue:
 
     def test_mla_decode_never_dispatches_without_its_gates(self) -> None:
         # The latent cache is not interchangeable with the per-head paged
-        # pool, so the row demands the ``kv:mla_latent`` tag — and then still
-        # has to survive the availability check. Either gate refuses, and the
-        # failure names the row instead of silently routing somewhere wrong.
+        # pool, so both rows demand the ``kv:mla_latent`` tag — and even with
+        # it, default dispatch refuses until a golden run verifies a row.
+        # Either gate refuses, and the failure names the row instead of
+        # silently routing somewhere wrong.
         with pytest.raises(LookupError, match="no usable implementation"):
             dispatch("attention.mla_decode", dtype="bf16")
+        with pytest.raises(LookupError, match="golden"):
+            dispatch("attention.mla_decode", dtype="bf16", layout=MLA_LATENT)
 
 
 class TestGlueCatalogue:

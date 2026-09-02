@@ -2,7 +2,8 @@
 
 Registers the domain's spec rows and points at the implementations:
 :mod:`flashattention2_nopad` for prefill, :mod:`flashdecoding` for paged
-decode, plus the KV-write kernels in ``kvcache``.
+decode, :mod:`mla` for the latent-cache MLA pair, plus the KV-write kernels
+in ``kvcache``.
 
 Usage:
     from lite_llama.kernels.ops.attention.flashdecoding import flash_decoding
@@ -48,6 +49,39 @@ register(
         golden=NATIVE_BASELINE,
     )
 )
+register(
+    KernelSpec(
+        name="native/mla_decode",
+        op="attention.mla_decode",
+        backend="native",
+        target="lite_llama.kernels.ops.attention.mla:mla_decode",
+        dtypes=("bf16", "fp16"),
+        layout=LayoutRequirement(required=("kv:mla_latent",)),
+        # Unverified until the DeepSeek-V2 golden run turns the kernel-test
+        # evidence into a measured diff against HF; the in-file PyTorch
+        # reference is the baseline those tests already pin the row to.
+        golden=GoldenRecord(
+            verified=False,
+            max_abs_diff=None,
+            baseline="ops/attention/mla.py:mla_decode_reference",
+        ),
+    )
+)
+register(
+    KernelSpec(
+        name="native/mla_prefill",
+        op="attention.mla_prefill",
+        backend="native",
+        target="lite_llama.kernels.ops.attention.mla:mla_prefill",
+        dtypes=("bf16", "fp16"),
+        layout=LayoutRequirement(required=("kv:mla_latent",)),
+        golden=GoldenRecord(
+            verified=False,
+            max_abs_diff=None,
+            baseline="full-upsample oracle over native/flash_attention2_no_pad",
+        ),
+    )
+)
 
 # --------------------------------------------------------------------------- #
 # flashinfer — both phases, wheel-installable, Ampere onward
@@ -83,7 +117,7 @@ register(
 )
 
 # --------------------------------------------------------------------------- #
-# flashmla — MLA decode against the latent cache; no native row exists
+# flashmla — the external MLA decode contender, Hopper-only
 # --------------------------------------------------------------------------- #
 register(
     KernelSpec(

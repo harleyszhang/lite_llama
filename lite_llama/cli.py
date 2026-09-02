@@ -1,16 +1,19 @@
-"""The ``lite-llama`` command line: chat, vl-chat, serve and batch subcommands.
+"""The ``lite-llama`` command line: chat, vl-chat, serve, batch and acc.divergence.
 
 Each subcommand is a :class:`CliCommand` that owns its parser section and its
-engine wiring, so a new command never touches ``main``; engine knobs shared
-by all commands live once in :class:`TextEngineOptions`.
+wiring, so a new command never touches ``main``; knobs shared by the engine
+commands live once in :class:`TextEngineOptions`, while the accuracy tool
+talks to :mod:`lite_llama.tools.accuracy` directly — no engine involved.
 
 Usage:
     lite-llama chat --help
+    lite-llama acc.divergence --model-dir <path>
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import warnings
@@ -25,6 +28,11 @@ from .engine import ContinuousBatchingEngine, SamplingParams, VisionGenerator
 from .engine.dp_load_balancer import LOAD_BALANCERS
 from .engine.scheduler import DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_NUM_SEQS
 from .modules.quantization import RUNTIME_SCHEMES
+from .tools.accuracy import (
+    DEFAULT_PROMPT,
+    DEFAULT_REL_THRESHOLD,
+    find_first_divergent_layer,
+)
 from .utils.prompt_templates import ChatPrompter, PrompterResolver
 
 # ---------------------------------------------------------------------------
@@ -119,6 +127,22 @@ def _cuda_graph_option(*, default: bool) -> CliOption:
 # ---------------------------------------------------------------------------
 
 
+def _model_dir_from(args: argparse.Namespace) -> str:
+    """Resolve ``--model-dir`` (falling back to ``LITE_LLAMA_MODEL_DIR``); exits if neither.
+
+    Public because the engine commands and the accuracy tool answer this
+    question identically — the fallback rule must not drift between them.
+    """
+    model_dir = args.model_dir or os.environ.get("LITE_LLAMA_MODEL_DIR")
+    if not model_dir:
+        raise SystemExit(
+            "Model directory not provided. Pass --model-dir <path> or set LITE_LLAMA_MODEL_DIR."
+        )
+    if not Path(model_dir).is_dir():
+        raise SystemExit(f"model directory {model_dir!r} does not exist")
+    return model_dir
+
+
 @dataclass(frozen=True)
 class BaseOptions:
     """Construction options every engine build shares, text or vision.
@@ -146,16 +170,8 @@ class BaseOptions:
 
     @staticmethod
     def _collect(args: argparse.Namespace) -> dict[str, Any]:
-        # --model-dir 优先,其次环境变量 LITE_LLAMA_MODEL_DIR
-        model_dir = args.model_dir or os.environ.get("LITE_LLAMA_MODEL_DIR")
-        if not model_dir:
-            raise SystemExit(
-                "Model directory not provided. Pass --model-dir <path> or set LITE_LLAMA_MODEL_DIR."
-            )
-        if not Path(model_dir).is_dir():
-            raise SystemExit(f"model directory {model_dir!r} does not exist")
         return {
-            "model_dir": model_dir,
+            "model_dir": _model_dir_from(args),
             "max_seq_len": args.max_seq_len,
             "max_gpu_num_blocks": args.max_gpu_num_blocks,
             "device": args.device,
@@ -232,14 +248,19 @@ class CliCommand(ABC):
 
     ``register`` 是模板方法:建子 parser → 注册公共参数 → 注册命令特有
     参数(``add_arguments`` 钩子)→ 绑定 handler。子类只补充差异部分。
+    公共参数集由 ``common_options`` 决定:引擎命令沿用全量
+    ``COMMON_OPTIONS``(采样参数在内),不走引擎的工具命令覆写为定位
+    模型所需的子集——给 ``acc.divergence`` 挂上 ``--temperature`` 只会
+    误导。
     """
 
     name: ClassVar[str]
     help: ClassVar[str]
+    common_options: ClassVar[tuple[CliOption, ...]] = COMMON_OPTIONS
 
     def register(self, subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         sub = subparsers.add_parser(self.name, help=self.help)
-        for opt in COMMON_OPTIONS:
+        for opt in self.common_options:
             opt.register(sub)
         self.add_arguments(sub)
         sub.set_defaults(handler=self)
@@ -608,6 +629,56 @@ class BatchCommand(CliCommand):
             print(f"TTFT mean {sum(ttfts) / len(ttfts):7.1f} ms | max {max(ttfts):7.1f} ms")
 
 
+class AccuracyCommand(CliCommand):
+    """``acc.divergence``:整模型对 ``transformers`` 参考实现的逐层精度对比。
+
+    同一 checkpoint 装两个实现、同一 prompt 喂两侧,逐层比 decoder layer
+    输出,报第一个超出噪声带的层及该层内 attention/MLP 的二次定位;
+    ``--json`` 给工具链,默认人读表格给终端。不构造引擎,公共参数只留
+    定位模型所需的三条。退出码即结论(0 全层通过,1 有散度),可直接当
+    CI 精度门禁用。
+    """
+
+    name = "acc.divergence"
+    help = "Locate the first decoder layer that diverges from the transformers reference"
+    common_options = (
+        CliOption("--model-dir", {"help": "Checkpoint directory"}),
+        CliOption("--max-seq-len", {"type": int, "default": 2048}),
+        CliOption("--device", {"default": "cuda"}),
+    )
+
+    def add_arguments(self, sub: argparse.ArgumentParser) -> None:
+        CliOption(
+            "--prompt",
+            {"default": DEFAULT_PROMPT, "help": "Prompt to compare the two models on"},
+        ).register(sub)
+        CliOption(
+            "--rel-threshold",
+            {
+                "type": float,
+                "default": DEFAULT_REL_THRESHOLD,
+                "help": "Diff-to-reference ratio past which a layer counts as diverged",
+            },
+        ).register(sub)
+        CliOption("--json", {"action": "store_true", "help": "Emit the report as JSON"}).register(
+            sub
+        )
+
+    def run(self, args: argparse.Namespace) -> int:
+        report = find_first_divergent_layer(
+            _model_dir_from(args),
+            prompt=args.prompt,
+            rel_threshold=args.rel_threshold,
+            device=args.device,
+            max_seq_len=args.max_seq_len,
+        )
+        if args.json:
+            print(json.dumps(report.to_dict(), indent=2))
+        else:
+            print(report.render())
+        return 0 if report.ok else 1
+
+
 # ---------------------------------------------------------------------------
 # 装配层:命令注册表 + 入口
 # ---------------------------------------------------------------------------
@@ -617,6 +688,7 @@ COMMANDS: tuple[CliCommand, ...] = (
     VlChatCommand(),
     ServeCommand(),
     BatchCommand(),
+    AccuracyCommand(),
 )
 """已注册子命令;新增命令 = 实现一个 :class:`CliCommand` 子类并加入此表。"""
 

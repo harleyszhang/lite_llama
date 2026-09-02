@@ -174,6 +174,8 @@ def test_expert_gate_and_up_fill_opposite_halves_of_their_own_slice():
             norm_topk_prob=True,
             hidden_size=5,
             dtype=torch.float16,
+            routed_scaling_factor=1.0,
+            n_shared_experts=0,
         )
     )
     param = block.experts["gate_up_proj"]  # [experts, 2 * moe_inter, hidden]
@@ -197,6 +199,8 @@ def test_expert_down_proj_fills_a_whole_slice():
             norm_topk_prob=True,
             hidden_size=5,
             dtype=torch.float16,
+            routed_scaling_factor=1.0,
+            n_shared_experts=0,
         )
     )
     param = block.experts["down_proj"]  # [experts, hidden, moe_inter]

@@ -53,6 +53,52 @@ _MOE = {
     "mlp_only_layers": [],
 }
 
+#: DeepSeek-V2-Lite geometry, shrunk to test size but keeping every relation
+#: that makes MLA MLA: rope only on the pe slice, equal-width kv_b halves, the
+#: mscale yarn pair, and one dense layer before the routed stack. ``factor`` is
+#: the true ratio of the two position bounds, so AutoConfig round-trips without
+#: the mismatch warning; ``mscale != mscale_all_dim`` keeps the cos/sin yarn
+#: ratio non-trivial (it cancels to 1.0 when the pair matches). The rope width
+#: is the real 64: the decode kernel's op contract carries no dimension
+#: argument, so the latent row splits at that fixed boundary.
+_MLA = {
+    "model_type": "deepseek_v2",
+    "vocab_size": 512,
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "moe_intermediate_size": 32,
+    "num_hidden_layers": 3,
+    "num_attention_heads": 4,
+    "n_shared_experts": 0,
+    "n_routed_experts": 4,
+    "num_experts_per_tok": 2,
+    "routed_scaling_factor": 2.5,
+    "first_k_dense_replace": 1,
+    # V2-Lite's real spelling: DeepSeek's router does not renormalise the
+    # topk weights (that is qwen3-moe's norm_topk_prob=True behaviour) — the
+    # softmax scores ride straight into the routed_scaling_factor multiply.
+    "norm_topk_prob": False,
+    "kv_lora_rank": 16,
+    "q_lora_rank": None,
+    "qk_nope_head_dim": 32,
+    "qk_rope_head_dim": 64,
+    "v_head_dim": 32,
+    "attention_bias": False,
+    "max_position_embeddings": 256,
+    "rope_theta": 10000.0,
+    "rope_scaling": {
+        "type": "yarn",
+        "factor": 4.0,
+        "original_max_position_embeddings": 64,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "mscale": 1.0,
+        "mscale_all_dim": 0.707,
+    },
+    "rms_norm_eps": 1e-6,
+    "tie_word_embeddings": False,
+}
+
 
 def _config(tmp_path, body: dict, **overrides) -> ModelConfig:
     """Round-trip a config.json through AutoConfig, as the loader does."""
@@ -238,8 +284,7 @@ def _cache(batch=2, seq_len=3, decode_steps=2) -> SingleLayerCache:
         batch,
         seq_len,
         decode_steps,
-        num_kv_heads=2,
-        head_dim=8,
+        kv_row=(4, 8),  # the paged shape: 2 * num_kv_heads, head_dim
         dtype=torch.float16,
         device="cpu",
     )
@@ -287,6 +332,102 @@ def test_decode_past_the_reservation_raises():
     cache.step_decode()
     with pytest.raises(RuntimeError, match="decode_steps"):
         cache.step_decode()
+
+
+# --------------------------------------------------------------------------- #
+# MLA (DeepseekV2): the latent cache, rope only on the pe slice
+# --------------------------------------------------------------------------- #
+def test_mla_layer_builds_the_latent_attention(tmp_path):
+    """Layer 0 pairs MLA with the dense MLP; layers past the cutover route.
+
+    The absorbed-decode views are checked by shape because that is their whole
+    contract: zero-copy reads of kv_b's per-head ``[k_nope | v]`` layout.
+    """
+    from lite_llama.models.deepseek_v2 import MlaAttention
+    from lite_llama.modules import FusedMLP, SparseMoeBlock
+
+    config = _config(tmp_path, _MLA)
+    harness = SingleLayerHarness(config, 0, device="cpu")
+    assert isinstance(harness.layer.self_attn, MlaAttention)
+    assert isinstance(harness.layer.mlp, FusedMLP)
+    assert isinstance(
+        SingleLayerHarness(config, 1, device="cpu").layer.mlp, SparseMoeBlock
+    )
+
+    attn = harness.layer.self_attn
+    assert attn.w_uk.shape == (4, 16, 32)  # heads, kv_lora, qk_nope
+    assert attn.w_uv.shape == (4, 16, 32)  # heads, kv_lora, v
+
+
+def test_translate_flattens_mla_norms(tmp_path):
+    """The layernorms fold; the MLA projections are real modules and stay put."""
+    harness = _harness(tmp_path, _MLA)
+    assert harness.translate("model.layers.1.self_attn.kv_a_layernorm.weight") == (
+        "self_attn.kv_a_layernorm_weight",
+        None,
+    )
+    assert harness.translate("model.layers.1.self_attn.q_a_layernorm.weight") == (
+        "self_attn.q_a_layernorm_weight",
+        None,
+    )
+    assert harness.translate("model.layers.1.self_attn.kv_a_proj_with_mqa.weight") == (
+        "self_attn.kv_a_proj_with_mqa.weight",
+        None,
+    )
+
+
+def test_mla_weights_mirror_into_the_right_blocks(tmp_path):
+    """A HF MLA layer's state dict fills the module block by block.
+
+    kv_b lands whole, so the w_uk/w_uv views read the real checkpoint layout —
+    if the per-head halves were transposed at load time this copy would pass and
+    every later kernel would read the wrong halves.
+    """
+    from lite_llama.tools.harness import HFLayerReference
+
+    config = _config(tmp_path, _MLA)
+    harness = SingleLayerHarness(config, 0, device="cpu")
+    reference = HFLayerReference(config, 0, device="cpu")
+    harness.load_state_dict(reference.state_dict(), source="test")
+
+    hf = dict(reference.state_dict())
+    attn = harness.layer.self_attn
+    torch.testing.assert_close(attn.q_proj.weight, hf["self_attn.q_proj.weight"])
+    torch.testing.assert_close(
+        attn.kv_a_proj_with_mqa.weight, hf["self_attn.kv_a_proj_with_mqa.weight"]
+    )
+    torch.testing.assert_close(attn.kv_b_proj.weight, hf["self_attn.kv_b_proj.weight"])
+    torch.testing.assert_close(attn.o_proj.weight, hf["self_attn.o_proj.weight"])
+    torch.testing.assert_close(attn.kv_a_layernorm_weight, hf["self_attn.kv_a_layernorm.weight"])
+
+    gate_up = harness.layer.mlp.gate_up_proj.weight
+    rows = hf["mlp.gate_proj.weight"].shape[0]
+    torch.testing.assert_close(gate_up[:rows], hf["mlp.gate_proj.weight"])
+    torch.testing.assert_close(gate_up[rows:], hf["mlp.up_proj.weight"])
+
+
+def test_mla_q_lora_weights_mirror(tmp_path):
+    """The V2-full query path (q_a + layernorm + q_b) loads the same way."""
+    from lite_llama.tools.harness import HFLayerReference
+
+    config = _config(tmp_path, _MLA, q_lora_rank=16)
+    harness = SingleLayerHarness(config, 0, device="cpu")
+    reference = HFLayerReference(config, 0, device="cpu")
+    harness.load_state_dict(reference.state_dict(), source="test")
+
+    hf = dict(reference.state_dict())
+    attn = harness.layer.self_attn
+    torch.testing.assert_close(attn.q_a_proj.weight, hf["self_attn.q_a_proj.weight"])
+    torch.testing.assert_close(attn.q_a_layernorm_weight, hf["self_attn.q_a_layernorm.weight"])
+    torch.testing.assert_close(attn.q_b_proj.weight, hf["self_attn.q_b_proj.weight"])
+
+
+def test_new_cache_allocates_the_latent_pool(tmp_path):
+    """MLA's cache row is the latent itself: ``[c_kv | k_pe]``, no head axis."""
+    config = _config(tmp_path, _MLA)
+    harness = SingleLayerHarness(config, 0, device="cpu")
+    cache = harness.new_cache(2, 3, 1)
+    assert cache.meta.kv_buffer[0].shape == (2 * 4, 1, 16 + 64)
 
 
 # --------------------------------------------------------------------------- #
@@ -436,3 +577,40 @@ def test_forward_leaves_its_input_alone(tmp_path):
 
     harness.forward(prompt, harness.new_cache(1, 8, 1).begin_prefill())
     assert torch.equal(prompt, before)
+
+
+@pytest.mark.gpu
+@pytest.mark.usefixtures("cuda_available")
+def test_mla_layer_agrees_with_transformers(tmp_path):
+    """The MLA layer matches transformers' own, in both phases.
+
+    Prefill and decode take different paths — up-projected per head vs q kept
+    absorbed against the latent — so two green numbers prove two different
+    kernel compositions, plus the rope-on-pe-slice handling between them.
+    """
+    from lite_llama.tools.harness import HFLayerReference
+
+    config = _config(tmp_path, _MLA)
+    harness = SingleLayerHarness(config, 0, device="cuda")
+    reference = HFLayerReference(config, 0, device="cuda")
+
+    report = harness.run(batch=2, seq_len=16, decode_steps=2, iters=1, reference=reference)
+    assert report.prefill_diff is not None and report.decode_diff is not None
+    assert report.prefill_diff.rel < 2e-2
+    assert report.decode_diff.rel < 2e-2
+
+
+@pytest.mark.gpu
+@pytest.mark.usefixtures("cuda_available")
+def test_mla_q_lora_layer_agrees_with_transformers(tmp_path):
+    """Same alignment through the down-projected query path (V2-full shape)."""
+    from lite_llama.tools.harness import HFLayerReference
+
+    config = _config(tmp_path, _MLA, q_lora_rank=16)
+    harness = SingleLayerHarness(config, 0, device="cuda")
+    reference = HFLayerReference(config, 0, device="cuda")
+
+    report = harness.run(batch=2, seq_len=16, decode_steps=2, iters=1, reference=reference)
+    assert report.prefill_diff is not None and report.decode_diff is not None
+    assert report.prefill_diff.rel < 2e-2
+    assert report.decode_diff.rel < 2e-2
