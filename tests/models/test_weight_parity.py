@@ -124,6 +124,43 @@ CASES: dict[str, tuple[dict, str]] = {
         },
         "transformers:DeepseekV2ForCausalLM",
     ),
+    # V3 is V2's biased sibling: sigmoid scores, grouped ``noaux_tc`` routing
+    # with an fp32 correction bias riding under ``mlp.gate``, and top-k weights
+    # renormalised under the 2.5 routed scale. The weight layout is the V2 one
+    # — the bias is the only tensor the two loaders disagree on by default.
+    "deepseek_v3": (
+        {
+            "model_type": "deepseek_v3",
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "moe_intermediate_size": 32,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            # MLA ignores the GQA count, but the config default (128) must not
+            # trip the generic divisibility check.
+            "num_key_value_heads": 4,
+            "n_shared_experts": 2,
+            "n_routed_experts": 4,
+            "num_experts_per_tok": 2,
+            "routed_scaling_factor": 2.5,
+            "first_k_dense_replace": 1,
+            "norm_topk_prob": True,
+            "topk_method": "noaux_tc",
+            "scoring_func": "sigmoid",
+            "n_group": 2,
+            "topk_group": 1,
+            "kv_lora_rank": 16,
+            "q_lora_rank": 32,
+            "qk_nope_head_dim": 32,
+            "qk_rope_head_dim": 64,
+            "v_head_dim": 32,
+            "vocab_size": 128,
+            "max_position_embeddings": 256,
+            "rms_norm_eps": 1e-6,
+            "tie_word_embeddings": False,
+        },
+        "transformers:DeepseekV3ForCausalLM",
+    ),
     "llava": (
         {
             "model_type": "llava",
@@ -198,6 +235,13 @@ def write_hf_checkpoint(directory: Path, model_type: str) -> tuple[dict, ModelCo
     torch.manual_seed(0)
     hf_model = _import(hf_path)(config.hf_config).eval()
     state = {key: value.detach().clone() for key, value in hf_model.state_dict().items()}
+    # The routing bias is an HF *buffer* initialised to zeros — random init
+    # never touches it, and an all-zeros comparison cannot tell a mapped copy
+    # from a miss. Randomise it in the saved state so the parity assertions
+    # below compare real values.
+    for key, value in state.items():
+        if key.endswith("e_score_correction_bias"):
+            state[key] = torch.randn_like(value)
     _save(state, directory)
     return state, config
 
@@ -261,7 +305,11 @@ def test_decoder_weights_land_in_the_right_place(model_type: str, tmp_path: Path
             q, kv = config.q_size, config.kv_size
             same(f"{attn}.q_proj.weight", f"{lite_attn}.qkv_proj.weight", (slice(0, q),))
             same(f"{attn}.k_proj.weight", f"{lite_attn}.qkv_proj.weight", (slice(q, q + kv),))
-            same(f"{attn}.v_proj.weight", f"{lite_attn}.qkv_proj.weight", (slice(q + kv, q + 2 * kv),))
+            same(
+                f"{attn}.v_proj.weight",
+                f"{lite_attn}.qkv_proj.weight",
+                (slice(q + kv, q + 2 * kv),),
+            )
 
             norms = f"{attn}.q_norm.weight" in state
             assert norms == (f"{lite_attn}.q_norm_weight" in params)
@@ -303,6 +351,14 @@ def test_decoder_weights_land_in_the_right_place(model_type: str, tmp_path: Path
         # copies. The per-expert layout the published checkpoints ship is covered
         # by ``test_per_expert_checkpoint_matches_the_stacked_one``.
         same(f"{mlp}.gate.weight", f"{lite_mlp}.gate_weight")
+        # V3's fp32 routing bias ships as an HF buffer under ``mlp.gate``, so
+        # it folds through the same flattened-key rule as the gate weight —
+        # and must stay fp32: a rounded bias silently reorders routing.
+        if f"{mlp}.gate.e_score_correction_bias" in state:
+            assert torch.equal(
+                params[f"{lite_mlp}.gate_e_score_correction_bias"].data,
+                state[f"{mlp}.gate.e_score_correction_bias"],
+            ), f"{lite_mlp}.gate_e_score_correction_bias"
         same(f"{mlp}.experts.gate_up_proj", f"{lite_mlp}.experts.gate_up_proj")
         same(f"{mlp}.experts.down_proj", f"{lite_mlp}.experts.down_proj")
         # DeepSeek's shared expert rides the MoE layers: one dense MLP every
@@ -392,7 +448,9 @@ def test_lm_head_shipped_by_the_checkpoint_is_used_verbatim(model_type: str, tmp
     params = dict(load_lite_model(config, tmp_path).named_parameters())
     lite = _text_prefix(model_type)
 
-    assert torch.equal(params[f"{lite}lm_head.weight"].data, state["lm_head.weight"].to(config.dtype))
+    assert torch.equal(
+        params[f"{lite}lm_head.weight"].data, state["lm_head.weight"].to(config.dtype)
+    )
 
 
 @pytest.mark.parametrize("model_type", ["qwen2", "qwen3", "qwen3_vl"])

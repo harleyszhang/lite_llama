@@ -374,6 +374,7 @@ class LLMEngine:
         tensor_parallel_size: int = 1,
         kv_cache_dtype: str = "auto",
         cuda_graph_lazy: bool = False,
+        hf_overrides: dict[str, object] | None = None,
     ) -> None:
         self.device = device
         self.model_path = checkpoints_dir
@@ -388,6 +389,7 @@ class LLMEngine:
             quantization=quantization,
             kv_cache_dtype=kv_cache_dtype,
             cuda_graph_lazy=cuda_graph_lazy,
+            hf_overrides=hf_overrides,
         )
         if use_cuda_graph:
             self.model_runner.enable_cuda_graph(lazy=cuda_graph_lazy)

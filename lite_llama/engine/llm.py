@@ -58,6 +58,9 @@ class LLM(LLMEngine):
         cuda_graph_lazy: O13 lazy graph capture — seed pair at startup, the
             remaining ``(batch, bucket)`` shapes on first use. Trades a one-off
             ~0.5–1 s stall per new shape for a seconds-scale cold start.
+        hf_overrides: Fields applied over the checkpoint's ``config.json``
+            (vLLM ``--hf-overrides`` semantics), e.g.
+            ``{"num_hidden_layers": 1}`` to run a trimmed stack.
     """
 
     def __init__(
@@ -73,6 +76,7 @@ class LLM(LLMEngine):
         data_parallel_size: int = 1,
         kv_cache_dtype: str = "auto",
         cuda_graph_lazy: bool = False,
+        hf_overrides: dict[str, object] | None = None,
     ) -> None:
         if data_parallel_size != 1:
             raise ValueError(
@@ -100,6 +104,7 @@ class LLM(LLMEngine):
             tensor_parallel_size=tensor_parallel_size,
             kv_cache_dtype=kv_cache_dtype,
             cuda_graph_lazy=cuda_graph_lazy,
+            hf_overrides=hf_overrides,
         )
 
         # Strategy: only multimodal checkpoints get a preparer (and pay for the

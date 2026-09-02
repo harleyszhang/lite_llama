@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -113,9 +114,21 @@ class ModelConfig:
         checkpoints_dir: str | Path,
         max_seq_len: int = 2048,
         kv_cache_dtype: str = "auto",
+        hf_overrides: Mapping[str, Any] | None = None,
     ) -> ModelConfig:
-        """Load ``config.json`` from a checkpoint directory through ``AutoConfig``."""
+        """Load ``config.json`` from a checkpoint directory through ``AutoConfig``.
+
+        Args:
+            hf_overrides: Fields set on the loaded config after ``AutoConfig`` —
+                vLLM's ``--hf-overrides`` semantics. Trimming
+                ``{"num_hidden_layers": 1}`` builds a one-layer model that still
+                loads and runs through every production path, the supported way
+                to test a family's layer arithmetic without paying for the
+                whole stack.
+        """
         hf_config = AutoConfig.from_pretrained(str(checkpoints_dir), trust_remote_code=True)
+        for field, value in (hf_overrides or {}).items():
+            setattr(hf_config, field, value)
         return cls(hf_config, max_seq_len=max_seq_len, kv_cache_dtype=kv_cache_dtype)
 
     @property
@@ -232,6 +245,22 @@ class ModelConfig:
     def scoring_func(self) -> str:
         """Router scoring: ``softmax`` (V2) or ``sigmoid`` (V2.5+/V3)."""
         return str(getattr(self.text_config, "scoring_func", "softmax"))
+
+    @property
+    def topk_method(self) -> str:
+        """Routing family: ``greedy`` (V2-Lite, Qwen3-MoE), ``group_limited_greedy``
+        (V2) or ``noaux_tc`` (V2.5+/V3, biased grouped routing)."""
+        return str(getattr(self.text_config, "topk_method", "greedy") or "greedy")
+
+    @property
+    def n_group(self) -> int:
+        """Expert groups the router splits the experts into (0/absent = ungrouped)."""
+        return int(getattr(self.text_config, "n_group", 1) or 1)
+
+    @property
+    def topk_group(self) -> int:
+        """Groups each token may draw its routed experts from."""
+        return int(getattr(self.text_config, "topk_group", 1) or 1)
 
     @property
     def tie_word_embeddings(self) -> bool:
