@@ -36,7 +36,11 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from ..distributed.parallel_state import all_ranks_agree, get_tp_world_size, warmup_collectives
+from ..distributed.parallel_state import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_ranks_agree,
+    warmup_collectives,
+)
 from .attention_metadata import AttentionMetadata
 
 logger = logging.getLogger(__name__)
@@ -325,7 +329,7 @@ class CUDAGraphManager:
         # driver alone deadlocks the group instead of returning a number.
         self.parity_error: float | None = None
         # Read once: this is consulted on every decode step.
-        self._check_lockstep = os.environ.get(_LOCKSTEP_ENV) == "1" and get_tp_world_size() > 1
+        self._check_lockstep = os.environ.get(_LOCKSTEP_ENV) == "1" and get_tensor_model_parallel_world_size() > 1
 
     def capture_all(self) -> None:
         """Capture a graph for every ``(batch_size, seq_len_bucket)`` pair."""
@@ -566,7 +570,7 @@ class CUDAGraphManager:
             if runner is None
             else 1 + zlib.crc32(f"{runner.batch_size}:{runner.seq_len_bucket}".encode())
         )
-        if not all_ranks_agree(choice):
+        if not tensor_model_parallel_ranks_agree(choice):
             raise RuntimeError(
                 "tensor-parallel ranks disagree on which decode CUDA graph to replay "
                 f"(this rank chose {choice}); the group would deadlock in the graph's "

@@ -48,7 +48,7 @@ follower 不持有 scheduler、不持有队列、不持有停止条件；它收 
 
 ## 控制面走 gloo，不走 NCCL
 
-plan 是 Python 对象，而 NCCL 只能搬**显存**：用它传 plan 就得把每个 plan 在 GPU 上中转一次。所以 `init_parallel` 在建 NCCL 组的同时，为同一批 rank 再建一个 **CPU（gloo）组**专门承载控制面，`broadcast_object` 把 pickle 后的字节从主存直接发出去。
+plan 是 Python 对象，而 NCCL 只能搬**显存**：用它传 plan 就得把每个 plan 在 GPU 上中转一次。所以 `init_parallel` 在建 NCCL 组的同时，为同一批 rank 再建一个 **CPU（gloo）组**专门承载控制面，`tensor_model_parallel_broadcast_object_list` 把 pickle 后的字节从主存直接发出去。
 
 分层的结果是：**数据面（NCCL，张量）与控制面（gloo，plan）互不知情**，而控制面因为不需要显卡，在 CPU 上就能整套测出来（`test_tp_control_plane.py`：广播语义 + follower 存活检测，7 个测试）。
 
@@ -137,7 +137,7 @@ assert stats.tally(Collective.ALL_GATHER).nbytes < 1024   # 关于流量的一�
 - **打开的窗口存在 `ContextVar` 里，不是模块全局变量里。** 于是一个窗口只属于开它的那个线程和 asyncio task。DP 副本是并发推进的（`async_data_parallel.py`），窗口若共享，每个副本的 per-step 测量都会把兄弟副本的流量算进来——得到的是一个看起来完全合理、但恰好错了 DP 倍的数字。
 - **窗口可嵌套，事件计入所有打开的窗口。** per-step 窗口套在 whole-run 窗口里，一趟就同时拿到两份数据，调用方不需要做减法。
 - **op 与 plane 是枚举，不是字符串。** 打错一个 op 名，字符串写法会安静地开出一行新账，让本该记录的那一行报 0——而"报 0"恰恰是这个模块唯一要回答的问题（这个通信到底有没有发生）。`Collective` 是封闭集合，plane 由 `Collective.plane` 给出：`broadcast_object` 是控制面（pickle 对象走 gloo），其余是数据面（张量走 NCCL）。二者是设计上互相交换的关系——花两个标量的控制流量换掉一次词表规模的 gather——所以按调用点打标签迟早会漂。报告、断言和 GIF 面板都从这一处取 plane。
-- **记账点在 world-of-one 早退之后。** 单卡下的 no-op collective 不搬字节，记它就是在量调用点而不是量线路。`broadcast_object` 的字节数需要第二次 pickle，所以只在有窗口打开时才算，并且**在广播之后**算——这样 follower 报的数就是 driver 发出去的数。
+- **记账点在 world-of-one 早退之后。** 单卡下的 no-op collective 不搬字节，记它就是在量调用点而不是量线路。`tensor_model_parallel_broadcast_object_list` 的字节数需要第二次 pickle，所以只在有窗口打开时才算，并且**在广播之后**算——这样 follower 报的数就是 driver 发出去的数。
 
 实测一次真实的 tp=2 运行（Qwen2.5-1.5B-Instruct，4 条 prompt，24 步，rank 0 视角）：
 
@@ -180,7 +180,7 @@ decode graph 在单卡上录的是一串 kernel；在两卡上还把分片层的
 三件事让它成立：
 
 1. **通信器先于捕获存在。** NCCL 在首次集合通信时才建设备资源，而捕获区内不能分配。`warmup_collectives()` 在每次 capture 前发一次 all-reduce 把这步挪到捕获之外，并顺手校验规约结果等于 rank 数——同一处不匹配若留到捕获中发现，表现是无消息的挂死。`init_parallel` 另外 `setdefault` 了 `NCCL_GRAPH_MIXING_SUPPORT=1`（prefill 永远 eager、decode 走 graph，两类集合通信共用一个通信器）；1 本就是 NCCL 默认值，这行的作用是把要求写在建组的地方。
-2. **网格在上线前对齐。** `ModelRunner.enable_cuda_graph` 捕获完成后，各 rank 用 `all_ranks_agree()` 比对一个 `crc32` 网格指纹；不一致就**全体一起丢弃** graph 回落 eager。指纹为 `0`（=什么都没捕获，含 OOM）即使全体一致也判失败，所以这道闸通过就意味着每个 rank 都**有** graph。OOM 分支不能直接 return——对端正走向同一个集合通信，失败必须**报进去**而不是绕开。
+2. **网格在上线前对齐。** `ModelRunner.enable_cuda_graph` 捕获完成后，各 rank 用 `tensor_model_parallel_ranks_agree()` 比对一个 `crc32` 网格指纹；不一致就**全体一起丢弃** graph 回落 eager。指纹为 `0`（=什么都没捕获，含 OOM）即使全体一致也判失败，所以这道闸通过就意味着每个 rank 都**有** graph。OOM 分支不能直接 return——对端正走向同一个集合通信，失败必须**报进去**而不是绕开。
 3. **replay 判定不读任何本地状态。** `_select()` 只看 `input_ids.shape` 与 `atten_info.max_actual_seq_len`，两者都由 driver 广播的同一份 `ModelInput` 推出，因此各 rank 结构对称，不需要每步协商。
 
 之后还有一道**数值闸**：每个已捕获的 `(batch, bucket)` 都跑一次 graph-vs-eager 的合成 decode 比对，取最大 logit 差，用 min 规约合并——任一 rank 超差则全体退回 eager。容差 `TP_GRAPH_PARITY_ATOL = 1e-2` 给 all-reduce 的求和顺序留了余量，但 H100×2 上 bf16 / fp8 / nvfp4 三种方案实测都是 **0.000e+00**：replay 发的是与捕获完全相同的 kernel 序列，逐位一致。写成 `error <= tol` 而不是 `not error > tol`，是为了让 NaN（graph 读到已释放内存的特征）落到失败一侧。

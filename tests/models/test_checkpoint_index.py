@@ -80,14 +80,15 @@ def mapping(checkpoint: Path) -> tuple[list[str], dict[str, str | None], set[str
     with init_empty_parameters():
         model = model_cls(config)
 
-    # For AWQ/GPTQ checkpoints, adapt_int4_checkpoint renames keys before
-    # translate_weight_key sees them. Simulate that renaming here.
-    is_int4 = config.quant is not None and getattr(config.quant, "is_int4", False)
+    # For packed checkpoints (AWQ/GPTQ, either bit width),
+    # adapt_packed_checkpoint renames keys before translate_weight_key sees
+    # them. Simulate that renaming here.
+    is_packed = config.quant is not None and getattr(config.quant, "is_packed", False)
 
     translated: dict[str, str | None] = {}
     for key in keys:
         effective_key = key
-        if is_int4:
+        if is_packed:
             effective_key = _adapt_int4_key(key)
             if effective_key is None:
                 translated[key] = None  # dropped (e.g. g_idx)

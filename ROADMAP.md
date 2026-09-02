@@ -128,9 +128,9 @@
 
 | # | bug | 位置 | 修法 |
 |---|---|---|---|
-| 5 | `all_reduce_min` 用 `_TP_RANK` 当 CUDA device index;dp>1 时非 leader 副本的 TP rank 0 会算到别人的卡上 | `parallel_state.py:245` `cuda:{_TP_RANK}` | `torch.cuda.current_device()` |
+| 5 | `tensor_model_parallel_all_reduce_min` 用 `_TP_RANK` 当 CUDA device index;dp>1 时非 leader 副本的 TP rank 0 会算到别人的卡上 | `parallel_state.py:245` `cuda:{_TP_RANK}` | `torch.cuda.current_device()` |
 | 6 | DP 路由用字符数 `len(prompt)` 当 token 数;`LeastLoadedBalancer.select` 的 `estimated_tokens` 形参实际未用,语义是 total_requests 却起了误导名字 | `data_parallel.py:_route` / `dp_load_balancer.py` | 路由层用 tokenizer 计数(或显式 len/4 启发式并命名 honest);balancer 命名对齐 SGLang 语义 |
-| 7 | TP 采样 RNG 不同步(已修,保留监控) | `broadcast_tp` 采样后广播 | — |
+| 7 | TP 采样 RNG 不同步(已修,保留监控) | `tensor_model_parallel_broadcast` 采样后广播 | — |
 
 ### 目标进程模型
 
@@ -295,7 +295,7 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
               └─→ CP/PCP
 ```
 
-当前通信层只有 `all_reduce`(SUM) 和 `all_reduce_min`,**缺 all_gather / reduce_scatter / all_to_all / P2P send-recv**——这是 EP/DCP/CP 的共同前置。
+当前通信层只有 `all_reduce`(SUM) 和 `tensor_model_parallel_all_reduce_min`,**缺 all_gather / reduce_scatter / all_to_all / P2P send-recv**——这是 EP/DCP/CP 的共同前置。
 
 | 能力 | 前置 | 2×GPU 可实测? | 优先级 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -323,7 +323,7 @@ SGLang `DataParallelController.LoadBalanceMethod` 有四种:round-robin / follow
 **设计**:类名对齐 vLLM `model_executor/layers/vocab_parallel_embedding.py`;weight 布局独立于 quant(复用 quant_method 组合,`_check_shard_alignment` 已保证 scale 网格不被切坏)。
 
 - `QKVParallelLinear`:q_proj + kv_proj 合为一个 `qkv_proj` 参数(输出 `[q_total + 2*kv_total]`),一次 GEMM 替代两次;q 段按 `num_q_heads/tp`、kv 段按 `num_kv_heads/tp` **各自对齐**(GQA 两段 head 边界独立),kv 段是 k+v 连续存放,local 输出 = `2*(num_kv_heads/tp)*head_dim`,k/v 边界不因切分破坏;
-- `VocabParallelEmbedding`:weight `[local_vocab, hidden]`,forward = `F.embedding` + `all_reduce_tp`(查表结果 hidden 维规约);
+- `VocabParallelEmbedding`:weight `[local_vocab, hidden]`,forward = `F.embedding` + `tensor_model_parallel_all_reduce`(查表结果 hidden 维规约);
 - `ParallelLMHead`:weight `[local_vocab, hidden]`,forward 输出**局部 logits** `[*, local_vocab]`,不 gather——采样层直接消费局部 logits。
 
 **自有设计(对比 vLLM 的关键差异)**
@@ -400,7 +400,7 @@ o rlap 不止"TP 通信藏进计算"一件事。把所有重叠拆成三条正�
 
 **两层各自的落法:**
 
-1. **TP + CUDA Graph**:捕获前 `warmup_collectives()` 把 NCCL 通信器的惰性初始化挪出捕获区;捕获后各 rank 用 `all_ranks_agree()` 比对 `crc32` 网格指纹(指纹 `0`=什么都没捕获,即使全体一致也判失败),再各自跑一遍 graph-vs-eager 的 logit 比对并以 min 规约合并——任一 rank 超差则全体退回 eager。replay 判定只读广播来的 `ModelInput`,故不需要每步协商。详见 `docs/tensor_parallel.md` 的「TP × CUDA Graph」节。
+1. **TP + CUDA Graph**:捕获前 `warmup_collectives()` 把 NCCL 通信器的惰性初始化挪出捕获区;捕获后各 rank 用 `tensor_model_parallel_ranks_agree()` 比对 `crc32` 网格指纹(指纹 `0`=什么都没捕获,即使全体一致也判失败),再各自跑一遍 graph-vs-eager 的 logit 比对并以 min 规约合并——任一 rank 超差则全体退回 eager。replay 判定只读广播来的 `ModelInput`,故不需要每步协商。详见 `docs/tensor_parallel.md` 的「TP × CUDA Graph」节。
 2. **DP + CUDA Graph**:DP 副本互不通信,各自 capture 各自 replay,随常驻引擎循环一同生效。
 
 **实测**(H100×2,Qwen2.5-0.5B,`tests/distributed/test_tp_cuda_graph.py`):bf16 / fp8 / nvfp4 三方案各捕获 8 个 graph,graph 与 eager 的最坏 logit 差 **0.000e+00**,32 步 greedy 逐字节同答。`LITE_LLAMA_TP_CUDA_GRAPH=0` 是 kill-switch,`LITE_LLAMA_TP_GRAPH_CHECK=1` 每步校验两 rank 选中同一 graph。
@@ -656,7 +656,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
 
 - **fix**(并行 bug 修复包:问题 4/5/6,小改不动架构)
   - DP×TP 死锁:改为一次 spawn 出 dp×tp 进程网格
-  - `all_reduce_min` 取错 device index:`_TP_RANK` 换成 `torch.cuda.current_device()`
+  - `tensor_model_parallel_all_reduce_min` 取错 device index:`_TP_RANK` 换成 `torch.cuda.current_device()`
   - DP 路由的 token 数估算:从字符数改为真实 token 数,balancer 命名对齐 SGLang 语义
 - **refactor**(引擎重构)
   - Executor 抽象:UniProc / Multiproc 两份实现,对标 vLLM `v1/executor/`

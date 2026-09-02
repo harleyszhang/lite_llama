@@ -2,11 +2,14 @@
 
 ``init_parallel`` splits the world into contiguous TP groups — one per DP
 replica — and builds the TP process group; the ``get_*`` accessors then
-answer rank queries from module state anywhere in the codebase.
+answer rank queries from module state anywhere in the codebase. The collective
+names follow vLLM's ``vllm.distributed.parallel_state`` spelling
+(``tensor_model_parallel_all_reduce`` and friends) so both codebases read the
+same at the call site.
 
 Usage:
     init_parallel(global_rank, tp_size, dp_size, master_port)
-    assert get_tp_rank() < get_tp_world_size()
+    assert get_tensor_model_parallel_rank() < get_tensor_model_parallel_world_size()
 """
 
 from __future__ import annotations
@@ -122,9 +125,9 @@ def init_parallel(
         members = list(range(replica * tp_size, (replica + 1) * tp_size))
         group = dist.new_group(members, backend=backend)
         # A second, CPU-backed group over the same ranks carries the *control*
-        # plane: :func:`broadcast_object` ships pickled plans, and nccl can
-        # only move device memory, so it would have to stage every plan through
-        # the GPU. gloo sends the bytes straight from host memory.
+        # plane: :func:`tensor_model_parallel_broadcast_object_list` ships pickled
+        # plans, and nccl can only move device memory, so it would have to stage
+        # every plan through the GPU. gloo sends the bytes straight from host memory.
         cpu_group = group if backend == "gloo" else dist.new_group(members, backend="gloo")
         if replica == _DP_RANK:
             _TP_GROUP = group
@@ -187,22 +190,22 @@ def destroy_tensor_parallel() -> None:
 # --------------------------------------------------------------------------- #
 # Accessors
 # --------------------------------------------------------------------------- #
-def get_tp_rank() -> int:
+def get_tensor_model_parallel_rank() -> int:
     """This process's rank within its replica's TP group (0 when TP is disabled)."""
     return _TP_RANK
 
 
-def get_tp_world_size() -> int:
+def get_tensor_model_parallel_world_size() -> int:
     """Number of TP ranks per replica (1 when TP is disabled)."""
     return _TP_WORLD_SIZE
 
 
-def get_dp_rank() -> int:
+def get_data_parallel_rank() -> int:
     """Which replica this process belongs to (0 when DP is disabled)."""
     return _DP_RANK
 
 
-def get_dp_world_size() -> int:
+def get_data_parallel_world_size() -> int:
     """Number of model replicas (1 when DP is disabled)."""
     return _DP_WORLD_SIZE
 
@@ -226,12 +229,12 @@ def divide(a: int, b: int, what: str = "") -> int:
 # --------------------------------------------------------------------------- #
 # Collectives
 #
-# Primitive names carry no domain suffix: the communication domain is expressed
-# by ``group``, not by the name (the vLLM/SGLang convention, and what
-# ``torch.distributed``'s own signatures do). ``group=None`` resolves to the
-# module-state TP group — today the only persistent group, and therefore what
-# every existing call site means; once EP/CP groups exist their callers pass the
-# group and these names stay put. Each op reports to :class:`CollectiveStats`
+# Two families. The TP family carries vLLM's ``tensor_model_parallel_*`` names
+# and always targets the module-state TP group — every existing call site means
+# that group, and the name says so at the call site. The generic family
+# (``reduce_scatter``/``all_to_all``/``send``/``recv``) expresses its domain by
+# ``group`` instead, the ``torch.distributed`` convention, because EP/CP
+# callers will own groups of their own. Each op reports to :class:`CollectiveStats`
 # *after* the world-of-one early return: a no-op collective moves no bytes, so
 # counting it would measure call sites rather than traffic.
 # --------------------------------------------------------------------------- #
@@ -250,44 +253,45 @@ def _world_of_one(group: dist.ProcessGroup | None) -> bool:
     return _TP_WORLD_SIZE <= 1 if group is None else dist.get_world_size(group) <= 1
 
 
-def all_reduce(
-    tensor: torch.Tensor,
-    op: dist.ReduceOp = dist.ReduceOp.SUM,
-    *,
-    group: dist.ProcessGroup | None = None,
-) -> torch.Tensor:
-    """Reduce ``tensor`` across the group's ranks, in place. No-op for a world of one.
-
-    The MAX spelling is the other half of a vocabulary-parallel ``log_softmax``:
-    each rank holds a slice of the vocabulary, so the row maximum that keeps
-    ``exp`` from overflowing has to be the maximum over *all* slices. One float
-    per row crosses the wire, not one per token id.
-    """
-    if _world_of_one(group):
+def tensor_model_parallel_all_reduce(tensor: torch.Tensor) -> torch.Tensor:
+    """Sum ``tensor`` across all TP ranks. No-op when ``world_size == 1``."""
+    if _TP_WORLD_SIZE <= 1:
         return tensor
-    dist.all_reduce(tensor, op=op, group=_resolve(group))
-    CollectiveStats.record(
-        Collective.ALL_REDUCE_MAX if op is dist.ReduceOp.MAX else Collective.ALL_REDUCE,
-        _payload(tensor),
-    )
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=_TP_GROUP)
+    CollectiveStats.record(Collective.ALL_REDUCE, _payload(tensor))
     return tensor
 
 
-def all_gather(
-    tensor: torch.Tensor, dim: int = -1, *, group: dist.ProcessGroup | None = None
-) -> torch.Tensor:
-    """Concatenate every rank's ``tensor`` along ``dim``, rank order.
+def tensor_model_parallel_all_reduce_max(tensor: torch.Tensor) -> torch.Tensor:
+    """Element-wise maximum of ``tensor`` across this replica's TP ranks, in place.
+
+    The other half of a vocabulary-parallel ``log_softmax``: each rank holds a slice of
+    the vocabulary, so the row maximum that keeps ``exp`` from overflowing has to be the
+    maximum over *all* slices. One float per row crosses the wire, not one per token id.
+
+    No-op when ``tp_world_size == 1``.
+    """
+    if _TP_WORLD_SIZE <= 1:
+        return tensor
+    dist.all_reduce(tensor, op=dist.ReduceOp.MAX, group=_TP_GROUP)
+    CollectiveStats.record(Collective.ALL_REDUCE_MAX, _payload(tensor))
+    return tensor
+
+
+def tensor_model_parallel_all_gather(tensor: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """Concatenate every TP rank's ``tensor`` along ``dim``, rank order.
 
     Used for the small candidate tensors of vocabulary-parallel sampling — the ``k``
-    best ``(logit, id)`` pairs per rank — where the transfer is ``O(k * world_size)``
-    and independent of the vocabulary size. Every rank must pass the same shape.
+    best ``(logit, id)`` pairs per rank — where the transfer is ``O(k * tp)`` and
+    independent of the vocabulary size. Every rank must pass the same shape.
+
+    Returns ``tensor`` itself when ``tp_world_size == 1``.
     """
-    if _world_of_one(group):
+    if _TP_WORLD_SIZE <= 1:
         return tensor
-    group = _resolve(group)
     tensor = tensor.contiguous()
-    parts = [torch.empty_like(tensor) for _ in range(dist.get_world_size(group))]
-    dist.all_gather(parts, tensor, group=group)
+    parts = [torch.empty_like(tensor) for _ in range(_TP_WORLD_SIZE)]
+    dist.all_gather(parts, tensor, group=_TP_GROUP)
     CollectiveStats.record(Collective.ALL_GATHER, _payload(tensor))
     return torch.cat(parts, dim=dim)
 
@@ -373,50 +377,45 @@ def recv(
     return tensor
 
 
-def broadcast(
-    tensor: torch.Tensor, src: int = 0, *, group: dist.ProcessGroup | None = None
-) -> torch.Tensor:
-    """Broadcast ``tensor`` from the group-local ``src`` rank to the whole group.
+def tensor_model_parallel_broadcast(tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
+    """Broadcast ``tensor`` from the TP-local ``src`` rank to all TP ranks.
 
     Used after sampling: rank 0 draws the next token and broadcasts it so every
     rank feeds the same input_ids on the next decode step. Without this, each
     rank would run ``torch.multinomial`` with an independent RNG state and
     diverge on the first non-greedy sample.
+
+    No-op when ``tp_world_size == 1``.
     """
-    if _world_of_one(group):
+    if _TP_WORLD_SIZE <= 1:
         return tensor
     # ``group_src`` keeps ``src`` a group-local rank for every group, which the old
     # hand-rolled ``dp_rank * tp_size + src`` arithmetic only managed for the TP one.
-    dist.broadcast(tensor, group_src=src, group=_resolve(group))
+    dist.broadcast(tensor, group_src=src, group=_TP_GROUP)
     CollectiveStats.record(Collective.BROADCAST, _payload(tensor))
     return tensor
 
 
-def broadcast_object(
-    obj: Any = None, src: int = 0, *, group: dist.ProcessGroup | None = None
-) -> Any:
-    """Broadcast any picklable object from group-local ``src`` to every rank.
+def tensor_model_parallel_broadcast_object_list(obj: Any = None, src: int = 0) -> Any:
+    """Broadcast any picklable object from TP-local ``src`` to every TP rank.
 
     This is the *control* plane. A tensor-parallel step is decided once — on the
     rank that owns the scheduler — and then run everywhere, so the decision has
     to travel: which slots, which token ids, which sampling parameters. Sending
     it as an object rather than as a pile of padded tensors means the receiving
     ranks reconstruct exactly what the sender planned, with no encoding to keep
-    in sync on both sides; and ``group=None`` goes over the gloo TP group, so a
-    few hundred bytes of control never touch device memory or serialise behind
-    the NCCL stream that the data plane is using. An explicit group is used
-    as-is — its owner chooses a backend that can carry host objects.
+    in sync on both sides; and it goes over the gloo group, so a few hundred
+    bytes of control never touch device memory or serialise behind the NCCL
+    stream that the data plane is using.
 
     Non-root ranks ignore ``obj`` and return what the root sent. Returns ``obj``
-    unchanged for a world of one, which is what lets the single-process path
-    call this without a branch.
+    unchanged when ``tp_world_size == 1``, which is what lets the single-process
+    path call this without a branch.
     """
-    if _world_of_one(group):
+    if _TP_WORLD_SIZE <= 1:
         return obj
     payload = [obj]
-    dist.broadcast_object_list(
-        payload, group_src=src, group=_TP_CPU_GROUP if group is None else group
-    )
+    dist.broadcast_object_list(payload, group_src=src, group=_TP_CPU_GROUP)
     # Sizing a plan means pickling it a second time, so it happens only while a window
     # is open: observability may cost something when asked for, never when not. Sized
     # after the broadcast so a follower reports the same bytes the driver sent.
@@ -425,7 +424,7 @@ def broadcast_object(
     return payload[0]
 
 
-def all_reduce_min(value: int) -> int:
+def tensor_model_parallel_all_reduce_min(value: int) -> int:
     """Smallest ``value`` across this replica's TP group.
 
     Used to agree on a KV-cache size: profiling runs per rank and two cards with
@@ -449,7 +448,7 @@ def all_reduce_min(value: int) -> int:
     return int(tensor.item())
 
 
-def all_ranks_agree(value: int) -> bool:
+def tensor_model_parallel_ranks_agree(value: int) -> bool:
     """Whether every TP rank passed the same ``value``. ``True`` when TP is off.
 
     A consensus primitive rather than a reduction, for decisions that must come

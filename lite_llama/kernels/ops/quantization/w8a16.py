@@ -50,6 +50,7 @@ def _w8a16_matmul_kernel(
     b_ptr,
     c_ptr,
     scale_ptr,
+    zero_ptr,
     bias_ptr,
     M,
     N,
@@ -69,13 +70,17 @@ def _w8a16_matmul_kernel(
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
     IS_FP8: tl.constexpr,
+    HAS_ZEROS: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     DEQUANT_SCALE: tl.constexpr,
 ):
     """One ``[BLOCK_M, BLOCK_N]`` tile of ``C = A @ dequant(B).T``.
 
     A is ``[M, K]`` fp16, B is ``[N, K]`` 8-bit, C is ``[M, N]``. ``BLOCK_K``
-    divides ``GROUP_K`` so a k-tile never straddles two scale blocks.
+    divides ``GROUP_K`` so a k-tile never straddles two scale blocks. With
+    ``HAS_ZEROS`` (asymmetric int8, GPTQ ``bits=8``) the group zero point is
+    subtracted in fp32 before the dot — the operand stays an exact integer,
+    exactly as the fused MoE kernel's int4 and int8-asym branches do it.
     """
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_M)
@@ -96,6 +101,11 @@ def _w8a16_matmul_kernel(
     a_ptrs = a_ptr + offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak
     b_ptrs = b_ptr + offs_bn[None, :] * stride_bn + offs_k[:, None] * stride_bk
     scale_ptrs = scale_ptr + (offs_bn // GROUP_N) * stride_sn
+    # Zeros share the scales' shape and strides; the pointer may be null —
+    # the constexpr guard keeps the address arithmetic off the symmetric
+    # kernel's trace entirely, so ``None`` never reaches ``+``.
+    if HAS_ZEROS:
+        zero_ptrs = zero_ptr + (offs_bn // GROUP_N) * stride_sn
 
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_K)):
@@ -109,6 +119,11 @@ def _w8a16_matmul_kernel(
         # int8 values are exact in both 16-bit dtypes.
         if IS_FP8:
             b = dequant_fp8e4m3(b).to(a.dtype)
+        elif HAS_ZEROS:
+            # Differences of int8 integers are integers within [-255, 255],
+            # exact in fp16 and bf16 alike, so the widened tile loses nothing.
+            zero = tl.load(zero_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_sk)
+            b = (b.to(tl.float32) - zero[None, :]).to(a.dtype)
         else:
             b = b.to(a.dtype)
         scale = tl.load(scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_sk)
@@ -177,6 +192,7 @@ def w8a16_matmul(
     group_n: int,
     group_k: int,
     bias: torch.Tensor | None = None,
+    zeros: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """``x @ dequant(qweight).T (+ bias)`` with the weight widened in-kernel.
 
@@ -189,6 +205,9 @@ def w8a16_matmul(
         group_n: Rows of one scale block. ``1`` means per-output-channel.
         group_k: Columns of one scale block. ``>= K`` means one scale per row.
         bias: Optional ``[N]`` bias, added in fp32 before the output cast.
+        zeros: Optional asymmetric int8 zero points (GPTQ ``bits=8``), same
+            shape and layout as ``scales``; ``None`` keeps the symmetric path.
+            fp8 weights reject them — e4m3 has no zero point.
 
     Returns:
         ``[..., N]`` in ``x``'s dtype.
@@ -200,6 +219,16 @@ def w8a16_matmul(
         raise ValueError(f"w8a16 activations must be fp16 or bf16, got {x.dtype}")
     if qweight.stride(-1) != 1:
         raise ValueError("qweight last dimension must be contiguous")
+    if zeros is not None:
+        if is_fp8:
+            raise ValueError(
+                "zero points are asymmetric-int8 (GPTQ bits=8) only; fp8 is symmetric"
+            )
+        if zeros.shape != scales.shape:
+            raise ValueError(
+                f"zeros {tuple(zeros.shape)} must share the scales' shape "
+                f"{tuple(scales.shape)}"
+            )
 
     n, k = qweight.shape
     if x.shape[-1] != k:
@@ -221,6 +250,7 @@ def w8a16_matmul(
         qweight,
         out,
         scales,
+        zeros,
         bias,
         m,
         n,
@@ -236,6 +266,7 @@ def w8a16_matmul(
         GROUP_N=group_n,
         GROUP_K=min(group_k, k),
         IS_FP8=is_fp8,
+        HAS_ZEROS=zeros is not None,
         HAS_BIAS=bias is not None,
         DEQUANT_SCALE=FP8_E4M3_BIT_TRICK_SCALE if is_fp8 else 1.0,
         **cfg,

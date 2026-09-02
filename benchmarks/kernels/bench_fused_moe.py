@@ -11,36 +11,36 @@ i=768, bf16 activation; the two ablations follow the regimes):
 ``tokens <= 8`` (decode)
     Each of the ``top_k`` selected experts is read whole for one token, so the
     ranking *should* be bytes of expert weight — and at exactly 1 token it still
-    is not: every format lands within 10% of bf16 (102-112 us) because the floor
+    is not: every format lands within 12% of bf16 (108-121 us) because the floor
     is launches, not bytes. The layer is five kernels back to back (align, GEMM1,
     silu, GEMM2, sum) and a W8A8 row's activation quantiser used to add two more
     launches — that was the old table's 35% W8A8 decode loss. Both quantisations
     are fused now (into the GEMMs below 32 rows, ``_INLINE_A_QUANT_MAX_ROWS``, and
     into silu's store, ``QUANT_OUT``), which trades the launch for an amax
-    re-derived in every GEMM program: ~9% at t1, gone by t8. From 8 tokens bytes
-    take over and the ranking returns — int8 weight-only at 116.5 us leads
-    bf16's 186.6 by 60%, W8A8 fp8 by 52%, and even int4 finally moves (1.07x).
+    re-derived in every GEMM program: up to ~12% at t1, gone by t8. From 8
+    tokens bytes take over and the ranking returns — int8 weight-only at 114.9
+    us leads bf16's 186.1 by 62%, W8A8 fp8 by 50%, and int4 by 43%.
 ``tokens = 64`` (where quantisation wins)
     Slots per expert first exceed the row-block, so the grouped GEMM amortises
-    each expert load and every quantised row beats bf16's 418.3. int8 W8A8 at
-    234.6 (1.78x) is the floor here, with int8 weight-only and W8A8 fp8 inside
-    1% of it (234.8 / 237.0) and weight-only fp8 at 279.7 (1.50x). The A8 rows
+    each expert load and every quantised row beats bf16's 415.9. int8 W8A8 at
+    234.4 (1.77x) is the floor here, with int8 weight-only and W8A8 fp8 inside
+    1% of it (234.1 / 236.3) and weight-only fp8 at 240.0 (1.73x). The A8 rows
     win on the skipped bit trick alone — ``BLOCK_M`` is 16 here, below the fp8
     wgmma threshold — so the byte savings and the compute savings stack instead
-    of competing. int4 only draws level (1.11x): it reads a quarter of the bytes
-    but is bound by unpacking 8 nibbles per int32, not by traffic — its GB/s is
-    the lowest in the table despite the fewest bytes.
+    of competing. int4 at 242.2 (1.72x) tracks the 8-bit rows: the byte layout's
+    dense load earns the traffic win, and its register nibble split costs about
+    what an 8-bit format's single widening does.
 ``tokens >= 512`` (prefill)
     The weight-only wins invert, and W8A8 takes over. At t512 int8 weight-only
-    still leads bf16 (309.2 against 469.4) but the W8A8 rows have passed it —
-    int8 W8A8 at 275.7 (1.70x) is the fastest row in the regime, fp8 W8A8 at
-    280.7 (1.67x) close behind. At t4096 the weight-only formats are outright
-    regressions (fp8 1404.0, int8 1145.0, int4 1916.4 against 1036.4): each
+    still leads bf16 (313.0 against 469.7) but the W8A8 rows have passed it —
+    int8 W8A8 at 275.9 (1.70x) is the fastest row in the regime, fp8 W8A8 at
+    280.4 (1.67x) close behind. At t4096 the weight-only formats are outright
+    regressions (fp8 1320.8, int8 1148.0, int4 1701.9 against 1062.4): each
     expert tile is re-read across row-blocks and widened again every time, so
     in-loop dequant stops being amortised weight traffic and becomes arithmetic
     on the critical path. The W8A8 rows never pay it — both operands are already
-    8-bit, and no widening exists to hoist. int8 W8A8 at 673.3 (1.54x) is the
-    fastest row in the table at any shape, 22% ahead of fp8 W8A8 (866.0, 1.20x):
+    8-bit, and no widening exists to hoist. int8 W8A8 at 673.1 (1.58x) is the
+    fastest row in the table at any shape, 22% ahead of fp8 W8A8 (868.9, 1.22x):
     the int8 imma reaches the tensor cores from ``BLOCK_M=16`` while fp8 needs 64
     for wgmma, and int32 accumulation is exact, with no ``K_PROMOTE``-style
     precision tax. Its gain is in the MMA, so it appears exactly where the
@@ -91,8 +91,13 @@ rows, whose bytes are identical to their weight-only formats':
     int8 experts, per-output-channel scales, converted in the loop. Same bytes as
     fp8, cheaper widening, coarser format.
 ``[int4]``
-    int4 experts packed 8-per-int32 with group scales and zero points. A quarter
-    of the bytes and the most unpacking work per byte.
+    int4 experts, two nibbles per uint8 byte (vLLM's packing, crossed from the
+    checkpoint's int32 words by ``repack_int4_experts``), with group scales and
+    zero points. The kernel loads the byte tile densely and splits the nibble
+    planes in registers into two half-K dots; vLLM's own replicated addressing
+    (logical k reading byte k // 2) compiles to scalar byte loads and measured
+    13-18 ms per GEMM on these shapes, which is why they ship int4 on the
+    Marlin CUDA kernel instead.
 
 One caveat the A8 rows' TFLOP/s column does not show: Triton emits Hopper's fp8
 ``wgmma`` only from ``BLOCK_M >= 64``, and ``_launch_config``'s fp8 W8A8 tiles
@@ -148,6 +153,7 @@ from lite_llama.kernels.ops.moe.fused_moe import (
     fused_moe_w8a8_int8,
     moe_align_block_size,
 )
+from lite_llama.kernels.ops.quantization import repack_int4_experts
 from lite_llama.modules.quantization.utils import (
     quantize_fp8_per_channel,
     quantize_fp8_per_token,
@@ -401,12 +407,16 @@ def _build_int4(w1: torch.Tensor, w2: torch.Tensor) -> Built:
     """AWQ/GPTQ-style packed int4 experts with group scales and zero points."""
     q1, s1, z1 = _quantize_int4_experts(w1)
     q2, s2, z2 = _quantize_int4_experts(w2)
+    # The kernel eats the byte layout (two nibbles per uint8) — the bridge
+    # ``process_weights_after_loading`` crosses once at load. The torch
+    # reference below still unpacks the int32 words both derive from.
+    kq1, kq2 = repack_int4_experts(q1), repack_int4_experts(q2)
 
     def call(x, tw, ids):
         return fused_moe(
             x,
-            q1,
-            q2,
+            kq1,
+            kq2,
             tw,
             ids,
             w1_scale=s1,
@@ -1049,14 +1059,15 @@ def main() -> None:
         "The two kinds of quantisation win in disjoint regimes, and neither wins\n"
         "everywhere:\n"
         "\n"
-        "  weight-only int8 wins from t8 through t512 (1.60x at t8, 1.78x at t64,\n"
-        "  1.52x at t512) and loses at t4096 (0.90x): each expert tile is re-read\n"
+        "  weight-only int8 wins from t8 through t512 (1.62x at t8, 1.78x at t64,\n"
+        "  1.50x at t512) and loses at t4096 (0.93x): each expert tile is re-read\n"
         "  across row-blocks and widened again every time, so past t512 the\n"
         "  widening stops being amortised weight traffic and becomes arithmetic\n"
         "  on the critical path. fp8_w8a16 is the same shape one tier milder\n"
-        "  (1.34x at t8, 0.74x at t4096). int4 never clearly wins: 1.07x at t8 is\n"
-        "  its best, and at t4096 it is 0.54x -- it reads a quarter of the bytes\n"
-        "  and has the lowest GB/s in the table: unpack-bound, not traffic-bound.\n"
+        "  (1.57x at t8, 0.80x at t4096). int4 wins the middle regimes (1.43x at\n"
+        "  t8, 1.72x at t64, 1.16x at t512) on its quarter of the bytes, and at\n"
+        "  t4096 it is the worst weight-only row (0.62x): the register nibble\n"
+        "  split is a per-tile cost the 8-bit formats' single widening avoids.\n"
         "\n"
         "  The W8A8 rows lose ~9% at t1 -- the launch floor again; their\n"
         "  quantisation is fused in below 32 rows and what remains is the inline\n"

@@ -164,10 +164,10 @@ def test_a_world_of_one_records_nothing_because_it_moves_nothing():
     """Single-GPU code calls the same collectives, which return early. Counting those
     would measure call sites; the count is about the wire."""
     with CollectiveStats.collect() as stats:
-        ps.all_reduce(torch.ones(1024))
-        ps.broadcast(torch.ones(1024))
-        ps.all_gather(torch.ones(1024))
-        ps.broadcast_object({"plan": [1, 2, 3]})
+        ps.tensor_model_parallel_all_reduce(torch.ones(1024))
+        ps.tensor_model_parallel_broadcast(torch.ones(1024))
+        ps.tensor_model_parallel_all_gather(torch.ones(1024))
+        ps.tensor_model_parallel_broadcast_object_list({"plan": [1, 2, 3]})
 
     assert stats.calls == 0
 
@@ -177,7 +177,7 @@ def test_a_world_of_one_records_nothing_because_it_moves_nothing():
 # --------------------------------------------------------------------------- #
 def _all_reduce_payload(rank: int) -> tuple[int, int]:
     with CollectiveStats.collect() as stats:
-        ps.all_reduce(torch.ones(1024, dtype=torch.float32))
+        ps.tensor_model_parallel_all_reduce(torch.ones(1024, dtype=torch.float32))
     tally = stats.tally(Collective.ALL_REDUCE)
     return tally.calls, tally.nbytes
 
@@ -194,7 +194,7 @@ def test_an_all_reduce_is_billed_its_tensor_on_every_rank():
 def _control_plane_payload(rank: int) -> tuple[int, int, int]:
     plan = {"slots": list(range(64)), "step": 7}
     with CollectiveStats.collect() as stats:
-        ps.broadcast_object(plan if rank == 0 else None)
+        ps.tensor_model_parallel_broadcast_object_list(plan if rank == 0 else None)
     return (
         stats.tally(Collective.BROADCAST_OBJECT).calls,
         stats.bytes_on(Plane.CONTROL),
@@ -218,7 +218,7 @@ def test_a_broadcast_plan_is_billed_to_the_control_plane_on_both_sides():
 # --------------------------------------------------------------------------- #
 def _sampling_traffic(rank: int, vocab: int, greedy: bool) -> tuple[int, int, int]:
     """Sample one step from this rank's slice; report (bytes, gather bytes, vocab)."""
-    local_width = vocab // ps.get_tp_world_size()
+    local_width = vocab // ps.get_tensor_model_parallel_world_size()
     generator = torch.Generator().manual_seed(11)
     local_logits = torch.randn(BATCH, local_width, generator=generator)
     offset = local_vocab_offset(local_width) or 0

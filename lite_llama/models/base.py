@@ -28,7 +28,7 @@ from ..modules import (
     SparseMoeBlock,
     VocabParallelEmbedding,
 )
-from ..modules.quantization import QuantizationConfig, adapt_int4_checkpoint
+from ..modules.quantization import QuantizationConfig, adapt_packed_checkpoint
 from . import weights
 from .config import ModelConfig
 
@@ -325,10 +325,11 @@ class CausalLM(nn.Module):
             checkpoint: ``(key, tensor)`` pairs as produced by
                 :func:`lite_llama.executor.weight_utils.hf_weights_iterator`.
         """
-        if self.quant is not None and self.quant.is_int4:
-            # An int4 checkpoint packs weights in its producer's layout;
-            # rewrite the stream to the canonical w4a16 layout on the way in.
-            checkpoint = adapt_int4_checkpoint(checkpoint, self.quant)
+        if self.quant is not None and self.quant.is_packed:
+            # A packed checkpoint (AWQ/GPTQ, either bit width) stores weights
+            # in its producer's word layout; rewrite the stream to the
+            # canonical layout on the way in.
+            checkpoint = adapt_packed_checkpoint(checkpoint, self.quant)
         weights.load_weights(
             self,
             checkpoint,
@@ -337,6 +338,13 @@ class CausalLM(nn.Module):
             if self.config.tie_word_embeddings
             else None,
         )
+        # Post-load weight transforms: a quant method whose kernel layout
+        # differs from the checkpoint's (int4's byte packing) repacks here,
+        # once, while the parameters sit on the load device. Most methods
+        # consume exactly what they loaded and the hook is a no-op.
+        for module in self.modules():
+            if isinstance(module, (LinearBase, SparseMoeBlock)):
+                module.quant_method.process_weights_after_loading(module)
 
     @torch.no_grad()
     def quantize_(self, quant: QuantizationConfig) -> None:

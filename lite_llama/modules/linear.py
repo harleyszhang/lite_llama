@@ -13,7 +13,12 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ..distributed.parallel_state import all_reduce, divide, get_tp_rank, get_tp_world_size
+from ..distributed.parallel_state import (
+    divide,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from .quantization import QuantizationConfig, UnquantizedLinearMethod
 
 
@@ -99,6 +104,11 @@ class LinearBase(nn.Module):
             return
         method = quant.get_quant_method(self)
         method.quantize_from_fp16(self, quant)
+        # Same post-load hook the checkpoint path runs (CausalLM.load_weights):
+        # a method whose kernel layout differs from what quantize_from_fp16
+        # produced — GPTQ bits=8 unpacks its packed words to int8 bytes — needs
+        # this pass before the first apply. For every other method it is a no-op.
+        method.process_weights_after_loading(self)
         self.quant = quant
         self.quant_method = method
 
@@ -130,7 +140,7 @@ class ColumnParallelLinear(LinearBase):
         dtype: torch.dtype = torch.bfloat16,
         what: str = "output features",
     ) -> None:
-        world_size = get_tp_world_size()
+        world_size = get_tensor_model_parallel_world_size()
         local_out = divide(output_size, world_size, what)
         _check_shard_alignment(quant, local_out, what)
         super().__init__(input_size, local_out, bias=bias, quant=quant, dtype=dtype)
@@ -145,10 +155,12 @@ class ColumnParallelLinear(LinearBase):
         if shard_id is not None:
             half = view.shape[0] // 2
             view = view.narrow(0, shard_id * half, half)
-        world_size = get_tp_world_size()
+
+        world_size = get_tensor_model_parallel_world_size()
         if world_size > 1:
             size = loaded.shape[0] // world_size
-            loaded = loaded.narrow(0, get_tp_rank() * size, size)
+            loaded = loaded.narrow(0, get_tensor_model_parallel_rank() * size, size)
+
         return super()._weight_loader(view, loaded)
 
 
@@ -184,7 +196,7 @@ class QKVParallelLinear(LinearBase):
         quant: QuantizationConfig | None = None,
         dtype: torch.dtype = torch.bfloat16,
     ) -> None:
-        world_size = get_tp_world_size()
+        world_size = get_tensor_model_parallel_world_size()
         local_heads = divide(num_heads, world_size, "attention heads")
         local_kv_heads = divide(num_kv_heads, world_size, "key/value heads")
         q_size = local_heads * head_dim
@@ -224,10 +236,12 @@ class QKVParallelLinear(LinearBase):
         q_rows, kv_rows = self.q_size // factor, self.kv_size // factor
         offset, rows = ((0, q_rows), (q_rows, kv_rows), (q_rows + kv_rows, kv_rows))[shard_id]
         view = param.data.narrow(0, offset, rows)
-        world_size = get_tp_world_size()
+
+        world_size = get_tensor_model_parallel_world_size()
         if world_size > 1:
             size = loaded.shape[0] // world_size
-            loaded = loaded.narrow(0, get_tp_rank() * size, size)
+            loaded = loaded.narrow(0, get_tensor_model_parallel_rank() * size, size)
+
         return super()._weight_loader(view, loaded)
 
     def extra_repr(self) -> str:
@@ -241,9 +255,24 @@ class QKVParallelLinear(LinearBase):
 class RowParallelLinear(LinearBase):
     """Splits the contracted features across ranks and all-reduces the result.
 
-    Each rank multiplies its slice of ``x`` by its slice of ``W``, producing a
-    partial sum that the all-reduce completes. A bias is rejected rather than
-    silently added ``world_size`` times — no supported projection has one.
+    Each rank multiplies its slice of ``x`` by its slice of ``W``, so what comes
+    out is a partial sum; :func:`~lite_llama.distributed.parallel_state.tensor_model_parallel_all_reduce`
+    completes it. The collective is inserted after the local multiply and gated
+    on ``reduce_results`` and the world size — the same insertion point vLLM's
+    ``RowParallelLinear`` uses, with the same flag. A bias is rejected rather
+    than silently added ``world_size`` times — no projection in the supported
+    models has one.
+
+    Args:
+        input_size: Full contracted width, split ``world_size`` ways.
+        output_size: Full output width (not split).
+        quant: Quantisation layout, or ``None``.
+        reduce_results: Whether ``forward`` all-reduces the partial sums into the
+            full output. ``True`` — the o_proj/down_proj default — keeps the
+            collective inside the layer; ``False`` hands back the partial sum so
+            a caller can time, batch or defer the collective itself (vLLM's
+            ``ParallelLMHead`` uses the same escape hatch).
+        what: Name of the dimension being split, for the error message.
     """
 
     def __init__(
@@ -253,6 +282,7 @@ class RowParallelLinear(LinearBase):
         *,
         bias: bool = False,
         quant: QuantizationConfig | None = None,
+        reduce_results: bool = True,
         dtype: torch.dtype = torch.bfloat16,
         what: str = "input features",
     ) -> None:
@@ -260,23 +290,31 @@ class RowParallelLinear(LinearBase):
             raise ValueError(
                 "RowParallelLinear cannot carry a bias: it would be added once per rank"
             )
-        world_size = get_tp_world_size()
+        world_size = get_tensor_model_parallel_world_size()
         local_in = divide(input_size, world_size, what)
         _check_shard_alignment(quant, local_in, what)
         super().__init__(local_in, output_size, quant=quant, dtype=dtype)
         self.full_input_size = input_size
+        self.reduce_results = reduce_results
 
     def _weight_loader(self, param, loaded, shard_id=None):
         # The split is along the contracted dimension (columns of the weight
         # and of the scale grid alike); no packed form of this layer exists.
-        world_size = get_tp_world_size()
+        world_size = get_tensor_model_parallel_world_size()
         if world_size > 1:
             size = loaded.shape[1] // world_size
-            loaded = loaded.narrow(1, get_tp_rank() * size, size)
+            loaded = loaded.narrow(1, get_tensor_model_parallel_rank() * size, size)
         return super()._weight_loader(param.data, loaded)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return all_reduce(self.apply_linear(x))
+        output_parallel = self.apply_linear(x)
+        # vLLM's insertion point: the collective rides on the layer itself, after
+        # the multiply and before anything downstream can consume the output. The
+        # world-of-one early return lives inside the collective, so the only
+        # decision a call site makes is the reduce_results policy.
+        if self.reduce_results:
+            return tensor_model_parallel_all_reduce(output_parallel)
+        return output_parallel
 
 
 def _check_shard_alignment(quant: QuantizationConfig | None, local_size: int, what: str) -> None:

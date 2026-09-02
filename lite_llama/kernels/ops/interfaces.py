@@ -304,7 +304,8 @@ class MoeOp(LogicalOp):
             topk_weights: ``[tokens, top_k]`` routing weights.
             topk_ids: ``[tokens, top_k]`` expert indices.
             w1_scale, w2_scale: Per-expert dequant scales; ``None`` = plain.
-            w1_zeros, w2_zeros: Zero points for int4 experts.
+            w1_zeros, w2_zeros: Zero points for the asymmetric formats — int4
+                experts and GPTQ ``bits=8`` int8; ``None`` for symmetric.
             group_n, group_k: Scale block geometry.
 
         Returns:

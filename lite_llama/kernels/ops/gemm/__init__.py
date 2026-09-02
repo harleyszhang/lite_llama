@@ -37,7 +37,10 @@ register(
         backend="native",
         target="lite_llama.kernels.ops.gemm.linear:linear_w8a16",
         dtypes=("bf16", "fp16"),
-        schemes=("fp8", "blockwise_int8"),
+        # ``gptq_int8`` is the asymmetric half of the row: GPTQ ``bits=8``
+        # checkpoints land here (with zero points) after the load-time unpack,
+        # while the int4 GPTQ scheme keeps its own packed-words row below.
+        schemes=("fp8", "blockwise_int8", "gptq_int8"),
         golden=NATIVE_BASELINE,
     )
 )

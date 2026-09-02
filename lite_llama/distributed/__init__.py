@@ -1,26 +1,24 @@
 """Parallelism state: the DP x TP rank grid and the collectives TP needs.
 
 Re-exports :mod:`lite_llama.distributed.parallel_state` so that rank queries
-(``get_tp_rank``) and group setup (``init_parallel``) come from one import.
+(``get_tensor_model_parallel_rank``) and group setup (``init_parallel``) come from
+one import. The collective names follow vLLM's
+``vllm.distributed.parallel_state`` spelling (``tensor_model_parallel_all_reduce``
+and friends) so both codebases read the same at the call site.
 
 Usage:
-    from lite_llama.distributed import get_tp_rank, init_parallel
+    from lite_llama.distributed import get_tensor_model_parallel_rank, init_parallel
 """
 
 from .parallel_state import (
-    all_gather,
-    all_reduce,
-    all_reduce_min,
     all_to_all,
-    broadcast,
-    broadcast_object,
     destroy_parallel,
     destroy_tensor_parallel,
     divide,
-    get_dp_rank,
-    get_dp_world_size,
-    get_tp_rank,
-    get_tp_world_size,
+    get_data_parallel_rank,
+    get_data_parallel_world_size,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
     get_world_size,
     grid_coordinates,
     init_parallel,
@@ -28,22 +26,25 @@ from .parallel_state import (
     recv,
     reduce_scatter,
     send,
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
+    tensor_model_parallel_all_reduce_max,
+    tensor_model_parallel_all_reduce_min,
+    tensor_model_parallel_broadcast,
+    tensor_model_parallel_broadcast_object_list,
+    tensor_model_parallel_ranks_agree,
+    warmup_collectives,
 )
 
 __all__ = [
-    "all_gather",
-    "all_reduce",
-    "all_reduce_min",
     "all_to_all",
-    "broadcast",
-    "broadcast_object",
     "destroy_parallel",
     "destroy_tensor_parallel",
     "divide",
-    "get_dp_rank",
-    "get_dp_world_size",
-    "get_tp_rank",
-    "get_tp_world_size",
+    "get_data_parallel_rank",
+    "get_data_parallel_world_size",
+    "get_tensor_model_parallel_rank",
+    "get_tensor_model_parallel_world_size",
     "get_world_size",
     "grid_coordinates",
     "init_parallel",
@@ -51,4 +52,12 @@ __all__ = [
     "recv",
     "reduce_scatter",
     "send",
+    "tensor_model_parallel_all_gather",
+    "tensor_model_parallel_all_reduce",
+    "tensor_model_parallel_all_reduce_max",
+    "tensor_model_parallel_all_reduce_min",
+    "tensor_model_parallel_broadcast",
+    "tensor_model_parallel_broadcast_object_list",
+    "tensor_model_parallel_ranks_agree",
+    "warmup_collectives",
 ]

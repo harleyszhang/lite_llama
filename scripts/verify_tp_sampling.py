@@ -42,8 +42,8 @@ def _run_rank(
         import lite_llama.engine.llm_engine as eng
 
         # Override the module-level reference so the decode loop's broadcast is a no-op
-        eng.broadcast = lambda t, src=0: t
-        ceng.broadcast = lambda t, src=0: t
+        eng.tensor_model_parallel_broadcast = lambda t, src=0: t
+        ceng.tensor_model_parallel_broadcast = lambda t, src=0: t
 
     from lite_llama import SamplingParams, TextGenerator
 

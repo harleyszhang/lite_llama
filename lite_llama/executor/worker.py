@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from ..distributed.parallel_state import broadcast, get_tp_world_size
+from ..distributed.parallel_state import tensor_model_parallel_broadcast
 from ..engine.sampler import (
     BatchedSamplingParams,
     GeneratedSpan,
@@ -70,22 +70,22 @@ class PassKind(StrEnum):
 
 @dataclass(frozen=True)
 class ModelInput:
-    """One model pass, as data: what to run, not how to lay it out.
+    """ModelInput: description of a single model forward pass (does not include data layout).
 
-    Every field is a tuple of ints (or of frozen :class:`SamplingParams`), which
-    makes a plan cheap to compare, safe to hold on to, and picklable — the last
-    being what lets the same object be broadcast to tensor-parallel workers.
+    All fields are tuples (or immutable :class:`SamplingParams`), making them comparable,
+    persistent, picklable, and thus broadcastable to tensor-parallel workers.
 
-    Sequences are described by ``(slots[i], seq_starts[i], seq_lens[i])``: slot
-    ``slots[i]`` receives cache rows ``[seq_starts[i], seq_lens[i])`` this pass, so
-    each sequence's chunk length falls out as the difference. ``tokens`` is those
-    chunks concatenated with no padding — padding is a property of the kernel the
-    pass will use, and is added by :class:`ModelWorker`.
+    Sequences are described by (slots[i], seq_starts[i], seq_lens[i]):
+        - slots[i]       : KV cache slot for sequence i
+        - seq_starts[i]  : start row index within the cache for this sequence
+        - seq_lens[i]    : end position (current chunk length) for this sequence
+        This pass processes the cache span [seq_starts[i], seq_lens[i]) for each sequence.
+        `tokens` is the concatenation of all token chunks from these spans (no padding).
+        Padding, if needed, is added by :class:`ModelWorker` based on kernel requirements.
 
-    Sampling is described separately because it covers a *subset*: a chunked
-    prompt that did not finish has no next token to draw. ``sampled`` indexes into
-    ``slots`` in ascending order, and ``sampling``/``gen_counts`` are parallel to
-    it.
+    Sampling fields apply only to a subset of sequences (those that have finished prefilling):
+        - sampled          : indices into `slots` (in ascending order)
+        - sampling / gen_counts : parallel to `sampled`, one per sequence to sample.
 
     Attributes:
         kind: Which kernel path the pass takes.
@@ -149,18 +149,6 @@ class ModelInput:
     def chunk_lens(self) -> tuple[int, ...]:
         """Tokens this pass feeds per sequence."""
         return tuple(end - start for start, end in zip(self.seq_starts, self.seq_lens, strict=True))
-
-
-def _sync_tp(tokens: torch.Tensor) -> torch.Tensor:
-    """Broadcast rank 0's sampled ids so every TP rank continues identically.
-
-    Non-greedy sampling draws from a per-rank RNG, so without this the ranks would
-    disagree about the token they just produced and every later step would compound
-    the divergence.
-    """
-    if get_tp_world_size() > 1:
-        return broadcast(tokens)
-    return tokens
 
 
 @dataclass(frozen=True)
@@ -520,24 +508,27 @@ class ModelWorker:
         The second return is the per-row logprob records, ``None`` when no
         sampled row asked — the common case, which costs nothing extra.
         """
+        if not plan.sampled:
+            return torch.empty(0, dtype=torch.long, device=logits.device), None
+
         sampling = self._batched_sampling(plan.sampling)
         slots = self._to_device([plan.slots[index] for index in plan.sampled])
-        # Where each row's new token goes, which is also how much history its
-        # repetition penalty may look at.
         columns = self._to_device(plan.gen_counts)
 
         generated = None
         width = max(plan.gen_counts)
         if sampling.any_penalty and width:
-            # The grid is far wider than any live sequence, so slice it down to
-            # the longest history in the batch and mask the rest off per row.
             span = self._columns[:width].unsqueeze(0)
             generated = GeneratedSpan(
                 self._gen_grid[slots.unsqueeze(1), span], span < columns.unsqueeze(1)
             )
 
         ids, records = self._sampler.sample_batched_with_logprobs(logits, sampling, generated)
-        tokens = _sync_tp(ids.reshape(-1))
+        # Every TP rank must hold the same ids: non-greedy sampling draws from a
+        # per-rank RNG, so without the broadcast the ranks would disagree about
+        # the token they just produced and every later step would compound the
+        # divergence. A world of one is the collective's own early return.
+        tokens = tensor_model_parallel_broadcast(ids.reshape(-1))
         self._gen_grid[slots, columns] = tokens
         if self._pipeline:
             # Device-side feedback: the next pass that feeds this slot reads

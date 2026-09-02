@@ -2,7 +2,8 @@
 
 Re-exports the five matmul entry points — fp8, nvfp4, w8a16, w4a16
 and smoothquant int8 — each the registered implementation of the
-``linear`` op under its scheme.
+``linear`` op under its scheme; the per-token quantisers stay inside
+the GEMM files whose epilogues consume them.
 
 Usage:
     from lite_llama.kernels.ops.quantization import fp8_matmul
@@ -29,3 +30,4 @@ __all__ = [
     "w4a16_matmul",
     "w8a16_matmul",
 ]
+

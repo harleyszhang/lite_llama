@@ -48,6 +48,17 @@ class QuantizeMethodBase(ABC):
             f"{type(self).__name__} cannot be computed from fp16 weights at load time"
         )
 
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        """Transform loaded weights once, after every tensor has been filled.
+
+        The seam a method whose *kernel* layout differs from the checkpoint's
+        layout needs: the checkpoint bytes and the loader stay untouched, and
+        the repack happens here while the parameters sit on the load device
+        (vLLM's same-named hook, where ``awq_marlin_repack`` lives). The
+        default is nothing to do -- most formats consume what they load.
+        """
+        return None
+
 
 class LinearMethodBase(QuantizeMethodBase):
     """Strategy interface for a quantised linear layer."""
@@ -209,6 +220,18 @@ class QuantizationConfig(ABC):
     @property
     def is_int4(self) -> bool:
         """True if this is an int4 weight format (AWQ/GPTQ)."""
+        return False
+
+    @property
+    def is_packed(self) -> bool:
+        """True if the checkpoint packs several values per storage word.
+
+        AWQ/GPTQ in either bit width ship ``[N, K//pack_factor]`` int32 words
+        that no kernel consumes directly, so loading runs them through
+        :func:`lite_llama.modules.quantization.adapt_packed_checkpoint` first
+        — a trigger this property owns, where ``is_int4`` used to stand in
+        before GPTQ ``bits=8`` made the two diverge.
+        """
         return False
 
     @property

@@ -38,7 +38,7 @@ def grid(monkeypatch):
     return enter
 
 
-class _OneLayer(nn.Module):
+class _OneLayerDecoder(nn.Module):
     """Just enough of a decoder for the real translator and sharder to run on it.
 
     The bias is present because Qwen2 ships one, and a 1-D tensor is where an offset
@@ -48,7 +48,12 @@ class _OneLayer(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         attn = nn.Module()
-        attn.qkv_proj = QKVParallelLinear(HIDDEN, NUM_HEADS, NUM_KV_HEADS, HEAD_DIM, bias=True)
+        # fp16, not the bf16 default: ``_numbered``'s labels below are only
+        # exact in an 11-bit mantissa, and this mirrors what an fp16
+        # checkpoint's config.dtype passes down the real load path.
+        attn.qkv_proj = QKVParallelLinear(
+            HIDDEN, NUM_HEADS, NUM_KV_HEADS, HEAD_DIM, bias=True, dtype=torch.float16
+        )
         layer = nn.Module()
         layer.self_attn = attn
         self.layers = nn.ModuleList([layer])
@@ -79,7 +84,7 @@ def _checkpoint() -> dict[str, torch.Tensor]:
 
 def _load_this_rank() -> QKVParallelLinear:
     """Build and fill the layer exactly as the loader does, for the ambient grid."""
-    model = _OneLayer()
+    model = _OneLayerDecoder()
     weights.load_weights(
         model,
         _checkpoint().items(),
@@ -211,20 +216,22 @@ def test_split_hands_out_views_in_qkv_order_with_heads_still_adjacent(grid):
 @pytest.mark.gpu
 @pytest.mark.parametrize("tokens", [1, 8, 512])
 def test_the_fused_gemm_answers_what_three_separate_ones_answer(tokens: int):
-    """Widening N may not change an output element by more than one fp16 rounding step.
+    """Widening N may not change an output element by more than one bf16 rounding step.
 
     Each element's reduction is over ``hidden`` either way, so on the batched path the
     two agree bit for bit. At ``tokens == 1`` cuBLAS splits the reduction differently for
     the wider gemv and a single ulp can move — that is the entire numerical cost of the
     fusion, and it is why the ``tests/golden`` baseline was re-recorded when it landed.
-    The geometry is Qwen2.5-0.5B's, the checkpoint that baseline is recorded from.
+    The geometry is Qwen2.5-0.5B's, the checkpoint that baseline is recorded from; the
+    activation follows the weight's element type because cuBLAS takes no implicit
+    promotion between the two 16-bit formats.
     """
     hidden, heads, kv_heads, head_dim = 896, 14, 2, 64
     torch.manual_seed(0)
     proj = QKVParallelLinear(hidden, heads, kv_heads, head_dim, bias=True).cuda()
     proj.weight.data.normal_(0, 0.05)
     proj.bias.data.normal_(0, 0.1)
-    x = torch.randn(tokens, hidden, device="cuda", dtype=torch.float16)
+    x = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16)
 
     separate = [
         F.linear(x, weight, bias)
@@ -233,4 +240,4 @@ def test_the_fused_gemm_answers_what_three_separate_ones_answer(tokens: int):
         )
     ]
     for got, want in zip(proj.project(x), separate, strict=True):
-        torch.testing.assert_close(got, want, rtol=torch.finfo(torch.float16).eps, atol=0)
+        torch.testing.assert_close(got, want, rtol=torch.finfo(torch.bfloat16).eps, atol=0)

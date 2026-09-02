@@ -15,9 +15,9 @@ import time
 import pytest
 
 from lite_llama.distributed.parallel_state import (
-    broadcast_object,
-    get_dp_rank,
-    get_tp_rank,
+    get_data_parallel_rank,
+    get_tensor_model_parallel_rank,
+    tensor_model_parallel_broadcast_object_list,
 )
 from lite_llama.engine.sampler import SamplingParams
 from lite_llama.executor.executor import ensure_followers_alive
@@ -41,7 +41,7 @@ def a_plan(slot: int = 0) -> ModelInput:
 
 def _publish_one_plan(rank: int) -> ModelInput:
     """Rank 0 publishes; every rank reports the plan it holds afterwards."""
-    return broadcast_object(a_plan() if get_tp_rank() == 0 else None)
+    return tensor_model_parallel_broadcast_object_list(a_plan() if get_tensor_model_parallel_rank() == 0 else None)
 
 
 def _drain_a_stream(rank: int) -> int:
@@ -50,21 +50,21 @@ def _drain_a_stream(rank: int) -> int:
     The follower branch is ``run_follower``'s loop with the model taken out, so a
     change to the stop protocol breaks this test rather than deadlocking a GPU run.
     """
-    if get_tp_rank() == 0:
+    if get_tensor_model_parallel_rank() == 0:
         for slot in range(3):
-            broadcast_object(a_plan(slot=slot))
-        broadcast_object(None)
+            tensor_model_parallel_broadcast_object_list(a_plan(slot=slot))
+        tensor_model_parallel_broadcast_object_list(None)
         return 3
     seen = 0
-    while broadcast_object() is not None:
+    while tensor_model_parallel_broadcast_object_list() is not None:
         seen += 1
     return seen
 
 
 def _publish_per_replica(rank: int) -> tuple[int, ...]:
     """Each replica's rank 0 publishes a plan naming its own slots."""
-    plan = a_plan(slot=10 * get_dp_rank()) if get_tp_rank() == 0 else None
-    return broadcast_object(plan).slots
+    plan = a_plan(slot=10 * get_data_parallel_rank()) if get_tensor_model_parallel_rank() == 0 else None
+    return tensor_model_parallel_broadcast_object_list(plan).slots
 
 
 class TestPlanBroadcast:
@@ -107,7 +107,7 @@ class TestPlanBroadcast:
         """Single-GPU code calls the same function; it must not touch torch.distributed."""
         plan = a_plan()
 
-        assert broadcast_object(plan) is plan
+        assert tensor_model_parallel_broadcast_object_list(plan) is plan
 
 
 def _exit_now() -> None:

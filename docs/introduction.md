@@ -169,8 +169,8 @@ graph TB
 |------|------|
 | [worker.py](../lite_llama/executor/worker.py) | 工作单元是 **forward + sample**：词表并行下采样本身是集合操作，必须在所有 rank 上执行，不能留在 rank 0 单独做。`ModelWorker` 从计划推导布局，经 `_forward_grid` / `_forward_extend` / `_forward_decode` 三条路径前向，批量采样后把 token 写入 `[num_slots, max_seq_len]` 生成网格（重复惩罚从该网格读取历史） |
 | [executor.py](../lite_llama/executor/executor.py) | `UniProcExecutor`（单进程）/ `MultiprocExecutor`（先广播计划，各进程执行本地份额）。`launch_tensor_parallel` 用 spawn 启动 follower 进程，选随机空闲端口做 rendezvous，阻塞到所有 rank 完成组初始化后才返回，保证随后分片层读到的并行宽度正确；`ensure_followers_alive` 在集合通信前检查进程存活，把进程死亡变成显式报错而不是集合通信互等挂死 |
-| [model_runner.py](../lite_llama/executor/model_runner.py) | 持有模型、KV cache 和逐步 forward；`build()` 串联 config → registry → loader。**TP 下的 CUDA graph 双重安全门**（`enable_cuda_graph`）：① 各 rank 的网格指纹一致（all_ranks_agree）；② graph 与 eager 输出的数值误差 ≤ atol。任一条件不满足，所有 rank 一起弃用图，不会出现部分 rank 走图、其余走 eager，然后在集合通信里互等。`forward()` 仅在 `seq_len == 1` 且无视觉输入时尝试 replay |
-| [kv_cache_manager.py](../lite_llama/executor/kv_cache_manager.py) | 分页 KV 池（块索引分配 + 引用计数）。`MemoryProfiler` 用一次 dummy forward 测峰值激活显存，剩余预算除以每 token KV 字节数得到块数（公式见 4.2 节）；TP 下对结论做 `all_reduce_min`，保证各 rank 容量一致 |
+| [model_runner.py](../lite_llama/executor/model_runner.py) | 持有模型、KV cache 和逐步 forward；`build()` 串联 config → registry → loader。**TP 下的 CUDA graph 双重安全门**（`enable_cuda_graph`）：① 各 rank 的网格指纹一致（tensor_model_parallel_ranks_agree）；② graph 与 eager 输出的数值误差 ≤ atol。任一条件不满足，所有 rank 一起弃用图，不会出现部分 rank 走图、其余走 eager，然后在集合通信里互等。`forward()` 仅在 `seq_len == 1` 且无视觉输入时尝试 replay |
+| [kv_cache_manager.py](../lite_llama/executor/kv_cache_manager.py) | 分页 KV 池（块索引分配 + 引用计数）。`MemoryProfiler` 用一次 dummy forward 测峰值激活显存，剩余预算除以每 token KV 字节数得到块数（公式见 4.2 节）；TP 下对结论做 `tensor_model_parallel_all_reduce_min`，保证各 rank 容量一致 |
 | [slot_batch.py](../lite_llama/executor/slot_batch.py) | 连续批处理专用 KV 视图（`SlotBatch`）：**固定槽位**，槽 s 永久占用行 `[s·max_seq_len, (s+1)·max_seq_len)`，槽位表即恒等映射，省去每步的分配器搜索和设备同步；**组合稳定元数据**，运行集不变时，元数据只在设备端增长长度，不重建 |
 | [attention_metadata.py](../lite_llama/executor/attention_metadata.py) | 单个 dataclass，向每层 attention 传递：kv_buffer、cur_select_index、b_req_tokens_table、b_seq_len、is_prefill。`is_prefill` 是显式字段，不从序列长度推断，否则长度为 1 的 prompt 会被误判进 decode 路径 |
 | [cuda_graph.py](../lite_llama/executor/cuda_graph.py) | 图捕获与重放：每个 `(batch_size, seq_len_bucket)` 组合一张图（桶取自 `DEFAULT_BATCH_SIZES` × `DEFAULT_SEQ_LEN_BUCKETS`）；输入经持久缓冲 `copy_` 原地写入；捕获前先跑一次集合通信预热（NCCL 不能在图捕获期间初始化）；每图按约 64MB 预留 workspace 预算 |
@@ -229,7 +229,7 @@ $$\log\mathrm{softmax}(x)_i \;=\; x_i - \log\sum_{j=1}^{V} e^{x_j} \;=\; x_i - \
 
 $$\mathrm{logsumexp}(x) \;=\; m + \log\sum_{j} e^{x_j - m}, \qquad m = \max_j x_j$$
 
-平移量 $m$ 是全局性质，防溢出必须用**所有 rank 切片**的最大值，所以恰好两次集合通信：`all_reduce_max_tp` 传 $[B,1]$，`all_reduce_tp` 传 $[B,1]$（sampler.py:283-285），合计**每行 2 个标量**。通信量对比：
+平移量 $m$ 是全局性质，防溢出必须用**所有 rank 切片**的最大值，所以恰好两次集合通信：`tensor_model_parallel_all_reduce_max` 传 $[B,1]$，`tensor_model_parallel_all_reduce` 传 $[B,1]$（sampler.py:283-285），合计**每行 2 个标量**。通信量对比：
 
 | 方案 | 每步采样通信量 | 与词表的关系 |
 |------|--------------|------------|
@@ -260,7 +260,7 @@ $$b_{\text{kv}} = 2 \cdot n_{\text{layer}} \cdot n_{\text{kv\_head}} \cdot d_{\t
 - $s_{\text{dtype}}$：fp16 为 2 字节；`--kv-cache-dtype fp8` 时 e4m3 字节存放在 uint8 容器中，为 1 字节；
 - 因子 2：K 与 V 各存一份。
 
-代入 Qwen2.5-0.5B（24 层 × 2 KV 头 × head_dim 64，fp16）：$b_{\text{kv}} = 2 \times 24 \times 2 \times 64 \times 2 = 12{,}288$ B ≈ 12 KiB/token。换 fp8 KV 后 $b_{\text{kv}}$ 减半到 6 KiB，同样显存能装的 token 数翻倍：A10 实测 282K 对 148K tokens（1.91×），吞吐代价 9%（[bench_kv_cache_fp8_v06.json](benchmark_logs/bench_kv_cache_fp8_v06.json)）。TP 下对这个结论做 `all_reduce_min`，各 rank 容量一致，「所有 rank 结论一致」由机制保证。
+代入 Qwen2.5-0.5B（24 层 × 2 KV 头 × head_dim 64，fp16）：$b_{\text{kv}} = 2 \times 24 \times 2 \times 64 \times 2 = 12{,}288$ B ≈ 12 KiB/token。换 fp8 KV 后 $b_{\text{kv}}$ 减半到 6 KiB，同样显存能装的 token 数翻倍：A10 实测 282K 对 148K tokens（1.91×），吞吐代价 9%（[bench_kv_cache_fp8_v06.json](benchmark_logs/bench_kv_cache_fp8_v06.json)）。TP 下对这个结论做 `tensor_model_parallel_all_reduce_min`，各 rank 容量一致，「所有 rank 结论一致」由机制保证。
 
 ### 4.3 decode 内核的 roofline 检查
 
@@ -299,7 +299,7 @@ $$\text{bytes} = N_{\text{cached}} \cdot 2 \cdot n_{kv} \cdot d_{\text{head}} \c
    │      （RawParameter 保留原 dtype，其余转 fp16）
    └─ KV 预算: MemoryProfiler（dummy forward 测峰值激活，公式见 4.2 节）
         若启用 CUDA graph，先扣除每图约 64MB 的 workspace
-        TP 下 all_reduce_min，各 rank 结论一致
+        TP 下 tensor_model_parallel_all_reduce_min，各 rank 结论一致
         → KVCacheManager 分页池 + b_req_tokens_table
 4. ModelRunner.enable_cuda_graph(): 捕获 (batch × seq_bucket) 图
    TP 下: 预热集合通信 → 网格指纹一致检查 → graph 与 eager 数值比对 →
@@ -324,7 +324,7 @@ generate() → _DecodeSession:
             每个序列只投影一行
     decode_alloc_kv_cache() → update_kv_index（必须先递增 b_seq_len 再写索引，
     顺序颠倒会覆写已有 KV）
-    sampler.sample → TP 下 broadcast_tp（各 rank 随机数生成器独立，采样结果必须同步）
+    sampler.sample → TP 下 tensor_model_parallel_broadcast（各 rank 随机数生成器独立，采样结果必须同步）
     StopCriteria.update — 全在设备端，不产生同步
     每 POLL_INTERVAL=8 步执行一次 _flush 读回（这是唯一的 D2H；流式模式每步读回）
   释放全部 KV 引用
@@ -461,7 +461,7 @@ benchmarks/ 全部脚本的分工：
 | **注册表 + 策略** | ModelRegistry、KernelSpec 注册表、量化 scheme 注册表、LoadBalancer、CliCommand（模板方法） |
 | **Null Object** | `_NullPrefixCache`：`enable_prefix_cache=False`（默认）时替换 `PrefixCache`，准入路径因此没有分支判断 |
 | **确定性优先** | dispatch 排序有最终 tie-break（spec 名）；TP 下 greedy 出现多个最大值时取 token id 最小者 |
-| **用集合通信检查一致性** | TP CUDA graph 的指纹 / 数值比对双门、`all_reduce_min` 对齐 KV 容量。「所有 rank 结论一致」由机制保证，不靠约定 |
+| **用集合通信检查一致性** | TP CUDA graph 的指纹 / 数值比对双门、`tensor_model_parallel_all_reduce_min` 对齐 KV 容量。「所有 rank 结论一致」由机制保证，不靠约定 |
 | **静默失败显式化** | 请求 `n=4` 直接报错而非只返回 1 条；`LLM` 拒绝自行组建 TP 组；`LITE_LLAMA_TP_CUDA_GRAPH=0` 可关闭 TP CUDA graph 应急 |
 | **双平面分离** | NCCL 承载数据、gloo 承载控制；集合通信台账按面分别记账 |
 | **结论以测量为准** | 词表并行每行 2 标量有台账佐证、KV 容量有启动日志、内核有 SOL 检查与 golden 精度门（第四章与第七章） |

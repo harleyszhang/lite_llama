@@ -17,7 +17,9 @@ from typing import Any
 import torch
 from transformers import AutoTokenizer
 
-from ..distributed.parallel_state import broadcast, get_tp_world_size
+from ..distributed.parallel_state import (
+    tensor_model_parallel_broadcast,
+)
 from ..executor.model_runner import ModelRunner
 from ..utils.path_utils import get_model_name_from_path
 from .detokenizer import IncrementalDetokenizer
@@ -206,9 +208,9 @@ class _DecodeSession:
             # to all other TP ranks. Without this, non-greedy sampling would
             # diverge across ranks (each has an independent RNG state). The
             # sampler already broadcasts before computing records, so this is
-            # a no-op for them.
-            if get_tp_world_size() > 1:
-                next_token = broadcast(next_token)
+            # a no-op for them — and in a world of one the collective's own
+            # early return makes issuing the call unconditionally safe.
+            next_token = tensor_model_parallel_broadcast(next_token)
 
             # Only fill positions that are not part of the original prompt.
             writable = ~self._prompt_mask[:, cur_pos]

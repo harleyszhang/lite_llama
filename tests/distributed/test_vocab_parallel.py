@@ -122,7 +122,7 @@ def _local_contribution_payload(rank: int) -> list[list[float]]:
     """
     device = torch.device("cuda", rank)
     embedding = _build(VocabParallelEmbedding, device)
-    vocab_parallel.all_reduce = lambda tensor: tensor
+    vocab_parallel.tensor_model_parallel_all_reduce = lambda tensor: tensor
     return embedding(torch.tensor(TOKENS, device=device)).tolist()
 
 
@@ -144,7 +144,7 @@ def _tie_payload(rank: int) -> tuple[bool, int, int]:
     embedding = VocabParallelEmbedding(VOCAB, HIDDEN, dtype=torch.float32)
     head = ParallelLMHead(VOCAB, HIDDEN, dtype=torch.float32)
     head.weight = embedding.weight
-    return head.weight is embedding.weight, head.local_vocab_size, ps.get_tp_world_size()
+    return head.weight is embedding.weight, head.local_vocab_size, ps.get_tensor_model_parallel_world_size()
 
 
 @needs_gpus(2)
@@ -164,5 +164,5 @@ def test_the_parent_process_keeps_its_world_of_one():
     these tests reads ``parallel_state`` at construction time."""
     run_on_tp_ranks(_tie_payload, tp_size=2)
 
-    assert ps.get_tp_world_size() == 1
-    assert ps.get_dp_world_size() == 1
+    assert ps.get_tensor_model_parallel_world_size() == 1
+    assert ps.get_data_parallel_world_size() == 1

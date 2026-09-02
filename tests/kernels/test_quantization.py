@@ -18,14 +18,18 @@ from lite_llama.kernels.ops.quantization import (
     fp8_matmul,
     fp8_quantize_per_token,
     nvfp4_matmul,
+    per_token_group_quant,
     quantize_nvfp4_blockwise,
     smoothquant_matmul,
+    unpack_int8_experts,
     w4a16_matmul,
     w8a16_matmul,
 )
 from lite_llama.modules.quantization.utils import (
+    gptq_adapt_key,
     quantize_fp8_per_token,
     quantize_int4_groupwise,
+    quantize_int8_groupwise_asym,
     quantize_int8_per_channel,
 )
 from tests.reference import nvfp4_dequant
@@ -108,6 +112,188 @@ def test_fp8_quantize_per_token_rounds_to_nearest():
     # rather than relative.
     torch.testing.assert_close(deq, ref, rtol=1.0 / 16, atol=scale.max().item() * 2)
     assert deq.abs().sum() > 0  # a kernel that stored zeros would pass rtol
+
+
+# --------------------------------------------------------------------------- #
+# Per-token-group activation quantisation: the A-side of block-wise W8A8
+# (sglang's per_token_group_quant), vs a torch reference
+# --------------------------------------------------------------------------- #
+def _ref_per_token_group_quant(
+    x: torch.Tensor,
+    group_size: int,
+    out_dtype: torch.dtype,
+    fuse_silu_and_mul: bool = False,
+    eps: float = 1e-10,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Torch spelling of ``per_token_group_quant`` for the byte-level tests."""
+    k = x.shape[-1]
+    h = k // 2 if fuse_silu_and_mul else k
+    val = x.reshape(-1, k).float()
+    if fuse_silu_and_mul:
+        gate, up = val[:, :h], val[:, h:]
+        val = gate * torch.sigmoid(gate) * up
+    t, g = val.shape[0], h // group_size
+    grouped = val.reshape(t, g, group_size)
+    qmax = 448.0 if out_dtype is torch.uint8 else 127.0
+    scale = grouped.abs().amax(dim=-1).clamp_min(eps) / qmax
+    q = (grouped / scale[:, :, None]).clamp(-qmax, qmax)
+    if out_dtype is torch.uint8:
+        q = q.to(torch.float8_e4m3fn).view(torch.uint8)
+    else:
+        # torch.round is round-half-even, the same rule as the kernel's rint.
+        q = q.round().to(torch.int8)
+    return q, scale
+
+
+#: (shape, group_size) pairs exercising single-token rows, several groups per
+#: program, a non-divisible group count (2560/128 = 20, GROUPS_PER_PROG=8) and
+#: batched leading dims.
+_GROUP_CASES = [
+    ((1, 128), 32),
+    ((1, 128), 128),
+    ((8, 512), 32),
+    ((8, 512), 256),
+    ((512, 7168), 128),
+    ((2, 5, 2560), 128),
+]
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize(("shape", "group_size"), _GROUP_CASES)
+def test_per_token_group_quant_int8_matches_reference(shape, group_size, dtype):
+    """int8 bytes and scales are exact against the torch chain.
+
+    Both sides load the same bf16 value into fp32, divide by the same
+    ``max(amax, eps)/127`` scale, and round half-to-even, so anything but
+    byte equality is an addressing or reduction bug, not rounding noise.
+    """
+    torch.manual_seed(0)
+    x = torch.randn(*shape, device="cuda", dtype=dtype) * 3.0
+
+    q, s = per_token_group_quant(x, group_size, out_dtype=torch.int8)
+    ref_q, ref_s = _ref_per_token_group_quant(x, group_size, torch.int8)
+
+    assert q.shape == x.shape and q.dtype == torch.int8
+    assert s.shape == (*x.shape[:-1], x.shape[-1] // group_size)
+    assert torch.equal(q, ref_q)
+    assert torch.equal(s, ref_s)
+
+
+@pytest.mark.parametrize(("shape", "group_size"), _GROUP_CASES)
+def test_per_token_group_quant_fp8_matches_reference(shape, group_size):
+    """Scales are exact; fp8 bytes may differ only on e4m3 ties.
+
+    Same contract as the per-token fp8 quantiser: the hardware cvt breaks
+    exact ties the other way from torch's software cast, so a bounded tie
+    fraction (with single-code moves) is the correct notion of agreement.
+    """
+    torch.manual_seed(0)
+    x = torch.randn(*shape, device="cuda", dtype=torch.bfloat16) * 3.0
+
+    q, s = per_token_group_quant(x, group_size, out_dtype=torch.uint8)
+    ref_q, ref_s = _ref_per_token_group_quant(x, group_size, torch.uint8)
+
+    assert q.shape == x.shape and q.dtype == torch.uint8
+    assert torch.equal(s, ref_s)
+    differing = q != ref_q
+    assert differing.float().mean().item() <= _FP8_TIE_FRACTION
+    delta = (q.to(torch.int16) - ref_q.to(torch.int16)).abs()
+    assert int(delta.max().item()) <= 1
+
+
+@pytest.mark.parametrize("out_dtype", [torch.int8, torch.uint8])
+def test_per_token_group_quant_round_trips_within_one_step(out_dtype):
+    """Dequantised groups stay within one quantisation step of the input."""
+    torch.manual_seed(0)
+    x = torch.randn(64, 2048, device="cuda", dtype=torch.bfloat16) * 3.0
+
+    q, s = per_token_group_quant(x, 128, out_dtype=out_dtype)
+    deq = q.view(torch.float8_e4m3fn).float() if out_dtype is torch.uint8 else q.float()
+    widened = s.repeat_interleave(128, dim=-1)
+    if out_dtype is torch.uint8:
+        # e4m3 keeps 3 mantissa bits: relative error bounded by half a step.
+        torch.testing.assert_close(deq * widened, x.float(), rtol=1.0 / 16, atol=s.max().item() * 2)
+    else:
+        # int8 quantises evenly: every element lands within half a step.
+        torch.testing.assert_close(deq * widened, x.float(), rtol=0.0, atol=0.51)
+    assert deq.abs().sum() > 0  # a kernel that stored zeros would pass rtol
+
+
+def test_per_token_group_quant_column_major_scales():
+    """The transposed scale view carries the same numbers, stride (1, T)."""
+    torch.manual_seed(0)
+    # T=37: no divisor of 4 anywhere, so a layout bug cannot cancel out.
+    x = torch.randn(37, 2560, device="cuda", dtype=torch.bfloat16)
+
+    q_rm, s_rm = per_token_group_quant(x, 128)
+    q_cm, s_cm = per_token_group_quant(x, 128, column_major_scales=True)
+
+    assert s_cm.shape == s_rm.shape == (37, 20)
+    assert s_cm.stride() == (1, 37)
+    assert torch.equal(s_cm, s_rm)
+    assert torch.equal(q_cm, q_rm)
+
+
+@pytest.mark.parametrize("out_dtype", [torch.int8, torch.uint8])
+def test_per_token_group_quant_fuses_silu_and_mul(out_dtype):
+    """The fused gate/up quantiser matches the eager silu-mul then quantise.
+
+    Compared through the dequantised values rather than the bytes: the kernel's
+    ``tl.sigmoid`` and torch's differ by ULPs, which can flip a round boundary —
+    but a flipped boundary moves the value by one step, not beyond tolerance.
+    """
+    torch.manual_seed(0)
+    t, h = 64, 2048
+    gate_up = torch.randn(t, 2 * h, device="cuda", dtype=torch.bfloat16)
+
+    q, s = per_token_group_quant(
+        gate_up, 128, out_dtype=out_dtype, fuse_silu_and_mul=True
+    )
+
+    assert q.shape == (t, h) and q.dtype == out_dtype
+    assert s.shape == (t, h // 128) and s.dtype == torch.float32
+    gate, up = gate_up[:, :h].float(), gate_up[:, h:].float()
+    ref = gate * torch.sigmoid(gate) * up
+    deq = q.view(torch.float8_e4m3fn).float() if out_dtype is torch.uint8 else q.float()
+    widened = s.repeat_interleave(128, dim=-1)
+    if out_dtype is torch.uint8:
+        torch.testing.assert_close(deq * widened, ref, rtol=1.0 / 16, atol=s.max().item() * 2)
+    else:
+        torch.testing.assert_close(deq * widened, ref, rtol=0.0, atol=0.51)
+
+
+def test_per_token_group_quant_zero_group_keeps_finite_scale():
+    """An all-zero group divides by eps/QMAX, not zero, and stays all-zero."""
+    x = torch.zeros(4, 512, device="cuda", dtype=torch.bfloat16)
+    x[1, 256:] = 2.0
+
+    q, s = per_token_group_quant(x, 256)
+
+    assert s[0, 0].item() == 1e-10 / 127.0
+    assert not q[0].any()
+    assert s[1, 1].item() == 2.0 / 127.0
+    assert q[1, 256:].abs().max().item() == 127
+
+
+def test_per_token_group_quant_rejects_misaligned_rows():
+    """Shape/layout violations fail loudly instead of quantising garbage."""
+    x = torch.zeros(4, 100, device="cuda", dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="not a multiple"):
+        per_token_group_quant(x, 128)
+    with pytest.raises(ValueError, match="power of two"):
+        per_token_group_quant(torch.zeros(4, 128, device="cuda"), 96)
+    with pytest.raises(ValueError, match="2D inputs only"):
+        per_token_group_quant(
+            torch.zeros(2, 4, 128, device="cuda"), 128, column_major_scales=True
+        )
+    with pytest.raises(ValueError, match="even row width"):
+        per_token_group_quant(
+            torch.zeros(4, 254, device="cuda"), 128, fuse_silu_and_mul=True
+        )
+    with pytest.raises(ValueError, match="int8 or uint8"):
+        per_token_group_quant(torch.zeros(4, 128, device="cuda"), 128, out_dtype=torch.float16)
+    with pytest.raises(ValueError, match="float tensor"):
+        per_token_group_quant(torch.zeros(4, 128, device="cuda", dtype=torch.int32), 128)
 
 
 # --------------------------------------------------------------------------- #
@@ -401,6 +587,77 @@ def test_quant_config_smoothquant():
     assert qc.get_name() == "w8a8_int8"
     assert qc.is_dynamic
     assert qc.storage_dtype == torch.int8
+
+
+# --------------------------------------------------------------------------- #
+# w8a16: int8 asymmetric (GPTQ bits=8)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("M,N,K", [(1, 512, 256), (8, 2048, 2048), (33, 130, 384)])
+def test_w8a16_int8_asymmetric_matches_reference(M, N, K):
+    """GPTQ ``bits=8``: group scales + zero points, one byte per element.
+
+    The zeros take the kernel through the ``HAS_ZEROS`` branch its symmetric
+    sibling never enters: the group point is subtracted in fp32 (the difference
+    of two int8 values is an exact integer) before the scale multiply.
+    """
+    torch.manual_seed(0)
+    x = torch.randn(M, K, device="cuda", dtype=torch.float16) * 0.5
+    w = torch.randn(N, K, device="cuda", dtype=torch.float32) * 0.05
+    qw, scales, zeros = quantize_int8_groupwise_asym(w, group_size=128)
+    # The layout process_weights_after_loading leaves: one int8 byte per value.
+    q_int8 = unpack_int8_experts(qw)
+
+    out = w8a16_matmul(x, q_int8, scales, group_n=1, group_k=128, zeros=zeros)
+
+    groups = q_int8.reshape(N, K // 128, 128)
+    deq = ((groups - zeros.unsqueeze(-1)) * scales.unsqueeze(-1)).reshape(N, K)
+    ref = x.float() @ deq.T
+    torch.testing.assert_close(out.float(), ref, rtol=1e-2, atol=1e-2)
+
+
+def test_w8a16_rejects_zeros_on_fp8_weights():
+    """e4m3 has no zero point; the asymmetric args must not be silently ignored."""
+    x = torch.randn(4, 128, device="cuda", dtype=torch.float16)
+    qw = torch.zeros(64, 128, device="cuda", dtype=torch.uint8)
+    scales = torch.ones(64, 1, device="cuda")
+    zeros = torch.zeros(64, 1, device="cuda")
+    with pytest.raises(ValueError, match="fp8 is symmetric"):
+        w8a16_matmul(x, qw, scales, group_n=1, group_k=128, zeros=zeros)
+
+
+def test_w8a16_rejects_zeros_shape_mismatch():
+    """Zeros ride the scales' grid; a mismatched shape is a caller bug."""
+    x = torch.randn(4, 128, device="cuda", dtype=torch.float16)
+    qw = torch.zeros(64, 128, device="cuda", dtype=torch.int8)
+    scales = torch.ones(64, 1, device="cuda")
+    zeros = torch.zeros(64, 2, device="cuda")
+    with pytest.raises(ValueError, match="share the scales' shape"):
+        w8a16_matmul(x, qw, scales, group_n=1, group_k=128, zeros=zeros)
+
+
+# --------------------------------------------------------------------------- #
+# int8 expert unpack: the bits=8 load-time preprocessing kernel
+# --------------------------------------------------------------------------- #
+def test_unpack_int8_experts_matches_torch_unpack():
+    """``[.., K//4]`` int32 words -> ``[.., K]`` int8, bit-exact.
+
+    Random words across the full int32 range exercise the sign path: the top
+    byte of a negative word sign-extends under an arithmetic ``>>``, so the
+    kernel's ``& 0xFF`` mask (and torch's here) is load-bearing.
+    """
+    torch.manual_seed(0)
+    words = torch.randint(
+        -(2**31), 2**31 - 1, (8, 64, 96), device="cuda", dtype=torch.int64
+    ).to(torch.int32)
+
+    out = unpack_int8_experts(words)
+    assert out.shape == (8, 64, 96 * 4)
+    assert out.dtype == torch.int8
+
+    shifts = torch.arange(0, 32, 8, device="cuda", dtype=torch.int32)
+    ref = ((words.unsqueeze(-1) >> shifts) & 0xFF).flatten(-2)
+    ref = ref.to(torch.uint8).view(torch.int8)
+    assert torch.equal(out, ref)
 
 
 # --------------------------------------------------------------------------- #
