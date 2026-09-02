@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from ..engine.scheduler import Request
+    from ...engine.scheduler import Request
 
 #: Environment variable switching collection off entirely (default on).
 METRICS_ENV = "LITE_LLAMA_METRICS"

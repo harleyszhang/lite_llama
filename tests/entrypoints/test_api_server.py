@@ -23,7 +23,7 @@ from lite_llama.entrypoints.api_server import (
     build_app,
     parse_sse,
 )
-from lite_llama.observe.metrics import EngineMetrics
+from lite_llama.tools.observability.metrics import EngineMetrics
 
 pytestmark = pytest.mark.serving
 
@@ -303,7 +303,13 @@ def test_chat_completion_returns_an_assistant_message(client):
 
     assert body["object"] == "chat.completion"
     assert body["id"].startswith("chatcmpl-")
-    assert body["choices"][0]["message"] == {"role": "assistant", "content": _REPLY}
+    # The parsing channels serialise as null until a request turns them on.
+    assert body["choices"][0]["message"] == {
+        "role": "assistant",
+        "content": _REPLY,
+        "reasoning_content": None,
+        "tool_calls": None,
+    }
     assert body["choices"][0]["finish_reason"] == "eos"
 
 
@@ -346,10 +352,19 @@ def test_streamed_chat_opens_with_a_role_only_delta(client):
     frames = parse_sse(response.text)
 
     assert frames[0]["object"] == "chat.completion.chunk"
-    assert frames[0]["choices"][0]["delta"] == {"role": "assistant", "content": None}
+    assert frames[0]["choices"][0]["delta"] == {
+        "role": "assistant",
+        "content": None,
+        "reasoning_content": None,
+        "tool_calls": None,
+    }
     content = "".join(f["choices"][0]["delta"].get("content") or "" for f in frames)
     assert content == _REPLY
+    # The finish reason rides its own empty-delta frame — OpenAI's own shape —
+    # so no text can arrive after it.
     assert frames[-1]["choices"][0]["finish_reason"] == "eos"
+    assert frames[-1]["choices"][0]["delta"]["content"] is None
+    assert all(f["choices"][0]["finish_reason"] is None for f in frames[:-1])
 
 
 # --------------------------------------------------------------------------- #
