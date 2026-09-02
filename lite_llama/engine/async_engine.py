@@ -110,12 +110,18 @@ class AsyncLLMEngine:
         self._engine = engine
         self._commands: queue.SimpleQueue[tuple[str, Any] | None] = queue.SimpleQueue()
         self._streams: dict[str, _RequestStream] = {}
+        self._stream_snapshot: dict[str, _RequestStream] = {}
         self._request_ids = itertools.count()
         self._worker: threading.Thread | None = None
         self._stopping = threading.Event()
-        # Guards ``_streams`` only. The worker publishes into it while coroutines
-        # register and drop entries; everything else the worker touches is
-        # reached exclusively by the worker.
+        self._closed = False
+        # Serializes starting, admitting a request, and shutting down. Keeping
+        # admission in this critical section prevents shutdown from consuming
+        # its sentinel between stream registration and the matching ``add``.
+        self._lifecycle_lock = threading.Lock()
+        # Guards mutations to ``_streams`` and its copy-on-write snapshot. The
+        # worker only reads the snapshot, keeping a mutex out of the per-token
+        # publish path while coroutines register and drop entries.
         self._lock = threading.Lock()
 
     @classmethod
@@ -142,6 +148,13 @@ class AsyncLLMEngine:
 
     def start(self) -> None:
         """Start the worker thread. Idempotent, and safe to call from any loop."""
+        with self._lifecycle_lock:
+            self._start_locked()
+
+    def _start_locked(self) -> None:
+        """Start the worker while ``_lifecycle_lock`` is held."""
+        if self._closed:
+            raise RuntimeError("this AsyncLLMEngine has been shut down")
         if self._worker is not None:
             return
         self._worker = threading.Thread(target=self._run, name="lite-llama-engine", daemon=True)
@@ -149,15 +162,24 @@ class AsyncLLMEngine:
 
     async def shutdown(self) -> None:
         """Stop the worker and fail any stream still being read."""
-        if self._worker is None:
-            return
-        self._stopping.set()
-        self._commands.put(None)  # wake the worker if it is idle
-        await asyncio.get_running_loop().run_in_executor(None, self._worker.join, 30.0)
-        self._worker = None
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            worker = self._worker
+            if worker is not None:
+                self._stopping.set()
+                self._commands.put(None)  # wake the worker if it is idle
+
+        if worker is not None:
+            await asyncio.get_running_loop().run_in_executor(None, worker.join, 30.0)
+            with self._lifecycle_lock:
+                if self._worker is worker:
+                    self._worker = None
         with self._lock:
             streams = list(self._streams.values())
             self._streams.clear()
+            self._stream_snapshot = {}
         for stream in streams:
             stream.push(None)
 
@@ -189,15 +211,16 @@ class AsyncLLMEngine:
         Yields:
             :class:`StreamedOutput` chunks, the last one carrying a finish reason.
         """
-        self.start()
-        request_id = request_id or f"async-{next(self._request_ids)}"
-        stream = _RequestStream(request_id, asyncio.get_running_loop())
-        with self._lock:
-            if request_id in self._streams:
-                raise ValueError(f"request id {request_id!r} is already active")
-            self._streams[request_id] = stream
-
-        self._commands.put(("add", (request_id, prompt, sampling_params)))
+        with self._lifecycle_lock:
+            self._start_locked()
+            request_id = request_id or f"async-{next(self._request_ids)}"
+            stream = _RequestStream(request_id, asyncio.get_running_loop())
+            with self._lock:
+                if request_id in self._streams:
+                    raise ValueError(f"request id {request_id!r} is already active")
+                self._streams[request_id] = stream
+                self._stream_snapshot = self._streams.copy()
+            self._commands.put(("add", (request_id, prompt, sampling_params)))
         try:
             while True:
                 chunk = await stream.get()
@@ -213,6 +236,7 @@ class AsyncLLMEngine:
                 # makes cleanup safe even if a future caller bypasses it).
                 if self._streams.get(request_id) is stream:
                     self._streams.pop(request_id)
+                    self._stream_snapshot = self._streams.copy()
             if not stream.finished:
                 self._commands.put(("abort", request_id))
 
@@ -293,7 +317,7 @@ class AsyncLLMEngine:
         self._fail(request.request_id, exc)
 
     def _publish(self, request) -> None:
-        stream = self._streams.get(request.request_id)
+        stream = self._get_stream(request.request_id)
         if stream is None:
             # Consumer already went away; the abort command it queued will land
             # on a later iteration, so there is nothing to do here.
@@ -319,14 +343,17 @@ class AsyncLLMEngine:
             )
 
     def _fail(self, request_id: str, exc: BaseException) -> None:
-        stream = self._streams.get(request_id)
+        stream = self._get_stream(request_id)
         if stream is not None:
             stream.finished = True
             stream.push(exc)
 
+    def _get_stream(self, request_id: str) -> _RequestStream | None:
+        """Look up a stream without putting a lock on the publish hot path."""
+        return self._stream_snapshot.get(request_id)
+
     def _fail_all(self, exc: BaseException) -> None:
-        with self._lock:
-            streams = list(self._streams.values())
+        streams = list(self._stream_snapshot.values())
         for stream in streams:
             stream.finished = True
             stream.push(exc)

@@ -204,6 +204,15 @@ async def test_shutdown_is_idempotent_and_stops_the_worker():
     await engine.shutdown()
 
 
+async def test_generate_after_shutdown_is_rejected():
+    """A stopped worker cannot be restarted because its stop event is permanent."""
+    engine = AsyncLLMEngine(StubEngine(tokens=2))
+    await engine.shutdown()
+
+    with pytest.raises(RuntimeError, match="has been shut down"):
+        await anext(engine.generate("hi"))
+
+
 async def test_shutdown_releases_the_engine():
     """The worker must hand the engine back, or tensor-parallel ranks never exit.
 
