@@ -790,3 +790,67 @@ class TestPrefixCacheIntegration:
             assert total_refs == 4 * sched.num_running
             assert cache.num_cached_blocks == 4
         assert sched.num_preemptions >= 1, "scenario never reached the bug path"
+
+
+# --------------------------------------------------------------------------- #
+# 7. Decode window (O9)
+# --------------------------------------------------------------------------- #
+class TestDecodeWindow:
+    """Fresh prefills wait up to N pure-decode steps before interrupting them."""
+
+    @pytest.fixture
+    def windowed(self) -> Scheduler:
+        return Scheduler(
+            SchedulerConfig(
+                max_seq_len=_MAX_SEQ_LEN,
+                max_num_seqs=4,
+                max_num_batched_tokens=128,
+                max_chunk_size=32,
+                decode_window_steps=2,
+            ),
+            num_slots=4,
+        )
+
+    def test_fresh_prompt_waits_exactly_the_window(self, windowed):
+        """A prompt arriving mid-decode interrupts after 2 pure-decode steps."""
+        sched = windowed
+        sched.add_request(make_request("a", prompt_len=4))
+        assert sched.schedule().prefill  # a's prefill step
+
+        sched.add_request(make_request("b", prompt_len=4))
+        for _ in range(2):  # the window: pure-decode steps, b waits
+            out = sched.schedule()
+            assert out.decode and not out.prefill
+            _decode_once(out)
+        out = sched.schedule()  # window exhausted: b may interrupt
+        assert [r.request_id for r in out.prefill] == ["b"]
+
+    def test_default_admits_immediately(self, scheduler):
+        """decode_window_steps=0 keeps the honest baseline: no deferral."""
+        sched = scheduler
+        sched.add_request(make_request("a", prompt_len=4))
+        sched.schedule()
+        sched.add_request(make_request("b", prompt_len=4))
+        out = sched.schedule()
+        assert [r.request_id for r in out.prefill] == ["b"]
+        assert out.decode
+
+    def test_no_decode_in_flight_never_waits(self, windowed):
+        """With nothing mid-generation, waiting would only delay the first token."""
+        sched = windowed
+        sched.add_request(make_request("a", prompt_len=4))
+        assert sched.schedule().prefill  # admitted in its first step
+
+    def test_resumed_chunk_step_admits_without_waiting(self, windowed):
+        """A step already carrying a chunked prefill has paid the interruption."""
+        sched = windowed
+        sched.add_request(make_request("long", prompt_len=100))
+        out = sched.schedule()
+        assert out.prefill_chunk_lens == [32]  # capped by the chunk size
+        sched.add_request(make_request("b", prompt_len=4))
+        out = sched.schedule()  # long's next chunk resumes; b joins immediately
+        assert [r.request_id for r in out.prefill] == ["long", "b"]
+
+    def test_negative_window_is_rejected(self):
+        with pytest.raises(ValueError):
+            SchedulerConfig(max_seq_len=_MAX_SEQ_LEN, decode_window_steps=-1)

@@ -17,7 +17,7 @@ from typing import Any
 import torch
 from transformers import AutoTokenizer
 
-from ..distributed.parallel_state import broadcast_tp, get_tp_world_size
+from ..distributed.parallel_state import broadcast, get_tp_world_size
 from ..executor.model_runner import ModelRunner
 from ..utils.path_utils import get_model_name_from_path
 from .detokenizer import IncrementalDetokenizer
@@ -161,9 +161,8 @@ class _DecodeSession:
         params = self._params
         prev_pos = 0
         pending_from = self._max_prompt_len  # first column not yet read back
-        step = 0
 
-        for cur_pos in range(self._max_prompt_len, self._total_len):
+        for step, cur_pos in enumerate(range(self._max_prompt_len, self._total_len), start=1):
             is_prefill = prev_pos == 0
             input_ids = self._tokens[:, prev_pos:cur_pos]
             step_positions = self._step_positions(input_ids, prev_pos, is_prefill)
@@ -209,7 +208,7 @@ class _DecodeSession:
             # sampler already broadcasts before computing records, so this is
             # a no-op for them.
             if get_tp_world_size() > 1:
-                next_token = broadcast_tp(next_token)
+                next_token = broadcast(next_token)
 
             # Only fill positions that are not part of the original prompt.
             writable = ~self._prompt_mask[:, cur_pos]
@@ -224,7 +223,6 @@ class _DecodeSession:
                     if keep and step_records[i] is not None:
                         self.output_logprobs[i].append(step_records[i])
 
-            step += 1
             prev_pos = cur_pos
             is_poll = step % POLL_INTERVAL == 0
 
@@ -289,13 +287,17 @@ class _DecodeSession:
             for token_id in row:
                 if token_id >= 0:
                     delta += self._detokenizer.append(i, token_id)
-            if check and delta and self._is_running(i):
-                # The candidate text includes this window's tokens, matching the
-                # historical behaviour where the token that completes a loop is
-                # detected but not emitted.
-                if detect_repetition(self._detokenizer.text(i)):
-                    self._stop.mark_repeat(i)
-                    delta = ""
+            # The candidate text includes this window's tokens, matching the
+            # historical behaviour where the token that completes a loop is
+            # detected but not emitted.
+            if (
+                check
+                and delta
+                and self._is_running(i)
+                and detect_repetition(self._detokenizer.text(i))
+            ):
+                self._stop.mark_repeat(i)
+                delta = ""
             deltas[i] = delta
             self.completions[i] += delta
         return deltas
@@ -354,6 +356,10 @@ class LLMEngine:
         use_cuda_graph: Capture decode CUDA graphs. Text models default to ``True``
             because replaying a graph removes the ~300 kernel launches an eager
             decode step costs; multimodal models ignore it.
+        cuda_graph_lazy: O13 lazy capture — capture only a seed pair at startup
+            and the remaining ``(batch, bucket)`` shapes the first time a step
+            needs them. Cold start stops paying for shapes the workload may
+            never produce; the first step on a new shape pays ~0.5–1 s once.
     """
 
     def __init__(
@@ -367,6 +373,7 @@ class LLMEngine:
         quantization: str | None = None,
         tensor_parallel_size: int = 1,
         kv_cache_dtype: str = "auto",
+        cuda_graph_lazy: bool = False,
     ) -> None:
         self.device = device
         self.model_path = checkpoints_dir
@@ -380,9 +387,10 @@ class LLMEngine:
             use_cuda_graph=use_cuda_graph,
             quantization=quantization,
             kv_cache_dtype=kv_cache_dtype,
+            cuda_graph_lazy=cuda_graph_lazy,
         )
         if use_cuda_graph:
-            self.model_runner.enable_cuda_graph()
+            self.model_runner.enable_cuda_graph(lazy=cuda_graph_lazy)
         self.tokenizer = self._load_tokenizer(tokenizer_path or checkpoints_dir)
         self.sampler = Sampler()
         self.max_seq_len = self.model_runner.max_seq_len

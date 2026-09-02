@@ -46,6 +46,7 @@ class ModelRunner:
         max_gpu_num_blocks: int | None = None,
         device: str = "cuda",
         use_cuda_graph: bool = False,
+        cuda_graph_lazy: bool = False,
     ) -> None:
         self.checkpoints_dir = checkpoints_dir
         self.config = config
@@ -75,7 +76,13 @@ class ModelRunner:
         if max_gpu_num_blocks is None:
             # When decode graphs will be captured later, withhold their workspace
             # from the KV budget — capture OOMs once the cache fills the card.
-            reserved = estimate_capture_workspace(self.max_seq_len) if use_cuda_graph else 0
+            # Lazy capture (O13) withholds only the seed pair; shapes captured
+            # on demand take their workspace from what is free at that moment.
+            reserved = (
+                estimate_capture_workspace(self.max_seq_len, lazy=cuda_graph_lazy)
+                if use_cuda_graph
+                else 0
+            )
             profiler = MemoryProfiler(
                 num_layers=self.num_layers,
                 kv_row=self.kv_row,
@@ -128,6 +135,7 @@ class ModelRunner:
         loader: ModelLoader | None = None,
         quantization: str | None = None,
         kv_cache_dtype: str = "auto",
+        cuda_graph_lazy: bool = False,
     ) -> ModelRunner:
         """Load config + weights and return a ready-to-run runner.
 
@@ -147,13 +155,20 @@ class ModelRunner:
             kv_cache_dtype: KV-cache element type — ``"auto"`` (fp16) or an fp8
                 spelling (``"fp8"`` / ``"fp8_e4m3"``), which halves the cache
                 footprint so twice as many tokens fit the same budget.
+            cuda_graph_lazy: Withhold only the lazy seed pair's workspace (O13)
+                instead of the whole grid's — pair with
+                :meth:`enable_cuda_graph`'s ``lazy`` flag or on-demand captures
+                fight the cache for workspace that was never withheld.
         """
         config = ModelConfig.from_pretrained(checkpoints_dir, max_seq_len, kv_cache_dtype)
         spec = ModelRegistry.resolve(config.model_type)
         model = (loader or DefaultModelLoader()).load_model(
             config, spec.load_class(), checkpoints_dir, device, quantization
         )
-        return cls(checkpoints_dir, config, spec, model, max_gpu_num_blocks, device, use_cuda_graph)
+        return cls(
+            checkpoints_dir, config, spec, model, max_gpu_num_blocks, device, use_cuda_graph,
+            cuda_graph_lazy=cuda_graph_lazy,
+        )
 
     # --------------------------------------------------------- kv allocation #
     def _init_req_tokens_table(
@@ -265,12 +280,21 @@ class ModelRunner:
         self,
         batch_sizes: tuple[int, ...] = DEFAULT_BATCH_SIZES,
         seq_len_buckets: tuple[int, ...] = DEFAULT_SEQ_LEN_BUCKETS,
+        *,
+        lazy: bool = False,
     ) -> None:
         """Capture decode graphs for the given ``(batch, seq_len_bucket)`` grid.
 
         Multimodal models are supported: a capture only ever replays a decode
         step, and by then the vision tokens are ordinary KV-cache rows — the
         vision tower and DeepStack hooks run during prefill, which stays eager.
+
+        ``lazy`` (O13) captures only a seed pair now and lets
+        :meth:`CUDAGraphManager.try_replay` capture the remaining shapes the
+        first time a step needs them — the cold start stops paying for shapes
+        the workload may never produce. The KV profiler must have reserved
+        with ``cuda_graph_lazy`` too, or on-demand captures fight the cache for
+        the workspace that eager startup would have withheld.
         """
         if get_tp_world_size() > 1:
             # A captured graph would have to replay the block's NCCL all-reduce,
@@ -312,9 +336,13 @@ class ModelRunner:
             batch_sizes=batch_sizes,
             seq_len_buckets=seq_len_buckets,
             device=self.device,
+            lazy=lazy,
         )
         try:
-            manager.capture_all()
+            if lazy:
+                manager.capture_seed()
+            else:
+                manager.capture_all()
         except torch.cuda.OutOfMemoryError:
             # A failed capture may leave a half-open graph; dropping the manager
             # is safe because replay state is only installed on success.

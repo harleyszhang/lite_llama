@@ -42,7 +42,7 @@ class StubEngine:
         self.max_concurrent = 0
         self.released = False
 
-    def add_request(self, prompt, params=None, request_id=None):
+    def add_request(self, prompt, params=None, request_id=None, prompt_token_ids=None, on_error=None):
         if prompt == "reject me":
             raise ValueError("prompt refused by the stub")
         request = Request(

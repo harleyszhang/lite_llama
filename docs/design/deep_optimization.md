@@ -147,6 +147,27 @@ CLI 与 serve 入口的 tokenize 在主线程串行，几十 K token 的大 prom
 harvest 段的线程池，下一个 launch 只用「已就绪」的请求。预期：大 prompt
 TTFT 减掉几十毫秒；优先级最低，顺手做。
 
+**落地记录（dev-v0.11）**：已落地，默认关（`async_tokenize=False`）。
+
+- `add_request` 开启且未显式给 `prompt_token_ids` 时，把 encode 丢进惰性
+  创建的线程池（4 worker；tokenizers 的 encode 释放 GIL，可真并行），
+  立即返回空 token 的 Request——engine loop 不再为大 prompt 的几十毫秒
+  encode 停摆（async serve 下所有在跑请求的 step 都被拖住）。
+- `_collect_tokenized()` 在每步 `step()` 开头（engine 线程，与
+  `add_request` 同线程故无需锁）收割完成的 encode：请求连同 token 进
+  scheduler，同一步即可被 admit；`has_unfinished_requests()` 把
+  tokenizing 计入，worker 不会误判 idle 死等。
+- 失败语义对齐同步路径：encode 异常或 scheduler 拒绝（空/超长 prompt）
+  → 请求标 `finish_reason="invalid"` + `request.error`，并经
+  `add_request(on_error=...)` 回调通知调用方——`AsyncLLMEngine._fail_async`
+  借此把同一个 ValueError 推给对应 stream，serve 语义不变。
+- `generate()` 批量路径并行 encode（sum→max）；显式 `prompt_token_ids`
+  一律走同步注册不进池；`abort` 能取消还在 tokenize 的请求；`shutdown`
+  关池。
+- 契约：`tests/engine/test_async_tokenize.py` 八例（立即返回/次步入队/
+  generate 一致性/显式 token_ids 旁路/空 prompt invalid+on_error/encode
+  异常/abort 取消/async 前端 ValueError 透传）。
+
 ## 4 内存与调度层
 
 ### O1 真·分页 KV + Radix 零拷贝共享（最大的一项）
@@ -220,6 +241,15 @@ running 会涨多少」模拟完不够就不放行。页模型的灵活性没有
 对教学框架来说「greedy 就是 argmax」也比「greedy 也走 top_p 流水线」诚实。
 采样固定开销 -80%，半小时的活。
 
+**落地记录（dev-v0.10）**：已落地，比设计还多一层。`Sampler._draw` 里
+`all_greedy` 时整条 softmax/top_p 流水线跳过，只剩一个 `argmax`（TP 走
+`global_argmax`：local max + all-reduce(MAX) + all-gather + amin，每行只过
+网 2 个值，tie 取最低 id 保持确定性）；混合 batch 才 `torch.where(greedy, ...)`
+合流。顺手快路径：`all_top_p_one`（`BatchedSamplingParams` 预计算
+`all(is_greedy or top_p == 1.0)`）让整批 top_p=1 的随机行直接
+`multinomial`，不过 topk/掩码。契约由 `tests/engine/test_sampler.py` 覆盖
+（greedy argmax、top_p=1 免排序、混合 batch 三形态）。
+
 ### O9 准入滞回 + decode 窗口
 
 **滞回**：`kv_cache_manager.can_admit` 的 watermark 是单边阈值，水位在阈值
@@ -231,6 +261,24 @@ running 会涨多少」模拟完不够就不放行。页模型的灵活性没有
 TPOT 尖刺。policy：新 prefill 最多攒 N 步再插队，用一点 TTFT 换 decode
 平滑。做成 `SchedulerConfig` 开关，benchmark 出 TTFT-TPOT 权衡曲线。
 预期：水位抖动期吞吐掉坑消除；decode TPOT P99 -30~50%。
+
+**落地记录（dev-v0.11）**：两半都落地，默认全关。
+
+- **滞回**：`KVCacheManager` 新增 `hysteresis`（默认 0.05，恢复带块数
+  `int(blocks * hysteresis)`）。`can_admit` 带惰性锁存：跌破 watermark 后
+  门槛抬到 watermark + 恢复带，直到水位回升过带才复位——水位在单阈值
+  附近抖动时 admit 不再来回翻。诚实声明：`can_admit` 目前无生产调用方
+  （slot 模型下容量由 `num_slots` 隐式管住），滞回现在只是把 v0.12
+  请求级回收要用的 API 修对，抖动保护要等那时才真实生效。
+- **decode 窗口**：`SchedulerConfig.decode_window_steps`（默认 0 = 立即
+  admit，诚实基线；`from_pretrained` 同名参数透传）。`_defer_admission`
+  只拦「本可纯 decode」的步：无 decode 在跑不拦（白等 TTFT），chunked
+  prefill 续传步不拦（打断已付），攒满 N 步必放行。计数器
+  `_deferred_steps` 在 admit 发生或队清空时归零。
+- 契约：`tests/executor/test_kv_cache_manager.py` 三例（单阈值语义、
+  恢复带拒绝、水位振荡防抖）+ `tests/engine/test_scheduler.py`
+  `TestDecodeWindow` 五例（窗口等待/默认立即/无 decode 不等/续传步不等/
+  负值拒绝）。TTFT-TPOT 权衡曲线待基准环境回归后归档。
 
 ## 5 通信层
 
@@ -255,6 +303,27 @@ decode batch 切两个 micro-batch，micro-A 做 all-reduce 时 micro-B 在算
 GEMM。参照 sglang `batch_overlap/`（原 two_batch_overlap）。lite_llama 已有
 `PassKind` / `ModelInput` 抽象，双 pass metadata 现成。做成 batch 超阈值才
 启用的 policy。PCIe 互联通信占比高时收益真实，NVLink 上气泡更小。
+
+**评估记录（dev-v0.11）**：完整 TBO 推迟，执行原语已落地。
+
+- **为什么不现在做**：(a) 收益场景是 TP>1 的大 batch decode，而 P0 基线
+  未立、O3.1（TP + graph）未做，没有 all-reduce 占比数据支撑阈值 policy；
+  (b) sglang 的 TBO ~2000 行，硬前置是把模型 forward 拆成 op 流
+  （`operations_strategy` 按 layer 产 op 序列）+ per-micro-batch 的
+  attention backend/metadata 切分——lite_llama 的 `CausalLM.forward` 整块、
+  `AttentionMetadata` 单例贯穿，属于 O1 级别的模型层重构，不能在无对照
+  基准的窗口里动。
+- **已落地（executor/overlap.py）**：sglang `execute_overlapped_operations`
+  的 stage/yield 交错语义精简为 `YieldOperation` + `execute_overlapped`
+  （~70 行）：op 流按 yield 切 stage，双流按 `delta_stages` 交错推进
+  （A 领先 N 个 stage，尾部对称收尾）。这是 TBO 的执行器半边，语义与
+  测试（`tests/executor/test_overlap.py` 七例：零 delta 严格交替/领先
+  语义/stage 内不可分割/结果与串行一致/长度不等/越界 delta/负值拒绝）
+  先固化，模型层 op 拆分就绪后直接复用。
+- **启动条件**：TP eager decode 的 nsys 基线显示 all-reduce 占步长 >20%
+  时启动；届时最小版本 = decode batch 按 slot 均切两份 + 双
+  `AttentionMetadata` + attention 与 MLP 两段式 op 流（每层一个 yield），
+  on/off 对照正收益才铺开到 prefill。
 
 ### O11 通信-RMSNorm 融合
 
@@ -345,6 +414,34 @@ capture + warmup），与 F3「冷启动秒级」卖点直接冲突。惰性化�
 收益最大。
 预期：启动 -80%+（几十秒 → 2–3s），显存预留降到实际用到的桶。
 
+**落地记录（dev-v0.11）**：已落地，默认关（`cuda_graph_lazy=False` 保持
+全量捕获旧行为），全链同名参数透传（`LLM` / `TextGenerator` /
+`VisionGenerator` / `ContinuousBatchingEngine.from_pretrained` / `LLMEngine` /
+`ModelRunner`）。
+
+- **种子对**：`CUDAGraphManager.capture_seed()` 启动只捕两图——最小
+  batch×最小桶（单个新请求立即上图）+ 最大 batch×最大桶（饱和长上下文
+  batch 也在图路径上）。网格先经 `max_seq_len` / `max_request_num` clamp
+  再取端点，退化网格（单形状）自动去重为一图。
+- **按需捕获**：`try_replay` miss 且 lazy 时 `_capture_on_miss` 现场捕获：
+  `torch.cuda.synchronize()` 排空流水后，warmup 借用当前 step 的真实
+  `(b_req_idx, cur_select_index)` 作写目标——warmup 的垃圾 K/V 落在紧随的
+  replay 要写的同一位置、被覆盖，不污染任何其它请求的行（安全前提：slot
+  恒等映射，写位置由 `cur_select_index` 决定）。
+- **OOM 黑名单**：捕获失败的形状进 `_failed` 永不重试，该形状后续步走
+  eager；触发 OOM 的那一步本身也降级 eager 正常出 token。
+- **KV 预留**：`estimate_capture_workspace(lazy=True)` 只预留
+  `LAZY_SEED_SHAPES=2` 张图的 workspace；按需捕获从当时空闲显存现拿，
+  失败形状不拖累 KV 池。
+- 诚实声明：设计里「空闲时后台补全高频桶」未做——on-demand 已覆盖
+  正确性路径，后台补全只省首次 ~0.5–1s 的一次性代价，复杂度不值；启动
+  收益数字待大模型基准回归（本地 0.5B 全量捕获本就秒级，差异不显著）。
+- 契约：`tests/executor/test_cuda_graph_manager.py` 十四例 CPU 单测
+  （种子对/按需捕获/黑名单短路/非 lazy 不捕获/prefill 与超长拒绝/退化
+  网格去重）+ `tests/compile/test_cuda_graph.py` 两例 GPU 测试（lazy
+  输出与 eager 一致、batch-2 首步确实触发按需捕获），无 weights 环境
+  自动 skip。
+
 ### O14 fp8 KV 端到端强化
 
 `kv_cache_dtype=fp8` 已存在（uint8 e4m3 存字节），补三件事让它从「能跑」
@@ -384,10 +481,16 @@ fp8 KV 单列一行精度指标，不达标不开默认。
 | 阶段 | 内容 | 出口标准 |
 |---|---|---|
 | P0 | 立基线：TPOT / TTFT / TPS 三曲线 + nsys 全链路采集一次 | 各项收益的对照基准 |
-| P1 | O2（已落地）+ O3.1 + TP graph + O6.3 + O9 + O10 + O13 | TPOT -35%+，启动秒级 |
+| P1 | O2（已落地）+ O3.1 + TP graph + O6.3（已落地）+ O9（已落地）+ O10（已落地，默认关）+ O13（已落地，默认关） | TPOT -35%+，启动秒级 |
 | P2 | O1 + O6.2（同版本）+ O14 | 容量与 TTFT 对照达标，golden 双布局全绿 |
 | P3 | O5 ngram + O7 + O8 | accept ≥2；TTFT / 长上下文 TPOT 达标 |
 | P4 | O3.2 TBO + O4 + O12 + O11 | 每项 on/off 对照正收益才保留 |
+
+P1 进度（2026-09）：O2 / O6.3 / O9 / O10 / O13 五项已落地并各有测试与
+落地记录，其中 O10、O13 与 O2 同为默认关闭的 opt-in 开关；未动的只剩
+O3.1 与 TP graph。O3.2 已完成评估并落地交错执行原语
+（`lite_llama.executor.overlap.execute_overlapped`），完整 TBO 按其节内
+启动条件推迟到 P4。
 
 每阶段沿用 ROADMAP 第十一节的铁律：新东西必须有 on/off 对照 benchmark
 归档进 `docs/release-vX.Y.Z.md`，golden 双跑；基线用 2×A10

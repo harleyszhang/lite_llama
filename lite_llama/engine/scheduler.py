@@ -62,7 +62,8 @@ class Request:
         output_token_ids: Tokens generated so far.
         text: Detokenised completion so far.
         delta: Text produced by the most recent step only.
-        finish_reason: ``"eos"``, ``"length"``, ``"repeat"`` or ``"abort"``.
+        finish_reason: ``"eos"``, ``"length"``, ``"repeat"``, ``"abort"`` or
+            ``"invalid"`` (background tokenize rejected the prompt, O10).
         first_token_time: When the first token became visible (for TTFT).
         finish_time: When the request finished.
         num_cached_tokens: Leading prompt tokens this request reused from the
@@ -89,6 +90,10 @@ class Request:
             which is exactly the gap between what the device has and what the
             host has harvested, and what the next decode plan adds back to the
             request's bookkeeping to keep writing the right cache rows.
+        error: The exception that rejected this request before it reached the
+            scheduler — a background-tokenize failure or an empty/over-long
+            prompt (O10). ``None`` on every request that actually ran; the
+            synchronous path raises from ``add_request`` instead.
     """
 
     request_id: str
@@ -113,6 +118,7 @@ class Request:
     output_logprobs: list[PositionLogprobs] | None = None
     delta_logprobs: PositionLogprobs | None = None
     pending_tokens: int = 0
+    error: BaseException | None = None
 
     @property
     def prompt_len(self) -> int:
@@ -165,6 +171,14 @@ class SchedulerConfig:
             time-shares slots by preempting (recompute) the youngest running
             request to admit an older waiting one. When False (default) the
             batch is capped at the slot count and nothing is ever evicted.
+        decode_window_steps: How many pure-decode steps a fresh prompt waits
+            at most before it may interrupt them (O9 decode window). ``0`` (the
+            default) admits immediately — the honest baseline. ``N > 0`` trades
+            a little TTFT for decode smoothness: while decodes are running and
+            no chunked prefill is already in flight, admission is deferred up
+            to ``N`` steps, so a burst of prompts cannot stretch every running
+            request's step back-to-back. Steps carrying resumed chunks never
+            defer — the interruption is already paid.
     """
 
     max_seq_len: int = 2048
@@ -174,6 +188,7 @@ class SchedulerConfig:
     enable_prefix_cache: bool = False
     prefix_cache_blocks: int | None = None
     enable_preemption: bool = False
+    decode_window_steps: int = 0
 
     def __post_init__(self) -> None:
         if self.max_seq_len < 2:
@@ -189,6 +204,10 @@ class SchedulerConfig:
         if self.prefix_cache_blocks is not None and self.prefix_cache_blocks < 1:
             raise ValueError(
                 f"prefix_cache_blocks must be >= 1 or None, got {self.prefix_cache_blocks}"
+            )
+        if self.decode_window_steps < 0:
+            raise ValueError(
+                f"decode_window_steps must be >= 0, got {self.decode_window_steps}"
             )
 
 
@@ -288,6 +307,9 @@ class Scheduler:
 
         self._pending_owners: list[tuple[Request, int, int]] = []
         self.num_preemptions: int = 0
+        # Pure-decode steps deferred since the first request started waiting
+        # (O9 decode window): the wait is bounded by ``decode_window_steps``.
+        self._deferred_steps: int = 0
 
     def _default_prefix_capacity(self, num_slots: int) -> int:
         """Resident-block ceiling to use when the deployment does not name one.
@@ -411,6 +433,11 @@ class Scheduler:
         preempted: list[Request] = []
         longest = max(chunk_lens, default=0)
 
+        if self._defer_admission(prefill):
+            self._deferred_steps += 1
+            return preempted
+        self._deferred_steps = 0
+
         while self._waiting:
             if len(self._running) >= self.max_num_seqs:
                 break
@@ -462,6 +489,21 @@ class Scheduler:
                 break
 
         return preempted
+
+    def _defer_admission(self, resume_prefill: list[Request]) -> bool:
+        """Whether this step stays pure-decode instead of admitting new prefills.
+
+        Only a step that would otherwise be pure decode is worth protecting:
+        someone is mid-generation and a fresh prefill would stretch their step.
+        With no decode in flight, or a chunk already resuming this step, waiting
+        would only delay the first token with nothing to smooth.
+        """
+        window = self.config.decode_window_steps
+        if window <= 0 or not self._waiting or resume_prefill:
+            return False
+        if self._deferred_steps >= window:
+            return False
+        return any(request.prefill_done for request in self._running)
 
     def _chunk_of(self, request: Request, computed: int | None = None) -> int:
         """Next chunk to run, chunk- and budget-capped.

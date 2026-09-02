@@ -4,6 +4,13 @@
 shape via :class:`CUDAGraphRunner`; ``try_replay`` launches the matching
 graph when a decode step fits one, else returns None so eager runs.
 
+Lazy mode (O13) captures only a seed pair at startup — batch 1 on the
+smallest bucket and the largest batch on the largest bucket — and captures
+the remaining shapes the first time a step actually needs them, so cold
+start stays seconds-scale instead of waiting for the whole grid. A shape
+whose on-demand capture runs out of memory is remembered and never retried;
+those steps run eager.
+
 Usage:
     mgr = CUDAGraphManager(model)
     logits = mgr.try_replay(input_ids, position_ids, attn_info)
@@ -11,12 +18,15 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 
 from .attention_metadata import AttentionMetadata
+
+logger = logging.getLogger(__name__)
 
 # One graph per (batch_size, seq_len_bucket): a graph fixes both the input shapes
 # and ``max_actual_seq_len``, so both axes must be enumerated. More buckets cover
@@ -30,15 +40,26 @@ DEFAULT_SEQ_LEN_BUCKETS: tuple[int, ...] = (256, 512, 1024, 2048, 4096)
 # ``ModelRunner.enable_cuda_graph`` covers models that exceed the estimate.
 WORKSPACE_BYTES_PER_GRAPH: int = 64 * 1024**2
 
+# Lazy mode seeds the grid with these two shapes (O13): the first serves a
+# single short request immediately, the second keeps a saturated batch with
+# long contexts on the graph path. Everything in between pays ~0.5–1 s once,
+# on the first step that needs the shape.
+LAZY_SEED_SHAPES: int = 2
 
-def estimate_capture_workspace(max_seq_len: int) -> int:
-    """Upper bound on the bytes the default capture grid will pin.
+
+def estimate_capture_workspace(max_seq_len: int, *, lazy: bool = False) -> int:
+    """Upper bound on the bytes the capture plan will pin.
 
     An upper bound by necessity: the KV profiler runs before ``max_request_num``
-    exists, so every default batch size is assumed to survive clamping.
+    exists, so every default batch size is assumed to survive clamping. Lazy
+    mode (O13) reserves only the seed pair — graphs captured on demand take
+    their workspace from whatever is free at that moment, and a shape whose
+    capture OOMs simply stays eager rather than dragging the KV pool down for
+    shapes the workload may never produce.
     """
     n_buckets = sum(1 for b in DEFAULT_SEQ_LEN_BUCKETS if b <= max_seq_len)
-    return len(DEFAULT_BATCH_SIZES) * max(n_buckets, 1) * WORKSPACE_BYTES_PER_GRAPH
+    graphs = LAZY_SEED_SHAPES if lazy else len(DEFAULT_BATCH_SIZES) * max(n_buckets, 1)
+    return graphs * WORKSPACE_BYTES_PER_GRAPH
 
 
 @dataclass(frozen=True)
@@ -98,11 +119,29 @@ class CUDAGraphRunner:
         self._graph: torch.cuda.CUDAGraph | None = None
         self._output: torch.Tensor | None = None
 
-    def capture(self) -> None:
-        """Warm up on a side stream, then record the graph on the current stream."""
-        # Warm up on real work: at zero length stage 1 visits no K/V rows, so any
-        # fault would surface inside the capture rather than in the warmup below.
-        self.atten_info.b_seq_len.fill_(min(self.seq_len_bucket, 32))
+    def capture(self, warmup_metadata: tuple[torch.Tensor, torch.Tensor] | None = None) -> None:
+        """Warm up on a side stream, then record the graph on the current stream.
+
+        ``warmup_metadata`` is ``(b_req_idx, cur_select_index)`` from the live
+        step that triggered an on-demand (lazy) capture: the warmup forwards
+        write their throwaway K/V exactly where that step's real pass is about
+        to write, so the replay that immediately follows overwrites the garbage
+        and no other request's rows are touched. ``None`` (capture at startup)
+        keeps the zero buffers — the cache is empty, so rows 0..batch are safe.
+        """
+        if warmup_metadata is not None:
+            b_req_idx, cur_select_index = warmup_metadata
+            # Warm up on real work: at zero length stage 1 visits no K/V rows, so any
+            # fault would surface inside the capture rather than in the warmup below.
+            self.atten_info.b_req_idx.copy_(b_req_idx)
+            self.atten_info.cur_select_index.copy_(cur_select_index)
+            # The longest legal length walks every split branch the kernel has,
+            # and writes at a position the real request has not reached yet.
+            self.atten_info.b_seq_len.fill_(min(self.seq_len_bucket, self.atten_info.b_req_tokens_table.shape[1] - 1))
+        else:
+            # Warm up on real work: at zero length stage 1 visits no K/V rows, so any
+            # fault would surface inside the capture rather than in the warmup below.
+            self.atten_info.b_seq_len.fill_(min(self.seq_len_bucket, 32))
 
         # The capture stream must be idle, so warmup runs on its own stream, fenced
         # both ways. Those passes force Triton JIT, cuBLAS workspaces and allocator
@@ -172,6 +211,7 @@ class CUDAGraphManager:
         batch_sizes: tuple[int, ...] = DEFAULT_BATCH_SIZES,
         seq_len_buckets: tuple[int, ...] = DEFAULT_SEQ_LEN_BUCKETS,
         device: str = "cuda",
+        lazy: bool = False,
     ) -> None:
         self.model = model
         self.kv_buffer = kv_buffer
@@ -179,7 +219,11 @@ class CUDAGraphManager:
         self.batch_sizes = tuple(sorted(set(batch_sizes)))
         self.seq_len_buckets = tuple(sorted(set(seq_len_buckets)))
         self.device = device
+        self._lazy = lazy
         self._runners: dict[_GraphKey, CUDAGraphRunner] = {}
+        # Shapes whose on-demand capture already failed (usually OOM): never
+        # retried, those steps run eager instead of paying the attempt again.
+        self._failed: set[_GraphKey] = set()
 
     def capture_all(self) -> None:
         """Capture a graph for every ``(batch_size, seq_len_bucket)`` pair."""
@@ -196,6 +240,83 @@ class CUDAGraphManager:
                 )
                 runner.capture()
                 self._runners[key] = runner
+
+    def capture_seed(self) -> None:
+        """Capture only the seed pair; the rest wait for their first use.
+
+        The seeds are batch 1 on the smallest bucket (a single fresh request
+        starts on the graph path immediately) and the largest batch on the
+        largest bucket (a saturated batch with long contexts too). Under load
+        the in-between shapes are captured on demand inside :meth:`try_replay`.
+        """
+        if not self.batch_sizes or not self.seq_len_buckets:
+            return
+        seeds = (
+            _GraphKey(self.batch_sizes[0], self.seq_len_buckets[0]),
+            _GraphKey(self.batch_sizes[-1], self.seq_len_buckets[-1]),
+        )
+        for key in dict.fromkeys(seeds):  # de-duplicated, order kept
+            runner = CUDAGraphRunner(
+                self.model,
+                batch_size=key.batch_size,
+                seq_len_bucket=key.seq_len_bucket,
+                kv_buffer=self.kv_buffer,
+                b_req_tokens_table=self.b_req_tokens_table,
+                device=self.device,
+            )
+            runner.capture()
+            self._runners[key] = runner
+
+    def _on_grid(self, key: _GraphKey) -> bool:
+        """Whether the key belongs to the configured capture grid."""
+        return key.batch_size in self.batch_sizes and key.seq_len_bucket in self.seq_len_buckets
+
+    def _capture_on_miss(
+        self, key: _GraphKey, atten_info: AttentionMetadata
+    ) -> CUDAGraphRunner | None:
+        """Capture a missing shape right where a step asked for it (O13).
+
+        The warmup borrows the live step's ``b_req_idx`` and
+        ``cur_select_index`` so its throwaway writes land exactly where the
+        real pass — which replays immediately after — is about to write. A
+        failure (typically OOM) blacklists the shape and this step runs eager.
+        """
+        if key in self._failed or not self._on_grid(key):
+            return None
+        try:
+            # The capture stream must be the only work in flight: the pipeline's
+            # readback copies and any pending kernels must land first.
+            torch.cuda.synchronize()
+            runner = CUDAGraphRunner(
+                self.model,
+                batch_size=key.batch_size,
+                seq_len_bucket=key.seq_len_bucket,
+                kv_buffer=self.kv_buffer,
+                b_req_tokens_table=self.b_req_tokens_table,
+                device=self.device,
+            )
+            runner.capture(
+                warmup_metadata=(atten_info.b_req_idx, atten_info.cur_select_index)
+            )
+            self._runners[key] = runner
+            logger.info(
+                "Lazy-captured decode graph batch=%d bucket=%d on first use "
+                "(%d/%d shapes captured)",
+                key.batch_size,
+                key.seq_len_bucket,
+                len(self._runners),
+                len(self.batch_sizes) * len(self.seq_len_buckets),
+            )
+            return runner
+        except torch.cuda.OutOfMemoryError:
+            self._failed.add(key)
+            logger.warning(
+                "Lazy capture of decode graph batch=%d bucket=%d ran out of "
+                "memory; that shape stays eager",
+                key.batch_size,
+                key.seq_len_bucket,
+            )
+            return None
 
     def _pick_bucket(self, current_max_seq_len: int) -> int | None:
         """Smallest bucket ceiling that fits; ``None`` if the request is too long."""
@@ -237,7 +358,10 @@ class CUDAGraphManager:
         bucket = self._pick_bucket(atten_info.max_actual_seq_len)
         if bucket is None:
             return None
-        runner = self._runners.get(_GraphKey(batch_size, bucket))
+        key = _GraphKey(batch_size, bucket)
+        runner = self._runners.get(key)
+        if runner is None and self._lazy:
+            runner = self._capture_on_miss(key, atten_info)
         if runner is None:
             return None
         return runner.replay(

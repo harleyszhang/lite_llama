@@ -20,6 +20,8 @@ from lite_llama.executor.overlap import (
     OverlapPolicy,
     StreamPool,
     Timeline,
+    YieldOperation,
+    execute_overlapped,
 )
 from lite_llama.executor.slot_batch import SlotBatch, flatten_extend_rows
 
@@ -226,3 +228,95 @@ def test_a_disabled_pool_falls_back_to_a_blocking_readback():
     host, event = pool.readback_async(device)
     assert event is None
     assert host.tolist() == [7, 8, 9]
+
+
+# --------------------------------------------------------------------------- #
+# O3.2 overlapped executor primitive (CPU)
+# --------------------------------------------------------------------------- #
+def _op(log: list, name: str):
+    def run() -> None:
+        log.append(name)
+
+    return run
+
+
+def test_streams_strictly_alternate_at_zero_delta():
+    log: list = []
+    execute_overlapped(
+        [_op(log, "a1"), YieldOperation(), _op(log, "a2")],
+        [_op(log, "b1"), YieldOperation(), _op(log, "b2")],
+    )
+    assert log == ["a1", "b1", "a2", "b2"]
+
+
+def test_delta_stages_give_the_lead_stream_a_head_start():
+    """A stays exactly delta_stages ahead: its head runs early, its tail late."""
+    log: list = []
+    execute_overlapped(
+        [_op(log, "a1"), YieldOperation(), _op(log, "a2"), YieldOperation(), _op(log, "a3")],
+        [_op(log, "b1"), YieldOperation(), _op(log, "b2")],
+        delta_stages=1,
+    )
+    assert log == ["a1", "a2", "b1", "a3", "b2"]
+
+
+def test_ops_within_one_stage_never_interleave():
+    """A yield is the only switch point — ops inside a stage stay together."""
+    log: list = []
+    execute_overlapped(
+        [_op(log, "a1"), _op(log, "a2"), _op(log, "a3")],
+        [_op(log, "b1")],  # no yields: one indivisible stage
+    )
+    assert log == ["a1", "a2", "a3", "b1"]
+
+
+def test_interleaving_matches_serial_results():
+    """The schedule changes, the outcomes must not: each stream's ops only
+    touch their own state, so interleaved and serial runs agree."""
+    state = {"a": [], "b": []}
+
+    def grow(key, value):
+        def run():
+            state[key].append(value)
+
+        return run
+
+    interleaved_ops_a = [grow("a", 1), YieldOperation(), grow("a", 2), YieldOperation(), grow("a", 3)]
+    interleaved_ops_b = [grow("b", 1), YieldOperation(), grow("b", 2)]
+    execute_overlapped(interleaved_ops_a, interleaved_ops_b, delta_stages=1)
+    interleaved = {k: list(v) for k, v in state.items()}
+
+    state["a"].clear()
+    state["b"].clear()
+    for op in interleaved_ops_a:
+        if not isinstance(op, YieldOperation):
+            op()
+    for op in interleaved_ops_b:
+        if not isinstance(op, YieldOperation):
+            op()
+
+    assert interleaved == state == {"a": [1, 2, 3], "b": [1, 2]}
+
+
+def test_unequal_stream_lengths_drain_the_remainder():
+    log: list = []
+    execute_overlapped(
+        [_op(log, "a1"), YieldOperation(), _op(log, "a2")],
+        [_op(log, "b1"), YieldOperation(), _op(log, "b2"), YieldOperation(), _op(log, "b3")],
+    )
+    assert log == ["a1", "b1", "a2", "b2", "b3"]
+
+
+def test_delta_beyond_the_lead_length_still_runs_everything():
+    log: list = []
+    execute_overlapped(
+        [_op(log, "a1"), YieldOperation(), _op(log, "a2")],
+        [_op(log, "b1")],
+        delta_stages=5,
+    )
+    assert log == ["a1", "a2", "b1"]
+
+
+def test_negative_delta_is_rejected():
+    with pytest.raises(ValueError):
+        execute_overlapped([], [], delta_stages=-1)
