@@ -13,7 +13,7 @@ on what runs.
 ``tests/kernels`` is auto-marked ``gpu`` by conftest.
 
 Usage:
-    pytest tests/kernels/test_grouped_topk.py
+    pytest tests/kernels/test_grouped_topk_kernel.py
 """
 
 from __future__ import annotations
