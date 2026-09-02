@@ -40,7 +40,7 @@ from ..executor.executor import (
 from ..executor.worker import PIPELINE_ENV, ModelInput, PassKind, PassLogprobs, pipeline_enabled
 from ..models.config import read_model_type
 from ..models.registry import ModelRegistry
-from ..observe import EngineMetrics, Tracer
+from ..tools.observability import EngineMetrics, Tracer
 from .detokenizer import IncrementalDetokenizer
 from .outputs import CompletionOutput, RequestOutput
 from .sampler import PositionLogprobs, SamplingParams

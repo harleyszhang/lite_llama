@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from typing import Any, Protocol
 
-from ..utils.logger import get_logger
+from ...utils.logger import get_logger
 
 logger = get_logger(__name__)
 

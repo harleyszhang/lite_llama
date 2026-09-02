@@ -5,7 +5,7 @@ histogram buckets are cumulative, and ``observe_finish`` records the
 full latency breakdown — or no-ops when disabled.
 
 Usage:
-    pytest tests/observe/test_metrics.py
+    pytest tests/tools/test_metrics.py
 """
 
 from __future__ import annotations
@@ -13,13 +13,13 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
-from lite_llama.observe.metrics import (
+from lite_llama.tools.observability.metrics import (
     Counter,
     EngineMetrics,
     Gauge,
     Histogram,
 )
-from lite_llama.observe.trace import Tracer
+from lite_llama.tools.observability.trace import Tracer
 
 
 def test_counter_accumulates_per_label_set():

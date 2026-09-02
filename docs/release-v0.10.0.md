@@ -8,7 +8,7 @@ v0.10 做的是"看得见"这件事，分三层。
 
 **给调用方看模型：** `logprobs` / `prompt_logprobs`（F6）报告每个采样 token 的对数概率与它压过的 top-k 备选，以及 prompt 每个位置的分数。两者都出自请求本来就要跑的那次 forward，没有第二次打分，也没有 vLLM 那样的独立 `PromptLogprobsWorker`——代价是 sampler、worker、executor、scheduler、engine、API 六层的签名都要能把"要不要收集"和"收集到什么"透传下去。
 
-**给运维看引擎：** `observe.metrics` + `observe.trace`（A7）把引擎已有的时间戳变成能画图的数字——queue / TTFT / TPOT 三段直方图、in-flight gauge、token 计数器，`/metrics` 直出 Prometheus 文本格式，不引入 `prometheus_client`；配上 collector 地址后每个请求一条 OTLP span。实测两者全开落在基线自身 0.5% 抖动以内。
+**给运维看引擎：** `tools/observability` 的 `metrics` + `trace`（A7）把引擎已有的时间戳变成能画图的数字——queue / TTFT / TPOT 三段直方图、in-flight gauge、token 计数器，`/metrics` 直出 Prometheus 文本格式，不引入 `prometheus_client`；配上 collector 地址后每个请求一条 OTLP span。实测两者全开落在基线自身 0.5% 抖动以内。
 
 **给开发者看单层：** F1 单层 harness 只在 meta 骨架上材料化一层，权重可以是 checkpoint 里那一层的 key、transformers 同层的镜像、或随机初始化，prefill 与 decode 两形态各自对 HF 比 max-abs-diff，并给出逐模块 CUDA event 计时、峰值显存与这一层真实走到的 dispatch 决策。671B 模型的一层是单卡对象，MLA / 新路由这类改动因此能先在真机上验证一层再谈整网。
 
@@ -42,9 +42,9 @@ lite-llama serve --model-dir my_weight/Qwen3-0.6B &
 curl -s localhost:8000/metrics | grep -A2 time_to_first_token
 ```
 
-`observe/metrics.py` 是一个不到 310 行的进程内 registry：Counter / Gauge / Histogram 各自渲染 Prometheus 文本，桶网格照 vLLM 的粒度取（延迟 1 ms – 10 s，token 数 1 – 16K）。为一个"每种指标几行文本"的格式引入 `prometheus_client`，代价是每个离线用户都要多装一个包，所以没引。采集是 opt-out（`LITE_LLAMA_METRICS=0`），因为它本身只是 finish 路径上的几次浮点加法。
+`tools/observability/metrics.py` 是一个不到 310 行的进程内 registry：Counter / Gauge / Histogram 各自渲染 Prometheus 文本，桶网格照 vLLM 的粒度取（延迟 1 ms – 10 s，token 数 1 – 16K）。为一个"每种指标几行文本"的格式引入 `prometheus_client`，代价是每个离线用户都要多装一个包，所以没引。采集是 opt-out（`LITE_LLAMA_METRICS=0`），因为它本身只是 finish 路径上的几次浮点加法。
 
-`observe/trace.py` 是 opt-in 的另一面：`LITE_LLAMA_OTLP_ENDPOINT` 给了就每个请求一条 span（request_id / prompt_tokens / output_tokens / finish_reason），没给就返回 `None` 当 span——`start_span` / `end_span` 对 `None` 是无操作，OpenTelemetry SDK 保持可选依赖，不装也不报错。
+`tools/observability/trace.py` 是 opt-in 的另一面：`LITE_LLAMA_OTLP_ENDPOINT` 给了就每个请求一条 span（request_id / prompt_tokens / output_tokens / finish_reason），没给就返回 `None` 当 span——`start_span` / `end_span` 对 `None` 是无操作，OpenTelemetry SDK 保持可选依赖，不装也不报错。
 
 ### F1 单层 harness（本分支）
 
