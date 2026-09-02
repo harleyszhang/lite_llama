@@ -594,6 +594,21 @@ def _fused_moe_kernel(
                         b = dequant_fp8e4m3(b).to(compute_type)
                 else:
                     b = b.to(compute_type)
+                    if HAS_ZEROS:
+                        # Asymmetric int8 (GPTQ bits=8): the integer zero point
+                        # shifts the int8 codes, so it is subtracted before the
+                        # dot, mirroring the int4 path. Both the int8 byte and
+                        # the zero point are integers exact in compute_type, so
+                        # the difference is too. Loaded per k-tile like the int4
+                        # zero point: under SCALE_HOISTED (one group spanning K)
+                        # it is the same value every iteration, which is correct.
+                        b_zero = tl.load(
+                            b_zeros_ptr
+                            + off_experts * stride_bse
+                            + (offs_bn // GROUP_N) * stride_bsn
+                            + ((k * BLOCK_K) // GROUP_K) * stride_bsk
+                        ).to(compute_type)
+                        b = b - b_zero[None, :]
                 # Hoisted out of the dot, so the tensor cores see two 16-bit
                 # operands instead of the fp32 scale's type. With one scale group
                 # over K it leaves the loop entirely: the dot then accumulates in
@@ -945,10 +960,12 @@ def _quant_mode(
     after this classification.
 
     ``zeros`` disambiguates the other dtype collision: byte-packed int4 experts
-    are ``uint8`` just like fp8, but int4 is the only format carrying zero
-    points. The int32 word packing that int4 checkpoints ship never reaches the
-    kernel -- converting it is a one-time load step
-    (:func:`repack_int4_experts`), not something a per-call path should pay.
+    are ``uint8`` just like fp8, and both int4 and asymmetric int8 (GPTQ
+    ``bits=8``) carry zero points, so ``zeros`` plus the dtype picks between
+    them. The int32 word packing that int4 and GPTQ-8 checkpoints ship never
+    reaches the kernel -- converting it is a one-time load step
+    (:func:`repack_int4_experts` / :func:`unpack_int8_experts`), not something a
+    per-call path should pay.
     """
     if scale is None:
         return _QUANT_NONE
@@ -956,13 +973,11 @@ def _quant_mode(
         if weight.dtype == torch.uint8:
             return _QUANT_INT4
         if weight.dtype == torch.int8:
-            # int8 experts are symmetric: no zero points exist to pass. Zeros
-            # with int8 bytes are the int4-style argument set on the wrong
-            # format, and the int4 uint8 check below would only re-describe it.
-            raise ValueError(
-                "int8 experts are symmetric and carry no zero points; zero "
-                "points belong to int4 (byte-packed uint8, [E, N, K//2])"
-            )
+            # Asymmetric int8 (GPTQ bits=8): one int8 byte per element plus an
+            # integer zero point, dequantised as (byte - zero) * scale. The
+            # kernel's HAS_ZEROS branch subtracts the zero point; symmetric int8
+            # (zeros is None) takes the same mode without it.
+            return _QUANT_INT8
         raise ValueError(
             "int4 expert weights must be byte-packed uint8 [E, N, K//2], got "
             f"{weight.dtype}; convert the [E, N, K//8] int32 checkpoint layout "
@@ -1031,6 +1046,13 @@ def _fused_moe(
             raise ValueError(
                 "int8 W8A8 experts must be int8 bytes with scales, got "
                 f"{w1.dtype} (mode {quant_mode})"
+            )
+        if w1_zeros is not None:
+            # W8A8 int8 is symmetric per-channel; the asymmetric zero points
+            # belong to the weight-only int8 path (GPTQ bits=8), not here.
+            raise ValueError(
+                "int8 W8A8 experts are symmetric and carry no zero points; zero "
+                "points belong to weight-only int8 (GPTQ bits=8) or int4"
             )
         quant_mode = _QUANT_INT8_A8
     elif act_quant is not None:
