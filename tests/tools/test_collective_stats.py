@@ -164,10 +164,10 @@ def test_a_world_of_one_records_nothing_because_it_moves_nothing():
     """Single-GPU code calls the same collectives, which return early. Counting those
     would measure call sites; the count is about the wire."""
     with CollectiveStats.collect() as stats:
-        ps.all_reduce_tp(torch.ones(1024))
-        ps.broadcast_tp(torch.ones(1024))
-        ps.all_gather_tp(torch.ones(1024))
-        ps.broadcast_object_tp({"plan": [1, 2, 3]})
+        ps.all_reduce(torch.ones(1024))
+        ps.broadcast(torch.ones(1024))
+        ps.all_gather(torch.ones(1024))
+        ps.broadcast_object({"plan": [1, 2, 3]})
 
     assert stats.calls == 0
 
@@ -177,7 +177,7 @@ def test_a_world_of_one_records_nothing_because_it_moves_nothing():
 # --------------------------------------------------------------------------- #
 def _all_reduce_payload(rank: int) -> tuple[int, int]:
     with CollectiveStats.collect() as stats:
-        ps.all_reduce_tp(torch.ones(1024, dtype=torch.float32))
+        ps.all_reduce(torch.ones(1024, dtype=torch.float32))
     tally = stats.tally(Collective.ALL_REDUCE)
     return tally.calls, tally.nbytes
 
@@ -194,7 +194,7 @@ def test_an_all_reduce_is_billed_its_tensor_on_every_rank():
 def _control_plane_payload(rank: int) -> tuple[int, int, int]:
     plan = {"slots": list(range(64)), "step": 7}
     with CollectiveStats.collect() as stats:
-        ps.broadcast_object_tp(plan if rank == 0 else None)
+        ps.broadcast_object(plan if rank == 0 else None)
     return (
         stats.tally(Collective.BROADCAST_OBJECT).calls,
         stats.bytes_on(Plane.CONTROL),

@@ -114,7 +114,7 @@ def init_parallel(
         members = list(range(replica * tp_size, (replica + 1) * tp_size))
         group = dist.new_group(members, backend=backend)
         # A second, CPU-backed group over the same ranks carries the *control*
-        # plane: :func:`broadcast_object_tp` ships pickled plans, and nccl can
+        # plane: :func:`broadcast_object` ships pickled plans, and nccl can
         # only move device memory, so it would have to stage every plan through
         # the GPU. gloo sends the bytes straight from host memory.
         cpu_group = group if backend == "gloo" else dist.new_group(members, backend="gloo")
@@ -218,98 +218,197 @@ def divide(a: int, b: int, what: str = "") -> int:
 # --------------------------------------------------------------------------- #
 # Collectives
 #
-# Each one reports to :class:`CollectiveStats` *after* the world-of-one early return:
-# a no-op collective moves no bytes, so counting it would measure call sites rather
-# than traffic.
+# Primitive names carry no domain suffix: the communication domain is expressed
+# by ``group``, not by the name (the vLLM/SGLang convention, and what
+# ``torch.distributed``'s own signatures do). ``group=None`` resolves to the
+# module-state TP group — today the only persistent group, and therefore what
+# every existing call site means; once EP/CP groups exist their callers pass the
+# group and these names stay put. Each op reports to :class:`CollectiveStats`
+# *after* the world-of-one early return: a no-op collective moves no bytes, so
+# counting it would measure call sites rather than traffic.
 # --------------------------------------------------------------------------- #
 def _payload(tensor: torch.Tensor) -> int:
     """Bytes one rank contributes to a collective over ``tensor``."""
     return tensor.numel() * tensor.element_size()
 
 
-def all_reduce_tp(tensor: torch.Tensor) -> torch.Tensor:
-    """Sum ``tensor`` across all TP ranks. No-op when ``world_size == 1``."""
-    if _TP_WORLD_SIZE <= 1:
-        return tensor
-    dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=_TP_GROUP)
-    CollectiveStats.record(Collective.ALL_REDUCE, _payload(tensor))
-    return tensor
+def _resolve(group: dist.ProcessGroup | None) -> dist.ProcessGroup | None:
+    """``None`` means the module-state TP group; an explicit group is used as given."""
+    return _TP_GROUP if group is None else group
 
 
-def all_reduce_max_tp(tensor: torch.Tensor) -> torch.Tensor:
-    """Element-wise maximum of ``tensor`` across this replica's TP ranks, in place.
+def _world_of_one(group: dist.ProcessGroup | None) -> bool:
+    """Whether a collective over ``group`` has no peer to talk to."""
+    return _TP_WORLD_SIZE <= 1 if group is None else dist.get_world_size(group) <= 1
 
-    The other half of a vocabulary-parallel ``log_softmax``: each rank holds a slice of
-    the vocabulary, so the row maximum that keeps ``exp`` from overflowing has to be the
-    maximum over *all* slices. One float per row crosses the wire, not one per token id.
 
-    No-op when ``tp_world_size == 1``.
+def all_reduce(
+    tensor: torch.Tensor,
+    op: dist.ReduceOp = dist.ReduceOp.SUM,
+    *,
+    group: dist.ProcessGroup | None = None,
+) -> torch.Tensor:
+    """Reduce ``tensor`` across the group's ranks, in place. No-op for a world of one.
+
+    The MAX spelling is the other half of a vocabulary-parallel ``log_softmax``:
+    each rank holds a slice of the vocabulary, so the row maximum that keeps
+    ``exp`` from overflowing has to be the maximum over *all* slices. One float
+    per row crosses the wire, not one per token id.
     """
-    if _TP_WORLD_SIZE <= 1:
+    if _world_of_one(group):
         return tensor
-    dist.all_reduce(tensor, op=dist.ReduceOp.MAX, group=_TP_GROUP)
-    CollectiveStats.record(Collective.ALL_REDUCE_MAX, _payload(tensor))
+    dist.all_reduce(tensor, op=op, group=_resolve(group))
+    CollectiveStats.record(
+        Collective.ALL_REDUCE_MAX if op is dist.ReduceOp.MAX else Collective.ALL_REDUCE,
+        _payload(tensor),
+    )
     return tensor
 
 
-def all_gather_tp(tensor: torch.Tensor, dim: int = -1) -> torch.Tensor:
-    """Concatenate every TP rank's ``tensor`` along ``dim``, rank order.
+def all_gather(
+    tensor: torch.Tensor, dim: int = -1, *, group: dist.ProcessGroup | None = None
+) -> torch.Tensor:
+    """Concatenate every rank's ``tensor`` along ``dim``, rank order.
 
     Used for the small candidate tensors of vocabulary-parallel sampling — the ``k``
-    best ``(logit, id)`` pairs per rank — where the transfer is ``O(k * tp)`` and
-    independent of the vocabulary size. Every rank must pass the same shape.
-
-    Returns ``tensor`` itself when ``tp_world_size == 1``.
+    best ``(logit, id)`` pairs per rank — where the transfer is ``O(k * world_size)``
+    and independent of the vocabulary size. Every rank must pass the same shape.
     """
-    if _TP_WORLD_SIZE <= 1:
+    if _world_of_one(group):
         return tensor
+    group = _resolve(group)
     tensor = tensor.contiguous()
-    parts = [torch.empty_like(tensor) for _ in range(_TP_WORLD_SIZE)]
-    dist.all_gather(parts, tensor, group=_TP_GROUP)
+    parts = [torch.empty_like(tensor) for _ in range(dist.get_world_size(group))]
+    dist.all_gather(parts, tensor, group=group)
     CollectiveStats.record(Collective.ALL_GATHER, _payload(tensor))
     return torch.cat(parts, dim=dim)
 
 
-def broadcast_tp(tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
-    """Broadcast ``tensor`` from the TP-local ``src`` rank to all TP ranks.
+def reduce_scatter(
+    tensor: torch.Tensor, dim: int = -1, *, group: dist.ProcessGroup | None = None
+) -> torch.Tensor:
+    """Sum ``tensor`` across ranks, then keep only this rank's shard along ``dim``.
+
+    An all-reduce is a reduce-scatter followed by an all-gather; when the caller
+    only wants its shard (sequence parallelism, EP output combining), the gather
+    half of that traffic is pure waste, which is what this primitive skips.
+
+    Raises:
+        ValueError: If ``dim`` does not divide across the group's ranks.
+    """
+    if _world_of_one(group):
+        return tensor
+    group = _resolve(group)
+    world = dist.get_world_size(group)
+    if tensor.shape[dim] % world != 0:
+        raise ValueError(
+            f"reduce_scatter dim {dim} of shape {tuple(tensor.shape)} does not divide "
+            f"across {world} ranks"
+        )
+    # reduce_scatter_tensor splits along dim 0, so the shard dim moves there first.
+    moved = tensor.movedim(dim, 0).contiguous()
+    shard = torch.empty(
+        moved.shape[0] // world, *moved.shape[1:], dtype=moved.dtype, device=moved.device
+    )
+    dist.reduce_scatter_tensor(shard, moved, op=dist.ReduceOp.SUM, group=group)
+    CollectiveStats.record(Collective.REDUCE_SCATTER, _payload(moved))
+    return shard.movedim(0, dim)
+
+
+def all_to_all(
+    tensor: torch.Tensor, *, group: dist.ProcessGroup | None = None
+) -> torch.Tensor:
+    """Equal-split exchange: slice ``j`` of rank ``i``'s tensor lands on rank ``j``.
+
+    The EP token-exchange primitive: with tokens sorted by expert id, one
+    all_to_all routes every token to the rank owning its expert. Splits are along
+    dim 0, whose size must divide by the world size.
+
+    Raises:
+        ValueError: If dim 0 does not divide across the group's ranks.
+    """
+    if _world_of_one(group):
+        return tensor
+    group = _resolve(group)
+    world = dist.get_world_size(group)
+    if tensor.shape[0] % world != 0:
+        raise ValueError(
+            f"all_to_all dim 0 of shape {tuple(tensor.shape)} does not divide across "
+            f"{world} ranks"
+        )
+    tensor = tensor.contiguous()
+    output = torch.empty_like(tensor)
+    dist.all_to_all_single(output, tensor, group=group)
+    CollectiveStats.record(Collective.ALL_TO_ALL, _payload(tensor))
+    return output
+
+
+def send(tensor: torch.Tensor, dst: int, *, group: dist.ProcessGroup | None = None) -> None:
+    """Point-to-point handoff to rank ``dst`` *within the group* (CP/PD plumbing).
+
+    Pairs with :func:`recv`; a world of one has no peer, so both are no-ops there.
+    """
+    if _world_of_one(group):
+        return
+    dist.send(tensor.contiguous(), group_dst=dst, group=_resolve(group))
+    CollectiveStats.record(Collective.SEND, _payload(tensor))
+
+
+def recv(
+    tensor: torch.Tensor, src: int, *, group: dist.ProcessGroup | None = None
+) -> torch.Tensor:
+    """Fill ``tensor`` from rank ``src`` *within the group*; pairs with :func:`send`."""
+    if _world_of_one(group):
+        return tensor
+    dist.recv(tensor, group_src=src, group=_resolve(group))
+    CollectiveStats.record(Collective.RECV, _payload(tensor))
+    return tensor
+
+
+def broadcast(
+    tensor: torch.Tensor, src: int = 0, *, group: dist.ProcessGroup | None = None
+) -> torch.Tensor:
+    """Broadcast ``tensor`` from the group-local ``src`` rank to the whole group.
 
     Used after sampling: rank 0 draws the next token and broadcasts it so every
     rank feeds the same input_ids on the next decode step. Without this, each
     rank would run ``torch.multinomial`` with an independent RNG state and
     diverge on the first non-greedy sample.
-
-    No-op when ``tp_world_size == 1``.
     """
-    if _TP_WORLD_SIZE <= 1:
+    if _world_of_one(group):
         return tensor
-    # ``src`` is the *global* rank of the broadcast root within the TP group.
-    global_src = _DP_RANK * _TP_WORLD_SIZE + src
-    dist.broadcast(tensor, src=global_src, group=_TP_GROUP)
+    # ``group_src`` keeps ``src`` a group-local rank for every group, which the old
+    # hand-rolled ``dp_rank * tp_size + src`` arithmetic only managed for the TP one.
+    dist.broadcast(tensor, group_src=src, group=_resolve(group))
     CollectiveStats.record(Collective.BROADCAST, _payload(tensor))
     return tensor
 
 
-def broadcast_object_tp(obj: Any = None, src: int = 0) -> Any:
-    """Broadcast any picklable object from TP-local ``src`` to every TP rank.
+def broadcast_object(
+    obj: Any = None, src: int = 0, *, group: dist.ProcessGroup | None = None
+) -> Any:
+    """Broadcast any picklable object from group-local ``src`` to every rank.
 
     This is the *control* plane. A tensor-parallel step is decided once — on the
     rank that owns the scheduler — and then run everywhere, so the decision has
     to travel: which slots, which token ids, which sampling parameters. Sending
     it as an object rather than as a pile of padded tensors means the receiving
     ranks reconstruct exactly what the sender planned, with no encoding to keep
-    in sync on both sides; and it goes over the gloo group, so a few hundred
-    bytes of control never touch device memory or serialise behind the NCCL
-    stream that the data plane is using.
+    in sync on both sides; and ``group=None`` goes over the gloo TP group, so a
+    few hundred bytes of control never touch device memory or serialise behind
+    the NCCL stream that the data plane is using. An explicit group is used
+    as-is — its owner chooses a backend that can carry host objects.
 
     Non-root ranks ignore ``obj`` and return what the root sent. Returns ``obj``
-    unchanged when ``tp_world_size == 1``, which is what lets the single-process
-    path call this without a branch.
+    unchanged for a world of one, which is what lets the single-process path
+    call this without a branch.
     """
-    if _TP_WORLD_SIZE <= 1:
+    if _world_of_one(group):
         return obj
     payload = [obj]
-    global_src = _DP_RANK * _TP_WORLD_SIZE + src
-    dist.broadcast_object_list(payload, src=global_src, group=_TP_CPU_GROUP)
+    dist.broadcast_object_list(
+        payload, group_src=src, group=_TP_CPU_GROUP if group is None else group
+    )
     # Sizing a plan means pickling it a second time, so it happens only while a window
     # is open: observability may cost something when asked for, never when not. Sized
     # after the broadcast so a follower reports the same bytes the driver sent.

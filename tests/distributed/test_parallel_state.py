@@ -1,7 +1,8 @@
 """Tests for the DP x TP rank grid in :mod:`lite_llama.distributed.parallel_state`.
 
 Pure CPU: initialise a grid and assert the coordinate maths — distinct
-cells, contiguous TP groups — plus rejection of out-of-range ranks.
+cells, contiguous TP groups — plus rejection of out-of-range ranks. The
+collectives run over a real two-rank gloo group, which needs no device.
 
 Usage:
     pytest tests/distributed/test_parallel_state.py
@@ -12,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from lite_llama.distributed import parallel_state as ps
+from tests.distributed.tp_harness import run_on_tp_ranks
 
 
 @pytest.fixture(autouse=True)
@@ -133,7 +135,7 @@ def test_destroy_parallel_restores_the_world_of_one():
 
 
 def test_collectives_are_no_ops_without_tensor_parallelism():
-    """Both collectives must return their input untouched in a world of one.
+    """Every collective must return its input untouched in a world of one.
 
     They are called unconditionally by ``RowParallelLinear`` and the KV-cache
     profiler, so on a single GPU they have to be free *and* transparent.
@@ -143,7 +145,13 @@ def test_collectives_are_no_ops_without_tensor_parallelism():
     ps.init_parallel(global_rank=1, tp_size=1, dp_size=2)
     tensor = torch.ones(4)
 
-    assert ps.all_reduce_tp(tensor) is tensor
+    assert ps.all_reduce(tensor) is tensor
+    assert ps.all_gather(tensor) is tensor
+    assert ps.reduce_scatter(tensor) is tensor
+    assert ps.all_to_all(tensor) is tensor
+    assert ps.broadcast(tensor) is tensor
+    ps.send(tensor, dst=0)  # no peer: must do nothing, not deadlock
+    assert ps.recv(tensor, src=0) is tensor
     assert ps.all_reduce_min(7) == 7
 
 
@@ -151,3 +159,69 @@ def test_divide_names_the_dimension_that_does_not_fit():
     assert ps.divide(8, 4, "attention heads") == 2
     with pytest.raises(ValueError, match="attention heads 6 does not divide across 4"):
         ps.divide(6, 4, "attention heads")
+
+
+# --------------------------------------------------------------------------- #
+# Two-rank gloo collectives: the tensor primitives over a real process group.
+# --------------------------------------------------------------------------- #
+def _reduce_scatter_is_all_reduce_then_slice(rank: int) -> bool:
+    """reduce_scatter(dim=-1) must equal an all-reduce followed by this rank's slice."""
+    import torch
+
+    tensor = torch.arange(8, dtype=torch.float32).reshape(2, 4) * (rank + 1)
+    shard = ps.reduce_scatter(tensor.clone(), dim=-1)
+    reduced = ps.all_reduce(tensor.clone())
+    return bool(torch.equal(shard, reduced[:, rank * 2 : (rank + 1) * 2]))
+
+
+def _all_to_all_transposes_rank_slices(rank: int) -> bool:
+    """Slice ``j`` of rank ``i`` must land on rank ``j``: rank ``r`` ends holding row ``r`` of every rank."""
+    import torch
+
+    tensor = torch.tensor([[rank * 10], [rank * 10 + 1]], dtype=torch.int64)
+    received = ps.all_to_all(tensor)
+    expected = torch.tensor([[rank], [10 + rank]], dtype=torch.int64)
+    return bool(torch.equal(received, expected))
+
+
+def _send_recv_pair(rank: int) -> bool:
+    """Rank 0's send must arrive verbatim in rank 1's receive buffer."""
+    import torch
+
+    if rank == 0:
+        ps.send(torch.full((3,), 7.0), dst=1)
+        return True
+    buffer = torch.zeros(3)
+    ps.recv(buffer, src=0)
+    return bool(torch.equal(buffer, torch.full((3,), 7.0)))
+
+
+def _default_group_is_the_tp_group(rank: int) -> bool:
+    """``group=None`` must move exactly the bytes an explicit TP membership group moves."""
+    import torch
+    import torch.distributed as dist
+
+    explicit = dist.new_group([0, 1], backend="gloo")
+    implicit = ps.all_reduce(torch.full((4,), float(rank + 1)))
+    over_explicit = ps.all_reduce(torch.full((4,), float(rank + 1)), group=explicit)
+    return bool(torch.equal(implicit, over_explicit)) and float(over_explicit[0]) == 3.0
+
+
+class TestGlooCollectives:
+    """The data-plane primitives over a real two-rank gloo group, no device needed."""
+
+    def test_reduce_scatter_is_all_reduce_then_slice(self):
+        both = run_on_tp_ranks(_reduce_scatter_is_all_reduce_then_slice, tp_size=2, backend="gloo")
+        assert both == [True, True]
+
+    def test_all_to_all_transposes_rank_slices(self):
+        both = run_on_tp_ranks(_all_to_all_transposes_rank_slices, tp_size=2, backend="gloo")
+        assert both == [True, True]
+
+    def test_send_recv_pair(self):
+        both = run_on_tp_ranks(_send_recv_pair, tp_size=2, backend="gloo")
+        assert both == [True, True]
+
+    def test_default_group_is_the_tp_group(self):
+        both = run_on_tp_ranks(_default_group_is_the_tp_group, tp_size=2, backend="gloo")
+        assert both == [True, True]

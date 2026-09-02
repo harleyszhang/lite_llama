@@ -15,7 +15,7 @@ import time
 import pytest
 
 from lite_llama.distributed.parallel_state import (
-    broadcast_object_tp,
+    broadcast_object,
     get_dp_rank,
     get_tp_rank,
 )
@@ -41,7 +41,7 @@ def a_plan(slot: int = 0) -> ModelInput:
 
 def _publish_one_plan(rank: int) -> ModelInput:
     """Rank 0 publishes; every rank reports the plan it holds afterwards."""
-    return broadcast_object_tp(a_plan() if get_tp_rank() == 0 else None)
+    return broadcast_object(a_plan() if get_tp_rank() == 0 else None)
 
 
 def _drain_a_stream(rank: int) -> int:
@@ -52,11 +52,11 @@ def _drain_a_stream(rank: int) -> int:
     """
     if get_tp_rank() == 0:
         for slot in range(3):
-            broadcast_object_tp(a_plan(slot=slot))
-        broadcast_object_tp(None)
+            broadcast_object(a_plan(slot=slot))
+        broadcast_object(None)
         return 3
     seen = 0
-    while broadcast_object_tp() is not None:
+    while broadcast_object() is not None:
         seen += 1
     return seen
 
@@ -64,7 +64,7 @@ def _drain_a_stream(rank: int) -> int:
 def _publish_per_replica(rank: int) -> tuple[int, ...]:
     """Each replica's rank 0 publishes a plan naming its own slots."""
     plan = a_plan(slot=10 * get_dp_rank()) if get_tp_rank() == 0 else None
-    return broadcast_object_tp(plan).slots
+    return broadcast_object(plan).slots
 
 
 class TestPlanBroadcast:
@@ -107,7 +107,7 @@ class TestPlanBroadcast:
         """Single-GPU code calls the same function; it must not touch torch.distributed."""
         plan = a_plan()
 
-        assert broadcast_object_tp(plan) is plan
+        assert broadcast_object(plan) is plan
 
 
 def _exit_now() -> None:

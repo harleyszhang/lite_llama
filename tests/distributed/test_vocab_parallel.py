@@ -122,7 +122,7 @@ def _local_contribution_payload(rank: int) -> list[list[float]]:
     """
     device = torch.device("cuda", rank)
     embedding = _build(VocabParallelEmbedding, device)
-    vocab_parallel.all_reduce_tp = lambda tensor: tensor
+    vocab_parallel.all_reduce = lambda tensor: tensor
     return embedding(torch.tensor(TOKENS, device=device)).tolist()
 
 

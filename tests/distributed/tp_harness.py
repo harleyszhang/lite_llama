@@ -87,7 +87,7 @@ def run_on_tp_ranks(
         backend: ``"nccl"`` for the data plane (one device per rank, see
             :func:`needs_gpus`) or ``"gloo"`` for a device-free grid — enough to
             exercise the control plane, which is what
-            :func:`~lite_llama.distributed.parallel_state.broadcast_object_tp` and the
+            :func:`~lite_llama.distributed.parallel_state.broadcast_object` and the
             executor's plan hand-off live on.
 
     Returns:
