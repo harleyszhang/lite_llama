@@ -62,13 +62,9 @@ def _lite_run() -> list[dict]:
             )
         return runs
     finally:
+        # shutdown reaps the followers and tears down the rank-0 half of their
+        # group with them, so the transformers load below sees a plain process.
         engine.shutdown()
-        # The executor reaps its followers but leaves this rank's process group
-        # standing (its lifecycle is still owned elsewhere); a live NCCL group
-        # changes how transformers loads below, so drop it here.
-        from lite_llama.distributed import parallel_state as ps
-
-        ps.destroy_parallel()
         del engine  # drop the weight reference before the HF reference loads
         gc.collect()
         torch.cuda.empty_cache()

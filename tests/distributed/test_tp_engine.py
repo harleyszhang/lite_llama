@@ -489,3 +489,37 @@ def test_two_gpus_cost_exactly_one_extra_process(probes):
     """
     assert probes[2]["executor"] == "MultiprocExecutor"
     assert probes[2]["children"] == 1
+
+
+@needs_gpus(2)
+def test_shutdown_returns_the_process_to_a_world_of_one(model_dir: Path):
+    """A shut-down TP engine must not re-shard the next one this process builds.
+
+    The executor owns the rank-0 half of the group exactly as it owns the
+    follower processes, so both halves have to go in ``shutdown``. Left
+    standing, the stale group makes the next engine in this process — the
+    benchmark that measures TP=2 then TP=1, the golden test that loads
+    transformers after lite_llama — read a TP size nobody asked for. The
+    probes above cannot catch this: each runs in a spawned process whose
+    module state dies with it; only this test holds the engine in the test
+    process itself.
+    """
+    from lite_llama.distributed import parallel_state as ps
+    from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
+
+    engine = ContinuousBatchingEngine.from_pretrained(
+        model=str(model_dir),
+        device="cuda:0",
+        max_seq_len=_MAX_SEQ_LEN,
+        max_gpu_num_blocks=_KV_TOKENS,
+        max_num_seqs=_MAX_NUM_SEQS,
+        use_cuda_graph=False,
+        tensor_parallel_size=2,
+    )
+    try:
+        assert ps.get_tp_world_size() == 2
+        list(engine.generate([_prompt_at("single", 0)], _GREEDY))
+    finally:
+        engine.shutdown()
+    assert ps.get_tp_world_size() == 1
+    assert ps.get_world_size() == 1

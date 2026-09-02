@@ -135,12 +135,9 @@ def lite(dsv2_dir: Path) -> dict[str, Any]:
                 }
             )
     finally:
+        # shutdown reaps the followers and tears down the rank-0 half of their
+        # group with them, so the transformers load below sees a plain process.
         engine.shutdown()
-        # The executor reaps its follower but leaves this rank's process group
-        # standing; a live NCCL group changes how transformers loads below.
-        from lite_llama.distributed import parallel_state as ps
-
-        ps.destroy_parallel()
         del engine
         gc.collect()
         torch.cuda.empty_cache()
