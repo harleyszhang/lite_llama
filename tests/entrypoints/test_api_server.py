@@ -17,7 +17,15 @@ pytest.importorskip("fastapi", reason="needs the `serve` extra")
 from fastapi.testclient import TestClient
 
 from lite_llama.engine.async_engine import StreamedOutput
+from lite_llama.engine.reasoning import _CLOSE as _THINK_CLOSE
 from lite_llama.engine.sampler import PositionLogprobs
+from lite_llama.engine.tool_parser import (
+    _DS_ARGS_END,
+    _DS_CALLS_BEGIN,
+    _DS_CALLS_END,
+    _DS_FENCE,
+    _DS_HEADER,
+)
 from lite_llama.entrypoints.api_server import (
     ServerConfig,
     build_app,
@@ -303,7 +311,13 @@ def test_chat_completion_returns_an_assistant_message(client):
 
     assert body["object"] == "chat.completion"
     assert body["id"].startswith("chatcmpl-")
-    assert body["choices"][0]["message"] == {"role": "assistant", "content": _REPLY}
+    # The parsing channels serialise as null until a request turns them on.
+    assert body["choices"][0]["message"] == {
+        "role": "assistant",
+        "content": _REPLY,
+        "reasoning_content": None,
+        "tool_calls": None,
+    }
     assert body["choices"][0]["finish_reason"] == "eos"
 
 
@@ -346,7 +360,12 @@ def test_streamed_chat_opens_with_a_role_only_delta(client):
     frames = parse_sse(response.text)
 
     assert frames[0]["object"] == "chat.completion.chunk"
-    assert frames[0]["choices"][0]["delta"] == {"role": "assistant", "content": None}
+    assert frames[0]["choices"][0]["delta"] == {
+        "role": "assistant",
+        "content": None,
+        "reasoning_content": None,
+        "tool_calls": None,
+    }
     content = "".join(f["choices"][0]["delta"].get("content") or "" for f in frames)
     assert content == _REPLY
     # The finish reason rides its own empty-delta frame — OpenAI's own shape —
@@ -553,3 +572,193 @@ def test_top_logprobs_without_logprobs_is_rejected(client):
     )
 
     assert response.status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+# Request-scoped reasoning / tool parsing
+# --------------------------------------------------------------------------- #
+# Marker spellings are assembled from the parser modules, never written out:
+# the transport delivering source edits strips anything it parses as markup.
+_TOOL_CALL_TEXT = (
+    _DS_CALLS_BEGIN
+    + _DS_HEADER
+    + "get_weather\n"
+    + _DS_FENCE
+    + '{"city": "Tokyo"}'
+    + _DS_ARGS_END
+    + _DS_CALLS_END
+)
+_THINKING_REPLY = "Plan: check the sky." + _THINK_CLOSE + " Calling now. " + _TOOL_CALL_TEXT
+
+
+class _SingleChunkEngine(FakeEngine):
+    """One whole reply in one chunk, with a caller-chosen finish reason."""
+
+    def __init__(self, reply: str, finish: str) -> None:
+        super().__init__(reply)
+        self._finish = finish
+
+    async def generate(self, prompt, sampling_params=None, request_id=None):
+        self.seen.append((prompt, sampling_params))
+        yield StreamedOutput(
+            request_id=request_id or "fake",
+            delta=self._reply,
+            text=self._reply,
+            finish_reason=self._finish,
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+
+def test_chat_with_both_parsers_splits_the_message():
+    """The two switches compose: reasoning first, tools from what remains."""
+    engine = FakeEngine(reply=_THINKING_REPLY)
+    with make_client(engine) as client:
+        body = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": _MODEL,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "reasoning_parser": "deepseek_r1",
+                "tool_parser": "deepseek",
+            },
+        ).json()
+
+    message = body["choices"][0]["message"]
+    assert message["reasoning_content"] == "Plan: check the sky."
+    assert message["content"] == " Calling now. "
+    assert message["tool_calls"] == [
+        {
+            "id": "call_0",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": '{"city": "Tokyo"}'},
+        }
+    ]
+    assert body["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_reasoning_parser_alone_splits_and_leaves_content_verbatim():
+    engine = FakeEngine(reply="Plan: check the sky." + _THINK_CLOSE + " Final answer.")
+    with make_client(engine) as client:
+        body = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": _MODEL,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "reasoning_parser": "deepseek_r1",
+            },
+        ).json()
+
+    message = body["choices"][0]["message"]
+    assert message["reasoning_content"] == "Plan: check the sky."
+    assert message["content"] == " Final answer."
+    assert message["tool_calls"] is None
+    assert body["choices"][0]["finish_reason"] == "eos"
+
+
+def test_streamed_chat_channels_merge_to_the_one_shot_message():
+    """The server-level axiom: streamed frames concatenate to the message."""
+
+    def run(stream: bool):
+        engine = FakeEngine(reply=_THINKING_REPLY)
+        with make_client(engine) as client:
+            return client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": _MODEL,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "stream": stream,
+                    "reasoning_parser": "deepseek_r1",
+                    "tool_parser": "deepseek",
+                },
+            )
+
+    message = run(stream=False).json()["choices"][0]["message"]
+    frames = parse_sse(run(stream=True).text)
+
+    # nothing may follow the terminal frame: clients stop reading there
+    assert frames[-1]["choices"][0]["finish_reason"] == "tool_calls"
+    assert all(f["choices"][0]["finish_reason"] is None for f in frames[:-1])
+    deltas = [f["choices"][0]["delta"] for f in frames]
+    assert "".join(d.get("reasoning_content") or "" for d in deltas) == message[
+        "reasoning_content"
+    ]
+    assert "".join(d.get("content") or "" for d in deltas) == message["content"]
+    # tool_calls merge by index, identity first, arguments streaming after
+    streamed: dict[int, dict] = {}
+    for delta in deltas:
+        for piece in delta.get("tool_calls") or []:
+            call = streamed.setdefault(
+                piece["index"], {"id": None, "name": "", "arguments": ""}
+            )
+            call["id"] = call["id"] or piece.get("id")
+            call["name"] += piece["function"].get("name") or ""
+            call["arguments"] += piece["function"].get("arguments") or ""
+    (call,) = message["tool_calls"]
+    assert streamed == {
+        0: {
+            "id": call["id"],
+            "name": call["function"]["name"],
+            "arguments": call["function"]["arguments"],
+        }
+    }
+
+
+def test_a_length_cut_keeps_its_reason_even_when_calls_were_extracted():
+    """A truncated call still reports its pieces, but the cut is the truth."""
+    reply = _DS_CALLS_BEGIN + _DS_HEADER + "get_weather\n" + _DS_FENCE + '{"city": "To'
+    engine = _SingleChunkEngine(reply, "length")
+    with make_client(engine) as client:
+        body = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": _MODEL,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "tool_parser": "deepseek",
+            },
+        ).json()
+
+    assert body["choices"][0]["finish_reason"] == "length"
+    (call,) = body["choices"][0]["message"]["tool_calls"]
+    assert call["function"] == {"name": "get_weather", "arguments": '{"city": "To'}
+
+
+def test_a_length_cut_still_streams_its_truncated_call_before_finishing():
+    reply = _DS_CALLS_BEGIN + _DS_HEADER + "get_weather\n" + _DS_FENCE + '{"city": "To'
+    engine = _SingleChunkEngine(reply, "length")
+    with make_client(engine) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": _MODEL,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "stream": True,
+                "tool_parser": "deepseek",
+            },
+        )
+    frames = parse_sse(response.text)
+
+    tail = frames[-1]
+    assert tail["choices"][0]["finish_reason"] == "length"
+    assert tail["choices"][0]["delta"]["content"] is None
+    pieces = [
+        piece
+        for f in frames[:-1]
+        for piece in f["choices"][0]["delta"].get("tool_calls") or []
+    ]
+    assert pieces[0]["id"] == "call_0"
+    assert "".join(p["function"].get("arguments") or "" for p in pieces) == '{"city": "To'
+
+
+def test_unknown_parser_names_are_rejected_by_the_schema(client):
+    """The switches are a closed set: typos must 422, not silently no-op."""
+    for field in ("reasoning_parser", "tool_parser"):
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": _MODEL,
+                "messages": [{"role": "user", "content": "Hi"}],
+                field: "bogus",
+            },
+        )
+        assert response.status_code == 422, field
