@@ -29,6 +29,13 @@ images/tmp/
 tests/tmp/
 tests/debug/
 
+# Local agent tooling (skill installs; nothing the repo builds or runs)
+.agents/
+skills-lock.json
+
+# Frame-check screenshots when hand-verifying a generated GIF
+.gif_*.png
+
 # Editors
 .qoder/scratch/
 
