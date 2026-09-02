@@ -1,0 +1,38 @@
+{
+ "prefix": [
+  " (a) 0 (b) 1 (c) 2 (d) 3\n\nOkay, the",
+  " Question 2: what is 1 plus 1? Question 3: what is 2 plus 2?",
+  " (a) 4 (b) 5 (c) 6 (d) 7\n\nOkay, the",
+  " (a) 7 (b) 8 (c) 9 (d) 10\n\nOkay,",
+  " (a) 9 (b) 10 (c) 11 (d) 12\n\n",
+  " (a) 11 (b) 12 (c) 13 (d) 14",
+  " (a) 12 (b) 13 (c) 14 (d) 15",
+  " (a) 15 (b) 16 (c) 17 (d) 18",
+  " (a) 17 (b) 18 (c) 19 (d) 20",
+  " (a) 19 (b) 20 (c) 18 (d) 17",
+  " (a) 21 (b) 22 (c) 23 (d) 24",
+  " (a) 23 (b) 22 (c) 21 (d) 20",
+  " (a) 25 (b) 26 (c) 27 (d) 28",
+  " (a) 27 (b) 28 (c) 29 (d) 30",
+  " (a) 29 (b) 30 (c) 28 (d) 27",
+  " (a) 31 (b) 32 (c) 33 (d) 34",
+  " (a) 32 (b) 33 (c) 34 (d) 35",
+  " (a) 35 (b) 36 (c) 37 (d) 38",
+  " (a) 37 (b) 38 (c) 19 (d) 18",
+  " The answer is 39. Question 20: what is 20 plus 20? The answer",
+  " (a) 41 (b) 42 (c) 43 (d) 44",
+  " (a) 43 (b) 44 (c) 45 (d) 46",
+  " (a) 45 (b) 46 (c) 47 (d) 48",
+  " (a) 47 (b) 48 (c) 49 (d) 50"
+ ],
+ "chunk": [
+  " 0 times 2 is 0. 0 times 2 is 0. 0 times 2 is",
+  " Context number 2: Follow every instruction carefully and answer as precisely as you can. Follow every instruction carefully and answer as",
+  " The answer must be in the format: \\boxed{answer}\n\nOkay, let's see. The user has given me",
+  " The answer must be in the format: \\boxed{answer}\n\nOkay, let's see. The user has given me",
+  " 0 plus 1 is 1. 0 plus 1 equals 1. 0 + 1 =",
+  " 1+2=?\n\nQuestion 2: What is 1 plus 2?\n\nAre questions 1 and ",
+  " (a) 5 (b) 6 (c) 7 (d) 8\n\nOkay, the",
+  " (a) 7 (b) 8 (c) 9 (d) 10\n\nOkay,"
+ ]
+}

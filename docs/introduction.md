@@ -380,7 +380,7 @@ e2e 层（[common.py](../benchmarks/common.py)，口径对齐 vLLM/TensorRT-LLM�
 - **TPOT**（每 token 生成延迟）：稳态每步延迟，取首 token 之后所有步间隔的均值；batch 内 lockstep 推进，`gen_tokens = steps × batch`。
 - **TPS**：`gen_tokens / 总时间`。
 
-在线服务另有专用口径（[bench_serving.py](../bench_serving.py)）：真实子进程 + 真实 socket + SSE，TTFT 报 mean 和 p99（负载下尾部才是用户感知到的数），TPOT 从请求自己的帧间隔取，在队列里等待的请求不会被重复计费。正确性三重校验（`batch` / `dup` / `offline`）全部在 temperature=0、采样字段显式钉死的条件下对比**前缀一致率**：greedy 解码是混沌的，一旦一个 token 分叉，逐位一致率必然衰减，只有前缀一致率才能反映真实偏差。
+在线服务另有专用口径（[bench_scheduler.py](../benchmarks/bench_scheduler.py) 的 `serving` 子命令）：真实子进程 + 真实 socket + SSE，TTFT 报 mean 和 p99（负载下尾部才是用户感知到的数），TPOT 从请求自己的帧间隔取，在队列里等待的请求不会被重复计费。正确性三重校验（`batch` / `dup` / `offline`）全部在 temperature=0、采样字段显式钉死的条件下对比**前缀一致率**：greedy 解码是混沌的，一旦一个 token 分叉，逐位一致率必然衰减，只有前缀一致率才能反映真实偏差。
 
 kernel 层（[microbench.py](../benchmarks/kernels/microbench.py)）：`Work` 声明理论代价，`Row` 派生 TFLOP/s 与 GB/s，`report()` 先打吞吐后打延迟（吞吐跨 shape 可比），每行附 SOL（speed-of-light，理论上限）检查；`metadata()` 输出设备 / 软件版本 / commit / 改变后端选择的环境变量，没有这一行的表格只是轶事。
 
@@ -394,8 +394,12 @@ python benchmarks/bench_e2e.py --model-dir my_weight/Qwen2.5-0.5B --verify
 python benchmarks/bench_e2e.py --model-dir my_weight/Qwen2.5-0.5B --backend hf
 
 # 在线服务矩阵：量化 x TP x 并发，逐配置起独立服务进程
-python benchmarks/bench_serving.py --model-dir <ckpt> \
+python benchmarks/bench_scheduler.py serving --model-dir <ckpt> \
     --schemes fp16 fp8 int4 --tp 1 2 --concurrency 1 8 32
+
+# 调度器特性矩阵：prefix-cache / chunked prefill × CUDA graph，另附
+# diag-prefix（按 wave 分解 TTFT）与 diag-preempt（超订抢占一致性）子命令
+python benchmarks/bench_scheduler.py matrix --model-dir <ckpt> --graph --prefix-cache
 
 # 全模型套件（结果 JSON 落 docs/benchmark_logs/）
 ./benchmarks/run_benchmark_suite.sh
@@ -413,7 +417,7 @@ benchmarks/ 全部脚本的分工：
 | [bench_continuous.py](bench_continuous.py) | 连续批处理 vs 静态批处理，离线与偏斜到达两种场景 |
 | [bench_data_parallel.py](bench_data_parallel.py) | DP 吞吐扩展（weak/strong scaling），输出逐条 diff 防止速度掩盖错误 |
 | [bench_dp_prefix_cache.py](bench_dp_prefix_cache.py) | 前缀缓存跨 DP 副本的命中率与路由质量 |
-| [bench_serving.py](bench_serving.py) | 在线服务矩阵：量化 × TP/DP × CUDA graph，走 HTTP + SSE |
+| [bench_scheduler.py](../benchmarks/bench_scheduler.py) | 调度器基准入口：`matrix`（特性矩阵）· `serving`（在线量化 × TP/DP × graph，HTTP + SSE）· `diag-prefix` · `diag-preempt` |
 | [bench_quant.py](bench_quant.py) | 离线量化矩阵：每行同时带吞吐与输出偏移，缺一半就不是合格的量化表 |
 | [bench_overlap_l1.py](bench_overlap_l1.py) | L1 copy-stream 重叠开关 A/B，附 timeline 证据 |
 | [bench_observability.py](bench_observability.py) | 每个可观测开关的每 token 开销一行 |
