@@ -507,6 +507,52 @@ python benchmarks/bench_gsm8k_vllm.py --model-dir $MZ/Qwen/Qwen2___5-0___5B-Inst
 原始日志见 `docs/benchmark_logs/vllm_compare_20260903/`（性能 10 份 + GSM8K 2 份，每份含完整 meta 与命令行）。
 
 
+### DeepSeek 剪裁栈三方对比（examples/benchmark.py，lite_llama vs transformers vs vLLM）
+
+DeepSeek-V2/V3 的完整栈（27 层 / 61 层）单卡放不下，本节用 `hf_overrides` 把栈剪到能进单张 A10 的规模，三方（lite_llama / HF transformers / vLLM）跑同一份剪裁配置、同一批 prompt、同一口径（贪心、`torch.cuda.synchronize` 计时、取中位数），对比 MLA + MoE 层的实际 decode 性能。两个 checkpoint 取自共享权重盘：
+
+- **DeepSeek-V2-Lite**（`num_hidden_layers=1`）：剪到单层（MLA + dense SwiGLU），与 golden 门 `tests/golden/test_deepseek_trimmed_parity.py` 同口径；
+- **DeepSeek-V3-4layers-MTP-BF16**（4 层，官方剪裁 checkpoint）：`first_k_dense_replace=3`，层 0-2 是 dense、层 3 才是 MoE，再剪到 1 层就没有路由可测，故跑完整 4 层；路由用 golden 门验证过的 regroup override（`n_group=2, topk_group=1, num_experts_per_tok=2`，把 8 专家 / 8 组重组成 2 组 × 4，恢复 noaux_tc 的分组语义）。
+
+batch=8、gen_len=128、iters=2、A10 22 GiB、bf16，解释器 `/home/honggao/projects/.venv/bin/python`（torch 2.11.0+cu129，含 transformers 5.8 / vLLM）：
+
+| 模型 | 剪裁 | 引擎 | TTFT (s) | TPOT (ms) | TGS (tok/s) | TPOT 加速比 |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| DeepSeek-V2-Lite | 1 层 | lite_llama | 0.0051 | 1.500 | 5235.8 | 1.99× |
+| DeepSeek-V2-Lite | 1 层 | transformers | 0.0055 | 2.991 | 2655.7 | — |
+| DeepSeek-V3-4layers | 4 层 | lite_llama | 0.0232 | 15.419 | 516.8 | 1.49× |
+| DeepSeek-V3-4layers | 4 层 | transformers | 0.0244 | 22.902 | 349.1 | — |
+| DeepSeek-V3-4layers | 4 层 | vLLM | 0.0325 | 13.551 | 584.0 | 0.88× |
+
+（TPOT 加速比 = `对照 TPOT / lite_llama TPOT`，标在 lite_llama 行；vLLM 行的 0.88× 是 `vLLM TPOT / lite_llama TPOT`，小于 1 即 vLLM 的 decode 更快。）
+
+结论（三项指标 TTFT / TPOT / TGS 齐报）：
+
+- **lite_llama 的 decode 全面快过 transformers**：V2-Lite 单层 TPOT **1.99×**、TGS 1.97×；V3 四层 TPOT **1.49×**、TGS 1.48×（MLA 吸收 + CUDA graph 重放，与主表小模型规律一致）；TTFT 两端接近（1.05×～1.10×），单层 prefill 太短、抖动主导。
+- **V3 四层上 vLLM 的 decode 略快于 lite_llama**：lite_llama 的 TPOT 是 vLLM 的 **0.88×**、TGS 0.89×——vLLM 的 MLA backend（FlashMLA / triton）在 4 层 MoE 栈上把稳态 decode 压得更低；但 **lite_llama 的 TTFT 反超 vLLM 1.40×**（0.0232 vs 0.0325 s），prefill 路径更轻。即 lite_llama 首 token 更快、vLLM 稳态吞吐更高，各有胜负。
+
+两处口径限制（如实记录）：
+
+- **V2-Lite 无 vLLM 行**：vLLM 0.21.0 的 DeepSeek 权重加载器不跳过 `num_hidden_layers` 剪掉的层，对 checkpoint 里多出来的 `layers.1..26` 直接 `KeyError`，故单层剪裁只有 lite_llama 与 transformers 两方；V2-Lite 完整 27 层（16B）单卡放不下、需 TP2，不属"单层"口径，未列入。
+- **vLLM 环境**：本机共享 venv 的 vLLM 为 editable 安装，源码一度漂到 0.23.1rc1 而预编译 `_C` 扩展停在 0.21.0（缺 `get_cuda_view_from_cpu_tensor` 算子），构造 `LLM` 直接崩；0.23.1rc1 源码又要求 torch 2.13（cu130），本机驱动 550 跑不了。把 vLLM 源码 checkout 回 v0.21.0 与预编译二进制 / torch 2.11 对齐后才测得上表。
+
+复现：
+
+```bash
+# 三方需把 .venv/bin 与 cuda bin 放进 PATH（vLLM 的 flashinfer JIT 要 ninja）：
+export PATH=/home/honggao/projects/.venv/bin:/usr/local/cuda-12.9/bin:$PATH
+# V2-Lite 单层（lite_llama + transformers；vLLM 不支持剪裁，见上）：
+PYTHONPATH=. /home/honggao/projects/.venv/bin/python examples/benchmark.py \
+    --model my_weight/DeepSeek-V2-Lite --batch-size 8 --gen-len 128 --iters 2 \
+    --engine both --hf-dtype bf16 --hf-overrides '{"num_hidden_layers": 1}'
+# V3 四层三方（vLLM 侧降 gpu_memory_utilization 给 MLA workspace 留空间）：
+PYTHONPATH=. /home/honggao/projects/.venv/bin/python examples/benchmark.py \
+    --model /data/shared/llm_weights/DeepSeek-V3-4layers-MTP-BF16 \
+    --batch-size 8 --gen-len 128 --iters 2 --engine all --hf-dtype bf16 \
+    --hf-overrides '{"n_group":2,"topk_group":1,"num_experts_per_tok":2}' \
+    --vllm-gpu-mem-util 0.7
+```
+
 ## 三 性能优化历史记录
 
 ### 迭代式优化记录

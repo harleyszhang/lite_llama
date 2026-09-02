@@ -193,13 +193,19 @@ def bench_transformers(model_dir, prompts, gen_len, iters, device, dtype="fp16",
     return Metrics.from_runs("transformers", len(prompts), prompt_tokens, ttfts, latencies, out_tokens)
 
 
-def bench_vllm(model_dir, prompts, gen_len, iters, hf_overrides=None) -> Metrics:
+def bench_vllm(model_dir, prompts, gen_len, iters, hf_overrides=None,
+               gpu_memory_utilization=0.9) -> Metrics:
     """Measure vLLM's offline ``LLM`` on one (batch_size, gen_len) configuration.
 
     Production defaults stay on (chunked prefill, CUDA graphs, torch.compile)
     except prefix caching, which lite_llama also leaves off by default — the
     warmup would otherwise serve every timed run from cache and the measured
     TTFT would describe the cache, not the engine.
+
+    ``gpu_memory_utilization`` defaults to vLLM's 0.9 but must be lowered for a
+    checkpoint whose weights already fill most of the card (e.g. the 13 GB
+    DeepSeek-V3-4layers on a 22 GiB A10): at 0.9 the KV reserve crowds out the
+    MLA attention workspace and the first forward OOMs.
     """
     from vllm import LLM as VllmLLM
     from vllm import SamplingParams as VllmParams
@@ -209,6 +215,7 @@ def bench_vllm(model_dir, prompts, gen_len, iters, hf_overrides=None) -> Metrics
         max_model_len=2048,  # the ceiling the lite_llama side runs under
         dtype="bfloat16",
         enable_prefix_caching=False,
+        gpu_memory_utilization=gpu_memory_utilization,
         hf_overrides=hf_overrides or {},
     )
     tokenizer = llm.get_tokenizer()
@@ -282,6 +289,12 @@ def main() -> None:
              "trimmed stack — the layer-local comparison",
     )
     parser.add_argument(
+        "--vllm-gpu-mem-util", type=float, default=0.9,
+        help="vLLM gpu_memory_utilization; lower it (e.g. 0.7) when a checkpoint's "
+             "weights nearly fill the card and the default KV reserve OOMs the "
+             "first forward",
+    )
+    parser.add_argument(
         "--max-gpu-num-blocks", type=int, default=None,
         help="KV pool size in tokens for lite_llama; profile-based when omitted. "
              "Shrink for checkpoints near the device budget (e.g. 16384 for 8B bf16 "
@@ -319,7 +332,10 @@ def main() -> None:
             args.hf_dtype, hf_overrides,
         ))
     if args.engine in ("all", "vllm"):
-        results.append(bench_vllm(args.model, prompts, args.gen_len, args.iters, hf_overrides))
+        results.append(bench_vllm(
+            args.model, prompts, args.gen_len, args.iters, hf_overrides,
+            args.vllm_gpu_mem_util,
+        ))
 
     cfg = dict(model=args.model, batch_size=args.batch_size, gen_len=args.gen_len,
                iters=args.iters, tensor_parallel_size=args.tensor_parallel_size,
