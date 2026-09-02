@@ -249,6 +249,11 @@ async def test_a_dead_replica_fails_every_open_stream(monkeypatch: pytest.Monkey
     with pytest.raises(RuntimeError, match="data-parallel engine failed"):
         await asyncio.wait_for(task, _TIMEOUT)
 
+    # The pump has stopped: accepting another request here would leave its
+    # stream waiting for a result that no thread can ever consume.
+    with pytest.raises(RuntimeError, match="has failed"):
+        await anext(grid.generate("later"))
+
 
 async def test_generate_after_shutdown_is_an_error(grid):
     await grid.shutdown()

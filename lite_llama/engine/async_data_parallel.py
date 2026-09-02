@@ -97,11 +97,18 @@ class AsyncDataParallelEngine(DataParallelEngine):
             **engine_kwargs,
         )
         self._streams: dict[str, _RequestStream] = {}
+        self._stream_snapshot: dict[str, _RequestStream] = {}
         self._request_ids = itertools.count()
         self._pump: threading.Thread | None = None
-        # Guards ``_streams`` only: the pump reads it while coroutines register
-        # and drop entries. Everything else the pump touches — the result queue,
-        # the workers — it shares with the constructor, which has returned.
+        self._shutting_down = False
+        self._failure: RuntimeError | None = None
+        # Serializes starting, admitting a request, and shutdown. A request is
+        # registered and sent to its replica under this lock, so shutdown cannot
+        # stop the pump in the gap and leave a stream with no possible result.
+        self._lifecycle_lock = threading.Lock()
+        # Guards mutations to ``_streams`` and its copy-on-write snapshot. The
+        # pump reads only the snapshot, avoiding lock contention for every
+        # streamed token while coroutines register and drop entries.
         self._lock = threading.Lock()
 
     @classmethod
@@ -117,6 +124,15 @@ class AsyncDataParallelEngine(DataParallelEngine):
     # ------------------------------------------------------------- lifecycle #
     def start(self) -> None:
         """Start the result pump. Idempotent, and safe to call from any loop."""
+        with self._lifecycle_lock:
+            self._start_locked()
+
+    def _start_locked(self) -> None:
+        """Start the result pump while ``_lifecycle_lock`` is held."""
+        if self._closed or self._shutting_down:
+            raise RuntimeError("this AsyncDataParallelEngine has been shut down")
+        if self._failure is not None:
+            raise RuntimeError("this AsyncDataParallelEngine has failed") from self._failure
         if self._pump is not None:
             return
         self._pump = threading.Thread(
@@ -132,16 +148,23 @@ class AsyncDataParallelEngine(DataParallelEngine):
         Both stages block (a replica drains its in-flight batch before exiting),
         so both run off the event loop.
         """
-        if self._pump is not None:
+        with self._lifecycle_lock:
+            if self._closed or self._shutting_down:
+                return
+            self._shutting_down = True
+            pump = self._pump
+
+        if pump is not None:
             with contextlib.suppress(ValueError, OSError):
                 self._result_queue.put((_PUMP_STOP, None, None))
-            await asyncio.get_running_loop().run_in_executor(
-                None, self._pump.join, _PUMP_JOIN_TIMEOUT_S
-            )
-            self._pump = None
+            await asyncio.get_running_loop().run_in_executor(None, pump.join, _PUMP_JOIN_TIMEOUT_S)
+            with self._lifecycle_lock:
+                if self._pump is pump:
+                    self._pump = None
         with self._lock:
             streams = list(self._streams.values())
             self._streams.clear()
+            self._stream_snapshot = {}
         for stream in streams:
             stream.push(None)
         await asyncio.get_running_loop().run_in_executor(None, DataParallelEngine.shutdown, self)
@@ -187,21 +210,28 @@ class AsyncDataParallelEngine(DataParallelEngine):
             RuntimeError: If the engine is shut down, or the replica failed or
                 died while serving this request.
         """
-        if self._closed:
-            raise RuntimeError("this AsyncDataParallelEngine has been shut down")
-        self.start()
-        request_id = request_id or f"dp-{next(self._request_ids)}"
-        stream = _RequestStream(request_id, asyncio.get_running_loop())
-        with self._lock:
-            if request_id in self._streams:
-                raise ValueError(f"request id {request_id!r} is already active")
-            self._streams[request_id] = stream
-
         token_ids = self._tokenize_for_routing([prompt])
         prompt_ids = None if token_ids is None else token_ids[0]
         estimate = 0 if prompt_ids is None else len(prompt_ids)
-        replica = self._select(prompt_ids)
-        self._request_queues[replica].put(("add", request_id, prompt, sampling_params))
+        with self._lifecycle_lock:
+            self._start_locked()
+            request_id = request_id or f"dp-{next(self._request_ids)}"
+            stream = _RequestStream(request_id, asyncio.get_running_loop())
+            with self._lock:
+                if request_id in self._streams:
+                    raise ValueError(f"request id {request_id!r} is already active")
+                self._streams[request_id] = stream
+                self._stream_snapshot = self._streams.copy()
+            replica = self._select(prompt_ids)
+            try:
+                self._request_queues[replica].put(("add", request_id, prompt, sampling_params))
+            except BaseException:
+                with self._lock:
+                    if self._streams.get(request_id) is stream:
+                        self._streams.pop(request_id)
+                        self._stream_snapshot = self._streams.copy()
+                self._balancer.release(replica, estimated_tokens=estimate)
+                raise
         try:
             while True:
                 chunk = await stream.get()
@@ -214,7 +244,8 @@ class AsyncDataParallelEngine(DataParallelEngine):
             with self._lock:
                 if self._streams.get(request_id) is stream:
                     self._streams.pop(request_id)
-            if not stream.finished and not self._closed:
+                    self._stream_snapshot = self._streams.copy()
+            if not stream.finished and not self._closed and not self._shutting_down:
                 # A dead replica's queue is not ours to notice: the put is
                 # best-effort the same way the parent's shutdown puts are.
                 with contextlib.suppress(ValueError, OSError):
@@ -252,12 +283,16 @@ class AsyncDataParallelEngine(DataParallelEngine):
             try:
                 message = self._await_message()
             except RuntimeError as exc:
+                failure = RuntimeError(f"data-parallel engine failed: {exc}")
+                with self._lifecycle_lock:
+                    self._failure = failure
                 with self._lock:
                     streams = list(self._streams.values())
                     self._streams.clear()
+                    self._stream_snapshot = {}
                 for stream in streams:
                     stream.finished = True
-                    stream.push(RuntimeError(f"data-parallel engine failed: {exc}"))
+                    stream.push(failure)
                 return
             if message[0] == _PUMP_STOP:
                 return
@@ -266,7 +301,7 @@ class AsyncDataParallelEngine(DataParallelEngine):
     def _deliver(self, message: tuple) -> None:
         """Move one replica message onto its stream, if anyone still holds it."""
         kind, request_id = message[0], message[1]
-        stream = self._streams.get(request_id)
+        stream = self._get_stream(request_id)
         if stream is None:
             # The consumer went away; the abort command it queued on its way
             # out will reclaim the replica's slot, so there is nothing to do.
@@ -299,3 +334,7 @@ class AsyncDataParallelEngine(DataParallelEngine):
         elif kind == "failed":
             stream.finished = True
             stream.push(RuntimeError(f"replica failed on request {request_id}:\n{message[2]}"))
+
+    def _get_stream(self, request_id: str) -> _RequestStream | None:
+        """Look up a stream without locking the result-pump hot path."""
+        return self._stream_snapshot.get(request_id)
