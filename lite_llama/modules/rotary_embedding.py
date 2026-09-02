@@ -40,7 +40,7 @@ def compute_default_rope(
 def compute_llama3_rope(
     config: Mapping[str, Any], device: torch.device | None = None
 ) -> tuple[torch.Tensor, float]:
-    """LLaMA-3 / YaRN frequency rescaling.
+    """LLaMA-3 frequency rescaling.
 
     Wavelengths longer than the original context are divided by ``factor``, short
     ones are left alone, and the band in between is linearly interpolated so the
@@ -69,11 +69,76 @@ def compute_llama3_rope(
     return torch.where(in_middle_band, smoothed, inv_freq_scaled), attention_scaling
 
 
+def compute_yarn_rope(
+    config: Mapping[str, Any], device: torch.device | None = None
+) -> tuple[torch.Tensor, float]:
+    """YaRN NTK-by-parts rescaling (DeepSeek-V2/V3), element-aligned with HF.
+
+    Unlike LLaMA-3's wavelength rule, the correction range comes from inverting
+    the rotation count over the original context: dimensions that rotate more
+    than ``beta_fast`` times keep their frequency (extrapolation), those below
+    ``beta_slow`` are divided by ``factor`` (interpolation), and a linear ramp
+    blends the band between. The attention scaling follows the paper's mscale
+    rule — DeepSeek-V2-Lite sets ``mscale == mscale_all_dim``, which cancels to
+    exactly 1.0, but the full formula is kept so the V3 spelling works too.
+    """
+    inv_freq, _ = compute_default_rope(config, device)
+
+    original = config["original_max_position_embeddings"]
+    factor = config.get("factor")
+    if factor is None:
+        # DeepSeek-V3 states the extended length and derives the ratio instead.
+        factor = config["max_position_embeddings"] / original
+
+    def mscale_value(scale: float, mscale: float = 1.0) -> float:
+        return 1.0 if scale <= 1 else 0.1 * mscale * math.log(scale) + 1.0
+
+    attention_scaling = config.get("attention_factor")
+    if attention_scaling is None:
+        mscale, mscale_all_dim = config.get("mscale"), config.get("mscale_all_dim")
+        if mscale and mscale_all_dim:
+            attention_scaling = float(mscale_value(factor, mscale) / mscale_value(factor, mscale_all_dim))
+        else:
+            attention_scaling = mscale_value(factor)
+
+    base = float(config.get("rope_theta", 10000.0))
+    dim = _rotary_dim(config)
+    beta_fast = config.get("beta_fast") or 32
+    beta_slow = config.get("beta_slow") or 1
+
+    def correction_dim(rotations: float) -> float:
+        """Index of the dimension rotating ``rotations`` times over the original context."""
+        return (dim * math.log(original / (rotations * 2 * math.pi))) / (2 * math.log(base))
+
+    low, high = correction_dim(beta_fast), correction_dim(beta_slow)
+    if config.get("truncate", True):
+        low, high = math.floor(low), math.ceil(high)
+    # Clamped against dim - 1, not dim // 2 - 1: the reference clamps the
+    # *dimension* bound before halving it for the ramp, and a dim//2 clamp
+    # would shift the blend band on small heads.
+    low, high = max(low, 0), min(high, dim - 1)
+    if low == high:
+        high = low + 0.001  # a singular ramp denominator would NaN the band
+
+    # ramp 0 keeps the frequency (extrapolation), ramp 1 divides it by the
+    # factor (interpolation); the band between blends linearly.
+    ramp = torch.clamp(
+        (torch.arange(dim // 2, dtype=torch.float32, device=device) - low) / (high - low),
+        0,
+        1,
+    )
+    inv_freq_extrapolation_factor = 1 - ramp
+    inv_freq = (inv_freq / factor) * (1 - inv_freq_extrapolation_factor) + (
+        inv_freq * inv_freq_extrapolation_factor
+    )
+    return inv_freq, attention_scaling
+
+
 ROPE_INIT_FUNCTIONS: dict[str, Callable[..., tuple[torch.Tensor, float]]] = {
     "default": compute_default_rope,
     "linear": compute_default_rope,
     "llama3": compute_llama3_rope,
-    "yarn": compute_llama3_rope,
+    "yarn": compute_yarn_rope,
 }
 
 
