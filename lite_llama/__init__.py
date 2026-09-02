@@ -66,7 +66,7 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | _EXPORTS.keys())
 
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 __all__ = [
     "LLM",

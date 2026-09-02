@@ -1,0 +1,60 @@
+{
+  "config": {
+    "batch": 8,
+    "max_gen_len": 128,
+    "mla_dir": "my_weight/DeepSeek-V2-Lite",
+    "mha_dir": "my_weight/Qwen3-1.7B",
+    "json": "docs/benchmark_logs/mla_v0.11.json",
+    "geometry": {
+      "mla": {
+        "model_dir": "my_weight/DeepSeek-V2-Lite",
+        "kind": "mla",
+        "layers": 27,
+        "kv_dtype": "bfloat16",
+        "latent_elements_per_token_per_layer": 576,
+        "uncompressed_elements_per_token_per_layer": 5120,
+        "latent_bytes_per_token": 31104,
+        "uncompressed_bytes_per_token": 276480
+      },
+      "mha": {
+        "model_dir": "my_weight/Qwen3-1.7B",
+        "kind": "gqa",
+        "layers": 28,
+        "kv_dtype": "bfloat16",
+        "gqa_elements_per_token_per_layer": 2048,
+        "gqa_bytes_per_token": 114688
+      }
+    },
+    "timestamp": "2026-09-02T21:23:38"
+  },
+  "results": {
+    "mla_tp2": {
+      "model": "DeepSeek-V2-Lite TP=2",
+      "ttft_ms": 64.77882713079453,
+      "tpot_ms": 63.01455361049944,
+      "total_s": 8.067666407674551,
+      "steps": 128,
+      "batch": 8,
+      "gen_tokens": 1024,
+      "tpot_p50_ms": 62.34870105981827,
+      "tps": 126.92641815555199,
+      "weight_gib": 29.32,
+      "kv_pool_tokens": 161137,
+      "peak_mem_gib_rank0": 19.41
+    },
+    "mha_tp1": {
+      "model": "Qwen3-1.7B TP=1",
+      "ttft_ms": 22.141296416521072,
+      "tpot_ms": 21.716731563797147,
+      "total_s": 2.7806203700602055,
+      "steps": 128,
+      "batch": 8,
+      "gen_tokens": 1024,
+      "tpot_p50_ms": 21.69758453965187,
+      "tps": 368.26314409033427,
+      "weight_gib": 3.78,
+      "kv_pool_tokens": 145363,
+      "peak_mem_gib_rank0": 19.33
+    }
+  }
+}
