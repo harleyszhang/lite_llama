@@ -32,11 +32,11 @@ class UnquantizedLinearMethod(LinearMethodBase):
         layer: nn.Module,
         input_size: int,
         output_size: int,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype = torch.bfloat16,
         **kw,
     ) -> None:
         layer.weight = nn.Parameter(
-            torch.empty(output_size, input_size, dtype=dtype or torch.float16),
+            torch.empty(output_size, input_size, dtype=dtype),
             requires_grad=False,
         )
 
@@ -50,9 +50,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
     """Plain stacked experts; the grouped GEMM runs without scales."""
 
     def create_weights(self, block: nn.Module) -> dict[str, nn.Parameter]:
-        # ``block.dtype`` is the model's dtype; the getattr keeps bare stubs
-        # (tests) on the fp16 default.
-        dtype = getattr(block, "dtype", torch.float16)
+        # ``block.dtype`` follows the checkpoint (SparseMoeBlock reads
+        # ``config.dtype``); bf16 is the fallback for direct instantiation.
+        dtype = getattr(block, "dtype", torch.bfloat16)
         return {
             "gate_up_proj": nn.Parameter(
                 torch.empty(

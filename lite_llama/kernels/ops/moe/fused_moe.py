@@ -6,45 +6,53 @@ packed expert weights with group-wise scales.
 
 The activation may be fp16 or bf16 and every quantised weight tile is widened to
 whichever it is: ``tl.dot`` needs both operands in one type, so the compute dtype
-is the activation's to choose, not the weight format's. The one exception is
-:func:`fused_moe_w8a8_fp8`, where the activation is quantised to e4m3 as well and
-both operands stay 8-bit through the dot. Whether that dot *lands* on the fp8
-tensor cores is Triton's call, not ours: it emits ``wgmma`` only from ``BLOCK_M >=
-64``, and widens both e4m3 operands to an fp16 ``mma.sync`` below that. Either way
-the inner loop skips the bit-trick dequantisation the weight-only modes pay, which
-is where the mode's speed actually comes from -- see ``_FP8_A8_PROMOTE_EVERY``.
+is the activation's to choose, not the weight format's. The exceptions are
+:func:`fused_moe_w8a8_fp8` and :func:`fused_moe_w8a8_int8`, where the activation
+is quantised as well and both operands stay 8-bit through the dot. Whether an
+fp8 dot *lands* on the fp8 tensor cores is Triton's call, not ours: it emits
+``wgmma`` only from ``BLOCK_M >= 64``, and widens both e4m3 operands to an fp16
+``mma.sync`` below that. Either way the inner loop skips the bit-trick
+dequantisation the weight-only modes pay, which is where the modes' speed
+actually comes from -- see ``_FP8_A8_PROMOTE_EVERY``.
 
 Usage:
-    y = fused_moe(hidden_states, w1, w2, topk_weights, topk_ids)
-    y = fused_moe(x, qw1, qw2, tw, ids, w1_scale=s1, w2_scale=s2,
-                  group_n=128, group_k=128)
-    y = fused_moe_w8a8_fp8(x, qw1, qw2, tw, ids, w1_scale=s1, w2_scale=s2,
-                           group_n=1, group_k=hidden)
+    out = fused_moe(hidden_states, w1, w2, topk_weights, topk_ids)
+    out = fused_moe(x, qw1, qw2, tw, ids, w1_scale=s1, w2_scale=s2,
+                    group_n=128, group_k=128)
+    out = fused_moe_w8a8_fp8(x, qw1, qw2, tw, ids, w1_scale=s1, w2_scale=s2,
+                             group_n=1, group_k=hidden)
+    out = fused_moe_w8a8_int8(x, qw1, qw2, tw, ids, w1_scale=s1, w2_scale=s2,
+                              group_n=1, group_k=hidden)
 """
 
 from __future__ import annotations
-
-import functools
 
 import torch
 import triton
 import triton.language as tl
 
 from ..activation.activations import silu
-from ..quantization.fp8 import FP8_E4M3_MAX, fp8_quantize_per_token
+from ..quantization.fp8 import FP8_E4M3_MAX, fp8_quantize_per_token, has_native_fp8
+from ..quantization.w8a8 import int8_quantize_per_token
 from ..quantization.w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
 from ..utils import torch_to_triton_dtype
 
 #: ``QUANT_MODE`` values shared by the kernel and its launcher. Modes 1-3 are
-#: weight-only — the activation stays fp16/bf16 — while mode 4 is true W8A8:
-#: both operands enter the dot as e4m3 bytes. Mode 4 cannot be inferred from
-#: ``w1.dtype`` the way the others are, because weight-only fp8 and W8A8 fp8
-#: store the same ``uint8`` experts; the caller selects it.
+#: weight-only — the activation stays fp16/bf16 — while modes 4 and 5 are true
+#: W8A8: both operands enter the dot as 8-bit (e4m3 / int8). Neither can be
+#: inferred from ``w1.dtype`` the way the others are, because W8A8 fp8 stores
+#: the same ``uint8`` experts as weight-only fp8 and W8A8 int8 the same
+#: ``int8`` experts as weight-only int8; the caller selects the mode through
+#: the entry point it picks. These are plain Python ints, invisible to the
+#: ``@triton.jit`` body -- Triton only resolves globals that are ``tl.constexpr``
+#: instances -- so inside the kernel the modes are spelled as literals
+#: (``if QUANT_MODE == 3:``) and only launcher-side code uses the names.
 _QUANT_NONE = 0
 _QUANT_FP8 = 1
 _QUANT_INT8 = 2
 _QUANT_INT4 = 3
 _QUANT_FP8_A8 = 4
+_QUANT_INT8_A8 = 5
 
 #: Exponent correction for the pre-sm89 path of mode 4, where *both* operands
 #: are widened by the e4m3 -> fp16 bit trick and each is short a factor of 256.
@@ -63,20 +71,49 @@ _QUANT_BLOCK_K = 128
 #:
 #: Measured on H100 (sm90), K=512 dot with both operands filling the e4m3 range,
 #: against an fp32 reference over the same bytes -- p99.9 relative error:
-#: unbounded 7.0e-2, promote every 32 2.5e-2, promote every 0 4.5e-6. The last is
-#: not a more accurate fp8 dot: at 0 Triton drops ``wgmma`` and widens both
+#: unbounded 7.0e-2, promote every 128 3.3e-2, promote every 0 4.5e-6. The last
+#: is not a more accurate fp8 dot: at 0 Triton drops ``wgmma`` and widens both
 #: operands to fp16 ``mma.sync`` instead, so there is no precise fp8 MMA to pick.
 #:
 #: At the Qwen3-30B-A3B MoE geometry all three are indistinguishable (RMS relative
 #: error 6.5e-3 / 6.6e-3 / 6.8e-3): the two e4m3 roundings swamp the accumulator,
 #: and the grouped GEMM is bound by re-reading expert weights once per row-block,
-#: not by the MMA, so the three also land within 5% of each other on time
-#: (tokens=16384: 4637 / 4695 / 4457 us). 32 is the middle: it keeps the dot at 8
-#: bits, where the unbounded default's worst case does not apply.
-_FP8_A8_PROMOTE_EVERY = 32
+#: not by the MMA. 128 — one promotion per BLOCK_K=128 k-tile — is what the dot
+#: runs at: against 32 it bought 10-11% on the 4096-token prefill (869 vs 972 us
+#: on the same tile) and nothing anywhere smaller, because below BLOCK_M=64 there
+#: is no wgmma to promote.
+_FP8_A8_PROMOTE_EVERY = 128
 
-#: Number of int4 values packed per int32 word.
-_INT4_PACK_FACTOR = 8
+#: Number of int4 values packed per output byte of the B tensor. Two nibbles
+#: per byte is vLLM's layout: the kernel's replicated addressing then repeats
+#: every byte across its two nibble rows (a 2x hit L1 absorbs), and the
+#: in-loop unpack is one shift-and-mask with no 3-D expand and no reshape.
+#: Checkpoints ship 8 nibbles per int32 word instead, so
+#: :func:`repack_int4_experts` bridges the two layouts once at load.
+_INT4_PACK_FACTOR = 2
+
+#: Largest magnitude symmetric int8 stores; the int8 A-quantising path scales
+#: by this, mirroring ``FP8_E4M3_MAX`` for the e4m3 modes.
+_INT8_MAX = 127.0
+
+#: A-row count at and below which the W8A8 modes quantise the activation *inside*
+#: the GEMM kernel instead of in the separate quantiser. The separate path costs
+#: a launch plus its host time (~35 us per call at 1 token on an H100, against
+#: ~15 us of device work in both GEMMs combined) -- on a launch-bound decode
+#: step that host time is the whole fp8 W8A8 regression. Inline removes it, but
+#: every program re-derives the amax over the full K of its gathered A rows, so
+#: the re-read grows with the grid -- once the GEMM is the cost (not the launch)
+#: the repetition is pure loss. Measured on H100 at the Qwen3-30B-A3B geometry
+#: with the threshold swept (both modes, us): at 1/8 tokens inline wins ~34/19 us
+#: either side of every value from 8 to 512; at 64 tokens (GEMM1's A is 64 rows)
+#: inline loses ~17 us and at 512 (GEMM1's A is 512 rows) ~62 us, because the
+#: amax pass over a [rows, K] tile runs in every one of the grid's
+#: m-blocks x n-blocks programs. 32 sits between: it keeps every decode-shape
+#: A (1 row, and top_k=8 rows into GEMM2) inline while anything whose GEMM has
+#: left the launch-bound regime goes to the quantiser. Both GEMMs are judged on
+#: their own A row count: GEMM1's is ``num_tokens``, GEMM2's the expanded
+#: ``num_tokens * top_k``.
+_INLINE_A_QUANT_MAX_ROWS = 32
 
 
 # --------------------------------------------------------------------------- #
@@ -305,11 +342,14 @@ def _fused_moe_kernel(
     MUL_ROUTED_WEIGHT: tl.constexpr,
     QUANT_MODE: tl.constexpr,
     NATIVE_FP8: tl.constexpr,
+    FP8_CVT: tl.constexpr,
     K_PROMOTE: tl.constexpr,
     DEQUANT_SCALE: tl.constexpr,
     HAS_ZEROS: tl.constexpr,
     SCALE_HOISTED: tl.constexpr,
     compute_type: tl.constexpr,
+    A_QUANT: tl.constexpr,
+    A_QMAX: tl.constexpr,
 ):
     """One C row-block of ``A @ B[expert]`` where rows of A are gathered tokens.
 
@@ -318,10 +358,18 @@ def _fused_moe_kernel(
     When ``QUANT_MODE`` is non-zero, ``b_scale_ptr`` holds dequantisation scales.
     When ``QUANT_MODE == 3`` (INT4), B is ``[E, N, K//8]`` int32 packed (8 nibbles per word),
     ``b_scale_ptr`` is ``[E, N, K//group_k]``, and optionally ``b_zeros_ptr`` holds zero points.
-    When ``QUANT_MODE == 4`` (fp8 W8A8), A is ``uint8`` e4m3 too and
+    When ``QUANT_MODE`` is 4 or 5 (fp8 / int8 W8A8), A is 8-bit too and
     ``a_scale_ptr`` holds one fp32 scale per A row; ``NATIVE_FP8`` then picks
     between keeping both operands 8-bit for the sm89+ fp8 MMA and the pre-sm89
-    widening. Both are read only in that mode, and unused elsewhere.
+    widening. Both are read only in those modes, and unused elsewhere.
+
+    ``A_QUANT`` moves the mode-4/5 activation quantisation *inside* this kernel:
+    A arrives at full precision (fp16/bf16), one extra pass over the gathered rows
+    derives each row's scale, and the k-loop quantises on the fly instead of
+    reading pre-quantised bytes. ``a_scale_ptr`` is then unread. This exists for
+    the launch-bound decode shapes, where the separate quantiser kernel's host
+    time exceeds the whole GEMM's device time (measured on H100 at 1 token:
+    ~35 us of host per call against ~15 us of device work in both GEMMs).
 
     ``SCALE_HOISTED`` says the b-scale does not vary along k -- one scale group
     spans the whole of K, which is what per-output-channel scales are. The
@@ -354,15 +402,24 @@ def _fused_moe_kernel(
     a_ptrs = a_ptr + (offs_token[:, None] // top_k) * stride_am + offs_k[None, :] * stride_ak
 
     if QUANT_MODE == 3:
-        # INT4: B is [E, N, K//8] int32, packed along K dim. stride_bk is per-word.
-        # For each k-tile of BLOCK_K logical elements, we load BLOCK_K//8 int32 words.
-        offs_k_words = tl.arange(0, BLOCK_K // 8)
+        # INT4: B is [E, N, K//2] uint8, two nibbles per byte along K;
+        # stride_bk is per byte. Replicated addressing (vLLM's idiom): logical
+        # k reads byte k // 2 and shifts by (k % 2) * 4, so the tile loads as
+        # one 2-D [BLOCK_K, BLOCK_N] with every byte appearing in its two
+        # nibble rows. The previous format packed 8 nibbles per int32 word and
+        # unpacked through a [words, 8, N] expand plus ``tl.reshape``; running
+        # that word layout under replicated addressing instead (each word
+        # fetched 8x as int32, a [BLOCK_K, BLOCK_N] int32 tile) measured ~10x
+        # slower on an H100 at t4096 -- the bytes are repacked once at load
+        # (``repack_int4_experts``) rather than shuffled in the loop.
         b_ptrs = (
             b_ptr
             + off_experts * stride_be
             + offs_bn[None, :] * stride_bn
-            + offs_k_words[:, None] * stride_bk
+            + (offs_k[:, None] // 2) * stride_bk
         )
+        # Low nibble for even k, high for odd; constant across the k-loop.
+        b_shifter = (offs_k[:, None] % 2) * 4
     else:
         b_ptrs = (
             b_ptr
@@ -378,29 +435,65 @@ def _fused_moe_kernel(
             # and leave the k-loop free to accumulate in the dot.
             b_scale = tl.load(b_scale_ptrs)
 
+    if A_QUANT:
+        # Row amax over the gathered A rows, the same rows the k-loop reads.
+        # Grid-wide this pass re-reads A once per n-block, which is why the
+        # launcher only sets A_QUANT on small token counts: at 1 token the
+        # whole activation is a few KB, at 4096 it is 16 MB the GEMM would
+        # otherwise touch once.
+        amax = tl.zeros((BLOCK_M,), dtype=tl.float32)
+        a_qrow_ptrs = a_ptr + (offs_token[:, None] // top_k) * stride_am
+        for k in range(0, tl.cdiv(K, BLOCK_K)):
+            offs_kq = k * BLOCK_K + offs_k
+            a_row = tl.load(
+                a_qrow_ptrs + offs_kq[None, :],
+                mask=token_mask[:, None] & (offs_kq[None, :] < K),
+                other=0.0,
+            ).to(tl.float32)
+            amax = tl.maximum(amax, tl.max(tl.abs(a_row), axis=1))
+        # Same scale convention as the separate quantisers: amax / QMAX, and
+        # 1.0 on an all-zero row so it stays zero instead of dividing by it.
+        a_scale = tl.where(amax > 0.0, amax / A_QMAX, 1.0)
+
     # fp32 accumulation keeps the K-loop noise below the fp16 storage floor.
+    # Mode 5 hoisted is the one int8 exception: the integer tensor cores
+    # accumulate in int32, which is exact, and converting every k-tile to fp32
+    # before the epilogue would lose that.
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    acc_int = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.int32)
     for k in range(0, tl.cdiv(K, BLOCK_K)):
-        a = tl.load(
-            a_ptrs,
-            mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_K),
-            # An int literal, not 0.0: in mode 4 this pointer is ``uint8``, and
-            # the e4m3 bit pattern 0 is +0.0 anyway, so one spelling serves both.
-            other=0,
-        )
-        if QUANT_MODE == 3:
-            # INT4 path: load int32 words [BLOCK_K//8, BLOCK_N], unpack to [BLOCK_K, BLOCK_N]
-            b_packed = tl.load(
-                b_ptrs,
-                mask=offs_k_words[:, None] < (K // 8) - k * (BLOCK_K // 8),
+        if A_QUANT:
+            a = tl.load(
+                a_ptrs,
+                mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_K),
+                other=0.0,
+            ).to(tl.float32)
+            q = a / a_scale[:, None]
+            if QUANT_MODE == 4:
+                a = tl.minimum(tl.maximum(q, -A_QMAX), A_QMAX).to(tl.float8e4nv)
+            else:
+                # rint, not a plain .to(int8): the torch reference rounds to
+                # nearest even, and .to truncates toward zero -- a different
+                # byte for every value whose fraction is above one half.
+                r = tl.extra.cuda.libdevice.rint(q)
+                a = tl.minimum(tl.maximum(r, -A_QMAX), A_QMAX).to(tl.int8)
+        else:
+            a = tl.load(
+                a_ptrs,
+                mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_K),
+                # An int literal, not 0.0: in modes 4/5 this pointer is ``uint8``
+                # or ``int8``, and the e4m3 / int8 bit pattern 0 is +0 anyway,
+                # so one spelling serves every dtype the pointer can carry.
                 other=0,
-            )  # [BLOCK_K//8, BLOCK_N]
-            # Unpack 8 int4 nibbles per word: shift by [0,4,8,...,28] and mask 0xF
-            shifts = (tl.arange(0, 8) * 4).to(tl.int32)  # [8]
-            # Reshape for broadcast: [BLOCK_K//8, 1, BLOCK_N] x [1, 8, 1] -> [BLOCK_K//8, 8, BLOCK_N]
-            b_expanded = (b_packed[:, None, :] >> shifts[None, :, None]) & 0xF
-            # Flatten to [BLOCK_K, BLOCK_N]
-            b = tl.reshape(b_expanded, (BLOCK_K, BLOCK_N)).to(tl.float32)
+            )
+        if QUANT_MODE == 3:
+            # INT4 path: one [BLOCK_K, BLOCK_N] uint8 tile, nibbles out by shift-and-mask
+            b_byte = tl.load(
+                b_ptrs,
+                mask=offs_k[:, None] < K - k * BLOCK_K,
+                other=0,
+            )  # [BLOCK_K, BLOCK_N]; each byte in its two nibble rows
+            b = ((b_byte >> b_shifter) & 0xF).to(tl.float32)
             # Load scale and optionally zero point
             if not SCALE_HOISTED:
                 b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
@@ -421,7 +514,7 @@ def _fused_moe_kernel(
                 accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
             else:
                 accumulator += tl.dot(a, b.to(compute_type)) * b_scale[None, :]
-            b_ptrs += (BLOCK_K // 8) * stride_bk
+            b_ptrs += (BLOCK_K // _INT4_PACK_FACTOR) * stride_bk
         else:
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0)
             if QUANT_MODE == 0:
@@ -433,7 +526,7 @@ def _fused_moe_kernel(
                 # e4m3 bit trick lands in fp16 by construction and its values
                 # carry 4 significant bits, so the extra hop to bf16 is exact.
                 if QUANT_MODE == 4:
-                    # W8A8: nothing is widened to compute_type at all. Both
+                    # W8A8 fp8: nothing is widened to compute_type at all. Both
                     # operands stay 8-bit into the dot, and Triton decides from
                     # BLOCK_M whether that becomes an fp8 wgmma or an fp16
                     # mma.sync. B is already loaded k-contiguous ([E, N, K] means
@@ -446,8 +539,25 @@ def _fused_moe_kernel(
                     else:
                         a = dequant_fp8e4m3(a)
                         b = dequant_fp8e4m3(b)
+                elif QUANT_MODE == 5:
+                    # W8A8 int8: both operands stay int8 into the dot and the
+                    # integer tensor cores accumulate in int32, which is exact.
+                    # No capability split: the imma path exists from Turing on,
+                    # and pre-Turing devices have no tensor cores for the other
+                    # modes either.
+                    pass
                 elif QUANT_MODE == 1:
-                    b = dequant_fp8e4m3(b).to(compute_type)
+                    # sm89+ widens e4m3 with one hardware cvt per element; the bit
+                    # trick below is the five-integer-op software path for anything
+                    # older. Both land in ``compute_type`` with the same rounding
+                    # (e4m3 is exact in fp16, so the trick's 256x must be folded
+                    # into DEQUANT_SCALE by the launcher -- the cvt needs no
+                    # correction), which is what keeps the golden bytes stable
+                    # across the capability split.
+                    if FP8_CVT:
+                        b = b.to(tl.float8e4nv, bitcast=True).to(compute_type)
+                    else:
+                        b = dequant_fp8e4m3(b).to(compute_type)
                 else:
                     b = b.to(compute_type)
                 # Hoisted out of the dot, so the tensor cores see two 16-bit
@@ -470,12 +580,23 @@ def _fused_moe_kernel(
                         accumulator += (
                             tl.dot(a, b, max_num_imprecise_acc=K_PROMOTE) * b_scale[None, :]
                         )
+                elif QUANT_MODE == 5:
+                    if SCALE_HOISTED:
+                        # out_dtype is spelled, not defaulted: the default is
+                        # fp32, and tl.dot asserts the accumulator's dtype equals
+                        # it -- which an int32 accumulator never will.
+                        acc_int = tl.dot(a, b, acc=acc_int, out_dtype=tl.int32)
+                    else:
+                        accumulator += tl.dot(a, b).to(tl.float32) * b_scale[None, :]
                 elif SCALE_HOISTED:
                     accumulator = tl.dot(a, b, acc=accumulator)
                 else:
                     accumulator += tl.dot(a, b) * b_scale[None, :]
             b_ptrs += BLOCK_K * stride_bk
         a_ptrs += BLOCK_K * stride_ak
+
+    if QUANT_MODE == 5 and SCALE_HOISTED:
+        accumulator = acc_int.to(tl.float32)
 
     if QUANT_MODE != 0 and SCALE_HOISTED:
         # The whole k-loop shared this scale, so one multiply here replaces the
@@ -484,12 +605,17 @@ def _fused_moe_kernel(
         # scale tensor at all, so hoisting is meaningless rather than free there.
         accumulator *= b_scale[None, :]
     accumulator *= DEQUANT_SCALE
-    if QUANT_MODE == 4:
-        # One scale per activation row, so it leaves the k-loop untouched. The
-        # mask matters: a padded slot's ``offs_token`` is the sentinel
-        # ``num_valid_slots``, one past the last real row of a_scale.
-        a_scale = tl.load(a_scale_ptr + offs_token // top_k, mask=token_mask, other=0.0)
-        accumulator *= a_scale[:, None]
+    if QUANT_MODE == 4 or QUANT_MODE == 5:
+        if A_QUANT:
+            # The scale is a register this kernel derived; multiplying here is
+            # one instruction and no memory traffic. ``a_scale_ptr`` is unused.
+            accumulator *= a_scale[:, None]
+        else:
+            # One scale per activation row, so it leaves the k-loop untouched. The
+            # mask matters: a padded slot's ``offs_token`` is the sentinel
+            # ``num_valid_slots``, one past the last real row of a_scale.
+            a_scale = tl.load(a_scale_ptr + offs_token // top_k, mask=token_mask, other=0.0)
+            accumulator *= a_scale[:, None]
     # Router weights multiply in fp32 before the final downcast (gemm2 only).
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
@@ -502,15 +628,18 @@ def _fused_moe_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-@functools.cache
-def _has_native_fp8(device_index: int | None) -> bool:
-    """Whether this device has the fp8 MMA, cached because the query is not free.
-
-    ``torch.cuda.get_device_capability`` costs ~2.7 us of host time per call and
-    both GEMMs of every layer ask. On a launch-bound decode step that is real
-    money for a property that cannot change while the process lives.
-    """
-    return torch.cuda.get_device_capability(device_index) >= (8, 9)
+#: Tile per (quant mode, rows-per-expert tier): ``(BLOCK_M, BLOCK_N, num_warps)``.
+#: ``BLOCK_K`` is 128 for every mode and ``GROUP_M``/``num_stages`` are 8/3, so
+#: those live in :func:`_launch_config` and only the axes that actually move are
+#: tabulated. See that function for the sweep behind every entry.
+_TILE_TABLE: dict[int, tuple[tuple[int, int, int], ...]] = {
+    _QUANT_NONE: ((16, 64, 4), (64, 64, 4), (128, 128, 8), (128, 128, 8)),
+    _QUANT_FP8: ((16, 64, 4), (64, 128, 4), (64, 128, 4), (128, 256, 8)),
+    _QUANT_INT8: ((16, 64, 4), (32, 128, 4), (64, 128, 4), (128, 256, 8)),
+    _QUANT_INT4: ((16, 128, 4), (64, 128, 4), (64, 128, 4), (64, 128, 4)),
+    _QUANT_FP8_A8: ((16, 64, 4), (32, 128, 4), (64, 128, 4), (64, 128, 4)),
+    _QUANT_INT8_A8: ((16, 64, 4), (32, 128, 4), (64, 128, 4), (128, 256, 8)),
+}
 
 
 def _launch_config(num_tokens: int, quant_mode: int, rows_per_expert: float) -> dict:
@@ -526,45 +655,57 @@ def _launch_config(num_tokens: int, quant_mode: int, rows_per_expert: float) -> 
     either -- 64 tokens is 4 rows per expert at Qwen3-30B-A3B's 128 experts and
     16 at Mixtral's 8, and the old tiers read both as "32".
 
-    Two tiers, 16 below 16 rows per expert and 64 at or above it, from a sweep of
-    16/32/64/128 over both geometries on an H100 (µs, ``LITE_LLAMA_AUTOTUNE=0``):
+    Tiles are per format *and* per tier, from a sweep of BLOCK_M x BLOCK_N over
+    the Qwen3-30B-A3B expert geometry on an H100 (``LITE_LLAMA_AUTOTUNE=0``,
+    BLOCK_K=128 throughout). Entry is ``(BLOCK_M, BLOCK_N, num_warps)``;
+    ``rows`` tiers are ``<16``, ``16..32``, ``32..64`` and ``>64`` rows per
+    expert:
 
-    ==================  ====  ==============  ==============  ==============
-    geometry            rows  fp16 16/32/64   int8 16/32/64   fp8a8 16/32/64
-    ==================  ====  ==============  ==============  ==============
-    E=128 k=8 t=8        0.5  186/191/192     159/206/196     219/218/219
-    E=128 k=8 t=64         4  418/419/423     250/445/404     235/242/278
-    E=128 k=8 t=512       32  532/480/473     571/656/439     323/299/311
-    E=128 k=8 t=4096     256  2948/1980/1487  3449/3639/1695  1836/1469/1072
-    E=8  k=2 t=512       128  188/158/157     236/256/163     267/264/263
-    ==================  ====  ==============  ==============  ==============
+    ============  ==========  ===========  ===========  ===========
+    format        <16         16..32       32..64       >64
+    ============  ==========  ===========  ===========  ===========
+    unquantised   16x64  w4   64x64  w4    128x128 w8   128x128 w8
+    fp8 W8A16     16x64  w4   64x128 w4    64x128  w4   128x256 w8
+    int8 W8A16    16x64  w4   32x128 w4    64x128  w4   128x256 w8
+    int4          16x128 w4   64x128 w4    64x128  w4   64x128  w4
+    fp8 W8A8      16x64  w4   32x128 w4    64x128  w4   64x128  w4
+    int8 W8A8     16x64  w4   32x128 w4    64x128  w4   128x256 w8
+    ============  ==========  ===========  ===========  ===========
 
-    The 4-rows row is the one the old heuristic got wrong: it picked 32, where
-    int8 costs 1.78x its 16 figure. 32 never wins by more than 4% anywhere in the
-    sweep (fp8 W8A8 at 32 rows) and loses by up to 1.5x, so the middle tier is
-    gone rather than re-fitted.
+    At the 4096-token prefill those tiles bought 19-28% over the old two-tier
+    heuristic (all in us): unquantised 1430 -> 1058, fp8 W8A8 1073 -> 869 (with
+    ``_FP8_A8_PROMOTE_EVERY=128``, without which the 64x128 tile loses ~12%),
+    fp8 W8A16 1949 -> 1418, int8 W8A16 1585 -> 1148, int4 2366 -> 1834. The
+    int8 W8A8 row was written after the sweep and inherits int8 W8A16's tiles:
+    its B bytes are identical and the int8 tensor cores only ever compute faster
+    than the widened dot, so the memory-bound tile preference transfers.
 
-    ``BLOCK_K`` is 128 for every mode, including fp16. It used to be 32 there, on
-    the reasoning that an fp16 tile already fills a memory transaction at 32 while
-    a byte tile needs 128 — true about the transaction, wrong about the layer. A
-    tile sweep over the Qwen3-30B-A3B expert geometry
-    (``benchmarks/kernels/bench_fused_moe.py --tune``) found no winning fp16 config
-    with ``BLOCK_K`` below 64 at any token count, and the narrow tile was costing
-    26% at 64 tokens and 32% at 512-4096 by running four times the k-iterations.
-    The quantised paths were never affected, which is why the defect survived: it
-    made every quantisation benchmark on this kernel look better than it was.
+    ``BLOCK_N`` stops at 128 for the unquantised mode by shared memory, not by
+    preference: a bf16 tile of (128, 128) + (128, 256) operands needs 288 KB over
+    three stages against H100's 228 KB. The 8-bit modes store B as one byte per
+    element and fit the wider tile; int4 and fp8 W8A8 measured *slower* on it --
+    int4's unpacking and mode 4's epilogue want the narrower tile -- so only the
+    two weight-only 8-bit modes take it.
 
     ``num_tokens`` and ``quant_mode`` stay in the signature because callers pass
     them and a future divergence on either belongs here rather than at the call
     sites.
     """
-    block_m = 16 if rows_per_expert < 16 else 64
+    if rows_per_expert < 16:
+        tier = 0
+    elif rows_per_expert <= 32:
+        tier = 1
+    elif rows_per_expert <= 64:
+        tier = 2
+    else:
+        tier = 3
+    block_m, block_n, num_warps = _TILE_TABLE[quant_mode][tier]
     return {
         "BLOCK_M": block_m,
-        "BLOCK_N": 64,
+        "BLOCK_N": block_n,
         "BLOCK_K": _QUANT_BLOCK_K,
         "GROUP_M": 8,
-        "num_warps": 4,
+        "num_warps": num_warps,
         "num_stages": 3,
     }
 
@@ -586,8 +727,15 @@ def _invoke_moe_gemm(
     group_n: int,
     group_k: int,
     config: dict,
+    a_quant: str | None = None,
 ) -> None:
-    """Launch one grouped GEMM: ``C[slot] = A[slot // top_k] @ B[expert].T``."""
+    """Launch one grouped GEMM: ``C[slot] = A[slot // top_k] @ B[expert].T``.
+
+    ``a_quant`` (``"fp8"`` / ``"int8"``) moves the per-row activation
+    quantisation inside the kernel — ``a`` then arrives at full precision and
+    ``a_scale`` is ignored — for the launch-bound shapes; see
+    ``_INLINE_A_QUANT_MAX_ROWS``.
+    """
     assert a.stride(-1) == 1 and b.stride(-1) == 1, "last dims must be contiguous"
     em = sorted_token_ids.numel()
     num_slots = c.shape[0]
@@ -597,11 +745,17 @@ def _invoke_moe_gemm(
     # Only mode 4 puts A through the tensor cores as fp8, so only it cares which
     # of the two widenings the kernel compiles; the weight-only modes always take
     # the bit trick and always pay its single correction factor.
-    native_fp8 = quant_mode == _QUANT_FP8_A8 and _has_native_fp8(a.device.index)
+    native_fp8 = quant_mode == _QUANT_FP8_A8 and has_native_fp8(a.device.index)
+    # Mode 1's widening has its own capability split: sm89+ converts e4m3 with a
+    # hardware cvt (one instruction, no 256x correction), older devices keep the
+    # bit trick and its DEQUANT_SCALE.
+    fp8_cvt = quant_mode == _QUANT_FP8 and has_native_fp8(a.device.index)
     if quant_mode == _QUANT_FP8_A8:
         dequant_scale = 1.0 if native_fp8 else _FP8_BIT_TRICK_SCALE_SQ
+    elif quant_mode == _QUANT_FP8:
+        dequant_scale = 1.0 if fp8_cvt else FP8_E4M3_BIT_TRICK_SCALE
     else:
-        dequant_scale = FP8_E4M3_BIT_TRICK_SCALE if quant_mode == _QUANT_FP8 else 1.0
+        dequant_scale = 1.0
     grid = (triton.cdiv(em, config["BLOCK_M"]) * triton.cdiv(n, config["BLOCK_N"]),)
     group_k_eff = min(group_k, k_logical) if group_k else 1
     _fused_moe_kernel[grid](
@@ -637,6 +791,7 @@ def _invoke_moe_gemm(
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         QUANT_MODE=quant_mode,
         NATIVE_FP8=native_fp8,
+        FP8_CVT=fp8_cvt,
         K_PROMOTE=min(_FP8_A8_PROMOTE_EVERY, config["BLOCK_K"]),
         DEQUANT_SCALE=dequant_scale,
         HAS_ZEROS=b_zeros is not None,
@@ -646,6 +801,11 @@ def _invoke_moe_gemm(
         # in-loop form because their scale genuinely changes with k.
         SCALE_HOISTED=quant_mode != _QUANT_NONE and group_k_eff >= k_logical,
         compute_type=torch_to_triton_dtype[c.dtype],
+        # A_QUANT quantises the activation inside the kernel (see
+        # ``_INLINE_A_QUANT_MAX_ROWS``); A_QMAX is the target format's range and
+        # only read when A_QUANT is set.
+        A_QUANT=a_quant is not None,
+        A_QMAX={"fp8": FP8_E4M3_MAX, "int8": _INT8_MAX}.get(a_quant, 0.0),
         num_warps=config["num_warps"],
         num_stages=config["num_stages"],
     )
@@ -661,20 +821,21 @@ def _silu_and_mul_kernel(
     scale_ptr,
     stride_xm,
     N,
-    FP8_MAX: tl.constexpr,
-    QUANT_FP8: tl.constexpr,
+    QMAX: tl.constexpr,
+    QUANT_OUT: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
     """``out = silu(x[:, :N]) * x[:, N:]`` on a contiguous ``[tokens, 2N]`` input.
 
-    With ``QUANT_FP8`` the result leaves as e4m3 bytes plus one fp32 scale per
-    row, which is what the W8A8 second GEMM wants. The launcher only sets it
-    when one program owns a whole row (``BLOCK_N >= N``): the row's amax has to
-    be known before any element of it can be scaled, and a program that holds
-    half a row cannot know it without a second pass through HBM -- which is
-    exactly the separate quantiser this fusion removes. The saving is a launch
-    (~40 us of host time on an H100, against a 13 us second GEMM at decode) and
-    a full fp16 round-trip of the intermediate.
+    With ``QUANT_OUT`` set (1 = fp8, 2 = int8) the result leaves as bytes plus
+    one fp32 scale per row, which is what the W8A8 second GEMM wants; ``QMAX`` is
+    the target format's range. The launcher only sets it when one program owns a
+    whole row (``BLOCK_N >= N``): the row's amax has to be known before any
+    element of it can be scaled, and a program that holds half a row cannot know
+    it without a second pass through HBM -- which is exactly the separate
+    quantiser this fusion removes. The saving is a launch (~40 us of host time
+    on an H100, against a 13 us second GEMM at decode) and a full fp16
+    round-trip of the intermediate.
     """
     pid_m = tl.program_id(0).to(tl.int64)
     pid_n = tl.program_id(1)
@@ -684,19 +845,26 @@ def _silu_and_mul_kernel(
     gate = tl.load(x_ptr + pid_m * stride_xm + offs, mask=mask, other=0.0).to(tl.float32)
     up = tl.load(x_ptr + pid_m * stride_xm + N + offs, mask=mask, other=0.0).to(tl.float32)
     out = silu(gate) * up
-    if QUANT_FP8:
+    if QUANT_OUT:
         # Masked lanes carry 0 from the loads above, so they cannot raise the
-        # amax. Same scale convention as ``fp8_quantize_per_token``: exactly
-        # ``amax / FP8_MAX``, and 1.0 on an all-zero row so it stays zero.
+        # amax. Same scale convention as the per-token quantisers: exactly
+        # ``amax / QMAX``, and 1.0 on an all-zero row so it stays zero.
         amax = tl.max(tl.abs(out))
-        scale = tl.where(amax > 0.0, amax / FP8_MAX, 1.0)
+        scale = tl.where(amax > 0.0, amax / QMAX, 1.0)
         tl.store(scale_ptr + pid_m, scale)
-        q = tl.minimum(tl.maximum(out / scale, -FP8_MAX), FP8_MAX)
-        tl.store(
-            out_ptr + pid_m * N + offs,
-            q.to(tl.float8e4nv).to(tl.uint8, bitcast=True),
-            mask=mask,
-        )
+        q = tl.minimum(tl.maximum(out / scale, -QMAX), QMAX)
+        if QUANT_OUT == 1:
+            tl.store(
+                out_ptr + pid_m * N + offs,
+                q.to(tl.float8e4nv).to(tl.uint8, bitcast=True),
+                mask=mask,
+            )
+        else:
+            # rint, not a plain .to(int8): torch's .round() is round-to-nearest
+            # even and .to truncates toward zero -- a different byte for every
+            # value whose fraction is above one half.
+            r = tl.extra.cuda.libdevice.rint(q)
+            tl.store(out_ptr + pid_m * N + offs, r.to(tl.int8), mask=mask)
     else:
         tl.store(out_ptr + pid_m * N + offs, out.to(out_ptr.dtype.element_ty), mask=mask)
 
@@ -727,20 +895,39 @@ def _moe_sum_kernel(
 def _quant_mode(weight: torch.Tensor, scale: torch.Tensor | None) -> int:
     """Classify an expert weight tensor into one of the ``QUANT_MODE`` values.
 
-    Never returns :data:`_QUANT_FP8_A8`: the dtype cannot tell weight-only fp8
-    from W8A8 fp8, since both store ``uint8`` e4m3 experts. Only the entry point
-    the caller chose says which, so :func:`fused_moe_w8a8_fp8` promotes the mode
+    Never returns the W8A8 modes: the dtype cannot tell weight-only fp8 from W8A8
+    fp8 (both store ``uint8`` e4m3 experts) nor weight-only int8 from W8A8 int8
+    (both ``int8``). Only the entry point the caller chose says which, so
+    :func:`fused_moe_w8a8_fp8` and :func:`fused_moe_w8a8_int8` promote the mode
     after this classification.
+
+    ``zeros`` disambiguates the other dtype collision: byte-packed int4 experts
+    are ``uint8`` just like fp8, but int4 is the only format carrying zero
+    points. The int32 word packing that int4 checkpoints ship never reaches the
+    kernel -- converting it is a one-time load step
+    (:func:`repack_int4_experts`), not something a per-call path should pay.
     """
     if scale is None:
         return _QUANT_NONE
+    if zeros is not None:
+        if weight.dtype != torch.uint8:
+            raise ValueError(
+                "int4 expert weights must be byte-packed uint8 [E, N, K//2], got "
+                f"{weight.dtype}; convert the [E, N, K//8] int32 checkpoint layout "
+                "once at load with repack_int4_experts"
+            )
+        return _QUANT_INT4
     if weight.dtype == torch.uint8:
         return _QUANT_FP8
     if weight.dtype == torch.int8:
         return _QUANT_INT8
     if weight.dtype == torch.int32:
-        return _QUANT_INT4
-    raise ValueError(f"quantised expert weights must be uint8, int8 or int32, got {weight.dtype}")
+        raise ValueError(
+            "int4 expert weights must be byte-packed uint8 [E, N, K//2]; the "
+            "[E, N, K//8] int32 checkpoint layout needs repack_int4_experts "
+            "(once, at load)"
+        )
+    raise ValueError(f"quantised expert weights must be uint8 or int8, got {weight.dtype}")
 
 
 def _fused_moe(
@@ -756,15 +943,17 @@ def _fused_moe(
     w2_zeros: torch.Tensor | None = None,
     group_n: int = 0,
     group_k: int = 0,
-    act_fp8: bool = False,
+    act_quant: str | None = None,
 ) -> torch.Tensor:
-    """Body of both public entry points; ``act_fp8`` is their only difference.
+    """Body of the three public entry points; ``act_quant`` is their only
+    difference: ``None`` leaves the activation at full precision, ``"fp8"`` and
+    ``"int8"`` quantise it per token.
 
-    Private, and the two thin wrappers below are what callers and the registry
-    see, because ``tests/ops/test_native_specs.py`` pins every registered
-    target's parameter *names* to the :class:`MoeOp` ABC. A public ``act_fp8``
-    flag would either break that pin or have to be added to the ABC, where it
-    would become a promise the DeepGEMM row cannot keep. Two names for two rows
+    Private, and the thin wrappers below are what callers and the registry see,
+    because ``tests/ops/test_native_specs.py`` pins every registered target's
+    parameter *names* to the :class:`MoeOp` ABC. A public ``act_quant`` flag
+    would either break that pin or have to be added to the ABC, where it would
+    become a promise the DeepGEMM row cannot keep. Three names for three rows
     costs less than one signature that lies.
     """
     num_tokens, hidden = hidden_states.shape
@@ -774,18 +963,27 @@ def _fused_moe(
     device = hidden_states.device
     dtype = hidden_states.dtype
 
-    quant_mode = _quant_mode(w1, w1_scale)
-    if quant_mode != _quant_mode(w2, w2_scale):
+    quant_mode = _quant_mode(w1, w1_scale, w1_zeros)
+    if quant_mode != _quant_mode(w2, w2_scale, w2_zeros):
         raise ValueError("w1 and w2 must use the same quantisation format")
     if quant_mode and group_k % 128 != 0 and group_k < min(hidden, intermediate):
         raise ValueError(f"group_k ({group_k}) must be a multiple of 128 unless it covers K")
-    if act_fp8:
+    if act_quant == "fp8":
         if quant_mode != _QUANT_FP8:
             raise ValueError(
                 "fp8 W8A8 experts must be uint8 e4m3 bytes with scales, got "
                 f"{w1.dtype} (mode {quant_mode})"
             )
         quant_mode = _QUANT_FP8_A8
+    elif act_quant == "int8":
+        if quant_mode != _QUANT_INT8:
+            raise ValueError(
+                "int8 W8A8 experts must be int8 bytes with scales, got "
+                f"{w1.dtype} (mode {quant_mode})"
+            )
+        quant_mode = _QUANT_INT8_A8
+    elif act_quant is not None:
+        raise ValueError(f"act_quant must be None, 'fp8' or 'int8', got {act_quant!r}")
 
     topk_ids = topk_ids.to(torch.int32)
     flat_weights = topk_weights.reshape(-1).to(dtype).contiguous()
@@ -803,10 +1001,11 @@ def _fused_moe(
         _QUANT_FP8: "fp8",
         _QUANT_INT8: "int8",
         _QUANT_INT4: "int4",
-        # Its own key, not "fp8": the two modes compile different inner loops and
-        # want different tiles, so sharing a TuneKey would let one mode's search
-        # install a config the other never measured.
+        # Their own keys, not the weight-only names: the W8A8 modes compile
+        # different inner loops and want different tiles, so sharing a TuneKey
+        # would let one mode's search install a config the other never measured.
         _QUANT_FP8_A8: "fp8_a8",
+        _QUANT_INT8_A8: "int8_a8",
     }.get(quant_mode, act_dtype)
     config = get_best_config("fused_moe", m=num_tokens, n=two_inter, k=hidden, dtype=dtype_label)
     if config is None:
@@ -815,16 +1014,27 @@ def _fused_moe(
         topk_ids, config["BLOCK_M"], num_experts
     )
 
-    # GEMM1: [M, hidden] x [E, 2I, hidden] -> [M * top_k, 2I]
-    # In W8A8 the activation is quantised once per token here, before the gather:
-    # a slot reads a row, so quantising the [M, hidden] input costs top_k times
-    # less than quantising the expanded slots would, and every slot of a token
-    # then shares one scale. No host synchronisation in the quantiser, so the
-    # layer stays capturable into a CUDA graph.
+    # GEMM1: [M, hidden] x [E, 2I, hidden] -> [M * top_k, 2I]. In W8A8 the
+    # activation is quantised once per token, before the gather: a slot reads a
+    # row, so quantising the [M, hidden] input costs top_k times less than
+    # quantising the expanded slots would, and every slot of a token then shares
+    # one scale. Below ``_INLINE_A_QUANT_MAX_ROWS`` tokens the quantisation moves
+    # inside the GEMM kernel (``a1_quant``) and this stays a full-precision read;
+    # either way there is no host synchronisation, so the layer stays
+    # CUDA-graph capturable.
     a1, a1_scale = hidden_states, None
+    a1_quant = None
     if quant_mode == _QUANT_FP8_A8:
-        a1, a1_scale = fp8_quantize_per_token(hidden_states)
-        a1_scale = a1_scale.reshape(-1)
+        if num_tokens <= _INLINE_A_QUANT_MAX_ROWS:
+            a1_quant = "fp8"
+        else:
+            a1, a1_scale = fp8_quantize_per_token(hidden_states)
+            a1_scale = a1_scale.reshape(-1)
+    elif quant_mode == _QUANT_INT8_A8:
+        if num_tokens <= _INLINE_A_QUANT_MAX_ROWS:
+            a1_quant = "int8"
+        else:
+            a1, a1_scale = int8_quantize_per_token(hidden_states)
     gate_up = torch.empty((num_tokens * top_k, two_inter), device=device, dtype=dtype)
     _invoke_moe_gemm(
         a1,
@@ -843,18 +1053,26 @@ def _fused_moe(
         group_n=group_n,
         group_k=group_k,
         config=config,
+        a_quant=a1_quant,
     )
 
     # silu(gate) * up -> [M * top_k, I], quantised on the way out when W8A8 can
-    # fuse it (see ``_silu_and_mul_kernel``); otherwise the separate quantiser
-    # below still runs, so a wide-FFN MoE keeps working, just with one more launch.
+    # fuse it (see ``_silu_and_mul_kernel``). Otherwise the wide-FFN case falls
+    # back to inline quantisation in GEMM2 below, and prefill shapes to the
+    # separate quantiser — a wide MoE keeps working either way, just with one
+    # more launch.
+    act_quant_out, act_qmax = 0, 0.0
+    if quant_mode == _QUANT_FP8_A8:
+        act_quant_out, act_qmax = 1, FP8_E4M3_MAX
+    elif quant_mode == _QUANT_INT8_A8:
+        act_quant_out, act_qmax = 2, _INT8_MAX
     block_n = min(triton.next_power_of_2(intermediate), 1024)
-    fuse_act_quant = quant_mode == _QUANT_FP8_A8 and block_n >= intermediate
-    act = torch.empty(
-        (num_tokens * top_k, intermediate),
-        device=device,
-        dtype=torch.uint8 if fuse_act_quant else dtype,
-    )
+    fuse_act_quant = act_quant_out != 0 and block_n >= intermediate
+    if fuse_act_quant:
+        act_dtype = torch.uint8 if act_quant_out == 1 else torch.int8
+    else:
+        act_dtype = dtype
+    act = torch.empty((num_tokens * top_k, intermediate), device=device, dtype=act_dtype)
     act_scale = (
         torch.empty(num_tokens * top_k, device=device, dtype=torch.float32)
         if fuse_act_quant
@@ -866,8 +1084,8 @@ def _fused_moe(
         act_scale,
         gate_up.stride(0),
         intermediate,
-        FP8_MAX=FP8_E4M3_MAX,
-        QUANT_FP8=fuse_act_quant,
+        QMAX=act_qmax,
+        QUANT_OUT=act_quant_out if fuse_act_quant else 0,
         BLOCK_N=block_n,
         num_warps=4,
     )
@@ -878,9 +1096,18 @@ def _fused_moe(
     # ``offs_token // top_k`` into the identity on slot indices -- which is also
     # what makes one a_scale row per slot the right shape here.
     a2, a2_scale = act, act_scale
-    if quant_mode == _QUANT_FP8_A8 and not fuse_act_quant:
-        a2, a2_scale = fp8_quantize_per_token(act)
-        a2_scale = a2_scale.reshape(-1)
+    a2_quant = None
+    if act_quant_out and not fuse_act_quant:
+        # GEMM2's A is the per-slot silu output, already expanded, so its row
+        # count is ``num_tokens * top_k`` — that is what the inline threshold is
+        # judged on here, not ``num_tokens``.
+        if num_tokens * top_k <= _INLINE_A_QUANT_MAX_ROWS:
+            a2_quant = "fp8" if act_quant_out == 1 else "int8"
+        elif act_quant_out == 1:
+            a2, a2_scale = fp8_quantize_per_token(act)
+            a2_scale = a2_scale.reshape(-1)
+        else:
+            a2, a2_scale = int8_quantize_per_token(act)
     expanded = torch.empty((num_tokens * top_k, hidden), device=device, dtype=dtype)
     _invoke_moe_gemm(
         a2,
@@ -899,6 +1126,7 @@ def _fused_moe(
         group_n=group_n,
         group_k=group_k,
         config=config,
+        a_quant=a2_quant,
     )
 
     # Reduce over the top_k slot dim -> [M, hidden]
@@ -928,7 +1156,8 @@ def fused_moe(
 
     Weight-only for every quantised format: the expert tiles are widened to the
     activation's dtype inside the loop and the activation itself is never
-    touched. :func:`fused_moe_w8a8_fp8` is the one that quantises it.
+    touched. :func:`fused_moe_w8a8_fp8` and :func:`fused_moe_w8a8_int8` are the
+    entry points that quantise it.
 
     Args:
         hidden_states: ``[num_tokens, hidden]`` activations (fp16 or bf16,
@@ -961,7 +1190,7 @@ def fused_moe(
         w2_zeros=w2_zeros,
         group_n=group_n,
         group_k=group_k,
-        act_fp8=False,
+        act_quant=None,
     )
 
 
@@ -984,10 +1213,11 @@ def fused_moe_w8a8_fp8(
     Both grouped GEMMs run on the fp8 tensor cores (sm89+) instead of widening
     the expert tile to bf16 first, which is the difference between quantising for
     memory and quantising for arithmetic. The activation is quantised per token
-    before GEMM1 and per slot-row before GEMM2, in one kernel each
-    (:func:`~lite_llama.kernels.ops.quantization.fp8.fp8_quantize_per_token`),
-    with no host synchronisation — the layer must stay CUDA-graph capturable,
-    which is also why ``moe_align_block_size`` avoids ``bincount``.
+    before GEMM1 and per slot-row before GEMM2 — inline in the GEMM kernels on
+    launch-bound decode shapes, else in
+    :func:`~lite_llama.kernels.ops.quantization.fp8.fp8_quantize_per_token` —
+    with no host synchronisation either way; the layer must stay CUDA-graph
+    capturable, which is also why ``moe_align_block_size`` avoids ``bincount``.
 
     ``w1_zeros``/``w2_zeros`` exist only to keep the :class:`MoeOp` contract; fp8
     is symmetric, so a non-``None`` value is a caller error.
@@ -1012,5 +1242,54 @@ def fused_moe_w8a8_fp8(
         w2_scale=w2_scale,
         group_n=group_n,
         group_k=group_k,
-        act_fp8=True,
+        act_quant="fp8",
+    )
+
+
+def fused_moe_w8a8_int8(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    *,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    w1_zeros: torch.Tensor | None = None,
+    w2_zeros: torch.Tensor | None = None,
+    group_n: int = 0,
+    group_k: int = 0,
+) -> torch.Tensor:
+    """The routed-expert FFN with int8 activations as well: SmoothQuant experts.
+
+    Same pipeline as :func:`fused_moe_w8a8_fp8` over int8 weights: both operands
+    enter the dot as int8 and the integer tensor cores (``imma``, from Turing on)
+    accumulate in int32, which is exact — the only fp8-vs-int8 asymmetry is that
+    there is no capability split, so ``NATIVE_FP8``'s sm89 widening does not
+    exist here.
+
+    ``w1_zeros``/``w2_zeros`` exist only to keep the :class:`MoeOp` contract;
+    symmetric int8 has no zero points, so a non-``None`` value is a caller error.
+
+    Args:
+        See :func:`fused_moe`. ``w1``/``w2`` must be ``int8`` bytes with scales
+        — anything else raises, rather than silently degrading to the weight-only
+        path.
+
+    Returns:
+        ``[num_tokens, hidden]`` combined expert output, in ``hidden_states``' dtype.
+    """
+    if w1_zeros is not None or w2_zeros is not None:
+        raise ValueError("symmetric int8 has no zero points; those belong to the int4 path")
+    return _fused_moe(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        group_n=group_n,
+        group_k=group_k,
+        act_quant="int8",
     )

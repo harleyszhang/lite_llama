@@ -136,7 +136,7 @@ method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 | 层 | Quant Method | Kernel | 权重格式 |
 |----|--------------|--------|---------|
 | `self_attn.qkv_proj` / `o_proj` | `Fp8LinearMethod` | `w8a16_matmul` | fp8-e4m3 + 128×128 block scales |
-| `mlp.experts`（128 专家的 gate_up / down） | `Fp8MoEMethod` | `fused_moe` `QUANT_MODE=1` | fp8-e4m3 + block scales（反量化因子 256 折进 `DEQUANT_SCALE` bit-trick） |
+| `mlp.experts`（128 专家的 gate_up / down） | `Fp8MoEMethod` | `fused_moe` `QUANT_MODE=1` | fp8-e4m3 + block scales（sm89+ 单条硬件 `cvt` 加宽；旧设备 bit-trick 折 256× 进 `DEQUANT_SCALE`） |
 | `mlp.gate`（router）/ `lm_head` | `UnquantizedLinearMethod` | cuBLAS 线性层 | bf16 |
 
 两条 kernel 路径都接受 fp16 或 bf16 激活（checkpoint 的 `torch_dtype: bfloat16` 走 bf16）：反量化后的操作数统一对齐激活 dtype 再进 tensor core。TP2 下每卡存半个副本（权重 14.53 GB + KV 各半）；连续批处理引擎的 TP-safe graph 捕获让 TP2 的 decode 同样走 graph（设计见 [tensor_parallel.md](tensor_parallel.md)）——早期"NCCL 集合通信不能进 CUDA graph 捕获"的 eager 限制属于旧引擎路径，已被推翻。
@@ -216,27 +216,27 @@ int4/AWQ 是一个有启发性的对照，但故事不同：它读的权重字�
 
 ## FP8 W8A8 融合 MoE
 
-`W8A8Fp8MoEMethod` 在量化专家权重的同时也量化**激活**（`fused_moe(..., act_fp8=True)`）：GEMM1 之前 per-token fp8，silu 输出在 GEMM2 之前 per-row fp8，两者都不做 host 同步，因此 MoE 层仍可被 graph 捕获。在此之前，`W8A8Fp8MoEMethod.apply` 与 `Fp8MoEMethod.apply` 是同一个函数，激活始终是 bf16——W8A8 只是个标签，不是一条路径。
+`W8A8Fp8MoEMethod` 与 `W8A8Int8MoEMethod` 在量化专家权重的同时也量化**激活**（入口 `fused_moe_w8a8_fp8` / `fused_moe_w8a8_int8`）：GEMM1 之前 per-token，silu 输出在 GEMM2 之前 per-row（低于 32 行时两者都融进 GEMM kernel 内部，见 `_INLINE_A_QUANT_MAX_ROWS`），全程不做 host 同步，因此 MoE 层仍可被 graph 捕获。在此之前，`W8A8Fp8MoEMethod.apply` 与 `Fp8MoEMethod.apply` 是同一个函数，`W8A8Int8MoEMethod.apply` 调的是 weight-only 的 `fused_moe`——激活始终是 bf16，W8A8 只是个标签，不是一条路径。
 
-Qwen3-30B-A3B 几何（E=128，top_k=8，hidden 2048，moe_intermediate 768），测于 NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7），数据来自 [`bench_fused_moe_h100_20260902.json`](benchmark_logs/bench_fused_moe_h100_20260902.json)（以 `LITE_LLAMA_AUTOTUNE=0` 运行，即用户没有调优缓存时拿到的启发式 tile）。基线与激活 dtype 为 bf16——即该 checkpoint 实际服务的精度（`torch_dtype: bfloat16`）；2026-09-01 的一轮 fp16 基线测量保留在 [`bench_fused_moe_h100_20260901.json`](benchmark_logs/bench_fused_moe_h100_20260901.json)：
+Qwen3-30B-A3B 几何（E=128，top_k=8，hidden 2048，moe_intermediate 768），测于 NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7），数据来自 [`bench_fused_moe_h100_20260902_fp8cvt.json`](benchmark_logs/bench_fused_moe_h100_20260902_fp8cvt.json)（以 `LITE_LLAMA_AUTOTUNE=0` 运行，即用户没有调优缓存时拿到的启发式 tile）。基线与激活 dtype 为 bf16——即该 checkpoint 实际服务的精度（`torch_dtype: bfloat16`）；fp8 W8A16 的 e4m3 加宽在 sm89+ 上走单条硬件 `cvt`（kernel 开关 `FP8_CVT`，修正因子 256 随之消失）。前一天的 fp16 基线测量保留在 [`bench_fused_moe_h100_20260901.json`](benchmark_logs/bench_fused_moe_h100_20260901.json)，同日早间的 [`bench_fused_moe_h100_20260902.json`](benchmark_logs/bench_fused_moe_h100_20260902.json) 是修复中途的快照（其 t1 行与自身消融行矛盾，勿引用）：
 
-| tokens | bf16 | fp8 W8A16 | **fp8 W8A8** | int8 | int4 |
-|---|---|---|---|---|---|
-| 1 | 366.5 µs | 371.5 µs | 494.4 µs | 369.9 µs | 370.3 µs |
-| 8 | 371.5 µs | 378.8 µs | 499.5 µs | 377.4 µs | 376.1 µs |
-| 64 | 535.1 µs | 473.1 µs | 502.9 µs | **379.4 µs** | 626.2 µs |
-| 512 | 588.1 µs | 654.1 µs | **492.2 µs** | 544.7 µs | 695.9 µs |
-| 4096 | 1578.9 µs | 2442.5 µs | **1479.4 µs** | 1901.1 µs | 2606.2 µs |
+| tokens | bf16 | fp8 W8A16 | fp8 W8A8 | **int8 W8A8** | int8 W8A16 | int4 |
+|---|---|---|---|---|---|---|
+| 1 | 99.2 µs | 103.6 µs | 109.5 µs | 109.2 µs | 103.1 µs | 104.7 µs |
+| 8 | 186.3 µs | 118.3 µs | 124.0 µs | 132.5 µs | **115.0 µs** | 174.7 µs |
+| 64 | 416.0 µs | 240.6 µs | 236.3 µs | **234.1 µs** | 234.4 µs | 376.4 µs |
+| 512 | 469.1 µs | 348.1 µs | 279.8 µs | **275.2 µs** | 313.6 µs | 461.0 µs |
+| 4096 | 1036.2 µs | 1329.7 µs | 856.3 µs | **672.7 µs** | 1130.9 µs | 1917.1 µs |
 
-decode 与 prefill 在这里是两个不同的操作，不平均成一个加速比。1-8 token 时 fp8-A8 是**最慢**的一行：在一个 launch-bound 的层上，量化 kernel 是纯开销（仅 `moe_align_block_size` 一项消融就占每行 ~188 µs，超过 decode 时间的一半——这也是 bf16 与三种 weight-only 格式在那里互相只差 1.5% 以内、读的权重字节却差 4× 的原因）。64 token 时 weight-only 格式胜出——int8 快 29.1%，W8A16 fp8 快 11.6%——int4 则不然，比 bf16 还*慢* 17.0%：那条路径受限于每个 int32 解包 8 个 nibble，而不是流量，它在表中读的字节最少、GB/s 却最低。从 512 token 起 fp8-A8 接管排序：成为最快一行（512 时比 bf16 低 16.3%，4096 时低 6.3%，达 209 TFLOP/s），int8 在 512 时仍领先 7.4%、W8A16 fp8 则落后 11.2%，到 4096 两者都是倒退（分别慢 20% 与 55%）——GEMM 一旦 compute-bound，逐 row-block 反量化权重 tile 就不再摊销。A8 的收益在 MMA 里，所以恰好出现在 weight-only 收益消失的地方。
+decode 与 prefill 在这里是两个不同的操作，不平均成一个加速比。1 token 时所有格式挤在 bf16 的 ±10% 内（99-110 µs）：这层是五个背靠背的 kernel（align、GEMM1、silu、GEMM2、sum），launch 而不是字节决定下限。W8A8 的激活量化已不再增加 launch——低于 32 行时量化融进 GEMM 内部（`_INLINE_A_QUANT_MAX_ROWS`），silu 输出在 store 时量化（`QUANT_OUT`）——代价是每个 GEMM program 重新推导 amax，t1 残留约 10%，t8 起被字节优势吞没（int8 weight-only 快 62%，W8A8 fp8 快 50%）。64 token 起 slot 数超过行块、每个专家载入被摊销，所有量化行都胜过 bf16：int8 W8A8（234.1 µs，1.78×）是此档下限，int8 W8A16 与 W8A8 fp8 落在其 1% 内；int4 只打平（1.11×）——它读的字节最少、GB/s 却最低：受限于每个 int32 解包 8 个 nibble，不是流量。512 token 起 weight-only 收益反转、W8A8 接管：int8 W8A8（275.2 µs，1.70×）是该档最快一行；4096 时 weight-only 全线倒退（fp8 慢 28%、int8 慢 9%、int4 慢 85%）——GEMM 一旦 compute-bound，逐 row-block 反量化权重 tile 就不再摊销——而 W8A8 不付这笔账：int8 W8A8 以 672.7 µs（1.54×，460 TFLOP/s）成为全表任意 shape 的最快行，比 fp8 W8A8（856.3 µs，1.21×）快 21%——int8 imma 从 `BLOCK_M=16` 就能用 tensor core（fp8 要 64 才发 wgmma），且 int32 累加精确、无 `K_PROMOTE` 式精度税。A8 的收益在 MMA 里，所以恰好出现在 weight-only 收益消失的地方。fp8 W8A16 的 28% 残值已是 `FP8_CVT` 之后的数字（换入硬件 `cvt` 值 5.3%：1404.0→1329.7 µs）；再往下是逐 row-block 重读权重 tile 的结构性成本——`BLOCK_M=256` 试图消它反而全面变慢（0.26-0.90×，shared memory 逼 `num_stages=2`、accumulator 寄存器压力压垮 occupancy，而 `GROUP_M=8` 的 L2 分组已吸收大部分重读）。
 
-一个表里看不出的告诫：Triton 只有在 `BLOCK_M >= 64` 时才发射 Hopper 的 fp8 `wgmma`，而 `_launch_config` 要到 64 token 以上才会到这个档位。t1/t8/t64 的 A8 行是把两个 e4m3 操作数加宽成 fp16 走 `mma.sync`，所以它们根本没有测到 fp8 tensor core——这与收益从 512 开始的现象一致。
+一个表里看不出的告诫：Triton 只有在 `BLOCK_M >= 64` 时才发射 Hopper 的 fp8 `wgmma`，而 `_launch_config` 的 fp8 W8A8 分档要到 4096 token 才到这个行块（512 的 tier-1 tile 是 `BLOCK_M=32`）。低于它的两个 e4m3 操作数加宽成 fp16 走 `mma.sync`，所以除 t4096 外的 fp8-A8 行都没测到 fp8 tensor core——t512 的领先来自字节与跳过的 bit-trick，不是 MMA。int8-A8 没有这个门槛（imma 从 `BLOCK_M=16` 起可用）。
 
 ### 这批数字发现的 tile 启发式缺陷
 
-`_launch_config` 原来返回 `BLOCK_K = 128 if quant_mode else 32`。对内存事务而言这是对的（fp16 tile 32 个元素就能填满一次，字节 tile 需要 128 个），对这个层却是错的：这里的专家 GEMM 宽 768、对 2048 的 hidden size，窄 k-tile 只会把循环次数放大。用 `benchmarks/kernels/bench_fused_moe.py --tune` 对 17 配置空间做 tile 扫描（当时是 fp16 基线），发现任何 token 数下未量化行的优胜配置 `BLOCK_K` 都**不低于** 64；基准里保留的窄 tile 消融行在 bf16 上复现同样的形状——64 token 时损失 25.1%、512 时 22.4%、4096 时 10.4%。
+`_launch_config` 原来返回 `BLOCK_K = 128 if quant_mode else 32`。对内存事务而言这是对的（fp16 tile 32 个元素就能填满一次，字节 tile 需要 128 个），对这个层却是错的：这里的专家 GEMM 宽 768、对 2048 的 hidden size，窄 k-tile 只会把循环次数放大。用 `benchmarks/kernels/bench_fused_moe.py --tune` 对 17 配置空间做 tile 扫描（当时是 fp16 基线），发现任何 token 数下未量化行的优胜配置 `BLOCK_K` 都**不低于** 64；基准里保留的窄 tile 消融行在 bf16 上复现同样的形状——t8 时慢 26.3%、64 时 30.8%、512 时 26.8%、4096 时 12.9%。
 
-这个缺陷只会压低*未量化基线*，这正是没有任何测试抓到它的原因，也是这个 kernel 上过去的量化对比都读起来比实际更好的原因——512 token 时，它就是「W8A16 fp8 看起来赢 18%」与上面实际的「输 11%」之间的差别。现在所有模式都用 128。基准测试保留窄 tile 作为消融行，让修复保持被度量：两行（基线与窄 tile）收敛就意味着它复发了。
+这个缺陷只会压低*未量化基线*，这正是没有任何测试抓到它的原因，也是这个 kernel 上过去的量化对比都读起来比实际更好的原因——在当时的 fp16 基线上，512 token 时它就是「W8A16 fp8 看起来赢 18%」与实际的「输 11%」之间的差别。现在所有模式都用 128。基准测试保留窄 tile 作为消融行，让修复保持被度量：两行（基线与窄 tile）收敛就意味着它复发了。
 
 同一次扫描持久化到 `ConfigStore` 后，15 个 store key 中 13 个相对启发式有提升（最大：fp16 在 M512 档，2502.8 → 1694.1 µs，+32.3%）。搜索按 `TuneKey` 进行而不是按 token 数，因为 `bucket_m` 会把 M 向上取整到 (16, 32, 64, 128, 256, 512) 的下一档——t1 与 t8 共享一个条目，按 token 数搜索会让它们互相覆盖。注意未量化模式现在按*激活 dtype* 键入（`bf16` 与 `fp16` 是两个条目），这批 fp16 扫描条目不会覆盖 bf16 路径——切到 bf16 基线后请重跑 `--tune`。换新设备同理；持久化的缓存不入库。
 

@@ -102,12 +102,13 @@ GLUE_NATIVE_ROWS = {
     "elementwise.swiglu_split": "native/swiglu_forward",
 }
 
-#: Native rows beyond the floor. Only ``moe`` has one, and only for one scheme:
+#: Native rows beyond the floor. Only ``moe`` has them, one per W8A8 scheme:
 #: ``fused_moe`` infers the expert format from ``w1.dtype``, which cannot tell
-#: weight-only fp8 from W8A8 fp8 -- both are ``uint8`` e4m3 experts. The
-#: difference is whether the *activation* is quantised, which no dtype records,
-#: so the choice has to be the entry point and therefore the row.
-GLUE_EXTRA_NATIVE_ROWS = {"moe": {"native/fused_moe_w8a8_fp8"}}
+#: weight-only fp8 from W8A8 fp8 (both are ``uint8`` e4m3 experts) nor
+#: weight-only int8 from W8A8 int8 (both ``int8``). The difference is whether
+#: the *activation* is quantised, which no dtype records, so the choice has to
+#: be the entry point and therefore the row.
+GLUE_EXTRA_NATIVE_ROWS = {"moe": {"native/fused_moe_w8a8_fp8", "native/fused_moe_w8a8_int8"}}
 
 #: ``op -> external rows`` for the same domains.
 GLUE_EXTERNAL_ROWS = {
@@ -273,18 +274,21 @@ class TestGlueCatalogue:
         with pytest.raises(LookupError, match="dtype"):
             dispatch(op, dtype="fp32")
 
-    def test_one_moe_row_serves_every_scheme_but_w8a8_fp8(self) -> None:
+    def test_one_moe_row_serves_every_scheme_but_the_w8a8_pair(self) -> None:
         # fused_moe reads the expert format off ``w1.dtype`` (uint8 -> fp8,
         # int8, int32 -> int4), so for those the scheme is not a choice between
         # rows; splitting them would write several specs for one internal branch.
-        # w8a8_fp8 is the exception because its bytes are indistinguishable from
-        # weight-only fp8's: see ``GLUE_EXTRA_NATIVE_ROWS``.
+        # The W8A8 pair are the exceptions because their bytes are
+        # indistinguishable from the weight-only formats' — int8 exactly as fp8
+        # before it: see ``GLUE_EXTRA_NATIVE_ROWS``.
         row = REGISTRY.native_floor("moe")
-        served_by_floor = SCHEME_TO_ROW.keys() - SCHEMES_WITHOUT_MOE - {"w8a8_fp8"}
+        served_by_floor = SCHEME_TO_ROW.keys() - SCHEMES_WITHOUT_MOE - {"w8a8_fp8", "w8a8_int8"}
         for scheme in served_by_floor:
             assert dispatch("moe", dtype="bf16", scheme=scheme).spec.name == row.name
         sel = dispatch("moe", dtype="bf16", scheme="w8a8_fp8")
         assert sel.spec.name == "native/fused_moe_w8a8_fp8"
+        sel = dispatch("moe", dtype="bf16", scheme="w8a8_int8")
+        assert sel.spec.name == "native/fused_moe_w8a8_int8"
 
     @pytest.mark.parametrize("scheme", sorted(SCHEMES_WITHOUT_MOE))
     def test_schemes_without_a_moe_kernel_fail_loudly(self, scheme: str) -> None:

@@ -23,7 +23,9 @@ class LinearBase(nn.Module):
     Subclasses decide how ``input_size``/``output_size`` are split; the
     :attr:`quant_method` owns the parameters and the multiply — composition,
     not subclassing, because sharding and storage format are orthogonal
-    choices.
+    choices. ``dtype`` is the checkpoint's element type, defaulting to bf16
+    for the undeclared-checkpoint case, and is threaded into
+    :meth:`create_weights` so a bf16 checkpoint never allocates fp16.
     """
 
     def __init__(
@@ -33,24 +35,22 @@ class LinearBase(nn.Module):
         *,
         bias: bool = False,
         quant: QuantizationConfig | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype = torch.bfloat16,
     ) -> None:
         super().__init__()
         self.input_size = input_size
         self.output_size = output_size
         self.quant = quant
         # The checkpoint's element type; the model layer passes ``config.dtype``
-        # (auto: follow config.json), and quant methods read it back when they
-        # allocate a plain 16-bit weight or bias.
+        # (auto: follow config.json), and it is threaded into ``create_weights``
+        # so an unquantised layer allocates in that type rather than in fp16.
         self.dtype = dtype
         self.quant_method = (
             quant.get_quant_method(self) if quant is not None else UnquantizedLinearMethod()
         )
         self.quant_method.create_weights(self, input_size, output_size, dtype=dtype)
         self.bias = (
-            nn.Parameter(
-                torch.empty(output_size, dtype=dtype or torch.float16), requires_grad=False
-            )
+            nn.Parameter(torch.empty(output_size, dtype=dtype), requires_grad=False)
             if bias
             else None
         )
@@ -127,7 +127,7 @@ class ColumnParallelLinear(LinearBase):
         *,
         bias: bool = False,
         quant: QuantizationConfig | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype = torch.bfloat16,
         what: str = "output features",
     ) -> None:
         world_size = get_tp_world_size()
@@ -182,7 +182,7 @@ class QKVParallelLinear(LinearBase):
         *,
         bias: bool = False,
         quant: QuantizationConfig | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype = torch.bfloat16,
     ) -> None:
         world_size = get_tp_world_size()
         local_heads = divide(num_heads, world_size, "attention heads")
@@ -253,7 +253,7 @@ class RowParallelLinear(LinearBase):
         *,
         bias: bool = False,
         quant: QuantizationConfig | None = None,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype = torch.bfloat16,
         what: str = "input features",
     ) -> None:
         if bias:
