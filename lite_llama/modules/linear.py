@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ..distributed.parallel_state import all_reduce_tp, divide, get_tp_rank, get_tp_world_size
+from ..distributed.parallel_state import all_reduce, divide, get_tp_rank, get_tp_world_size
 from .quantization import QuantizationConfig, UnquantizedLinearMethod
 
 
@@ -277,7 +277,7 @@ class RowParallelLinear(LinearBase):
     """Splits the contracted features across ranks and all-reduces the result.
 
     Each rank multiplies its slice of ``x`` by its slice of ``W``, so what comes
-    out is a partial sum; :func:`~lite_llama.distributed.parallel_state.all_reduce_tp`
+    out is a partial sum; :func:`~lite_llama.distributed.parallel_state.all_reduce`
     completes it. A bias is rejected rather than silently added ``world_size``
     times — no projection in the supported models has one.
 
@@ -319,7 +319,7 @@ class RowParallelLinear(LinearBase):
         return super()._weight_loader(param.data, loaded)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return all_reduce_tp(self.apply_linear(x))
+        return all_reduce(self.apply_linear(x))
 
 
 def _check_shard_alignment(quant: QuantizationConfig | None, local_size: int, what: str) -> None:

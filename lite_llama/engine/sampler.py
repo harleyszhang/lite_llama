@@ -15,12 +15,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
+from torch.distributed import ReduceOp
 
 from ..distributed.parallel_state import (
-    all_gather_tp,
-    all_reduce_max_tp,
-    all_reduce_tp,
-    broadcast_tp,
+    all_gather,
+    all_reduce,
+    broadcast,
     get_tp_rank,
     get_tp_world_size,
 )
@@ -31,7 +31,7 @@ def local_vocab_offset(local_width: int) -> int | None:
 
     The shard is derived from the ambient parallel state and the width of the tensor
     itself rather than threaded down from the model, for the same reason
-    :func:`~lite_llama.distributed.parallel_state.all_reduce_tp` is: there is exactly one
+    :func:`~lite_llama.distributed.parallel_state.all_reduce` is: there is exactly one
     vocabulary split per process, and a sampler that has to be *told* about it is a
     sampler that can be told wrong. It holds because every logits producer in the
     package is a :class:`~lite_llama.modules.vocab_parallel.ParallelLMHead`.
@@ -256,11 +256,11 @@ def global_argmax(local_logits: torch.Tensor, vocab_offset: int) -> torch.Tensor
         ``[batch, 1]`` global token ids.
     """
     local_best, local_id = local_logits.max(dim=-1, keepdim=True)
-    best = all_reduce_max_tp(local_best.clone())
+    best = all_reduce(local_best.clone(), op=ReduceOp.MAX)
     ids = local_id + vocab_offset
     losers = torch.full_like(ids, torch.iinfo(ids.dtype).max)
     candidates = torch.where(local_best == best, ids, losers)
-    return all_gather_tp(candidates).amin(dim=-1, keepdim=True)
+    return all_gather(candidates).amin(dim=-1, keepdim=True)
 
 
 def vocab_logsumexp(scaled: torch.Tensor) -> torch.Tensor:
@@ -280,8 +280,8 @@ def vocab_logsumexp(scaled: torch.Tensor) -> torch.Tensor:
     Returns:
         ``[batch, 1]`` global ``logsumexp``, identical on every rank.
     """
-    row_max = all_reduce_max_tp(scaled.amax(dim=-1, keepdim=True))
-    row_sum = all_reduce_tp((scaled - row_max).exp().sum(dim=-1, keepdim=True))
+    row_max = all_reduce(scaled.amax(dim=-1, keepdim=True), op=ReduceOp.MAX)
+    row_sum = all_reduce((scaled - row_max).exp().sum(dim=-1, keepdim=True))
     return row_max + row_sum.log()
 
 
@@ -312,8 +312,8 @@ def sharded_top_p(
 
     local_k = scaled.shape[-1] if k is None else min(k, scaled.shape[-1])
     local_top, local_ids = torch.topk(scaled, local_k, dim=-1)
-    pool = all_gather_tp(local_top)
-    pool_ids = all_gather_tp(local_ids + vocab_offset)
+    pool = all_gather(local_top)
+    pool_ids = all_gather(local_ids + vocab_offset)
     global_k = pool.shape[-1] if k is None else min(k, pool.shape[-1])
     top_probs, order = torch.topk((pool - log_z).exp(), global_k, dim=-1)
     return _draw_from_nucleus(top_probs, pool_ids.gather(-1, order), top_p)
@@ -353,12 +353,12 @@ def _distribution_records(
     local = ids - offset
     valid = (local >= 0) & (local < width)
     gathered = scaled.gather(-1, local.clamp(0, width - 1))
-    chosen = all_reduce_tp(torch.where(valid, gathered, torch.zeros_like(gathered))) - log_z
+    chosen = all_reduce(torch.where(valid, gathered, torch.zeros_like(gathered))) - log_z
     if k <= 0:
         return chosen, None, None
     local_values, local_ids = (scaled - log_z).topk(min(k, width), dim=-1)
-    pool_values = all_gather_tp(local_values)
-    pool_ids = all_gather_tp(local_ids + offset)
+    pool_values = all_gather(local_values)
+    pool_ids = all_gather(local_ids + offset)
     top_values, order = pool_values.topk(min(k, pool_values.shape[-1]), dim=-1)
     return chosen, top_values, pool_ids.gather(-1, order)
 
@@ -685,7 +685,7 @@ class Sampler:
         # caller will actually see, so synchronise first; the worker's own
         # broadcast of the returned ids is then an idempotent no-op.
         if offset is not None and not all_greedy:
-            ids = broadcast_tp(ids)
+            ids = broadcast(ids)
         # A greedy whole-batch call arrives with temperature == 0.0, which the
         # draw itself never divides by. The records must describe the raw
         # distribution, so substitute the clamp BatchedSamplingParams applies.

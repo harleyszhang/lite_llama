@@ -6,7 +6,7 @@ decisions get numbers instead of guesses.
 
 Usage:
     with CollectiveStats.collect() as stats:
-        all_reduce_tp(x)
+        all_reduce(x)
     print(stats.report())
 """
 
@@ -44,6 +44,10 @@ class Collective(StrEnum):
     ALL_REDUCE_MAX = "all_reduce_max"
     ALL_REDUCE_MIN = "all_reduce_min"
     ALL_GATHER = "all_gather"
+    REDUCE_SCATTER = "reduce_scatter"
+    ALL_TO_ALL = "all_to_all"
+    SEND = "send"
+    RECV = "recv"
     BROADCAST = "broadcast"
     BROADCAST_OBJECT = "broadcast_object"
 

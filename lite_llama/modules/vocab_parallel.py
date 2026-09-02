@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..distributed.parallel_state import all_reduce_tp, divide, get_tp_rank, get_tp_world_size
+from ..distributed.parallel_state import all_reduce, divide, get_tp_rank, get_tp_world_size
 from ..kernels import vocab_parallel_embedding
 
 
@@ -105,7 +105,7 @@ class VocabParallelEmbedding(nn.Module):
         out = vocab_parallel_embedding(
             input_ids, self.weight, self.shard.start, self.local_vocab_size
         )
-        return all_reduce_tp(out.view(*input_ids.shape, self.hidden_size))
+        return all_reduce(out.view(*input_ids.shape, self.hidden_size))
 
     def extra_repr(self) -> str:
         return (

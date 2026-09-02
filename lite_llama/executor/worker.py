@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from ..distributed.parallel_state import broadcast_tp, get_tp_world_size
+from ..distributed.parallel_state import broadcast, get_tp_world_size
 from ..engine.sampler import (
     BatchedSamplingParams,
     GeneratedSpan,
@@ -154,7 +154,7 @@ def _sync_tp(tokens: torch.Tensor) -> torch.Tensor:
     the divergence.
     """
     if get_tp_world_size() > 1:
-        return broadcast_tp(tokens)
+        return broadcast(tokens)
     return tokens
 
 
