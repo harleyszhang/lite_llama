@@ -134,18 +134,23 @@ class SparseMoeBlock(nn.Module):
                 )
             param.data.copy_(loaded)
             return param.data
+        
         expert_index, proj = shard_id
         view = param.data[expert_index]
+        
         if proj < 2:
             half = view.shape[0] // 2
             view = view.narrow(0, proj * half, half)
             dim = 0
         else:
             dim = 1
+            
         world_size = get_tensor_model_parallel_world_size()
+        
         if world_size > 1:
             size = loaded.shape[dim] // world_size
             loaded = loaded.narrow(dim, get_tensor_model_parallel_rank() * size, size)
+            
         if view.shape != loaded.shape:
             raise ValueError(
                 f"checkpoint tensor of shape {tuple(loaded.shape)} does not fit "
