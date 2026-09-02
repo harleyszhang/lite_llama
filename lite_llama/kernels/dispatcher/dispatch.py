@@ -140,16 +140,16 @@ def resolve_target(ref: str) -> Any:
 
 
 @cache
-def _probe_available(ref: str) -> tuple[bool, str]:
-    """Run an availability probe once; failures count as "not installed".
+def _check_available(ref: str) -> tuple[bool, str]:
+    """Run an availability check once; failures count as "not installed".
 
     Returns (usable, detail) where detail feeds the explain line either way.
     """
     try:
-        probe = resolve_target(ref)
-        return bool(probe()), str(probe)
+        check = resolve_target(ref)
+        return bool(check()), str(check)
     except Exception as e:
-        return False, f"probe raised {type(e).__name__}: {e}"
+        return False, f"availability check raised {type(e).__name__}: {e}"
 
 
 def dtype_label(dtype: Any) -> str:
@@ -226,7 +226,7 @@ def _reject_reason(spec: KernelSpec, key: DispatchKey) -> str | None:
     if key.forced_backend and spec.backend != key.forced_backend:
         return f"backend {spec.backend!r} != forced {key.forced_backend!r}"
     if spec.available is not None:
-        ok, detail = _probe_available(spec.available)
+        ok, detail = _check_available(spec.available)
         if not ok:
             return f"library unavailable ({spec.available}; {detail})"
     if not capabilities_match(spec.capability, key.platform):

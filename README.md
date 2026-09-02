@@ -37,7 +37,7 @@
 - **Chunked Prefill** (v0.7): long prompts split into 512-token chunks so per-step prefill work is bounded (2000 → 512 tokens, 3.9× lower peak) — decode requests interleave instead of waiting behind a whole prompt.
 - **Prefix Caching** (v0.7): block-hash chained prefix reuse — shared system prompts are prefilled once and reused by later requests; LRU-evicted under capacity pressure (aligned with vLLM's `BlockPool`).
 - **Preemption** (v0.7): opt-in recompute-based eviction (`enable_preemption`) when the running set exceeds slot capacity; evicted requests re-queue with a progress quantum that prevents livelock.
-- **Backend Registry** (v0.8): declarative kernel-backend selection with probe + `explain_selection()`; environment-variable override and graceful degradation when a backend's dependency is missing.
+- **Backend Registry** (v0.8): declarative kernel-backend selection with availability checks + `explain_selection()`; environment-variable override and graceful degradation when a backend's dependency is missing.
 - **Declarative kernel dispatch** (v0.9): every kernel is a `KernelSpec` row (availability / capability / dtype+scheme / shape / layout / golden), selection is `filter → rank → cache` with a per-rejection reason, and a frozen measured ranking replaces hand-written priorities. One dispatch costs 27 µs at construction time and nothing per step.
 - **Token scores** (v0.10): `logprobs=k` reports the chosen token and its top-k alternatives, `prompt_logprobs=k` scores every prompt position — both out of the forward pass that was happening anyway, no rescoring run. Verified against `transformers` on every position.
 - **Metrics and tracing** (v0.10): Prometheus `/metrics` (queue time, TTFT, TPOT, token counters) with no `prometheus_client` dependency, plus one OTLP span per request when a collector is configured. Measured cost is below the 0.5% run-to-run noise.
@@ -509,13 +509,13 @@ One-way layers — user code only ever talks to the Facade; plans flow down, tok
 ├─────────────────────────────────────────────────────────────────────────────────────────────────┤
 │  Kernels           LogicalOp + KernelSpec dispatch → Triton FA2 / flashinfer / deepgemm / ...   │
 ├─────────────────────────────────────────────────────────────────────────────────────────────────┤
-│  Hardware          PlatformInfo · probe · device_utils — the device the layers assume           │
+│  Hardware          PlatformInfo · device detection — the device the layers assume               │
 └─────────────────────────────────────────────────────────────────────────────────────────────────┘
 
   Cross-cutting support:
   ┌─────────────────────────┐  ┌───────────────────────────┐  ┌──────────────────────────┐
   │ Platform                │  │ Distributed               │  │ Tools                    │
-  │ PlatformInfo / probe /  │  │ dp×tp grid · NCCL + gloo  │  │ logger · profiling ·     │
+  │ PlatformInfo / check /  │  │ dp×tp grid · NCCL + gloo  │  │ logger · profiling ·     │
   │ device_utils            │  │ parallel_state · stats    │  │ prompt · image utils     │
   └─────────────────────────┘  └───────────────────────────┘  └──────────────────────────┘
 ```
@@ -551,7 +551,7 @@ lite_llama/
 │   └── protocol.py          # request/response schemas
 ├── kernels/                 # Triton kernels used by the models
 │   ├── quantization/        # w8a16 / w4a16 / w8a8 / fp8 GEMMs
-│   ├── backends/            # probe + priority registry, per op
+│   ├── backends/            # availability + priority registry, per op
 │   ├── autotune/            # config search, keying and persistence
 │   ├── flashattention2_nopad.py / flashdecoding.py
 │   └── fused_moe.py         # MoE grouped GEMM (fp16/fp8/int8)

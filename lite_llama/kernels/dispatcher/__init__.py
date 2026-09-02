@@ -22,6 +22,8 @@ from .dispatch import (
 )
 from .registry import REGISTRY, OpRegistry, register
 from .spec import (
+    MLA_LATENT,
+    MLA_LATENT_TAGS,
     NATIVE_BASELINE,
     PAGED_KV,
     PAGED_KV_TAGS,
@@ -35,6 +37,8 @@ from .spec import (
 )
 
 __all__ = [
+    "MLA_LATENT",
+    "MLA_LATENT_TAGS",
     "NATIVE_BASELINE",
     "PAGED_KV",
     "PAGED_KV_TAGS",

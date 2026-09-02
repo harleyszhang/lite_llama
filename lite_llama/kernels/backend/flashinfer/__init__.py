@@ -1,7 +1,7 @@
 """FlashInfer: the wheel-installable external backend, Ampere (sm75) onward.
 
-``available()`` probes the wheel; until it returns True the flashinfer
-rows stay filtered out of dispatch and the native Triton rows serve.
+``available()`` checks the wheel's presence; until it returns True the
+flashinfer rows stay filtered out of dispatch and the native Triton rows serve.
 
 Usage:
     from lite_llama.kernels.backend import flashinfer
@@ -16,11 +16,11 @@ from ..capability import BackendInstall, library_present
 #: Capability window shared by every FlashInfer row: Ampere and newer.
 CUDA_SM75 = (CapabilityRequirement("cuda", min_cc=(7, 5)),)
 
-#: Availability probe every FlashInfer row points at.
-PROBE = "lite_llama.kernels.backend.flashinfer:available"
+#: Availability entry every FlashInfer row points at.
+AVAILABLE = "lite_llama.kernels.backend.flashinfer:available"
 
 #: Note the split names: the distribution is ``flashinfer-python`` while the
-#: import is ``flashinfer`` — probing the import name is what matters.
+#: import is ``flashinfer`` — checking the import name is what matters.
 INSTALL = BackendInstall(
     backend="flashinfer",
     module="flashinfer",

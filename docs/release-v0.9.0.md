@@ -6,7 +6,7 @@
 
 v0.9 有两条工作线。
 
-**Part A（地基 2，本版主体）** 把 kernel 选择从散落的 if-else 收敛成三层机制：`kernels/ops/` 按算子域分组并持有全部注册行（11 个算子契约、21 行实现），`kernels/dispatcher/` 是 torch-free 的选择层（声明式 KernelSpec + 确定性 dispatch + 逐条拒绝理由的 explain），`kernels/backend/` 一库一包接入 flashinfer / deepgemm / flashmla / deepep，缺库是排名事件而不是崩溃。A9 Platform 抽象给出设备探测与 capability 声明，sm90+ 的行在 A10 上被窗口过滤自动拒绝。默认全 native，外部后端要等 v0.10 的冻结实测排序才可能翻盘。
+**Part A（地基 2，本版主体）** 把 kernel 选择从散落的 if-else 收敛成三层机制：`kernels/ops/` 按算子域分组并持有全部注册行（11 个算子契约、21 行实现），`kernels/dispatcher/` 是 torch-free 的选择层（声明式 KernelSpec + 确定性 dispatch + 逐条拒绝理由的 explain），`kernels/backend/` 一库一包接入 flashinfer / deepgemm / flashmla / deepep，缺库是排名事件而不是崩溃。A9 Platform 抽象给出设备检测与 capability 声明，sm90+ 的行在 A10 上被窗口过滤自动拒绝。默认全 native，外部后端要等 v0.10 的冻结实测排序才可能翻盘。
 
 **Part B（L1 跨 stream 重叠，ROADMAP 第六节第一级）** 引擎步内最多三个 pass（prefill / extend / decode），本版让每个 pass 的输入上传在独立 copy stream 上发出，不再等待上一个 forward 排空：prepare 阶段在 host 侧算好布局后立刻发起 pinned-staging H2D 拷贝，compute stream 只插一次 event 等待。配套改动是引擎步从"每 pass 一次 `tolist()`"改成**步末一次同步**（deferred harvest）——没有它，host 每 pass 自抽干一次，跨 pass 重叠在结构上不可能。
 
@@ -18,13 +18,13 @@ v0.9 有两条工作线。
 |----|------|------|
 | 算子域 | `kernels/ops/<group>/__init__.py` | 谁来算：native 行与外部后端的行同处一地 |
 | 选择 | `kernels/dispatcher/` | 怎么选：KernelSpec 六维声明（available / capability / dtypes+schemes / shape / layout / golden）+ filter → rank → cache → report |
-| 接入 | `kernels/backend/<lib>/` | 能算什么：INSTALL 元数据 + 真 import 探测 + adapter |
+| 接入 | `kernels/backend/<lib>/` | 能算什么：INSTALL 元数据 + 真 import 检测 + adapter |
 
 三个刻意决策：**不造第二注册表**（量化 scheme 只是 dispatch key 的一维，`linear` 的量化实现与非量化实现进同一张清单）、**不写转发适配器**（KernelSpec 的 target 是 `"module:attr"` 字符串直指 kernel 函数，形参名是契约的一部分，由 `TestTargetsMatchTheirContract` 逐名比对）、**golden 门禁内建于 dispatch**（`verified=False` 的行默认不参与选择，只有显式 `backend=` 可越过——flashinfer 的 attention / rmsnorm / rope / sample 行已带 max-abs-diff 记录）。
 
 ### A9 Platform 抽象
 
-设备探测与能力声明（`platform/`）让 dispatch 的 capability 过滤可 mock 测试：deepgemm / flashmla 声明 `>=sm90` 窗口，在 A10（sm86）上被拒且 explain 给出原因，而不是 import 时报错。
+设备检测与能力声明（`platform/`）让 dispatch 的 capability 过滤可 mock 测试：deepgemm / flashmla 声明 `>=sm90` 窗口，在 A10（sm86）上被拒且 explain 给出原因，而不是 import 时报错。
 
 ### L1 跨 stream 重叠（commit 07ee09e + 本分支集成）
 

@@ -1,6 +1,6 @@
 """DeepEP: expert-parallel all-to-all dispatch and combine.
 
-``available()`` probes the DeepEP install; until it returns True the
+``available()`` checks the DeepEP install; until it returns True the
 dispatcher treats the deepep rows as unusable and routing falls back.
 
 Usage:

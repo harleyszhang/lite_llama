@@ -236,22 +236,9 @@ PAGED_KV_TAGS = frozenset({"kv:paged"})
 #: :class:`LayoutRequirement` form of :data:`PAGED_KV_TAGS`, for spec rows.
 PAGED_KV = LayoutRequirement(required=("kv:paged",))
 
+#: The MLA latent cache's layout tag family: one latent row per token, in its
+#: own pool — never interchangeable with the per-head paged buffer above.
+MLA_LATENT_TAGS = frozenset({"kv:mla_latent"})
 
-# --------------------------------------------------------------------------- #
-# Shared constants every ops group and backend module imports from one place
-# --------------------------------------------------------------------------- #
-#: The native rows define the golden baseline themselves.
-NATIVE_BASELINE = GoldenRecord(verified=True, max_abs_diff=0.0, baseline="native")
-
-#: External rows rank below the native floor until a frozen measurement says
-#: otherwise: an installed library is not a measurement.
-UNMEASURED = -1
-
-#: The paged KV layout tag family. The repo's cache manager allocates
-#: ``[max_tokens, 2 * num_kv_heads, head_dim]`` — K heads first, then V heads,
-#: so one token's K and V are adjacent — and kernels that consume that buffer
-#: (or an equivalent external pool, e.g. FlashInfer's) must say so.
-PAGED_KV_TAGS = frozenset({"kv:paged"})
-
-#: :class:`LayoutRequirement` form of :data:`PAGED_KV_TAGS`, for spec rows.
-PAGED_KV = LayoutRequirement(required=("kv:paged",))
+#: :class:`LayoutRequirement` form of :data:`MLA_LATENT_TAGS`, for spec rows.
+MLA_LATENT = LayoutRequirement(required=("kv:mla_latent",))

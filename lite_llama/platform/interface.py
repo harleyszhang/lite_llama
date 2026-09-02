@@ -1,8 +1,8 @@
 """Platform ABC: one subclass per accelerator family, CUDA first.
 
-Subclasses implement the probe (device name, capability, memory);
-``register_platform`` installs them and :func:`current_platform` picks
-the one whose probe succeeds, defaulting to :class:`CpuPlatform`.
+Subclasses implement the availability check (device name, capability,
+memory); ``register_platform`` installs them and :func:`current_platform`
+picks the one whose check succeeds, defaulting to :class:`CpuPlatform`.
 
 Usage:
     platform = current_platform()
@@ -42,7 +42,7 @@ class CpuPlatform(Platform):
         return PlatformInfo()
 
 
-#: Probe order: the first available class wins, ``CpuPlatform`` closes the
+#: Scan order: the first available class wins, ``CpuPlatform`` closes the
 #: list so the scan always terminates. A future ``RocmPlatform`` registers
 #: itself here (before the cpu fallback) and needs no other change.
 _PLATFORM_CLASSES: list[type[Platform]] = [CpuPlatform]
@@ -51,7 +51,7 @@ _CURRENT: Platform | None = None
 
 
 def register_platform(cls: type[Platform], *, first: bool = False) -> None:
-    """Add a platform class to the probe order (used by sibling modules).
+    """Add a platform class to the scan order (used by sibling modules).
 
     ``lite_llama.platform.cuda`` calls this at import time, keeping the ABC
     module free of any torch import while still one ``import`` away from a
@@ -67,7 +67,7 @@ def register_platform(cls: type[Platform], *, first: bool = False) -> None:
 
 
 def current_platform() -> Platform:
-    """Process-wide platform singleton: first available class in probe order."""
+    """Process-wide platform singleton: first available class in scan order."""
     global _CURRENT
     if _CURRENT is None:
         from . import cuda  # noqa: F401  (registers CudaPlatform as a side effect)
