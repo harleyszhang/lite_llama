@@ -1,8 +1,8 @@
 """Fused MoE: top-k routed experts as a Triton grouped GEMM.
 
-``moe_align_block_size`` sorts tokens by expert into padded blocks; the
-fused kernel then runs both expert GEMMs and the activation for every
-block, with quantisation folded in per weight format.
+Pipeline: moe_align_block_size -> GEMM1 (gate_up) -> silu_and_mul -> GEMM2
+(down, router weight folded in) -> moe_sum. Supports fp16, fp8, int8, and int4
+packed expert weights with group-wise scales.
 
 The activation may be fp16 or bf16 and every quantised weight tile is widened to
 whichever it is: ``tl.dot`` needs both operands in one type, so the compute dtype
@@ -24,12 +24,14 @@ Usage:
 
 from __future__ import annotations
 
+import functools
+
 import torch
 import triton
 import triton.language as tl
 
 from ..activation.activations import silu
-from ..quantization.fp8 import fp8_quantize_per_token
+from ..quantization.fp8 import FP8_E4M3_MAX, fp8_quantize_per_token
 from ..quantization.w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
 from ..utils import torch_to_triton_dtype
 
@@ -78,8 +80,127 @@ _INT4_PACK_FACTOR = 8
 
 
 # --------------------------------------------------------------------------- #
-# Token alignment (torch-native; every output shape is static -> no host sync)
+# Token alignment (2 Triton launches; every output shape is static -> no host sync)
 # --------------------------------------------------------------------------- #
+#: Slots per tile of the alignment kernels. Caps how much of ``topk_ids`` one
+#: program holds; the scatter walks the rest in a loop.
+_ALIGN_BLOCK_S = 1024
+
+#: Whether the scatter kernel counts the experts itself, skipping both the
+#: histogram launch and the ``torch.zeros`` that feeds it, is decided by one
+#: tile: a program can only histogram the slots it holds. Within that limit the
+#: fused form won at every size measured on H100 (slots 8 / 64 / 256 / 1024:
+#: 5.7 / 7.6 / 7.3 / 11.5 us against 10.4 / 11.4 / 12.2 / 14.3, and 45 us of host
+#: time against 77 flat), so there is no second threshold to tune -- the
+#: [BLOCK_S, BLOCK_E] compare it adds stays cheaper than two launches even at the
+#: full tile. Above one tile it is not a choice, it is unimplementable.
+
+
+@triton.jit
+def _moe_align_count_kernel(
+    topk_ids_ptr,
+    counts_ptr,
+    num_slots,
+    BLOCK_S: tl.constexpr,
+):
+    """Histogram of expert ids: ``counts[e] = #{slots routed to e}``.
+
+    Duplicate lanes in one tile hit the same address; the hardware serialises
+    them, which is what makes a vector ``atomic_add`` a histogram. An atomic
+    also keeps the count on the device, unlike ``bincount``, whose host read of
+    the max element both stalls the launch queue and makes the layer
+    uncapturable as a CUDA graph.
+    """
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_S + tl.arange(0, BLOCK_S)
+    mask = offs < num_slots
+    experts = tl.load(topk_ids_ptr + offs, mask=mask, other=0)
+    tl.atomic_add(counts_ptr + experts, 1, mask=mask)
+
+
+@triton.jit
+def _moe_align_scatter_kernel(
+    topk_ids_ptr,
+    counts_ptr,
+    sorted_ids_ptr,
+    expert_ids_ptr,
+    num_post_ptr,
+    num_slots,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_EXPERTS: tl.constexpr,
+    BLOCK_E: tl.constexpr,
+    BLOCK_PAD: tl.constexpr,
+    BLOCK_S: tl.constexpr,
+    FUSED_COUNT: tl.constexpr,
+):
+    """One program per expert: writes that expert's whole padded run.
+
+    Program ``e`` re-derives the block offsets from the full ``counts`` vector
+    rather than reading a prefix-sum some earlier kernel left behind. ``E``
+    programs each summing ``E`` values is the same order of work as the scan
+    would be, and it removes a launch plus a global round-trip from a path whose
+    cost is launches, not arithmetic.
+
+    Order inside a run is the flat slot order, as a stable sort would give:
+    ``tl.cumsum`` ranks the hits within a tile and ``written`` carries the count
+    across tiles. Nothing downstream can observe the order -- each slot's output
+    row is computed independently and ``_moe_sum_kernel`` indexes slots
+    directly -- but an atomic cursor would make the buffer differ run to run,
+    which turns any future comparison of two runs into a false positive.
+    """
+    e = tl.program_id(0)
+    offs_e = tl.arange(0, BLOCK_E)
+    if FUSED_COUNT:
+        # Every program already reads every slot to find its own, so when the
+        # slots fit one tile it can histogram all E experts from the same tile
+        # instead of waiting on a counting kernel -- trading a [BLOCK_S, BLOCK_E]
+        # compare per program for two launches (the histogram and the zeroing of
+        # its output), which measured cheaper at every size that fits -- see the
+        # note above ``_ALIGN_BLOCK_S``. The launcher only sets it when one tile
+        # covers the slots; with it set and more slots than that, the counts
+        # would silently be a prefix of the real ones.
+        offs_s = tl.arange(0, BLOCK_S)
+        ids_all = tl.load(topk_ids_ptr + offs_s, mask=offs_s < num_slots, other=-1)
+        counts = tl.sum((ids_all[:, None] == offs_e[None, :]).to(tl.int32), axis=0)
+    else:
+        counts = tl.load(counts_ptr + offs_e, mask=offs_e < NUM_EXPERTS, other=0)
+    padded = ((counts + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
+    # Exclusive prefix over experts, and the run's own extent.
+    start = tl.sum(tl.where(offs_e < e, padded, 0))
+    my_count = tl.sum(tl.where(offs_e == e, counts, 0))
+    my_padded = ((my_count + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
+    if e == 0:
+        tl.store(num_post_ptr, tl.sum(padded))
+
+    written = 0
+    for s in range(0, num_slots, BLOCK_S):
+        offs = s + tl.arange(0, BLOCK_S)
+        in_range = offs < num_slots
+        ids = tl.load(topk_ids_ptr + offs, mask=in_range, other=-1)
+        hit = ids == e
+        rank = tl.cumsum(hit.to(tl.int32), axis=0) - 1
+        tl.store(sorted_ids_ptr + start + written + rank, offs.to(tl.int32), mask=hit)
+        written += tl.sum(hit.to(tl.int32))
+
+    # Sentinel (== num_slots) on the tail this run padded, so the GEMM masks it.
+    # At most BLOCK_SIZE - 1 slots, and exactly 0 when the expert drew nothing.
+    offs_pad = tl.arange(0, BLOCK_PAD)
+    tl.store(
+        sorted_ids_ptr + start + my_count + offs_pad,
+        num_slots,
+        mask=offs_pad < my_padded - my_count,
+    )
+
+    # expert_ids[b] = expert owning row-block b, for this run's blocks only;
+    # the runs partition [0, num_tokens_post_padded), so every readable block
+    # gets written exactly once.
+    num_blocks = my_padded // BLOCK_SIZE
+    first_block = start // BLOCK_SIZE
+    for b in range(0, num_blocks, BLOCK_PAD):
+        offs_b = b + tl.arange(0, BLOCK_PAD)
+        tl.store(expert_ids_ptr + first_block + offs_b, e, mask=offs_b < num_blocks)
+
+
 def moe_align_block_size(
     topk_ids: torch.Tensor, block_size: int, num_experts: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -95,44 +216,52 @@ def moe_align_block_size(
         module docstring for the exact protocol.
     """
     device = topk_ids.device
-    flat_experts = topk_ids.reshape(-1).to(torch.int64)
+    flat_experts = topk_ids.reshape(-1)
+    if flat_experts.dtype != torch.int32:
+        flat_experts = flat_experts.to(torch.int32)
+    flat_experts = flat_experts.contiguous()
     num_slots = flat_experts.numel()
 
-    # Stable argsort groups slots by expert while keeping token order inside
-    # each expert; sort_index doubles as the slot ids in sorted order.
-    sort_index = torch.argsort(flat_experts, stable=True)
-    sorted_experts = flat_experts[sort_index]
-
-    # scatter_add rather than bincount: bincount reads the largest element back
-    # to the host to size its output, which both stalls the launch pipeline
-    # (~0.4 ms, more than the two GEMMs cost at decode batch sizes) and makes the
-    # whole MoE layer uncapturable as a CUDA graph.
-    counts = torch.zeros(num_experts, dtype=torch.int64, device=device)
-    counts.scatter_add_(0, flat_experts, torch.ones_like(flat_experts))
-    padded_counts = (
-        torch.div(counts + (block_size - 1), block_size, rounding_mode="floor") * block_size
-    )
-    padded_starts = torch.cumsum(padded_counts, 0) - padded_counts
-    real_starts = torch.cumsum(counts, 0) - counts
-    num_tokens_post_padded = padded_counts.sum().to(torch.int32).reshape(1)
-
-    # Static upper bound: every expert may waste at most block_size - 1 slots.
-    max_padded = num_slots + num_experts * (block_size - 1)
-    sorted_token_ids = torch.full((max_padded,), num_slots, dtype=torch.int32, device=device)
-    rows = torch.arange(num_slots, device=device, dtype=torch.int64)
-    dest = padded_starts[sorted_experts] + (rows - real_starts[sorted_experts])
-    sorted_token_ids[dest] = sort_index.to(torch.int32)
-
-    # expert_ids[b] = expert owning row-block b. searchsorted over the block
-    # boundaries keeps the output shape static (out-of-range blocks are never
-    # read: the kernel returns early on num_tokens_post_padded).
+    # Only experts that actually appear can waste padding, and at most
+    # min(E, num_slots) of them do -- one slot cannot open two runs. The loose
+    # `num_slots + E * (block_size - 1)` bound this used to carry is the same
+    # number for prefill but wildly wrong at decode: 8 slots over 128 experts
+    # sized the buffer at 1928 slots instead of 128, and `_invoke_moe_gemm`
+    # takes its grid from that length, so 121 of every 129 row-blocks existed
+    # only to load `num_tokens_post_padded` and return.
+    max_active = min(num_experts, num_slots)
+    max_padded = num_slots + max_active * (block_size - 1)
     max_num_blocks = (max_padded + block_size - 1) // block_size
-    block_ends = torch.cumsum(padded_counts // block_size, 0)
-    block_ids = torch.arange(max_num_blocks, device=device, dtype=torch.int64)
-    expert_ids = (
-        torch.searchsorted(block_ends, block_ids, right=True)
-        .clamp_(max=num_experts - 1)
-        .to(torch.int32)
+
+    # Untouched past num_tokens_post_padded, which is fine: the GEMM tests that
+    # bound before it reads either buffer, so the tail is unreachable rather
+    # than merely unused. `torch.full` would cost a launch to prove the same.
+    sorted_token_ids = torch.empty(max_padded, dtype=torch.int32, device=device)
+    expert_ids = torch.empty(max_num_blocks, dtype=torch.int32, device=device)
+    num_tokens_post_padded = torch.empty(1, dtype=torch.int32, device=device)
+
+    block_s = min(triton.next_power_of_2(num_slots), _ALIGN_BLOCK_S)
+    fused_count = num_slots <= block_s
+    counts = None
+    if not fused_count:
+        counts = torch.zeros(num_experts, dtype=torch.int32, device=device)
+        _moe_align_count_kernel[(triton.cdiv(num_slots, block_s),)](
+            flat_experts, counts, num_slots, BLOCK_S=block_s, num_warps=4
+        )
+    _moe_align_scatter_kernel[(num_experts,)](
+        flat_experts,
+        counts,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        num_slots,
+        BLOCK_SIZE=block_size,
+        NUM_EXPERTS=num_experts,
+        BLOCK_E=triton.next_power_of_2(num_experts),
+        BLOCK_PAD=triton.next_power_of_2(block_size),
+        BLOCK_S=block_s,
+        FUSED_COUNT=fused_count,
+        num_warps=4,
     )
     return sorted_token_ids, expert_ids, num_tokens_post_padded
 
@@ -179,6 +308,7 @@ def _fused_moe_kernel(
     K_PROMOTE: tl.constexpr,
     DEQUANT_SCALE: tl.constexpr,
     HAS_ZEROS: tl.constexpr,
+    SCALE_HOISTED: tl.constexpr,
     compute_type: tl.constexpr,
 ):
     """One C row-block of ``A @ B[expert]`` where rows of A are gathered tokens.
@@ -192,6 +322,12 @@ def _fused_moe_kernel(
     ``a_scale_ptr`` holds one fp32 scale per A row; ``NATIVE_FP8`` then picks
     between keeping both operands 8-bit for the sm89+ fp8 MMA and the pre-sm89
     widening. Both are read only in that mode, and unused elsewhere.
+
+    ``SCALE_HOISTED`` says the b-scale does not vary along k -- one scale group
+    spans the whole of K, which is what per-output-channel scales are. The
+    k-loop then accumulates *inside* ``tl.dot`` and the scale is applied once in
+    the epilogue; otherwise (int4 group scales, block-wise fp8) each k-tile
+    reads its own scale and has to leave the dot to multiply by it.
     """
     # Grouped pid ordering for L2 reuse (same scheme as vLLM/triton matmul).
     pid = tl.program_id(axis=0)
@@ -237,6 +373,10 @@ def _fused_moe_kernel(
     if QUANT_MODE != 0:
         # Scale row is fixed for this tile; only the k-block index advances.
         b_scale_ptrs = b_scale_ptr + off_experts * stride_bse + (offs_bn // GROUP_N) * stride_bsn
+        if SCALE_HOISTED:
+            # One group covers K, so this is the whole tile's scale: read it here
+            # and leave the k-loop free to accumulate in the dot.
+            b_scale = tl.load(b_scale_ptrs)
 
     # fp32 accumulation keeps the K-loop noise below the fp16 storage floor.
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
@@ -262,7 +402,8 @@ def _fused_moe_kernel(
             # Flatten to [BLOCK_K, BLOCK_N]
             b = tl.reshape(b_expanded, (BLOCK_K, BLOCK_N)).to(tl.float32)
             # Load scale and optionally zero point
-            b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
+            if not SCALE_HOISTED:
+                b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
             if HAS_ZEROS:
                 b_zero = tl.load(
                     b_zeros_ptr
@@ -276,7 +417,10 @@ def _fused_moe_kernel(
             # and the zero point are integers in [0, 15], so ``b`` is an exact
             # small integer in ``compute_type`` and folding the scale in here
             # would cost precision as well as the operand's dtype.
-            accumulator += tl.dot(a, b.to(compute_type)) * b_scale[None, :]
+            if SCALE_HOISTED:
+                accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
+            else:
+                accumulator += tl.dot(a, b.to(compute_type)) * b_scale[None, :]
             b_ptrs += (BLOCK_K // 8) * stride_bk
         else:
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0)
@@ -307,8 +451,12 @@ def _fused_moe_kernel(
                 else:
                     b = b.to(compute_type)
                 # Hoisted out of the dot, so the tensor cores see two 16-bit
-                # operands instead of the fp32 scale's type.
-                b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
+                # operands instead of the fp32 scale's type. With one scale group
+                # over K it leaves the loop entirely: the dot then accumulates in
+                # place (``acc=``) instead of producing a tile that a separate
+                # fp32 multiply-add has to fold in once per k-tile.
+                if not SCALE_HOISTED:
+                    b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
                 if QUANT_MODE == 4:
                     # Hopper's fp8 wgmma accumulates at reduced precision inside
                     # the instruction, and Triton's sm90 default lets that run
@@ -316,12 +464,25 @@ def _fused_moe_kernel(
                     # accumulate before the result is promoted into a real fp32
                     # accumulator; 0 makes Triton drop wgmma entirely and widen
                     # both operands to fp16 instead. See ``_FP8_A8_PROMOTE_EVERY``.
-                    accumulator += tl.dot(a, b, max_num_imprecise_acc=K_PROMOTE) * b_scale[None, :]
+                    if SCALE_HOISTED:
+                        accumulator = tl.dot(a, b, acc=accumulator, max_num_imprecise_acc=K_PROMOTE)
+                    else:
+                        accumulator += (
+                            tl.dot(a, b, max_num_imprecise_acc=K_PROMOTE) * b_scale[None, :]
+                        )
+                elif SCALE_HOISTED:
+                    accumulator = tl.dot(a, b, acc=accumulator)
                 else:
                     accumulator += tl.dot(a, b) * b_scale[None, :]
             b_ptrs += BLOCK_K * stride_bk
         a_ptrs += BLOCK_K * stride_ak
 
+    if QUANT_MODE != 0 and SCALE_HOISTED:
+        # The whole k-loop shared this scale, so one multiply here replaces the
+        # cdiv(K, BLOCK_K) the in-loop form would have done. The ``QUANT_MODE``
+        # half of the guard mirrors where ``b_scale`` is defined: mode 0 has no
+        # scale tensor at all, so hoisting is meaningless rather than free there.
+        accumulator *= b_scale[None, :]
     accumulator *= DEQUANT_SCALE
     if QUANT_MODE == 4:
         # One scale per activation row, so it leaves the k-loop untouched. The
@@ -341,10 +502,47 @@ def _fused_moe_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-def _launch_config(num_tokens: int, quant_mode: int) -> dict:
+@functools.cache
+def _has_native_fp8(device_index: int | None) -> bool:
+    """Whether this device has the fp8 MMA, cached because the query is not free.
+
+    ``torch.cuda.get_device_capability`` costs ~2.7 us of host time per call and
+    both GEMMs of every layer ask. On a launch-bound decode step that is real
+    money for a property that cannot change while the process lives.
+    """
+    return torch.cuda.get_device_capability(device_index) >= (8, 9)
+
+
+def _launch_config(num_tokens: int, quant_mode: int, rows_per_expert: float) -> dict:
     """Heuristic tile config, used whenever the autotune store has no entry.
 
     ``BLOCK_M`` must be identical for both GEMMs because they share one alignment.
+
+    ``BLOCK_M`` is chosen from ``rows_per_expert`` (``num_tokens * top_k / E``),
+    not from ``num_tokens``, because that is the quantity the tile trades against:
+    an expert holding fewer rows than ``BLOCK_M`` pads the rest away and does the
+    MMA on them anyway, while an expert holding more spills into a second
+    row-block that re-reads its whole weight tile. Token count alone cannot see
+    either -- 64 tokens is 4 rows per expert at Qwen3-30B-A3B's 128 experts and
+    16 at Mixtral's 8, and the old tiers read both as "32".
+
+    Two tiers, 16 below 16 rows per expert and 64 at or above it, from a sweep of
+    16/32/64/128 over both geometries on an H100 (µs, ``LITE_LLAMA_AUTOTUNE=0``):
+
+    ==================  ====  ==============  ==============  ==============
+    geometry            rows  fp16 16/32/64   int8 16/32/64   fp8a8 16/32/64
+    ==================  ====  ==============  ==============  ==============
+    E=128 k=8 t=8        0.5  186/191/192     159/206/196     219/218/219
+    E=128 k=8 t=64         4  418/419/423     250/445/404     235/242/278
+    E=128 k=8 t=512       32  532/480/473     571/656/439     323/299/311
+    E=128 k=8 t=4096     256  2948/1980/1487  3449/3639/1695  1836/1469/1072
+    E=8  k=2 t=512       128  188/158/157     236/256/163     267/264/263
+    ==================  ====  ==============  ==============  ==============
+
+    The 4-rows row is the one the old heuristic got wrong: it picked 32, where
+    int8 costs 1.78x its 16 figure. 32 never wins by more than 4% anywhere in the
+    sweep (fp8 W8A8 at 32 rows) and loses by up to 1.5x, so the middle tier is
+    gone rather than re-fitted.
 
     ``BLOCK_K`` is 128 for every mode, including fp16. It used to be 32 there, on
     the reasoning that an fp16 tile already fills a memory transaction at 32 while
@@ -356,15 +554,11 @@ def _launch_config(num_tokens: int, quant_mode: int) -> dict:
     The quantised paths were never affected, which is why the defect survived: it
     made every quantisation benchmark on this kernel look better than it was.
 
-    ``quant_mode`` is still in the signature because callers pass it and a future
-    per-mode divergence belongs here rather than at the call sites.
+    ``num_tokens`` and ``quant_mode`` stay in the signature because callers pass
+    them and a future divergence on either belongs here rather than at the call
+    sites.
     """
-    if num_tokens <= 16:
-        block_m = 16
-    elif num_tokens <= 64:
-        block_m = 32
-    else:
-        block_m = 64
+    block_m = 16 if rows_per_expert < 16 else 64
     return {
         "BLOCK_M": block_m,
         "BLOCK_N": 64,
@@ -403,15 +597,13 @@ def _invoke_moe_gemm(
     # Only mode 4 puts A through the tensor cores as fp8, so only it cares which
     # of the two widenings the kernel compiles; the weight-only modes always take
     # the bit trick and always pay its single correction factor.
-    native_fp8 = quant_mode == _QUANT_FP8_A8 and torch.cuda.get_device_capability(a.device) >= (
-        8,
-        9,
-    )
+    native_fp8 = quant_mode == _QUANT_FP8_A8 and _has_native_fp8(a.device.index)
     if quant_mode == _QUANT_FP8_A8:
         dequant_scale = 1.0 if native_fp8 else _FP8_BIT_TRICK_SCALE_SQ
     else:
         dequant_scale = FP8_E4M3_BIT_TRICK_SCALE if quant_mode == _QUANT_FP8 else 1.0
     grid = (triton.cdiv(em, config["BLOCK_M"]) * triton.cdiv(n, config["BLOCK_N"]),)
+    group_k_eff = min(group_k, k_logical) if group_k else 1
     _fused_moe_kernel[grid](
         a,
         b,
@@ -436,7 +628,7 @@ def _invoke_moe_gemm(
         c.stride(1),
         *(b_scale.stride() if b_scale is not None else (0, 0, 0)),
         GROUP_N=group_n or 1,
-        GROUP_K=min(group_k, k_logical) if group_k else 1,
+        GROUP_K=group_k_eff,
         BLOCK_M=config["BLOCK_M"],
         BLOCK_N=config["BLOCK_N"],
         BLOCK_K=config["BLOCK_K"],
@@ -448,6 +640,11 @@ def _invoke_moe_gemm(
         K_PROMOTE=min(_FP8_A8_PROMOTE_EVERY, config["BLOCK_K"]),
         DEQUANT_SCALE=dequant_scale,
         HAS_ZEROS=b_zeros is not None,
+        # Per-output-channel scales (one group spanning K) are the common case for
+        # every 8-bit expert format here, and they let the k-loop accumulate
+        # inside ``tl.dot``. Int4's group scales and block-wise fp8 keep the
+        # in-loop form because their scale genuinely changes with k.
+        SCALE_HOISTED=quant_mode != _QUANT_NONE and group_k_eff >= k_logical,
         compute_type=torch_to_triton_dtype[c.dtype],
         num_warps=config["num_warps"],
         num_stages=config["num_stages"],
@@ -461,11 +658,24 @@ def _invoke_moe_gemm(
 def _silu_and_mul_kernel(
     x_ptr,
     out_ptr,
+    scale_ptr,
     stride_xm,
     N,
+    FP8_MAX: tl.constexpr,
+    QUANT_FP8: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    """``out = silu(x[:, :N]) * x[:, N:]`` on a contiguous ``[tokens, 2N]`` input."""
+    """``out = silu(x[:, :N]) * x[:, N:]`` on a contiguous ``[tokens, 2N]`` input.
+
+    With ``QUANT_FP8`` the result leaves as e4m3 bytes plus one fp32 scale per
+    row, which is what the W8A8 second GEMM wants. The launcher only sets it
+    when one program owns a whole row (``BLOCK_N >= N``): the row's amax has to
+    be known before any element of it can be scaled, and a program that holds
+    half a row cannot know it without a second pass through HBM -- which is
+    exactly the separate quantiser this fusion removes. The saving is a launch
+    (~40 us of host time on an H100, against a 13 us second GEMM at decode) and
+    a full fp16 round-trip of the intermediate.
+    """
     pid_m = tl.program_id(0).to(tl.int64)
     pid_n = tl.program_id(1)
     offs = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -474,7 +684,21 @@ def _silu_and_mul_kernel(
     gate = tl.load(x_ptr + pid_m * stride_xm + offs, mask=mask, other=0.0).to(tl.float32)
     up = tl.load(x_ptr + pid_m * stride_xm + N + offs, mask=mask, other=0.0).to(tl.float32)
     out = silu(gate) * up
-    tl.store(out_ptr + pid_m * N + offs, out.to(out_ptr.dtype.element_ty), mask=mask)
+    if QUANT_FP8:
+        # Masked lanes carry 0 from the loads above, so they cannot raise the
+        # amax. Same scale convention as ``fp8_quantize_per_token``: exactly
+        # ``amax / FP8_MAX``, and 1.0 on an all-zero row so it stays zero.
+        amax = tl.max(tl.abs(out))
+        scale = tl.where(amax > 0.0, amax / FP8_MAX, 1.0)
+        tl.store(scale_ptr + pid_m, scale)
+        q = tl.minimum(tl.maximum(out / scale, -FP8_MAX), FP8_MAX)
+        tl.store(
+            out_ptr + pid_m * N + offs,
+            q.to(tl.float8e4nv).to(tl.uint8, bitcast=True),
+            mask=mask,
+        )
+    else:
+        tl.store(out_ptr + pid_m * N + offs, out.to(out_ptr.dtype.element_ty), mask=mask)
 
 
 @triton.jit
@@ -569,8 +793,13 @@ def _fused_moe(
     # Autotune lookup: use persisted best config if available, else heuristic.
     from ...dispatcher.autotune import get_best_config
 
+    # The unquantised key follows the activation dtype — bf16 and fp16 compile
+    # the same inner loop but are tuned as separate entries, and a bf16
+    # checkpoint must not silently read fp16's tile table. The quantised keys
+    # name the weight format, which is what pins the kernel's tiles.
+    act_dtype = "bf16" if dtype == torch.bfloat16 else "fp16"
     dtype_label = {
-        _QUANT_NONE: "fp16",
+        _QUANT_NONE: act_dtype,
         _QUANT_FP8: "fp8",
         _QUANT_INT8: "int8",
         _QUANT_INT4: "int4",
@@ -578,10 +807,10 @@ def _fused_moe(
         # want different tiles, so sharing a TuneKey would let one mode's search
         # install a config the other never measured.
         _QUANT_FP8_A8: "fp8_a8",
-    }.get(quant_mode, "fp16")
+    }.get(quant_mode, act_dtype)
     config = get_best_config("fused_moe", m=num_tokens, n=two_inter, k=hidden, dtype=dtype_label)
     if config is None:
-        config = _launch_config(num_tokens, quant_mode)
+        config = _launch_config(num_tokens, quant_mode, num_tokens * top_k / num_experts)
     sorted_ids, expert_ids, num_post = moe_align_block_size(
         topk_ids, config["BLOCK_M"], num_experts
     )
@@ -616,11 +845,31 @@ def _fused_moe(
         config=config,
     )
 
-    # silu(gate) * up -> [M * top_k, I]
-    act = torch.empty((num_tokens * top_k, intermediate), device=device, dtype=dtype)
+    # silu(gate) * up -> [M * top_k, I], quantised on the way out when W8A8 can
+    # fuse it (see ``_silu_and_mul_kernel``); otherwise the separate quantiser
+    # below still runs, so a wide-FFN MoE keeps working, just with one more launch.
     block_n = min(triton.next_power_of_2(intermediate), 1024)
+    fuse_act_quant = quant_mode == _QUANT_FP8_A8 and block_n >= intermediate
+    act = torch.empty(
+        (num_tokens * top_k, intermediate),
+        device=device,
+        dtype=torch.uint8 if fuse_act_quant else dtype,
+    )
+    act_scale = (
+        torch.empty(num_tokens * top_k, device=device, dtype=torch.float32)
+        if fuse_act_quant
+        else None
+    )
     _silu_and_mul_kernel[(num_tokens * top_k, triton.cdiv(intermediate, block_n))](
-        gate_up, act, gate_up.stride(0), intermediate, BLOCK_N=block_n, num_warps=4
+        gate_up,
+        act,
+        act_scale,
+        gate_up.stride(0),
+        intermediate,
+        FP8_MAX=FP8_E4M3_MAX,
+        QUANT_FP8=fuse_act_quant,
+        BLOCK_N=block_n,
+        num_warps=4,
     )
 
     # GEMM2 with the routing weight folded in: [M * top_k, I] x [E, hidden, I].
@@ -628,8 +877,8 @@ def _fused_moe(
     # top_k=1 (vLLM does the same: the second invocation passes ``1``), turning
     # ``offs_token // top_k`` into the identity on slot indices -- which is also
     # what makes one a_scale row per slot the right shape here.
-    a2, a2_scale = act, None
-    if quant_mode == _QUANT_FP8_A8:
+    a2, a2_scale = act, act_scale
+    if quant_mode == _QUANT_FP8_A8 and not fuse_act_quant:
         a2, a2_scale = fp8_quantize_per_token(act)
         a2_scale = a2_scale.reshape(-1)
     expanded = torch.empty((num_tokens * top_k, hidden), device=device, dtype=dtype)

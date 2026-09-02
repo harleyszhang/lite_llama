@@ -17,7 +17,7 @@ import triton.language as tl
 
 from .w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
 
-#: Exponent correction when *both* operands went through the e4m3 -> fp16 bit
+#: Exponent correction when *both* operands went through the e4m3 -> bf16 bit
 #: trick: each is short a factor of 256, so the product is short 256**2.
 _FP8_BIT_TRICK_SCALE_SQ = FP8_E4M3_BIT_TRICK_SCALE * FP8_E4M3_BIT_TRICK_SCALE
 
@@ -213,7 +213,7 @@ def _fp8_matmul_kernel(
         a = tl.load(a_ptrs, mask=offs_k[None, :] < k_rem, other=0)
         b = tl.load(b_ptrs, mask=offs_k[None, :] < k_rem, other=0)
         # NATIVE_FP8 is constexpr: Triton emits two specialised kernels, so
-        # the fp16 widening below never reaches an sm89+ binary (and the fp8
+        # the bf16 widening below never reaches an sm89+ binary (and the fp8
         # bitcast never reaches an sm86 one).
         if NATIVE_FP8:
             a = a.to(tl.float8e4nv, bitcast=True)
@@ -302,7 +302,7 @@ def fp8_matmul(
         group_n: Rows of one weight-scale block. ``1`` means per-output-channel.
         group_k: Columns of one weight-scale block. ``>= K`` means one per row.
         bias: Optional ``[N]`` bias, added in fp32 before the output cast.
-        out_dtype: Output dtype; the rest of the network runs bf16 (or fp16
+        out_dtype: Output dtype; the rest of the network runs bf16 (or bf16
             for a checkpoint that declares it).
 
     Returns:

@@ -103,14 +103,14 @@ def _w8a16_matmul_kernel(
         a = tl.load(a_ptrs, mask=offs_k[None, :] < k_rem, other=0.0)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < k_rem, other=0)
         # IS_FP8 is constexpr: Triton emits two specialised kernels, no branch.
+        # Either way the tile lands straight in the activation's dtype (fp16 or
+        # bf16): e4m3 values are exact in fp16 and the fp16 -> bf16 hop rounds
+        # at 2^-8, an order below the 2^-4 the 8-bit weight itself carries;
+        # int8 values are exact in both 16-bit dtypes.
         if IS_FP8:
-            b = dequant_fp8e4m3(b)
+            b = dequant_fp8e4m3(b).to(a.dtype)
         else:
-            b = b.to(tl.float16)
-        # tl.dot needs both operands in the activation's dtype. Widening the
-        # widened-from-fp16 weight to bf16 rounds at 2^-8 — an order below the
-        # 2^-4 the 8-bit weight itself carries, so nothing measurable is lost.
-        b = b.to(a.dtype)
+            b = b.to(a.dtype)
         scale = tl.load(scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_sk)
         accumulator += tl.dot(a, b) * scale[None, :]
         a_ptrs += BLOCK_K * stride_ak

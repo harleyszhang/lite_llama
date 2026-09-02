@@ -61,7 +61,7 @@ class VocabParallelEmbedding(nn.Module):
     """
 
     def __init__(
-        self, vocab_size: int, hidden_size: int, dtype: torch.dtype = torch.float16
+        self, vocab_size: int, hidden_size: int, dtype: torch.dtype = torch.bfloat16
     ) -> None:
         super().__init__()
         self.vocab_size = vocab_size

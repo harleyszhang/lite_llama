@@ -16,9 +16,10 @@ Two accuracy columns, and they answer different questions:
   first one — greedy decoding is chaotic, so once a token differs the rest of the
   sequence is unrelated and ``pos`` decays toward chance no matter how small the
   numerical error was.
-* ``vs HF`` compares against HuggingFace fp16. That difference contains the whole
-  engine — kernels, attention, sampling — so it is a sanity bound, not a measure of
-  quantisation error. Skip it with ``--skip-hf`` when only the axes matter.
+* ``vs HF`` compares against HuggingFace, loaded at the dtype the checkpoint's
+  own config declares. That difference contains the whole engine — kernels,
+  attention, sampling — so it is a sanity bound, not a measure of quantisation
+  error. Skip it with ``--skip-hf`` when only the axes matter.
 
 The golden run reuses the recorded prompt set but not its pinned KV pool, so the
 bf16 / eager / TP=1 row acts as a control: it must score ``1.000``. If it does not,
@@ -54,6 +55,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import itertools
 import json
 import os
@@ -73,7 +75,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 import torch.multiprocessing as mp
 
-from benchmarks.common import PROMPTS, expand_prompts, gpu_tag
+from benchmarks.common import PROMPTS, checkpoint_dtype, dtype_tag, expand_prompts, gpu_tag
 
 _MAX_GEN = 64
 _BATCH = 4
@@ -397,7 +399,7 @@ def _measure_cb(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _measure_hf(payload: dict[str, Any]) -> dict[str, Any]:
-    """HuggingFace fp16 reference row."""
+    """HuggingFace reference row, at the checkpoint's declared dtype."""
     from benchmarks.common import HFBackend
 
     torch.cuda.reset_peak_memory_stats()
@@ -601,15 +603,18 @@ def benchmark_model(
 
     rows: list[Row] = []
     hf_texts: list[str] | None = None
+    # HF 基线与 lite 各行一样跟随 checkpoint 自身的 dtype；标签里带上，
+    # 免得两次运行在不同精度间静默换挡。
+    hf_tag = dtype_tag(checkpoint_dtype(model_dir))
     if not skip_hf:
-        print(f"\n=== {model_name} — HF fp16 baseline ===")
+        print(f"\n=== {model_name} — HF {hf_tag} baseline ===")
         status, payload = _run_child({**common, "kind": "hf", "golden": False}, timeout_s)
         if status == "ok":
             hf_texts = payload.pop("texts")
-            rows.append(Row(config="HF fp16", model=model_name, **payload))
+            rows.append(Row(config=f"HF {hf_tag}", model=model_name, **payload))
             print(f"  TPS {rows[-1].tps:.1f} | peak {rows[-1].peak_mem_gb:.2f} GB")
         else:
-            rows.append(Row(config="HF fp16", model=model_name, note=_first_line(payload)))
+            rows.append(Row(config=f"HF {hf_tag}", model=model_name, note=_first_line(payload)))
             print(f"  FAILED: {_first_line(payload)}")
 
     for spec in specs:
@@ -751,7 +756,7 @@ def main() -> int:
         default=None,
         help="KV cache tokens; profiled when omitted, which is what the memory columns measure",
     )
-    parser.add_argument("--skip-hf", action="store_true", help="Skip the HuggingFace fp16 row")
+    parser.add_argument("--skip-hf", action="store_true", help="Skip the HuggingFace baseline row")
     parser.add_argument("--no-golden", action="store_true", help="Skip the golden comparison")
     parser.add_argument("--spec-timeout", type=float, default=_SPEC_TIMEOUT_S)
     parser.add_argument("--json", help="Output path; a default under docs/benchmark_logs is used")
@@ -759,6 +764,21 @@ def main() -> int:
 
     if not torch.cuda.is_available():
         print("CUDA required", file=sys.stderr)
+        return 1
+
+    # The HF row and the lite children import transformers / lite_llama inside
+    # their processes. A bare interpreter (a container's system python, say)
+    # lacks them; failing here names the fix instead of a mid-matrix traceback.
+    missing = [
+        name for name in ("transformers", "lite_llama") if importlib.util.find_spec(name) is None
+    ]
+    if missing:
+        print(
+            f"this interpreter lacks {', '.join(missing)} — benchmarks run on the "
+            "project environment, e.g. "
+            f".venv/bin/python {Path(__file__).resolve().relative_to(Path.cwd())} ...",
+            file=sys.stderr,
+        )
         return 1
 
     if args.all:

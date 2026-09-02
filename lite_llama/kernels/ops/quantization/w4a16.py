@@ -1,4 +1,4 @@
-"""W4A16 GEMM: 4-bit weights (AWQ/GPTQ), fp16 activations, fp32 accumulation.
+"""W4A16 GEMM: 4-bit weights (AWQ/GPTQ), fp16/bf16 activations, fp32 accumulation.
 
 AWQ and GPTQ checkpoints pack 8 int4 values into each int32 word along the K
 dimension, with one fp32 scale (and zero point) per group of ``group_size``

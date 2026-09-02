@@ -49,7 +49,7 @@ class MemoryProfiler:
         num_layers: int,
         kv_row: tuple[int, int],
         gpu_memory_utilization: float = 0.9,
-        dtype: torch.dtype = torch.float16,
+        dtype: torch.dtype = torch.bfloat16,
         device: str = "cuda",
         reserved_bytes: int = 0,
     ) -> None:
@@ -157,7 +157,7 @@ class KVCacheManager:
         kv_row,
         gpu_num_blocks,
         block_size=1,
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
         device="cuda",
         watermark: float = 0.1,
         hysteresis: float = 0.05,
@@ -190,7 +190,7 @@ class KVCacheManager:
         )
 
         # Row indices to hand out, and the per-row reference count.
-        self.kv_mem_pos_indexs = torch.arange(
+        self.kv_mem_pos_indices = torch.arange(
             0, self.max_num_tokens, dtype=torch.long, device=self.device
         )
         self.kv_mem_use_state = torch.zeros(
@@ -198,7 +198,7 @@ class KVCacheManager:
         )
         # Callers need int32 row indices; keeping a pre-cast copy lets the
         # bump-allocator fast path return a view instead of casting per step.
-        self.kv_mem_pos_indexs_int32 = self.kv_mem_pos_indexs.to(torch.int32)
+        self.kv_mem_pos_indices_int32 = self.kv_mem_pos_indices.to(torch.int32)
         # Cursor for the append-only fast path, and whether it is still exact
         # (invalidated by any partial free, restored by ``free_all``).
         self._bump_cursor = 0
@@ -287,21 +287,21 @@ class KVCacheManager:
         can_use_pos_index = torch.nonzero(self.kv_mem_use_state == 0).view(-1)
         N = can_use_pos_index.numel()
         if need_size <= N:
-            # Two views of the free list offset by need_size - 1, so start_indexs[j]
-            # and end_indexs[j] are the ends of a candidate window. The last valid
+            # Two views of the free list offset by need_size - 1, so start_indices[j]
+            # and end_indices[j] are the ends of a candidate window. The last valid
             # start is at N - need_size, and slicing excludes the stop, hence the + 1.
-            start_indexs = can_use_pos_index[: N - need_size + 1]
-            end_indexs = can_use_pos_index[need_size - 1 :]
+            start_indices = can_use_pos_index[: N - need_size + 1]
+            end_indices = can_use_pos_index[need_size - 1 :]
             # A window holds consecutive rows exactly when its two ends differ by
             # need_size - 1; anything larger means a used row sits in between.
-            contiguous_blocks = (end_indexs - start_indexs == need_size - 1).nonzero(as_tuple=True)[
-                0
-            ]
+            contiguous_blocks = (end_indices - start_indices == need_size - 1).nonzero(
+                as_tuple=True
+            )[0]
 
             if contiguous_blocks.numel() > 0:
-                start_index = start_indexs[contiguous_blocks[0]].item()  # first run wins
+                start_index = start_indices[contiguous_blocks[0]].item()  # first run wins
                 end_index = start_index + need_size
-                select_index = self.kv_mem_pos_indexs[start_index:end_index]
+                select_index = self.kv_mem_pos_indices[start_index:end_index]
                 self.add_ref(select_index)
                 return select_index, start_index, end_index
 
@@ -320,7 +320,7 @@ class KVCacheManager:
         """
         if self._bump_is_exact and self._bump_cursor + need_size <= self.max_num_tokens:
             start = self._bump_cursor
-            select_index = self.kv_mem_pos_indexs_int32[start : start + need_size]
+            select_index = self.kv_mem_pos_indices_int32[start : start + need_size]
             self.kv_mem_use_state[start : start + need_size] += 1
             self._bump_cursor += need_size
             self.can_use_mem_size -= need_size
