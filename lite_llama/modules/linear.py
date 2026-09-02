@@ -39,6 +39,10 @@ class LinearBase(nn.Module):
         self.input_size = input_size
         self.output_size = output_size
         self.quant = quant
+        # The checkpoint's element type; the model layer passes ``config.dtype``
+        # (auto: follow config.json), and quant methods read it back when they
+        # allocate a plain 16-bit weight or bias.
+        self.dtype = dtype
         self.quant_method = (
             quant.get_quant_method(self) if quant is not None else UnquantizedLinearMethod()
         )
@@ -85,7 +89,7 @@ class LinearBase(nn.Module):
 
     @torch.no_grad()
     def quantize_(self, quant: QuantizationConfig) -> None:
-        """Replace a loaded fp16 weight with its quantised form, in place.
+        """Replace a loaded 16-bit weight with its quantised form, in place.
 
         The ``--quantization <scheme>`` path: the fp16 storage is dropped as
         each layer converts, so peak memory stays at the size of the fp16
@@ -99,7 +103,7 @@ class LinearBase(nn.Module):
         self.quant_method = method
 
     def extra_repr(self) -> str:
-        fmt = self.quant.format if self.quant else "fp16"
+        fmt = self.quant.format if self.quant else "unquantized"
         return f"in={self.input_size}, out={self.output_size}, bias={self.bias is not None}, {fmt}"
 
 

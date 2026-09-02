@@ -104,10 +104,15 @@ def test_moe_method_rejects_int4():
 # create_weights: parameter layout per scheme
 # --------------------------------------------------------------------------- #
 def test_create_weights_unquantized():
+    # The default is bf16 (the modern checkpoint standard), and an explicit
+    # dtype argument is honoured — that is the wire the model layer uses to
+    # pass ``config.dtype`` down.
     layer = ReplicatedLinear(64, 128)
     assert layer.weight.shape == (128, 64)
-    assert layer.weight.dtype == torch.float16
+    assert layer.weight.dtype == torch.bfloat16
     assert not hasattr(layer, "weight_scale_inv")
+    layer_fp16 = ReplicatedLinear(64, 128, dtype=torch.float16)
+    assert layer_fp16.weight.dtype == torch.float16
 
 
 def test_create_weights_int8_per_channel():

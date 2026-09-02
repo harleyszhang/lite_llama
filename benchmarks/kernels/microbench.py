@@ -38,6 +38,16 @@ _TENSOR_CORE_TFLOPS: dict[str, float] = {
     "NVIDIA H800": 989.0,
 }
 
+#: Peak bandwidth (GB/s) per ``get_device_properties().name``, for torch builds
+#: whose CUDA properties lack ``memory_clock_rate``/``memory_bus_width`` (some
+#: container releases predate the attributes). Only verified vendor figures go
+#: here — a wrong peak poisons every %bw column, and a missing entry raises with
+#: instructions rather than guessing. To add a device, read the computed figure
+#: off a torch that has the attributes (the project .venv does) on that device.
+_PEAK_BANDWIDTH_GBPS: dict[str, float] = {
+    "NVIDIA H100 80GB HBM3": 3352.3,
+}
+
 #: Env vars that silently change which kernel runs, so a table without them is
 #: not reproducible (see ``lite_llama.kernels.dispatcher``).
 _RELEVANT_ENV = (
@@ -84,10 +94,25 @@ def device_peaks(device: int = 0) -> Peaks:
     width times two transfers per clock reproduces the vendor figure on both
     GDDR6 (A10: 6251 MHz x 384 bit -> 600 GB/s) and HBM (A100: 1215 MHz x
     5120 bit -> 1555 GB/s), so a new device needs no table entry to get an
-    honest memory-side percentage.
+    honest memory-side percentage. Torch builds without the clock attributes
+    fall back to :data:`_PEAK_BANDWIDTH_GBPS` and raise on an unknown device:
+    a wrong peak poisons every percentage in the table, so a loud error beats
+    a quiet guess.
     """
     p = torch.cuda.get_device_properties(device)
-    gbps = p.memory_clock_rate * 1e3 * (p.memory_bus_width / 8) * 2 / 1e9
+    clock_rate = getattr(p, "memory_clock_rate", None)
+    bus_width = getattr(p, "memory_bus_width", None)
+    if clock_rate is not None and bus_width is not None:
+        gbps = clock_rate * 1e3 * (bus_width / 8) * 2 / 1e9
+    else:
+        gbps = _PEAK_BANDWIDTH_GBPS.get(p.name, 0.0)
+        if not gbps:
+            raise RuntimeError(
+                f"{p.name}: torch {torch.__version__} does not expose "
+                "memory_clock_rate/memory_bus_width and the device has no entry in "
+                "_PEAK_BANDWIDTH_GBPS. Run on a torch build that has the attributes "
+                "(the project .venv does) or add the vendor peak to the table."
+            )
     return Peaks(name=p.name, gbps=gbps, tflops=_TENSOR_CORE_TFLOPS.get(p.name))
 
 

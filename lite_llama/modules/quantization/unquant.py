@@ -87,13 +87,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
 
 
 class UnquantizedConfig(QuantizationConfig):
-    """Pseudo-config for the fp16 (no quantisation) path."""
+    """Pseudo-config for the unquantised (no quantisation) path."""
 
     group_n: int = 1
     group_k: int = 1 << 30
 
     def get_name(self) -> str:
-        return "fp16"
+        return "unquantized"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.float16, torch.bfloat16]
@@ -114,4 +114,7 @@ class UnquantizedConfig(QuantizationConfig):
 
     @property
     def storage_dtype(self) -> torch.dtype:
-        return torch.float16
+        # bf16 is the modern training default and lite_llama's undeclared-checkpoint
+        # dtype (see ModelConfig.dtype); an actual checkpoint's type is carried by
+        # ``layer.dtype``, not by this pseudo-config.
+        return torch.bfloat16

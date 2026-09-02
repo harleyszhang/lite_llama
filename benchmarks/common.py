@@ -371,9 +371,31 @@ class VisionBackend(Backend):
         super().close()
 
 
+def checkpoint_dtype(model_dir: str) -> torch.dtype:
+    """读 checkpoint ``config.json`` 声明的 dtype（``torch_dtype``/``dtype`` 字段）。
+
+    两个引擎都按 config 的 dtype 加载权重，HF 基线也必须如此：对 bf16 checkpoint
+    跑 fp16 的 HF 行，测出的是"换 dtype + 换引擎"的混合效应，不是引擎差距。
+    config 缺该字段时回退 fp16（transformers 自己的历史默认）。
+    """
+    from transformers import AutoConfig
+
+    declared = getattr(AutoConfig.from_pretrained(model_dir), "dtype", None)
+    if isinstance(declared, str):  # 旧版 transformers 返回字符串
+        declared = getattr(torch, declared, None)
+    return declared if isinstance(declared, torch.dtype) else torch.float16
+
+
+def dtype_tag(dtype: torch.dtype) -> str:
+    """行标签用的 dtype 简写：``torch.bfloat16`` -> ``bf16``。"""
+    return {torch.bfloat16: "bf16", torch.float16: "fp16"}.get(dtype, str(dtype))
+
+
 class HFBackend(Backend):
     """HF transformers 测量策略:generate 无逐步回调,用两段式拆 TTFT。
 
+    权重按 checkpoint config 声明的 dtype 加载（见 :func:`checkpoint_dtype`），
+    与 lite 引擎同精度对比。
     greedy 时 min_new_tokens == max_gen_len,禁止提前 EOS 退出,
     保证 batch 恰好跑满 max_gen_len 步(与 lite_llama lockstep 对齐);
     采样时允许提前 EOS,steps 取 batch 内最长序列的步数,
@@ -383,13 +405,14 @@ class HFBackend(Backend):
     def __init__(self, model_dir: str, attn: str = "sdpa"):
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        self.dtype = checkpoint_dtype(model_dir)
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
         self.tokenizer.padding_side = "left"
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model = (
             AutoModelForCausalLM.from_pretrained(
-                model_dir, dtype=torch.float16, attn_implementation=attn
+                model_dir, dtype=self.dtype, attn_implementation=attn
             )
             .cuda()
             .eval()
