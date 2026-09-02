@@ -9,7 +9,7 @@
 
 | # | 亮点 | 状态 | 他们为何不做 |
 |---|---|---|---|
-| F1 | **任意模型任意单层的独立运行 harness**:单层跑 forward、对比 HF、测延迟/显存 | 已有(v0.10) | 他们没有这个抽象;大模型验证靠整模型跑 + 8 卡 |
+| F1 | **任意模型任意单层的独立运行 harness**:单层跑 forward、对比 HF、测延迟/显存 | 待建 | 他们没有这个抽象;大模型验证靠整模型跑 + 8 卡 |
 | F2 | 默认单卡路径全程单进程,`pdb` 可直达 kernel 调用点 | 已有 | v1 全量多进程隔离(pdb 进不了 EngineCore);这里多进程只在 TP/DP>1 时启用(地基 0 的 UniProc/Multiproc 双实现),单卡默认仍是单进程 |
 | F3 | 冷启动秒级(无 CUDA C++ 编译、无 torch.compile、graph 捕获可关) | 已有 | 他们为长驻服务优化,启动 30s–2min 不在乎 |
 | F4 | 后端缺失自动回退原生,永不硬失败 | 待建 | 他们缺库常直接报错退出 |
@@ -229,9 +229,12 @@ kernels/
 | `available()` | import 检测 | sglang 惰性 load |
 | `capability`(device + SM 窗口,OR 语义) | 硬过滤,如 DeepGEMM `>=sm90` | sglang `CapabilityRequirement` |
 | `dtypes` / `scheme` | 支持的精度/量化方案 | 合并现有量化 method |
+
 | `shape`(hard 约束 + prefer 偏好) | 过滤 + 排序 | 本项目新增 |
 | `layout`(输入/输出布局要求) | dispatcher 决定转换或排除 | 防抽象泄漏 |
+
 | `golden`(verified + max_abs_diff) | 未过对齐门禁不进默认分发 | 挂钩 acc.align |
+
 | `perf_key`(gpu, op, shape_bucket, dtype) | 指向冻结的实测记录 | 本项目新增,见支柱⑤ |
 
 **⑤ 一条确定性分发规则(sglang 的确定性 + 实测排序)**:
@@ -267,7 +270,7 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
 这是你 comment 6 的正式方案:
 
 | 阶段 | 做什么 |
-|---|---|
+| -- | --- |
 | 采集 | T2 shape 采集器跑一遍真实负载,导出 shape 清单(含出现频次) |
 | 搜索 | warm-up 或离线对高频 shape 搜索 tile/num_warps/num_stages |
 | 落盘 | 按 `(gpu_name, op, shape_key, dtype)` 存 JSON 到用户缓存目录 + 可选提交进仓库 |
@@ -276,7 +279,7 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
 
 覆盖对象:`fused_moe`(`_launch_config` 替换)、`flashattention2_nopad`(把注释掉的 144 组配置启用为搜索空间)、量化 GEMM(`_launch_config`)。
 
-**当前覆盖度(2026-09 实测校正)**:「量化 GEMM」这一项目前只做到五分之一——dense 路径的五个量化 kernel 里只有 `w4a16_matmul` 会查 `ConfigStore`,fp8 W8A8、fp8/int8 W8A16、NVFP4 都是无条件算 launch config,搜到的配置无消费者。`benchmarks/kernels/bench_quant_gemm.py --tune` 对这四个如实报「no consumer」而不写死没人读的条目;要补齐,得先给它们加上和 `w4a16.py` 同样的 `get_best_config` 查询点。详见 `docs/quantization.md` 的「A second tile heuristic defect, in w4a16」节。
+**当前覆盖度(2026-09 实测校正)**:「量化 GEMM」这一项目前只做到五分之一——dense 路径的五个量化 kernel 里只有 `w4a16_matmul` 会查 `ConfigStore`,fp8 W8A8、fp8/int8 W8A16、NVFP4 都是无条件算 launch config,搜到的配置无消费者。`benchmarks/kernels/bench_quant_gemm.py --tune` 对这四个如实报「no consumer」而不写死没人读的条目;要补齐,得先给它们加上和 `w4a16.py` 同样的 `get_best_config` 查询点。详见 `docs/quantization.md` 的「w4a16 中的第二个 tile 启发式缺陷」节。
 
 # 四、并行与服务能力路线
 
@@ -295,7 +298,7 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
 当前通信层只有 `all_reduce`(SUM) 和 `all_reduce_min`,**缺 all_gather / reduce_scatter / all_to_all / P2P send-recv**——这是 EP/DCP/CP 的共同前置。
 
 | 能力 | 前置 | 2×GPU 可实测? | 优先级 | 说明 |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | **TP 持续批处理** | 地基 0 Executor 抽象 | 可(TP=2) | **高** | 当前 TP 只有 CLI 镜像进程+一次性批处理,服务路径完全不支持 TP(见地基 0 问题 1/2) |
 | chunked prefill | 分页 KV + token budget 调度 | 可 | **高** | varlen attention 你已有,主要改调度和 KV 部分写 |
 | prefix caching | 分页 KV + block hash | 可 | **高** | 多轮对话/共享 system prompt 收益直观 |
@@ -355,28 +358,28 @@ SGLang `DataParallelController.LoadBalanceMethod` 有四种:round-robin / follow
 价值:
 
 | 用途 | 说明 |
-|---|---|
+| --- | --- |
 | MLA 正确性验证 | 不需要 671B 权重,随机权重也能验证结构与数值路径 |
 | DSA / Lightning Indexer 验证 | MQA logits + TopK 稀疏选择的机制正确性 |
 | 性能对比 | 单层 fp8 ≈ 11.5GB,单张 A10(24GB)可跑,vs vLLM 同层可比;H100/B200 更充裕 |
-| 产品化为 F1 亮点 | 任意模型任意层的通用调试工具,这是 vLLM 没有的 |
+| 品化为 F1 亮点 | 任意模型任意层的通用调试工具,这是 vLLM 没有的 |
 
 前置:必须先拆薄 `models/base.py` 的 `Attention`(当前硬编码 fused-KV + RoPE + RMSNorm,MLA 接不进来)。这和地基 2 是同一次改造。
 
-补充建议:先用 **DeepSeek-V2-Lite(16B,MLA 完整)** 跑整模型验证端到端正确性,再用单层 harness 打 V3/V4。两条路互补——一个验证全链路,一个验证前沿架构。
+补充建议:用 **DeepSeek-V2-Lite(16B,MLA 完整)** 跑整模型验证端到端正确性,再用单层 harness 打 V3/V4。两条路互补——一个验证全链路,一个验证前沿架构。
 
-# 六、计算-通信 overlap 设计
+# 、计算-通信 overlap 设计
 
 不同 GPU 互联拓扑决定 overlap 的收益量级:**PCIe 互联的 GPU(如 A10/A100 PCIe 版)之间无 NVLink**,TP 的 all-reduce 走 PCIe、通信占比高,"把通信藏进计算"是真实大头收益;**NVLink 互联的 GPU(如 H100/H200/B200)**带宽充裕、通信占比低,但仍有调度气泡可藏,且 L4 tile-signaling 在 NVLink 上收益全开。以下设计面向两种拓扑,由 `capability` 字段自适应。
 
 ## 三条 ping-pong 流水轴
 
-overlap 不止"TP 通信藏进计算"一件事。把所有重叠拆成三条正交的 ping-pong 轴,每条轴独立度量、独立验证,组合后逼近零气泡:
+o rlap 不止"TP 通信藏进计算"一件事。把所有重叠拆成三条正交的 ping-pong 轴,每条轴独立度量、独立验证,组合后逼近零气泡:
 
 | 轴 | 流水两端 | 粒度 | 目标 | 对应层级 |
 |---|---|---|---|---|
 | **A. Host-Device** | CPU 调度 ↔ GPU 执行 | **batch 级** | CPU 在 GPU 跑 batch i 时即调度 batch i+1,CPU 侧零等待 | P9(第八节) |
-| **B. Memory-Compute** | HBM 读写 ↔ tensor core 计算 | **tile 级** | 算完一块 tile 即可发射下一块的 load/store,访存与计算流水 | L4 |
+|**B. Memo-Compute** | HBM 读写 ↔ tensor core 计算 | **tile 级** | 算完一块 tile 即可发射下一块的 load/store,访存与计算流水 | L4 |
 | **C. Compute-Comm** | 计算 kernel ↔ 通信 kernel | **batch/micro-batch 级** | A 块做 all-reduce 时 B 块的 GEMM 已在算,通信藏进计算 | L2/L3/L5 |
 
 三条轴由易到难,分五级落地:
@@ -415,7 +418,7 @@ overlap 不止"TP 通信藏进计算"一件事。把所有重叠拆成三条正�
 **三层能力**:
 
 | 能力 | 现状 | 归属 | 说明 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 分配粒度(block table) | ROADMAP 已有 | 地基 1 | block_size>1,不再预占 max_seq_len |
 | 请求级 alloc/free + watermark 准入 | 缺 | 地基 1 补充 | 取代 `free_all` 全量重置 |
 | 抢占(recompute / swap-out) | 缺 | v0.9 调度 | 缺块时把低优先序列踢回 waiting |
@@ -447,7 +450,7 @@ overlap 不止"TP 通信藏进计算"一件事。把所有重叠拆成三条正�
 **四个组件**:
 
 | 组件 | 职责 | 借鉴 | 自有设计 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **Frontend** | 收 HTTP/CLI 请求,序列化后发给 Scheduler | vLLM `AsyncLLM` | 复用现有 `AsyncLLMEngine` 的 asyncio 层,只换 IPC 后端 |
 | **Scheduler** | 独立进程;跑 `Scheduler.schedule()`,产出 `SchedulerOutput`;不碰 GPU | vLLM `EngineCoreProc`;SGLang `zmq_to_scheduler` | **N-batch 流水线**:允许多个 `SchedulerOutput` 同时在 queue 里未被执行,不是严格 1:1 的 request-response |
 | **Executor** | GPU worker;消费 `SchedulerOutput`,跑 `model_runner.forward()`,采样,回传 result | vLLM `gpu_worker` | **双缓冲 slot**:batch i 在 GPU 跑时,batch i+1 的 input tensor 已在另一块预分配 buffer 里 ready |
@@ -458,7 +461,7 @@ overlap 不止"TP 通信藏进计算"一件事。把所有重叠拆成三条正�
 vLLM/SGLang 的调度器与执行器是严格 1:1 的 request-response——调度一步、执行一步、回传一步。lite_llama 的原创设计是**流水线化**:
 
 | 时刻 | CPU(Scheduler) | GPU(Executor) |
-|---|---|---|
+| --- | --- | --- |
 | t0 | 调度 batch 0 | idle |
 | t1 | 调度 batch 1 | 执行 batch 0 |
 | t2 | 调度 batch 2 | 执行 batch 1 |
@@ -492,7 +495,7 @@ vLLM/SGLang 的调度器与执行器是严格 1:1 的 request-response——调�
 ## 四种注意力变体
 
 | 变体 | 全称 | 代表模型 | 核心机制 | vLLM 对标 |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | **MLA** | Multi-head Latent Attention | DeepSeek-V2/V3/V4 | 低秩压缩 KV:存 latent `c_kv` 而非完整 K/V;decode 时 on-the-fly 上采成 K/V;KV cache 只占 `L_kv` 维而非 `N × P` | `MLAAttention` + `MLAAttentionSpec` |
 | **DSA** | Dynamic Sparse Attention | DeepSeek-V3/V4 | Top-K 稀疏选择:latent KV 经 `MLA` 粗筛后,只取 top-K 相关行做细粒度 attention;Lightning Indexer 加速 top-K | `MLAAttentionSpec(model_version=4)` + `sparse_swa.py` |
 | **SWA** | Sliding Window Attention | Mistral / Qwen3 部分 | 固定窗口 W:只 attend 最近 W 个 token;与 full attention 混用(底层 SWA + 顶层 full) | `SlidingWindowMLASpec` |
@@ -503,7 +506,7 @@ vLLM/SGLang 的调度器与执行器是严格 1:1 的 request-response——调�
 地基 2 的 dispatch 在 attention 上的具体展开——后端 × 变体的二维矩阵,每格一份实现,新增后端/变体只加格子不写新类:
 
 | 后端 | prefill | decode | 变体覆盖 | 前置条件 |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | Triton FA2(自有,现 `flash_attention2_nopad` / `flash_decoding`) | ✓ | ✓ | GQA / SWA | 无,永远存在的保底行 |
 | Triton MLA(自有) | ✓ chunked | ✓ MQA 路径 | MLA | 无 |
 | FlashAttention-3(external) | ✓ | ✓ | GQA / SWA | sm90+;import 失败自动回退 Triton |
@@ -567,7 +570,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
 可观测(A7 / 工具模块 F)是引擎内视角;本节补服务外视角——lite_llama 要能当生产服务跑,不只是研究框架。
 
 | 能力 | 做什么 | 借鉴 | 自有设计 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **Prometheus metrics** | `/metrics` 端点暴露 TTFT / TPOT / 队列深度 / KV 占用 / 后端选中率 / overlap 气泡 | vLLM metrics(SRE 导向的标准计数器);SGLang prometheus 输出 | 复用 observe.metrics 的 per-step 数据流;metric 命名与 vLLM 对齐(社区 Grafana 面板直接可用),额外暴露 lite_llama 特有的后端/算子维度 |
 | **请求追踪** | 请求全链路 span:enqueue → 调度决策 → forward → 采样 → detokenize → 返回 | OpenTelemetry;vLLM request-level tracing | observe.trace 直接导出 OTLP;trace_id 贯穿 ZMQ 进程边界(第八节跨进程透传) |
 | **Router** | 多实例入口:负载均衡 / 健康检查 / 故障转移 / prefix 感知路由 | SGLang router(Rust 实现);vLLM 生产栈 router(k8s gateway) | **路由决策吃 metrics 反馈**:Router 从各实例 /metrics 拉负载与 cache 水位,把第四节的 cache-aware 路由从引擎内 DP 推广到集群级;纯 Python 单进程实现(不引 Rust 依赖),定位教学级生产化 |
@@ -593,7 +596,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - acc.golden 升为强制门禁:上 GPU runner、禁止静默 skip、覆盖面扩到 continuous / 量化 / VL / DP
   - perf.watchdog:benchmark 入库,劣化超阈值报警
 - **benchmark**
-  - 立零点:全部在库模型跑 `bench_e2e`(lite 与 `--backend hf` 两路),同 prompt 同口径,作为后续版本的对照基准
+  - 立零点:全部在库模型跑 `bench_e2e` 与 `bench_hf_baseline`,同 prompt 同口径,作为后续版本的对照基准
   - 量化路径(fp8 / W8A16 / W4A16 / SmoothQuant)单列一张表,性能与精度成对给出
 - **验收**
   - 无卡时 CI 明确报"未验证",不再判绿
@@ -673,7 +676,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - 引擎:TP=2 下 continuous golden 全绿;在线服务 × TP=2 可跑;单卡默认仍走单进程(pdb 能断点),mock 进程网格断言各 rank 收到的 SchedulerOutput 一致
   - module:TP=2 的采样 logprob 与 TP=1 逐元素一致;embed + lm_head 显存减半
 
-## v0.9 多后端 + overlap 骨架(已发版)
+## v0.9 多后端 + overlap 骨架(进行中)
 
 - **feat(已完成)**
   - 地基 2:实际落地形态超出本版"雏形"目标,直接按三层建满
@@ -684,9 +687,10 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
     - 默认全 native:外部行 priority=UNMEASURED(-1) 排在 native(0) 之下,翻盘等 v0.10 冻结实测数据接线
   - A9 Platform 抽象:设备检测 + 能力声明(CapabilityRequirement),dispatch 按 capability 过滤(deepgemm / flashmla 的 sm90+ 窗口在 A10 上被拒),可 mock 测试
   - prefix caching 支持 DP:负载均衡按前缀亲和路由,各副本的 cache 合成一个池
-  - overlap 调度器抽象 + L1 跨 stream 重叠(本版收尾时完成 ModelWorker 集成 + deferred harvest,timeline 相交证据见 release 文档)
 - **refactor(已完成)**
   - attention 接口拆薄:`PagedAttention` 下沉到 modules/(KV 写入 + prefill/decode 分派),`models/base.py` 的 Attention 只管投影与 RoPE;dispatch 在构造期一次决策,热路径是普通属性调用,MLA 才接得进来
+- **feat(剩余)**
+  - overlap 调度器抽象 + L1 跨 stream 重叠
 - **顺带提前入库**(归属后继版本,在此记账)
   - v0.11 的 MLA 算子侧:`MinimalMlaLayer` 单层 harness + flashmla 后端行(golden 未验证,默认不 dispatch)
   - v0.13 的 FlashInfer attention 后端行(prefill + decode 两行,golden 已验证)
@@ -696,7 +700,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
 - **验收**
   - (已达成)一条命令切后端,并能解释为何选它
   - (已达成)缺库时自动回退到 native
-  - (已达成)L1 重叠有 timeline 作佐证
+  - L1 重叠有 timeline 作佐证
   - (已达成)Platform 可 mock 测试
 
 ## v0.10.0 可观测性 + 算子分发(已发版)
