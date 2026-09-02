@@ -92,19 +92,16 @@ class SlotBatch:
 
         # Per-sequence offsets in a flattened prefill grid, scaled per call.
         self._row_offsets = torch.arange(total_slots, dtype=torch.int32, device=self.device)
-        # Row offsets within one block, reused by every table write.
-        self._block_offsets = torch.arange(self.block_size, dtype=table.dtype, device=self.device)
 
-        # Device metadata + the host mirror that decides if the next step reuses it.
+        # Device metadata plus the host mirror used to decide whether the next
+        # step can reuse it.
         self._b_req_idx: torch.Tensor | None = None
         self._b_seq_len: torch.Tensor | None = None
         self._host_slots: list[int] = []
         self._host_lens: list[int] = []
 
     # ------------------------------------------------------------------ steps #
-    def write_block_tables(
-        self, writes: Sequence[tuple[int, int, int, tuple[int, ...]]]
-    ) -> None:
+    def write_block_tables(self, writes: Sequence[tuple[int, int, int, tuple[int, ...]]]) -> None:
         """Point slots' table entries at the physical blocks they were given.
 
         The entire device-side cost of prefix reuse: a paged table only names the
@@ -124,6 +121,9 @@ class SlotBatch:
         table = self._atten.b_req_tokens_table
         width = table.shape[1]
         size = self.block_size
+        slots: list[int] = []
+        positions: list[int] = []
+        rows: list[int] = []
         for slot, group_id, start_block, block_ids in writes:
             if group_id != 0:
                 raise NotImplementedError(
@@ -132,10 +132,21 @@ class SlotBatch:
             start = start_block * size
             if not block_ids or start >= width:
                 continue
-            ids = torch.tensor(block_ids, dtype=table.dtype, device=self.device)
-            rows = (ids.unsqueeze(1) * size + self._block_offsets).reshape(-1)
-            end = min(start + rows.numel(), width)
-            table[slot, start:end] = rows[: end - start]
+            count = min(len(block_ids) * size, width - start)
+            # Build one contiguous host batch for all grants in the plan.  The
+            # old loop made a fresh H2D allocation and assignment per grant;
+            # prefix-cache admissions can carry hundreds of grants at once.
+            slots.extend([slot] * count)
+            positions.extend(range(start, start + count))
+            mapped_rows = [
+                block_id * size + offset for block_id in block_ids for offset in range(size)
+            ]
+            rows.extend(mapped_rows[:count])
+        if slots:
+            table[
+                torch.tensor(slots, dtype=torch.long, device=self.device),
+                torch.tensor(positions, dtype=torch.long, device=self.device),
+            ] = torch.tensor(rows, dtype=table.dtype, device=self.device)
 
     def begin_prefill(
         self,

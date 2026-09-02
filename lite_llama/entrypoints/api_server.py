@@ -21,6 +21,7 @@ from ..engine.async_data_parallel import AsyncDataParallelEngine
 from ..engine.async_engine import AsyncLLMEngine, StreamedOutput
 from ..engine.reasoning import ReasoningSplitter, for_family
 from ..engine.sampler import PositionLogprobs, SamplingParams
+from ..engine.scheduler import DEFAULT_MAX_CHUNK_SIZE
 from ..engine.tool_parser import ToolCall, ToolCallDelta, ToolParser
 from ..utils.logger import get_logger
 from ..utils.prompt_templates import get_prompter
@@ -109,6 +110,8 @@ class ServerConfig:
         max_seq_len: Context window, and the per-slot KV cache size.
         max_num_seqs: Concurrency ceiling — how many requests may decode together.
         max_num_batched_tokens: Padded token budget for one prefill group.
+        max_chunk_size: Maximum prefill chunk per request; ``0`` disables
+            chunking and favours throughput over decode-tail latency.
         max_gpu_num_blocks: Manual KV-cache size in tokens; profiled when ``None``.
         device: Torch device string.
         use_cuda_graph: Capture decode CUDA graphs.
@@ -117,6 +120,10 @@ class ServerConfig:
             the engine spawns the follower ranks itself and the server is still
             one process with one scheduler.
         kv_cache_dtype: KV-cache element type (``"auto"`` or an fp8 spelling).
+        enable_prefix_cache: Reuse block-aligned prompt prefixes in the local
+            replica cache.
+        prefix_cache_blocks: Optional prefix-cache capacity in 16-token blocks.
+        enable_preemption: Allow recompute-based oversubscription of cache slots.
         data_parallel_size: Whole-model replicas serving this one endpoint,
             combined with ``tensor_parallel_size`` into the usual
             ``dp x tp`` GPU grid. Above 1 the lifespan builds an
@@ -135,12 +142,16 @@ class ServerConfig:
     max_seq_len: int = 2048
     max_num_seqs: int = 32
     max_num_batched_tokens: int = 8192
+    max_chunk_size: int = DEFAULT_MAX_CHUNK_SIZE
     max_gpu_num_blocks: int | None = None
     device: str = "cuda"
     use_cuda_graph: bool = True
     quantization: str | None = None
     tensor_parallel_size: int = 1
     kv_cache_dtype: str = "auto"
+    enable_prefix_cache: bool = False
+    prefix_cache_blocks: int | None = None
+    enable_preemption: bool = False
     data_parallel_size: int = 1
     load_balancer: str = "round_robin"
     chat_template: bool = True
@@ -441,6 +452,13 @@ class OpenAIServer:
                     None,
                     block if first else None,
                 )
+                first = False
+            # A reasoning/tool parser may intentionally withhold this token's
+            # text until it has seen more bytes.  Its probability is still a
+            # token-level result, so do not lose it merely because there was no
+            # visible text delta to attach it to.
+            if first and block is not None:
+                yield frame(ChatCompletionDelta(), None, block)
         # End-of-stream flush: the suffix windows release what they held and a
         # truncated call surfaces its pieces — all before the terminal frame,
         # because clients stop reading at finish_reason.
@@ -537,11 +555,15 @@ def build_app(config: ServerConfig, engine: AsyncLLMEngine | AsyncDataParallelEn
                     max_seq_len=config.max_seq_len,
                     max_num_seqs=config.max_num_seqs,
                     max_num_batched_tokens=config.max_num_batched_tokens,
+                    max_chunk_size=config.max_chunk_size,
                     max_gpu_num_blocks=config.max_gpu_num_blocks,
                     use_cuda_graph=config.use_cuda_graph,
                     quantization=config.quantization,
                     tensor_parallel_size=config.tensor_parallel_size,
                     kv_cache_dtype=config.kv_cache_dtype,
+                    enable_prefix_cache=config.enable_prefix_cache,
+                    prefix_cache_blocks=config.prefix_cache_blocks,
+                    enable_preemption=config.enable_preemption,
                 )
             else:
                 logger.info("loading %s for serving", config.model_dir)
@@ -550,12 +572,16 @@ def build_app(config: ServerConfig, engine: AsyncLLMEngine | AsyncDataParallelEn
                     max_seq_len=config.max_seq_len,
                     max_num_seqs=config.max_num_seqs,
                     max_num_batched_tokens=config.max_num_batched_tokens,
+                    max_chunk_size=config.max_chunk_size,
                     max_gpu_num_blocks=config.max_gpu_num_blocks,
                     device=config.device,
                     use_cuda_graph=config.use_cuda_graph,
                     quantization=config.quantization,
                     tensor_parallel_size=config.tensor_parallel_size,
                     kv_cache_dtype=config.kv_cache_dtype,
+                    enable_prefix_cache=config.enable_prefix_cache,
+                    prefix_cache_blocks=config.prefix_cache_blocks,
+                    enable_preemption=config.enable_preemption,
                 )
         active: AsyncLLMEngine | AsyncDataParallelEngine = state["engine"]
         active.start()

@@ -20,8 +20,9 @@ from typing import ClassVar
 import pytest
 import torch
 
-from lite_llama import LLM, DataParallelEngine, RequestOutput, SamplingParams
-from lite_llama.engine.data_parallel import _SHUTDOWN, _dp_worker, _ReplicaLoop
+from lite_llama.engine.data_parallel import _SHUTDOWN, DataParallelEngine, _dp_worker, _ReplicaLoop
+from lite_llama.engine.outputs import RequestOutput
+from lite_llama.engine.sampler import SamplingParams
 from lite_llama.engine.scheduler import Request, RequestStatus
 
 # Enough KV for the short generations here, small enough that two replicas plus the
@@ -61,6 +62,11 @@ def test_device_kwarg_is_rejected():
 def test_non_positive_replica_count_is_rejected():
     with pytest.raises(ValueError, match="data_parallel_size must be >= 1"):
         DataParallelEngine(model="unused", data_parallel_size=0)
+
+
+def test_non_positive_tensor_parallel_size_is_rejected_before_spawning_workers():
+    with pytest.raises(ValueError, match="tensor_parallel_size must be >= 1"):
+        DataParallelEngine(model="unused", tensor_parallel_size=0)
 
 
 def test_unknown_load_balancer_is_rejected():
@@ -729,6 +735,8 @@ class TestTwoReplicas:
         comparison is byte-exact — see this module's docstring for why comparing
         against one run over all six prompts would not be.
         """
+        from lite_llama.engine.llm import LLM
+
         dp_texts = [out.text for out in engine.generate(_PROMPTS, _GREEDY)]
 
         reference = LLM(model=str(model_dir), max_seq_len=512, max_gpu_num_blocks=_KV_TOKENS)

@@ -17,8 +17,6 @@ import pytest
 import torch
 
 from lite_llama.engine.async_engine import AsyncLLMEngine
-from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
-from lite_llama.engine.llm_engine import LLMEngine
 from lite_llama.engine.sampler import SamplingParams
 from lite_llama.engine.scheduler import Request, Scheduler, SchedulerConfig
 
@@ -42,7 +40,9 @@ class StubEngine:
         self.max_concurrent = 0
         self.released = False
 
-    def add_request(self, prompt, params=None, request_id=None, prompt_token_ids=None, on_error=None):
+    def add_request(
+        self, prompt, params=None, request_id=None, prompt_token_ids=None, on_error=None
+    ):
         if prompt == "reject me":
             raise ValueError("prompt refused by the stub")
         request = Request(
@@ -129,6 +129,18 @@ async def test_request_ids_are_reported_back():
         chunks = await asyncio.wait_for(collect(engine, "hi", request_id="mine"), _TIMEOUT)
 
     assert {c.request_id for c in chunks} == {"mine"}
+
+
+async def test_duplicate_live_request_id_is_rejected_without_stranding_the_first_stream():
+    """A second stream used to replace the first one's delivery queue and hang it."""
+    async with AsyncLLMEngine(StubEngine(tokens=500)) as engine:
+        first = engine.generate("first", request_id="same")
+        await asyncio.wait_for(anext(first), _TIMEOUT)
+
+        with pytest.raises(ValueError, match="already active"):
+            await anext(engine.generate("second", request_id="same"))
+
+        await first.aclose()
 
 
 async def test_abandoning_a_stream_aborts_the_request():
@@ -236,6 +248,9 @@ async def test_the_engine_serves_a_second_event_loop():
 @pytest.mark.weights
 async def test_concurrent_coroutines_get_their_own_answers(model_dir):
     """Real model, three coroutines, one batch: nobody may get another's text."""
+    from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
+    from lite_llama.engine.llm_engine import LLMEngine
+
     engine = AsyncLLMEngine(
         ContinuousBatchingEngine(
             LLMEngine(

@@ -24,7 +24,7 @@ from ..utils.logger import get_logger
 from .dp_load_balancer import LOAD_BALANCERS, make_load_balancer
 from .outputs import CompletionOutput, RequestOutput
 from .sampler import SamplingParams
-from .scheduler import DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_NUM_SEQS
+from .scheduler import DEFAULT_MAX_CHUNK_SIZE, DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_NUM_SEQS
 
 if TYPE_CHECKING:  # pragma: no cover - the worker imports these in its own process
     from .continuous_engine import ContinuousBatchingEngine
@@ -272,7 +272,10 @@ def _dp_worker(
     engine_kwargs: dict[str, Any],
     max_num_seqs: int,
     max_num_batched_tokens: int,
+    max_chunk_size: int,
     enable_prefix_cache: bool,
+    prefix_cache_blocks: int | None,
+    enable_preemption: bool,
     request_queue: mp.Queue,
     result_queue: mp.Queue,
 ) -> None:
@@ -334,7 +337,10 @@ def _dp_worker(
                 device=device,
                 max_num_seqs=max_num_seqs,
                 max_num_batched_tokens=max_num_batched_tokens,
+                max_chunk_size=max_chunk_size,
                 enable_prefix_cache=enable_prefix_cache,
+                prefix_cache_blocks=prefix_cache_blocks,
+                enable_preemption=enable_preemption,
                 **engine_kwargs,
             )
         else:
@@ -381,17 +387,23 @@ class DataParallelEngine:
         max_num_seqs: Requests each replica keeps in flight. Per replica, not in
             total: DP multiplies concurrency along with throughput.
         max_num_batched_tokens: Padded token budget for one prefill group.
+        max_chunk_size: Maximum prompt tokens one request prefills per step;
+            ``0`` disables chunking.
         enable_prefix_cache: Give every replica a prefix cache. Each one is *local*:
             replicas share no KV, so a prompt whose prefix was prefilled on replica 0
             hits nothing on replica 1. That is what ``load_balancer="cache_aware"``
             exists to fix, and the two are meant to be turned on together.
+        prefix_cache_blocks: Optional per-replica prefix-cache capacity in
+            16-token blocks; ``None`` uses the profiled cache capacity.
+        enable_preemption: Allow a replica's scheduler to evict and recompute
+            decode work when its logical concurrency exceeds cache slots.
         **engine_kwargs: Forwarded verbatim to each replica's :class:`LLM`
             (``max_seq_len``, ``quantization``, ``use_cuda_graph``, ...). ``device``
             is not accepted: it is derived from the replica's position in the grid.
 
     Raises:
-        ValueError: If ``data_parallel_size`` is below 1, exceeds the visible GPU
-            count, ``device`` was passed, or the policy name is unknown.
+        ValueError: If a parallel size is below 1, the grid exceeds visible GPUs,
+            ``device`` was passed, or the policy name is unknown.
         RuntimeError: If a replica fails to build.
     """
 
@@ -403,13 +415,18 @@ class DataParallelEngine:
         load_balancer: str = "round_robin",
         max_num_seqs: int = DEFAULT_MAX_NUM_SEQS,
         max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS,
+        max_chunk_size: int = DEFAULT_MAX_CHUNK_SIZE,
         enable_prefix_cache: bool = False,
+        prefix_cache_blocks: int | None = None,
+        enable_preemption: bool = False,
         **engine_kwargs: Any,
     ) -> None:
         import torch
 
         if data_parallel_size < 1:
             raise ValueError(f"data_parallel_size must be >= 1, got {data_parallel_size}")
+        if tensor_parallel_size < 1:
+            raise ValueError(f"tensor_parallel_size must be >= 1, got {tensor_parallel_size}")
         if "device" in engine_kwargs:
             raise ValueError(
                 "device is derived from the replica's rank; pass data_parallel_size "
@@ -468,7 +485,10 @@ class DataParallelEngine:
                     self._engine_kwargs,
                     max_num_seqs,
                     max_num_batched_tokens,
+                    max_chunk_size,
                     enable_prefix_cache,
+                    prefix_cache_blocks,
+                    enable_preemption,
                     self._request_queues[global_rank // tensor_parallel_size],
                     self._result_queue,
                 ),

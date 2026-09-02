@@ -129,6 +129,18 @@ def test_explicit_token_ids_bypass_the_pool():
     engine.shutdown()
 
 
+def test_duplicate_id_while_tokenizing_is_rejected_instead_of_overwriting_the_job():
+    engine = _build_engine([[_WORD], [_EOS]], delay=0.05)
+    first = engine.add_request("first", request_id="same")
+
+    with pytest.raises(ValueError, match="already active"):
+        engine.add_request("second", request_id="same")
+
+    assert engine._tokenizing["same"].request is first
+    engine.abort("same")
+    engine.shutdown()
+
+
 # --------------------------------------------------------------------------- #
 # Failure paths
 # --------------------------------------------------------------------------- #
