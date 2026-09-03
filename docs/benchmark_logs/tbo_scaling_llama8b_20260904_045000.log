@@ -1,0 +1,227 @@
+=== environment ===
+  gpu_model: NVIDIA A10
+  gpu_count: 2
+  gpu_memory_gib: 22.0
+  sm_count: 72
+  compute_capability: sm_86
+  driver_version: 550.135
+  interconnect: 	[4mGPU0	GPU1	CPU Affinity	NUMA Affinity	GPU NUMA ID[0m
+GPU0	 X 	PHB	0-63	0		N/A
+GPU1	PHB	 X 	0-63	0		N/A
+  cuda_version: 12.9
+  torch_version: 2.13.0+cu129
+  triton_version: 3.7.1
+  transformers_version: 5.15.1
+  python_version: 3.13.13
+  cpu_cores: 64
+  inference_mode: offline (all prompts submitted at once, no serving queue)
+
+=== model Meta-Llama-3.1-8B-Instruct: {'model_type': 'llama', 'hidden_size': 4096, 'num_hidden_layers': 32, 'num_attention_heads': 32, 'intermediate_size': 14336} ===
+
+--- batch=32 prompt=64 gen=64 tp=2 ---
+[32m09-04 04:47:07 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:47:07 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:47:07 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:47:07 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:47:07 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:47:07 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:47:37 [I] loader.py:157 Loaded LlamaModel onto cuda:1 in 29.95s[0m
+[32m09-04 04:47:37 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[32m09-04 04:47:37 [I] loader.py:157 Loaded LlamaModel onto cuda in 29.97s[0m
+[32m09-04 04:47:37 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:47:37 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[36m09-04 04:47:37 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:47:37 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+[transformers] Ignoring clean_up_tokenization_spaces=True for BPE tokenizer TokenizersBackend. The clean_up_tokenization post-processing step is designed for WordPiece tokenizers and is destructive for BPE (it strips spaces before punctuation). Set clean_up_tokenization_spaces=False to suppress this warning, or set clean_up_tokenization_spaces_for_bpe_even_though_it_will_corrupt_output=True to force cleanup anyway.
+  eager_off    TTFT    76.0 ms | TPOT  30.167 ms | TPS   1036.1 | TGS/GPU    518.1
+[32m09-04 04:47:45 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:47:45 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:47:45 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[32m09-04 04:47:46 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:47:46 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:47:46 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:47:48 [I] loader.py:157 Loaded LlamaModel onto cuda in 2.73s[0m
+[32m09-04 04:47:48 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:47:48 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:47:48 [I] loader.py:157 Loaded LlamaModel onto cuda:1 in 2.85s[0m
+[32m09-04 04:47:48 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:47:48 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:47:49 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  eager_on     TTFT    76.1 ms | TPOT  30.678 ms | TPS   1019.5 | TGS/GPU    509.7
+[32m09-04 04:47:57 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:47:57 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:47:57 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[32m09-04 04:47:57 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:47:57 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:47:57 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:48:00 [I] loader.py:157 Loaded LlamaModel onto cuda in 2.72s[0m
+[32m09-04 04:48:00 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:48:00 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:48:00 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:48:00 [I] loader.py:157 Loaded LlamaModel onto cuda:1 in 2.83s[0m
+[32m09-04 04:48:00 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:48:00 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:48:00 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:48:06 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  graph_off    TTFT    76.3 ms | TPOT  23.462 ms | TPS   1317.3 | TGS/GPU    658.7
+[32m09-04 04:48:12 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:48:12 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:48:12 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[32m09-04 04:48:12 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:48:12 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:48:12 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:48:15 [I] loader.py:157 Loaded LlamaModel onto cuda in 2.66s[0m
+[32m09-04 04:48:15 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:48:15 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:48:15 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:48:15 [I] loader.py:157 Loaded LlamaModel onto cuda:1 in 2.83s[0m
+[32m09-04 04:48:15 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:48:15 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:48:15 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:48:21 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  graph_on     TTFT    77.0 ms | TPOT  23.606 ms | TPS   1309.1 | TGS/GPU    654.5
+  -> graph_on vs graph_off: TPOT -0.6%
+  -> eager_on vs eager_off: TPOT -1.7%
+
+--- batch=128 prompt=64 gen=64 tp=2 ---
+[32m09-04 04:48:27 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:48:27 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:48:27 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[32m09-04 04:48:27 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:48:27 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:48:27 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:48:30 [I] loader.py:157 Loaded LlamaModel onto cuda in 2.74s[0m
+[32m09-04 04:48:30 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:48:30 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:48:30 [I] loader.py:157 Loaded LlamaModel onto cuda:1 in 2.82s[0m
+[32m09-04 04:48:30 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:48:30 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:48:31 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  eager_off    TTFT   281.3 ms | TPOT  36.973 ms | TPS   3137.9 | TGS/GPU   1569.0
+[32m09-04 04:48:39 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:48:39 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:48:39 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[32m09-04 04:48:39 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:48:39 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:48:39 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:48:42 [I] loader.py:157 Loaded LlamaModel onto cuda in 2.64s[0m
+[32m09-04 04:48:42 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:48:42 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:48:42 [I] loader.py:157 Loaded LlamaModel onto cuda:1 in 2.79s[0m
+[32m09-04 04:48:42 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:48:42 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:48:43 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  eager_on     TTFT   280.4 ms | TPOT  36.622 ms | TPS   3165.9 | TGS/GPU   1582.9
+[32m09-04 04:48:51 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:48:51 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:48:51 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[32m09-04 04:48:51 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:48:51 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:48:51 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:48:54 [I] loader.py:157 Loaded LlamaModel onto cuda in 2.67s[0m
+[32m09-04 04:48:54 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:48:54 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:48:54 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:48:54 [I] loader.py:157 Loaded LlamaModel onto cuda:1 in 2.85s[0m
+[32m09-04 04:48:54 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:48:54 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:48:54 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:49:00 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  graph_off    TTFT   280.4 ms | TPOT  35.872 ms | TPS   3224.4 | TGS/GPU   1612.2
+[32m09-04 04:49:08 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:49:08 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:49:08 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[32m09-04 04:49:08 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:49:08 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:49:08 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:49:11 [I] loader.py:157 Loaded LlamaModel onto cuda in 2.73s[0m
+[32m09-04 04:49:11 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:49:11 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:49:11 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:49:11 [I] loader.py:157 Loaded LlamaModel onto cuda:1 in 2.80s[0m
+[32m09-04 04:49:11 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:49:11 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:49:11 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:49:16 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  graph_on     TTFT   281.6 ms | TPOT  36.129 ms | TPS   3202.4 | TGS/GPU   1601.2
+  -> graph_on vs graph_off: TPOT -0.7%
+  -> eager_on vs eager_off: TPOT +0.9%
+
+--- batch=256 prompt=64 gen=64 tp=2 ---
+[32m09-04 04:49:24 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:49:24 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:49:24 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[32m09-04 04:49:24 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:49:24 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:49:24 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:49:27 [I] loader.py:157 Loaded LlamaModel onto cuda in 2.76s[0m
+[32m09-04 04:49:27 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:49:27 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:49:27 [I] loader.py:157 Loaded LlamaModel onto cuda:1 in 2.84s[0m
+[32m09-04 04:49:27 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:49:27 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:49:28 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  eager_off    TTFT   283.3 ms | TPOT  38.930 ms | TPS   3134.3 | TGS/GPU   1567.1
+[32m09-04 04:49:40 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:49:40 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:49:40 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[32m09-04 04:49:40 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:49:40 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:49:40 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:49:43 [I] loader.py:157 Loaded LlamaModel onto cuda in 2.68s[0m
+[32m09-04 04:49:43 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:49:43 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:49:43 [I] loader.py:157 Loaded LlamaModel onto cuda:1 in 2.87s[0m
+[32m09-04 04:49:43 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:49:43 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:49:44 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  eager_on     TTFT   282.8 ms | TPOT  38.690 ms | TPS   3152.9 | TGS/GPU   1576.5
+[32m09-04 04:49:55 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:49:55 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:49:55 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[32m09-04 04:49:55 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:49:55 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:49:55 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:49:58 [I] loader.py:157 Loaded LlamaModel onto cuda in 2.64s[0m
+[32m09-04 04:49:58 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:49:58 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:49:58 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:49:58 [I] loader.py:157 Loaded LlamaModel onto cuda:1 in 2.84s[0m
+[32m09-04 04:49:58 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:49:58 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:49:58 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:50:04 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  graph_off    TTFT   283.4 ms | TPOT  37.746 ms | TPS   3226.8 | TGS/GPU   1613.4
+[32m09-04 04:50:15 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:50:15 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:50:15 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[32m09-04 04:50:15 [I] loader.py:138 Building LlamaModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:50:15 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:50:15 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/Meta-Llama-3.1-8B-Instruct[0m
+[32m09-04 04:50:17 [I] loader.py:157 Loaded LlamaModel onto cuda in 2.66s[0m
+[32m09-04 04:50:17 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:50:17 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:50:17 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:50:17 [I] loader.py:157 Loaded LlamaModel onto cuda:1 in 2.78s[0m
+[32m09-04 04:50:17 [I] kv_cache_manager.py:183 KV cache: 49152 blocks, watermark=4915 blocks (10%), recovery band=2457 blocks[0m
+[36m09-04 04:50:17 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([49152, 8, 128])[0m
+[32m09-04 04:50:17 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:50:23 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  graph_on     TTFT   283.6 ms | TPOT  38.735 ms | TPS   3148.8 | TGS/GPU   1574.4
+  -> graph_on vs graph_off: TPOT -2.6%
+  -> eager_on vs eager_off: TPOT +0.6%
+
+-> benchmarks/logs/tbo_scaling_llama8b.json

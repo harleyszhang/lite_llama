@@ -1,0 +1,149 @@
+{
+  "config": {
+    "models": [
+      "my_weight/Qwen2.5-1.5B-Instruct"
+    ],
+    "batches": [
+      32,
+      128,
+      256
+    ],
+    "gen_len": 64,
+    "prompt_len": 64,
+    "tp": 2,
+    "kv_blocks": 65536,
+    "arms": [
+      "eager_off",
+      "eager_on",
+      "graph_off",
+      "graph_on"
+    ],
+    "json": "benchmarks/logs/tbo_scaling_qwen.json"
+  },
+  "results": {
+    "environment": {
+      "gpu_model": "NVIDIA A10",
+      "gpu_count": 2,
+      "gpu_memory_gib": 22.0,
+      "sm_count": 72,
+      "compute_capability": "sm_86",
+      "driver_version": "550.135",
+      "interconnect": "\t\u001b[4mGPU0\tGPU1\tCPU Affinity\tNUMA Affinity\tGPU NUMA ID\u001b[0m\nGPU0\t X \tPHB\t0-63\t0\t\tN/A\nGPU1\tPHB\t X \t0-63\t0\t\tN/A",
+      "cuda_version": "12.9",
+      "torch_version": "2.13.0+cu129",
+      "triton_version": "3.7.1",
+      "transformers_version": "5.15.1",
+      "python_version": "3.13.13",
+      "cpu_cores": 64,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    },
+    "workload": {
+      "batch_sizes": [
+        32,
+        128,
+        256
+      ],
+      "prompt_len": 64,
+      "gen_len": 64,
+      "tensor_parallel_size": 2,
+      "kv_blocks": 65536,
+      "greedy": true
+    },
+    "framework_flags": {
+      "LITE_LLAMA_TBO": "per arm",
+      "use_cuda_graph": "per arm",
+      "LITE_LLAMA_OVERLAP": "1 (default, L1 pinned-copy)",
+      "LITE_LLAMA_COMM_OVERLAP": "0 (L3 off)",
+      "LITE_LLAMA_SBO": "0 (SBO off)"
+    },
+    "models": {
+      "Qwen2.5-1.5B-Instruct": {
+        "model_type": "qwen2",
+        "hidden_size": 1536,
+        "num_hidden_layers": 28,
+        "num_attention_heads": 12,
+        "intermediate_size": 8960
+      }
+    },
+    "results": {
+      "Qwen2.5-1.5B-Instruct_b32": {
+        "eager_off": {
+          "ttft_ms": 27.69,
+          "tpot_ms": 26.454,
+          "tps": 1208.7,
+          "tgs_per_gpu": 604.4
+        },
+        "eager_on": {
+          "ttft_ms": 26.87,
+          "tpot_ms": 25.673,
+          "tps": 1245.5,
+          "tgs_per_gpu": 622.8
+        },
+        "graph_off": {
+          "ttft_ms": 27.32,
+          "tpot_ms": 7.635,
+          "tps": 4027.2,
+          "tgs_per_gpu": 2013.6
+        },
+        "graph_on": {
+          "ttft_ms": 27.66,
+          "tpot_ms": 7.66,
+          "tps": 4011.9,
+          "tgs_per_gpu": 2006.0
+        }
+      },
+      "Qwen2.5-1.5B-Instruct_b128": {
+        "eager_off": {
+          "ttft_ms": 74.85,
+          "tpot_ms": 31.096,
+          "tps": 4027.7,
+          "tgs_per_gpu": 2013.8
+        },
+        "eager_on": {
+          "ttft_ms": 74.9,
+          "tpot_ms": 31.71,
+          "tps": 3952.4,
+          "tgs_per_gpu": 1976.2
+        },
+        "graph_off": {
+          "ttft_ms": 75.07,
+          "tpot_ms": 15.267,
+          "tps": 7898.9,
+          "tgs_per_gpu": 3949.5
+        },
+        "graph_on": {
+          "ttft_ms": 75.14,
+          "tpot_ms": 15.193,
+          "tps": 7933.8,
+          "tgs_per_gpu": 3966.9
+        }
+      },
+      "Qwen2.5-1.5B-Instruct_b256": {
+        "eager_off": {
+          "ttft_ms": 75.39,
+          "tpot_ms": 31.564,
+          "tps": 4011.7,
+          "tgs_per_gpu": 2005.8
+        },
+        "eager_on": {
+          "ttft_ms": 75.61,
+          "tpot_ms": 31.85,
+          "tps": 3976.2,
+          "tgs_per_gpu": 1988.1
+        },
+        "graph_off": {
+          "ttft_ms": 75.5,
+          "tpot_ms": 15.761,
+          "tps": 7886.9,
+          "tgs_per_gpu": 3943.5
+        },
+        "graph_on": {
+          "ttft_ms": 75.57,
+          "tpot_ms": 15.723,
+          "tps": 7904.9,
+          "tgs_per_gpu": 3952.5
+        }
+      }
+    }
+  }
+}

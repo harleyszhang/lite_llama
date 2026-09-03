@@ -174,14 +174,82 @@ def timestamped_log_path(log_dir: str | Path, prefix: str) -> Path:
     return Path(log_dir) / f"{prefix}_{stamp}.json"
 
 
+def environment() -> dict:
+    """The hardware/software facts every benchmark report must carry.
+
+    Collected rather than hand-written so the numbers cannot drift from the
+    machine that actually produced them: GPU model and count, SM count and
+    compute capability, interconnect topology (``PHB`` in the nvidia-smi topo
+    matrix means PCIe host bridge, i.e. no NVLink), driver and library
+    versions, host CPU/memory, and the inference mode.
+    """
+    import os
+    import platform
+    import subprocess
+
+    import transformers
+    import triton
+
+    gpu = torch.cuda.get_device_properties(0) if torch.cuda.is_available() else None
+    topo = ""
+    driver = ""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "topo", "-m"], capture_output=True, text=True, timeout=10
+        ).stdout
+        topo = "; ".join(
+            line.strip()
+            for line in out.splitlines()
+            if line.startswith("GPU0") or line.startswith("GPU1")
+        )
+    except Exception:
+        topo = "unavailable"
+    try:
+        driver = (
+            subprocess.run(
+                ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            .stdout.strip()
+            .splitlines()[0]
+        )
+    except Exception:
+        driver = "unavailable"
+    return {
+        "gpu_model": gpu.name if gpu else "no CUDA device",
+        "gpu_count": torch.cuda.device_count(),
+        "gpu_memory_gib": round(gpu.total_memory / 1024**3, 1) if gpu else None,
+        "sm_count": gpu.multi_processor_count if gpu else None,
+        "compute_capability": f"sm_{gpu.major}{gpu.minor}" if gpu else None,
+        "driver_version": driver,
+        "interconnect_topology": topo or "unknown",
+        "cuda_version": torch.version.cuda,
+        "torch_version": torch.__version__,
+        "triton_version": triton.__version__,
+        "transformers_version": transformers.__version__,
+        "python_version": platform.python_version(),
+        "cpu_cores": os.cpu_count(),
+        "inference_mode": "offline (all prompts submitted at once, no serving queue)",
+    }
+
+
 def write_json_log(path: str | Path, config: dict, results) -> None:
     """One JSON shape for every benchmark: {"config": ..., "results": ...}.
 
-    A ``timestamp`` is stamped into the config unless the caller supplied one.
+    A ``timestamp`` is stamped into the config unless the caller supplied one,
+    and the machine/library facts from :func:`environment` are stamped in too —
+    every benchmark report owes its reader the environment the numbers came
+    from, and collecting it here means no bench script can forget it.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    config = {**config, "timestamp": datetime.now().isoformat(timespec="seconds")}
+    config = {
+        **config,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "environment": config.get("environment") or environment(),
+    }
     path.write_text(json.dumps({"config": config, "results": results}, indent=2, default=str))
     print(f"-> {path}")
 

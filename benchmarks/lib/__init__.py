@@ -29,6 +29,7 @@ from .metrics import BenchResult, RequestRun, print_table, run_requests, steps_t
 from .utils import (
     count_gen_tokens,
     describe_footprint,
+    environment,
     footprint_stats,
     free_gpu,
     gpu_tag,
@@ -61,6 +62,7 @@ __all__ = [
     "count_gen_tokens",
     "describe_footprint",
     "dtype_tag",
+    "environment",
     "expand_prompts",
     "footprint_stats",
     "free_gpu",

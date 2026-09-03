@@ -1,0 +1,99 @@
+
+=== EP2 eager SBO off ===
+[32m09-04 05:04:51 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep on)[0m
+[32m09-04 05:04:51 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep on)[0m
+[32m09-04 05:04:51 [I] loader.py:138 Building DeepseekV2Model skeleton on the meta device[0m
+[32m09-04 05:04:51 [I] loader.py:138 Building DeepseekV2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 05:04:51 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/DeepSeek-V2-Lite[0m
+[32m09-04 05:04:51 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/DeepSeek-V2-Lite[0m
+[32m09-04 05:04:56 [I] loader.py:157 Loaded DeepseekV2Model onto cuda:1 in 5.39s[0m
+[32m09-04 05:04:56 [I] kv_cache_manager.py:183 KV cache: 4096 blocks, watermark=409 blocks (10%), recovery band=204 blocks[0m
+[36m09-04 05:04:56 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([4096, 1, 576])[0m
+[32m09-04 05:04:56 [I] loader.py:157 Loaded DeepseekV2Model onto cuda in 5.53s[0m
+[32m09-04 05:04:56 [I] kv_cache_manager.py:183 KV cache: 4096 blocks, watermark=409 blocks (10%), recovery band=204 blocks[0m
+[36m09-04 05:04:56 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([4096, 1, 576])[0m
+[32m09-04 05:04:57 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+[36m09-04 05:04:58 [D] comm_overlap.py:195 comm stream pool created for cuda:0[0m
+[36m09-04 05:04:58 [D] comm_overlap.py:195 comm stream pool created for cuda:1[0m
+  ' Paris.\nThe currency of France is the Euro.\nThe languages sp'
+  ' two.”\n\n“Two plus two equals four.”\n\n“Four plus four equals '
+  ' 100 degrees Celsius.\n\n## What is the boiling point of water'
+  ' Jupiter. It is the fifth planet from the sun. Jupiter is a '
+  wall 1.96s
+
+=== EP2 eager SBO on ===
+[32m09-04 05:05:06 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep on)[0m
+[32m09-04 05:05:06 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep on)[0m
+[32m09-04 05:05:06 [I] loader.py:138 Building DeepseekV2Model skeleton on the meta device[0m
+[32m09-04 05:05:06 [I] loader.py:138 Building DeepseekV2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 05:05:06 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/DeepSeek-V2-Lite[0m
+[32m09-04 05:05:06 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/DeepSeek-V2-Lite[0m
+[32m09-04 05:05:11 [I] loader.py:157 Loaded DeepseekV2Model onto cuda in 5.30s[0m
+[32m09-04 05:05:11 [I] kv_cache_manager.py:183 KV cache: 4096 blocks, watermark=409 blocks (10%), recovery band=204 blocks[0m
+[36m09-04 05:05:11 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([4096, 1, 576])[0m
+[32m09-04 05:05:12 [I] loader.py:157 Loaded DeepseekV2Model onto cuda:1 in 5.65s[0m
+[32m09-04 05:05:12 [I] kv_cache_manager.py:183 KV cache: 4096 blocks, watermark=409 blocks (10%), recovery band=204 blocks[0m
+[36m09-04 05:05:12 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([4096, 1, 576])[0m
+[32m09-04 05:05:12 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+[36m09-04 05:05:13 [D] comm_overlap.py:195 comm stream pool created for cuda:1[0m
+  ' Paris.\nThe currency of France is the Euro.\nThe languages sp'
+  ' two.”\n\n“Two plus two equals four.”\n\n“Four plus four equals '
+  ' 100 degrees Celsius.\n\n## What is the boiling point of water'
+  ' Jupiter. It is a gas giant, which means it is made up of mo'
+  wall 2.01s
+
+=== EP2 graph SBO off ===
+[32m09-04 05:05:22 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep on)[0m
+[32m09-04 05:05:22 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep on)[0m
+[32m09-04 05:05:22 [I] loader.py:138 Building DeepseekV2Model skeleton on the meta device[0m
+[32m09-04 05:05:22 [I] loader.py:138 Building DeepseekV2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 05:05:22 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/DeepSeek-V2-Lite[0m
+[32m09-04 05:05:22 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/DeepSeek-V2-Lite[0m
+[32m09-04 05:05:27 [I] loader.py:157 Loaded DeepseekV2Model onto cuda in 5.29s[0m
+[32m09-04 05:05:27 [I] kv_cache_manager.py:183 KV cache: 4096 blocks, watermark=409 blocks (10%), recovery band=204 blocks[0m
+[36m09-04 05:05:27 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([4096, 1, 576])[0m
+[32m09-04 05:05:27 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512)[0m
+[32m09-04 05:05:27 [I] loader.py:157 Loaded DeepseekV2Model onto cuda:1 in 5.60s[0m
+[32m09-04 05:05:27 [I] kv_cache_manager.py:183 KV cache: 4096 blocks, watermark=409 blocks (10%), recovery band=204 blocks[0m
+[36m09-04 05:05:27 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([4096, 1, 576])[0m
+[32m09-04 05:05:27 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512)[0m
+[36m09-04 05:05:28 [D] comm_overlap.py:195 comm stream pool created for cuda:1[0m
+[32m09-04 05:05:29 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  ' Paris.\nThe currency of France is the Euro.\nThe languages sp'
+  ' two.”\n\n“Two plus two equals four.”\n\n“Four plus four equals '
+  ' 100 degrees Celsius.\n\n## What is the boiling point of water'
+  ' Jupiter. It is the fifth planet from the sun. Jupiter is a '
+  wall 0.62s
+
+=== EP2 graph SBO on ===
+[32m09-04 05:05:36 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep on)[0m
+[32m09-04 05:05:36 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep on)[0m
+[32m09-04 05:05:36 [I] loader.py:138 Building DeepseekV2Model skeleton on the meta device[0m
+[32m09-04 05:05:36 [I] loader.py:138 Building DeepseekV2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 05:05:36 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/DeepSeek-V2-Lite[0m
+[32m09-04 05:05:36 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/DeepSeek-V2-Lite[0m
+[32m09-04 05:05:41 [I] loader.py:157 Loaded DeepseekV2Model onto cuda:1 in 5.35s[0m
+[32m09-04 05:05:41 [I] kv_cache_manager.py:183 KV cache: 4096 blocks, watermark=409 blocks (10%), recovery band=204 blocks[0m
+[36m09-04 05:05:41 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([4096, 1, 576])[0m
+[32m09-04 05:05:41 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512)[0m
+[32m09-04 05:05:41 [I] loader.py:157 Loaded DeepseekV2Model onto cuda in 5.55s[0m
+[32m09-04 05:05:41 [I] kv_cache_manager.py:183 KV cache: 4096 blocks, watermark=409 blocks (10%), recovery band=204 blocks[0m
+[36m09-04 05:05:41 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([4096, 1, 576])[0m
+[32m09-04 05:05:41 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512)[0m
+[36m09-04 05:05:42 [D] comm_overlap.py:195 comm stream pool created for cuda:1[0m
+[32m09-04 05:05:43 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  ' Paris.\nThe currency of France is the Euro.\nThe languages sp'
+  ' two.”\n\n“Two plus two equals four.”\n\n“Four plus four equals '
+  ' 100 degrees Celsius.\n\n## What is the boiling point of water'
+  ' Jupiter. It is a gas giant, which means it is made up of mo'
+  wall 0.62s
+
+graph vs eager parity: 3/4 completions identical
+graph speedup over eager (SBO off): 3.19x
+SBO on vs off under eager: wall -2.4% (positive = faster), greedy 3/4 identical
+SBO on vs off under graph: wall -0.2% (positive = faster), greedy 2/4 identical
