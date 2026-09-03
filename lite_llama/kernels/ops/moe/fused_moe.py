@@ -32,9 +32,10 @@ import triton
 import triton.language as tl
 
 from ..activation.activations import silu
-from ..quantization.fp8 import FP8_E4M3_MAX, fp8_quantize_per_token, has_native_fp8
+from ..quantization.fp8 import FP8_E4M3_MAX, fp8_quantize_per_token
 from ..quantization.w8a8 import int8_quantize_per_token
 from ..quantization.w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
+from ..tile_policy import TileTier, has_native_fp8, resolve_tiles, tile_tier
 from ..utils import torch_to_triton_dtype
 
 #: ``QUANT_MODE`` values shared by the kernel and its launcher. Modes 1-3 are
@@ -690,8 +691,24 @@ _TILE_TABLE: dict[int, tuple[tuple[int, int, int], ...]] = {
     _QUANT_INT8_A8: ((16, 64, 4), (32, 128, 4), (64, 128, 4), (128, 256, 8)),
 }
 
+#: Pre-Hopper fallback, shared by every format. NOT measured — the sm90 table
+#: above is sized against H100's 228 KB shared memory (its unquantised 128x128
+#: tier needs 288 KB over three stages and only fits because Hopper carries
+#: that budget); sm86-class parts have 100 KB, so the wide tiers would spill or
+#: fail to compile outright. These tiles keep two stages of (64, 128) bf16
+#: operands inside ~64 KB. The intended path for any hardware the sweep never
+#: ran on is the autotune store, whose per-GPU entry takes precedence.
+_TILE_TABLE_PRE_HOPPER: tuple[tuple[int, int, int], ...] = (
+    (16, 64, 4),
+    (32, 64, 4),
+    (64, 64, 4),
+    (64, 64, 4),
+)
 
-def _launch_config(num_tokens: int, quant_mode: int, rows_per_expert: float) -> dict:
+
+def _launch_config(
+    num_tokens: int, quant_mode: int, rows_per_expert: float, device_index: int | None
+) -> dict:
     """Heuristic tile config, used whenever the autotune store has no entry.
 
     ``BLOCK_M`` must be identical for both GEMMs because they share one alignment.
@@ -753,6 +770,17 @@ def _launch_config(num_tokens: int, quant_mode: int, rows_per_expert: float) -> 
         tier = 2
     else:
         tier = 3
+    if tile_tier(device_index) is TileTier.PRE_HOPPER:
+        # Conservative pre-Hopper tiles (unmeasured; autotune overrides).
+        block_m, block_n, num_warps = _TILE_TABLE_PRE_HOPPER[tier]
+        return {
+            "BLOCK_M": block_m,
+            "BLOCK_N": block_n,
+            "BLOCK_K": _QUANT_BLOCK_K,
+            "GROUP_M": 8,
+            "num_warps": num_warps,
+            "num_stages": 2,
+        }
     block_m, block_n, num_warps = _TILE_TABLE[quant_mode][tier]
     return {
         "BLOCK_M": block_m,
@@ -1062,8 +1090,6 @@ def _fused_moe(
     flat_weights = topk_weights.reshape(-1).to(dtype).contiguous()
 
     # Autotune lookup: use persisted best config if available, else heuristic.
-    from ...dispatcher.autotune import get_best_config
-
     # The unquantised key follows the activation dtype — bf16 and fp16 compile
     # the same inner loop but are tuned as separate entries, and a bf16
     # checkpoint must not silently read fp16's tile table. The quantised keys
@@ -1080,9 +1106,17 @@ def _fused_moe(
         _QUANT_FP8_A8: "fp8_a8",
         _QUANT_INT8_A8: "int8_a8",
     }.get(quant_mode, act_dtype)
-    config = get_best_config("fused_moe", m=num_tokens, n=two_inter, k=hidden, dtype=dtype_label)
-    if config is None:
-        config = _launch_config(num_tokens, quant_mode, num_tokens * top_k / num_experts)
+    config = resolve_tiles(
+        "fused_moe",
+        m=num_tokens,
+        n=two_inter,
+        k=hidden,
+        dtype_label=dtype_label,
+        heuristic=lambda dev: _launch_config(
+            num_tokens, quant_mode, num_tokens * top_k / num_experts, dev
+        ),
+        device_index=device.index,
+    )
     sorted_ids, expert_ids, num_post = moe_align_block_size(
         topk_ids, config["BLOCK_M"], num_experts
     )
