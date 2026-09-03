@@ -179,21 +179,31 @@ def test_cpu_inputs_take_the_torch_path():
     assert torch.equal(out[1], ref[1])
 
 
-def test_one_expert_groups_with_bias_fall_back_to_the_reference():
+def test_one_expert_groups_with_bias_degenerate_to_the_reference():
     """A bias with one-expert groups has no top-2 group score anywhere — the
-    reference raises its own error; the wrapper must hand it the call."""
+    kernel declines and the reference degenerates the group score to the
+    group's single biased expert (the top-2 sum's limit). The wrapper must
+    hand it the call so both paths agree; the upstream references
+    (transformers, vLLM) crash on this geometry instead."""
+    torch.manual_seed(0)
     logits = torch.randn(4, 8, device="cuda", dtype=torch.float32)
     bias = torch.randn(8, device="cuda")
-    with pytest.raises(RuntimeError):
-        grouped_topk(
-            logits,
-            top_k=2,
-            renormalize=False,
-            num_expert_group=8,
-            topk_group=1,
-            scoring_func="sigmoid",
-            e_score_correction_bias=bias,
-        )
+    kwargs = {
+        "top_k": 1,
+        "renormalize": False,
+        "num_expert_group": 8,
+        "topk_group": 1,
+        "scoring_func": "sigmoid",
+        "e_score_correction_bias": bias,
+    }
+    out = grouped_topk(logits, **kwargs)
+    ref = grouped_topk_torch(logits, **kwargs)
+    assert torch.equal(out[0], ref[0])
+    assert torch.equal(out[1], ref[1])
+    # Semantics: the winning group is the one whose single biased expert
+    # scores highest, and that expert is exactly what gets selected.
+    scores = torch.sigmoid(logits) + bias
+    assert torch.equal(out[1].squeeze(-1), scores.argmax(dim=-1))
 
 
 def test_validation_matches_the_reference_contract():

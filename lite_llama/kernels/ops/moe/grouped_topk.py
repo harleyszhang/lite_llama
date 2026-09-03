@@ -101,7 +101,18 @@ def grouped_topk_torch(
     original_scores = scores
     if e_score_correction_bias is not None:
         scores = scores + e_score_correction_bias.unsqueeze(0)
-        group_scores = scores.view(num_tokens, num_expert_group, -1).topk(2, dim=-1)[0].sum(dim=-1)
+        per_group = n_experts // num_expert_group
+        if per_group >= 2:
+            group_scores = (
+                scores.view(num_tokens, num_expert_group, -1).topk(2, dim=-1)[0].sum(dim=-1)
+            )
+        else:
+            # One-expert groups (trimmed checkpoints that keep the full
+            # ``n_group``) have no top-2 to sum; the group score degenerates
+            # to its single biased expert. The math is the limit of the top-2
+            # sum, and the reference implementations (transformers, vLLM)
+            # simply crash on this geometry instead.
+            group_scores = scores.view(num_tokens, num_expert_group, -1).max(dim=-1).values
     else:
         group_scores = scores.view(num_tokens, num_expert_group, -1).max(dim=-1).values
     group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[1]
