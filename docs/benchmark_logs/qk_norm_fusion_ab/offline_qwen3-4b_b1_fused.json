@@ -1,0 +1,39 @@
+{
+  "config": {
+    "max_gen_len": 64,
+    "batch": 1,
+    "json": "docs/benchmark_logs/qk_norm_fusion_ab/offline_qwen3-4b_b1_fused.json",
+    "greedy": true,
+    "mode": "both",
+    "backend": "lite",
+    "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507",
+    "attn": "sdpa",
+    "verify": true,
+    "max_gpu_num_blocks": 40960,
+    "router_variant": null,
+    "image": "examples/assets/vision_bench.jpg",
+    "timestamp": "2026-09-03T21:22:08"
+  },
+  "results": {
+    "eager": {
+      "ttft_ms": 20.051347091794014,
+      "tpot_ms": 19.266615991318034,
+      "total_s": 1.2341833394020796,
+      "steps": 64,
+      "batch": 1,
+      "gen_tokens": 64,
+      "tpot_p50_ms": 19.255954772233963,
+      "tps": 51.856152936731306
+    },
+    "graph": {
+      "ttft_ms": 19.915327429771423,
+      "tpot_ms": 4.4211919700342515,
+      "total_s": 0.2987616527825594,
+      "steps": 64,
+      "batch": 1,
+      "gen_tokens": 64,
+      "tpot_p50_ms": 4.424380138516426,
+      "tps": 214.2175858378304
+    }
+  }
+}

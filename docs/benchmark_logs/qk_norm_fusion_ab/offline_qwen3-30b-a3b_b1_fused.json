@@ -1,0 +1,39 @@
+{
+  "config": {
+    "max_gen_len": 64,
+    "batch": 1,
+    "json": "docs/benchmark_logs/qk_norm_fusion_ab/offline_qwen3-30b-a3b_b1_fused.json",
+    "greedy": true,
+    "mode": "both",
+    "backend": "lite",
+    "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen3-30B-A3B-Instruct-2507",
+    "attn": "sdpa",
+    "verify": true,
+    "max_gpu_num_blocks": 40960,
+    "router_variant": null,
+    "image": "examples/assets/vision_bench.jpg",
+    "timestamp": "2026-09-03T21:24:37"
+  },
+  "results": {
+    "eager": {
+      "ttft_ms": 40.87352193892002,
+      "tpot_ms": 40.15549162905368,
+      "total_s": 2.571059785783291,
+      "steps": 64,
+      "batch": 1,
+      "gen_tokens": 64,
+      "tpot_p50_ms": 40.01195915043354,
+      "tps": 24.892458881698843
+    },
+    "graph": {
+      "ttft_ms": 41.158631443977356,
+      "tpot_ms": 5.363368414460667,
+      "total_s": 0.37937971763312817,
+      "steps": 64,
+      "batch": 1,
+      "gen_tokens": 64,
+      "tpot_p50_ms": 5.357369780540466,
+      "tps": 168.6964195115195
+    }
+  }
+}

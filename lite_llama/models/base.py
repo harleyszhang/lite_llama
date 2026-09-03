@@ -16,7 +16,7 @@ from typing import Any, ClassVar
 import torch
 import torch.nn as nn
 
-from ..kernels import rope_emb_forward, skip_rmsnorm
+from ..kernels import qk_rmsnorm, rope_emb_forward, skip_rmsnorm
 from ..modules import (
     FusedMLP,
     LinearBase,
@@ -117,9 +117,9 @@ class Attention(nn.Module):
         xv = xv.view(num_tokens, self.num_kv_heads, self.head_dim)
 
         if self.use_qk_norm:
-            # RMSNorm over head_dim, i.e. independently per head.
-            xq, _ = skip_rmsnorm(xq, None, self.q_norm_weight, self.rms_norm_eps)
-            xk, _ = skip_rmsnorm(xk, None, self.k_norm_weight, self.rms_norm_eps)
+            # RMSNorm over head_dim, i.e. independently per head -- both
+            # tensors in one launch instead of two.
+            xq, xk = qk_rmsnorm(xq, xk, self.q_norm_weight, self.k_norm_weight, self.rms_norm_eps)
 
         cos, sin = position_embeddings
         xq, xk = rope_emb_forward(xq, xk, cos, sin)

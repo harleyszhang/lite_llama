@@ -1,0 +1,39 @@
+{
+  "config": {
+    "max_gen_len": 64,
+    "batch": 1,
+    "json": "docs/benchmark_logs/qk_norm_fusion_ab/offline_qwen2.5-0.5b-control_b1_baseline.json",
+    "greedy": true,
+    "mode": "both",
+    "backend": "lite",
+    "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct",
+    "attn": "sdpa",
+    "verify": true,
+    "max_gpu_num_blocks": 40960,
+    "router_variant": null,
+    "image": "examples/assets/vision_bench.jpg",
+    "timestamp": "2026-09-03T21:51:13"
+  },
+  "results": {
+    "eager": {
+      "ttft_ms": 11.982578784227371,
+      "tpot_ms": 11.84634743110528,
+      "total_s": 0.758648743852973,
+      "steps": 64,
+      "batch": 1,
+      "gen_tokens": 64,
+      "tpot_p50_ms": 11.839304119348526,
+      "tps": 84.3605166667267
+    },
+    "graph": {
+      "ttft_ms": 11.860711500048637,
+      "tpot_ms": 1.1801325849124364,
+      "total_s": 0.08650565333664417,
+      "steps": 64,
+      "batch": 1,
+      "gen_tokens": 64,
+      "tpot_p50_ms": 1.1785458773374557,
+      "tps": 739.8360399746189
+    }
+  }
+}
