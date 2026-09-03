@@ -1,0 +1,60 @@
+{
+  "config": {
+    "model_dir": "my_weight/Qwen3-0.6B",
+    "batch_per_replica": 16,
+    "max_gen_len": 128,
+    "iters": 2,
+    "max_dp": 2,
+    "timestamp": "2026-09-03T14:30:56"
+  },
+  "results": {
+    "dp1_eager": {
+      "build_s": 7.12,
+      "tpot_ms": 25.901,
+      "tps": 617.7,
+      "gpu_used_mb": [
+        20522
+      ],
+      "gpu_delta_mb": [
+        20521
+      ]
+    },
+    "dp1_graph": {
+      "build_s": 9.35,
+      "tpot_ms": 5.158,
+      "tps": 3101.9,
+      "gpu_used_mb": [
+        19976
+      ],
+      "gpu_delta_mb": [
+        19741
+      ]
+    },
+    "dp2_eager": {
+      "build_s": 7.26,
+      "tpot_ms": 26.356,
+      "tps": 1199.9,
+      "gpu_used_mb": [
+        20300,
+        20291
+      ],
+      "gpu_delta_mb": [
+        20065,
+        20287
+      ]
+    },
+    "dp2_graph": {
+      "build_s": 9.72,
+      "tpot_ms": 5.163,
+      "tps": 6161.5,
+      "gpu_used_mb": [
+        19978,
+        19969
+      ],
+      "gpu_delta_mb": [
+        19743,
+        19965
+      ]
+    }
+  }
+}

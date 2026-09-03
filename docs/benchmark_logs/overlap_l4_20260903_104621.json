@@ -1,0 +1,100 @@
+{
+  "config": {
+    "shapes": [
+      [
+        64,
+        4480,
+        1536
+      ],
+      [
+        256,
+        4480,
+        1536
+      ],
+      [
+        1024,
+        2048,
+        1024
+      ],
+      [
+        2048,
+        4480,
+        1536
+      ],
+      [
+        4096,
+        4480,
+        1536
+      ]
+    ],
+    "sm": 72,
+    "timestamp": "2026-09-03T10:46:22"
+  },
+  "results": {
+    "64x4480x1536": {
+      "serial_ms": 0.181,
+      "pipelined_ms": 0.209,
+      "torch_ms": 0.096,
+      "speedup_pct": -15.54,
+      "bitwise_agree": true,
+      "overlap": {
+        "producer_regions": 3,
+        "consumer_regions": 3,
+        "overlapping_pairs": 3,
+        "overlap_ms": 0.043
+      }
+    },
+    "256x4480x1536": {
+      "serial_ms": 0.412,
+      "pipelined_ms": 0.413,
+      "torch_ms": 0.156,
+      "speedup_pct": -0.35,
+      "bitwise_agree": true,
+      "overlap": {
+        "producer_regions": 3,
+        "consumer_regions": 3,
+        "overlapping_pairs": 3,
+        "overlap_ms": 0.54
+      }
+    },
+    "1024x2048x1024": {
+      "serial_ms": 0.495,
+      "pipelined_ms": 0.455,
+      "torch_ms": 0.152,
+      "speedup_pct": 7.97,
+      "bitwise_agree": true,
+      "overlap": {
+        "producer_regions": 3,
+        "consumer_regions": 3,
+        "overlapping_pairs": 3,
+        "overlap_ms": 0.711
+      }
+    },
+    "2048x4480x1536": {
+      "serial_ms": 2.832,
+      "pipelined_ms": 2.491,
+      "torch_ms": 0.847,
+      "speedup_pct": 12.05,
+      "bitwise_agree": true,
+      "overlap": {
+        "producer_regions": 3,
+        "consumer_regions": 3,
+        "overlapping_pairs": 3,
+        "overlap_ms": 6.952
+      }
+    },
+    "4096x4480x1536": {
+      "serial_ms": 5.849,
+      "pipelined_ms": 5.049,
+      "torch_ms": 1.688,
+      "speedup_pct": 13.67,
+      "bitwise_agree": true,
+      "overlap": {
+        "producer_regions": 3,
+        "consumer_regions": 3,
+        "overlapping_pairs": 3,
+        "overlap_ms": 15.774
+      }
+    }
+  }
+}

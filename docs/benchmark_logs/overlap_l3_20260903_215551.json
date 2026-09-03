@@ -1,0 +1,27 @@
+{
+  "config": {
+    "model_dir": "my_weight/Qwen2.5-1.5B-Instruct",
+    "batch": 16,
+    "max_gen_len": 16,
+    "max_num_batched_tokens": 512,
+    "repeat": 2,
+    "timeline": true,
+    "json": "docs/benchmark_logs/overlap_l3_20260903_215551.json",
+    "timestamp": "2026-09-03T21:56:53"
+  },
+  "results": {
+    "ttft_ms": {
+      "l3_off": 33.25458988547325,
+      "l3_on": 33.0684557557106
+    },
+    "tpot_ms": {
+      "l3_off": 45.97276562091076,
+      "l3_on": 48.183027993549004
+    },
+    "total_s": {
+      "l3_off": 1.550397653132677,
+      "l3_on": 1.6231452226638794
+    },
+    "timeline": "comm regions 224, l3 gemm regions 224; 111 overlapping pairs totalling 9.78 ms of overlap"
+  }
+}
