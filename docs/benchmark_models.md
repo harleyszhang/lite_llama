@@ -6,7 +6,7 @@
 
 #### A10 (24 GB, SM86)
 
-以下为量化 Triton 内核在 `A10` 上的 `triton.testing.do_bench` 实测结果（2026-08-22 口径、合成 shape）。基准为 cuBLAS fp16 `F.linear`；加速来自减半（或减至 1/4）的 HBM 权重读取量。此后内核经过多轮改动（v0.6 重写、`FP8_CVT` 硬件 `cvt` 分叉、0903 按 H100 扫描重定 tile fallback），**A10 未复测**，绝对值仅供参考，下面的 roofline 判据仍然成立。
+以下为量化 Triton 内核在 `A10` 上的 `triton.testing.do_bench` 实测结果（2026-08-22 口径、合成 shape）。环境：NVIDIA A10 24GB（sm86，~600 GB/s HBM），当时的软件栈为 torch 2.11.0+cu129 / triton 3.6.0 / python 3.12；负载：合成方阵 shape（下表 M×N×K 列），`triton.testing.do_bench` 口径。**该批数字早于 JSON 环境日志功能，无独立日志留存**（数字仅见于本节表格）。此后内核经过多轮改动（v0.6 重写、`FP8_CVT` 硬件 `cvt` 分叉、0903 按 H100 扫描重定 tile fallback），**A10 未复测**，绝对值仅供参考，下面的 roofline 判据仍然成立。
 
 ##### W8A16 (fp8-e4m3, 128×128 block scales)
 
@@ -124,7 +124,7 @@ python benchmarks/kernels/bench_quant_gemm.py --tune --dry-run                  
 
 ### lite_llama vs HF transformers（examples/benchmark.py）
 
-下表是用重构后的 `examples/benchmark.py` **实测**得到的结果（贪心解码、两端同一 tokenizer 统计输出 token、两端自然 EOS 停止、`torch.cuda.synchronize` 计时、取中位数）。指标口径对齐 vLLM/SGLang serving benchmark：
+**测试环境**：单卡 NVIDIA A10 24GB（sm86，~600 GB/s），torch 2.11.0+cu129 / transformers 5.8.0 / Python 3.12（2026-08-31 重测）；TP2 行为 2×A10。**推理负载**：`examples/benchmark.py` 的 PROMPTS 扩到 batch 8（gen_len 128）或 batch 16（gen_len 256），贪心解码、两端同一 tokenizer 统计输出 token、两端自然 EOS 停止、`torch.cuda.synchronize` 计时、取中位数；lite_llama 默认启用 CUDA graph，HF 侧 sdpa attention。**日志**：每行对应一份 `docs/benchmark_logs/bench_<模型>_b<batch>_g<gen>_<日期>_<时间>.json`（如 `bench_Qwen2.5-1.5B-Instruct_b8_g128_20260831_200147.json`，含完整 config 与环境 meta）。指标口径对齐 vLLM/SGLang serving benchmark：
 
 - **TTFT**（首 token 时延，s）= 预填充延迟；
 - **TPOT**（每输出 token 时延，ms）= `(latency - ttft) / (output_len - 1)`；
@@ -281,7 +281,7 @@ lite_llama 流式输出实录（Qwen2.5-3B，仅演示效果，非并排对比�
 
 ### eager vs CUDA graph（benchmarks/bench_e2e.py）
 
-batch 8、greedy、`max_gen_len=256`、A10 22 GiB、torch 2.11.0+cu129 / triton 3.6.0 / Python 3.12，`--mode both` 同时测 eager 与 CUDA graph。一次覆盖全部四种受支持架构、三条优化路径与两个多模态模型（多模态为 8 请求串行口径：TTFT 取每请求首 token 均值、TPS 为串行循环聚合吞吐）：
+**测试环境**：单卡 NVIDIA A10 22 GiB（sm86），torch 2.11.0+cu129 / triton 3.6.0 / Python 3.12（2026-08-31）。**推理负载**：batch 8、greedy、`max_gen_len=256`，`--mode both` 同时测 eager 与 CUDA graph；多模态为 8 请求串行口径（TTFT 取每请求首 token 均值、TPS 为串行循环聚合吞吐）。**日志**：`docs/benchmark_logs/bench_e2e_<模型>_b<batch>_g<gen>_<版本>.json`（如 `bench_e2e_Qwen2.5-1.5B_b8_g128_v09_release.json`，含环境 meta）。一次覆盖全部四种受支持架构、三条优化路径与两个多模态模型：
 
 | 模型 | 架构 / 优化 | TTFT (ms) | TPOT eager (ms) | TPOT graph (ms) | graph 加速 | TPS (tok/s) |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -669,7 +669,7 @@ python scripts/golden_tokens.py --check /tmp/golden.json --cuda-graph
 ### 历史吞吐对比总表（旧脚本，仅供参考）
 
 > ⚠️ 数据来源：本表数字来自本文档下方各模型章节的**历史记录**（由仓库作者早前用
-> 旧版 `benchmark.py` 在 3090 上跑出），**并非本次实测**。旧脚本存在方法学问题：
+> 旧版 `benchmark.py` 在 3090 上跑出），**并非本次实测**。环境：趋动云 B1.small（3090 的 1/4 卡）/ B1.big（3090 整卡），当时的软件栈未记录；负载：各章节列出的 prompt 集（变长）× 各档 max_gen_len，单次运行。**该批数字无 JSON 日志留存**（结果仅以文本输出形式记在各章节）。旧脚本存在方法学问题：
 > transformers 被强制忽略 EOS（`eos_token_id=None`）跑满长度，而 lite_llama 会提前
 > 停止，两端工作量并不一致；且仅有单次运行、只统计吞吐、无 TTFT/TPOT。因此这些倍数
 > 仅作趋势参考，请以上方实测表为准。
