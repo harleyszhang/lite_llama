@@ -15,6 +15,8 @@ bsn = "bsn"
 # weights); the model-dump docs must keep it verbatim.
 layrnorm = "layrnorm"
 Ot = "Ot"
+# Acknowledged upstream project names, spelled as their repositories do.
+kernl = "kernl"
 
 [default.extend-identifiers]
 # Existing public API spellings kept for compatibility.

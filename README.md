@@ -14,6 +14,7 @@
          ✅ W8A16 (fp8/int8)    ✅ W4A16 (AWQ/GPTQ)      ✅ SmoothQuant W8A8        ✅ FP8 KV Cache (2×)
          ✅ NVFP4 weight-only   ✅ FP8 W8A8 Fused MoE    ✅ TP + CUDA Graph
          ✅ Kernel Autotune     ✅ Fused MoE             ✅ Tensor Parallel         ✅ Data Parallel
+         ✅ Comm-Compute Overlap ✅ Tile-Signaling       ✅ DP × CUDA Graph         ✅ DeepSeek V4 (mHC)
 
 <b>Framework Design</b>
          ✅ Continuous batching ✅ OpenAI API server     ✅ Preemption              ✅ Ops Backend Registry
@@ -46,6 +47,13 @@
 - **Streaming reasoning & tool-call parsing** (v0.11): `reasoning_parser` / `tool_parser` are **request fields**, not server flags — one deployment serves R1-style and direct models side by side. Streamed frames concatenate to the one-shot message by construction (tested as an axiom); DeepSeek/Qwen tool marker families; ~1.2 µs/token.
 - **Decode host-overhead cuts** (v0.11.1): the MoE router's fp32 gate widen and the attention K/V half-view slicing each happen once per layer per step — now once per engine. TPOT on Qwen3-30B-A3B (H100, eager): **-3.5%** at batch 1, -2.6% at batch 8; graphs gain +2.0% throughput with byte-identical greedy output. The router then moved to vllm's tier-4 path — `torch.mm(x, gate_weight.T, out_dtype=fp32)`, one bf16 tensor-core GEMM with an fp32 epilogue — worth 2.2–5.28× at the operator level and another -2.6% graph TPOT e2e. Numbers, method and figures in [docs/release-v0.11.1.md](docs/release-v0.11.1.md).
 - **TP shutdown deadlock fixed** (v0.11.1): a TP=2 engine with captured CUDA graphs used to hang forever at shutdown — `ncclCommAbort` on a graph-captured communicator parks in a futex (a PyTorch/NCCL interaction). Teardown now rendezvouses every rank at a gloo barrier and destroys with a deadline, abandoning a wedged group to die with the process. The graph × TP × quant cross-validation suite (bf16/fp8/nvfp4, logit parity, byte-identical greedy) went from a 900 s timeout to 11/11 green.
+
+## Setup and Installation
+
+> If you don't have a physical server, you can try using [VirtAI Cloud remote server](https://growthdata.virtaicloud.com/t/hK).
+- **Compute–communication overlap** (v0.11.5): four primitives that hide transfers and collectives behind compute, each behind its own switch — L1 pinned-copy uploads (on by default), L2 two-batch ping-pong, L3 chunked all-reduce, L4 tile-signaling kernels. Every one is measured on/off on the same workload, and the regressions ship in the same table as the wins — see [docs/release-v0.11.5.md](./docs/release-v0.11.5.md).
+- **DP × CUDA graph** (v0.11.5): every data-parallel replica captures and replays its own decode graph (tp=1 per replica, so no collective lands inside a graph) — TPOT 25.9 → 5.2 ms and 618 → 6162 tok/s on 2× A10 with Qwen3-0.6B.
+- **DeepSeek-V4 (trimmed) end-to-end** (v0.11.5): mHC residual, Compressor + Lightning Indexer, SWA/CSA hybrid attention and Hash MoE run through the engine with per-module golden tests; prefill reaches **1.06×** `transformers` at seq 2048 while decode stays CPU-bound — both numbers published.
 
 ## Setup and Installation
 
@@ -302,6 +310,14 @@ On 2× A10 (batch=8, gen=128, eager decode): TTFT 64.8 ms, TPOT 63.01 ms; KV den
 
 Accuracy is a gate, not a hope: `pytest tests/golden/test_deepseek_v2_tp2.py` compares greedy tokens and per-step logprobs against `transformers` on 2× A10, with drift budgets calibrated from a parity probe — the BOS investigation showed a single-layer max-abs threshold can flag a 1-ULP arithmetic tie as a hotspot, so the budget is what the noise floor actually measured, not a round number.
 
+### DeepSeek-V4 (v0.11.5)
+
+V4 has no public weights, so the end-to-end path is verified against a randomly-initialised trimmed checkpoint built from its `config.json`: mHC residual (Sinkhorn mixing), the Compressor + Lightning Indexer pair, SWA/CSA hybrid attention over a 512-dim latent KV, O-LoRA grouped projections and Hash MoE. Eight module-level tests plus a TP2 consistency test carry the numerics; `python benchmarks/bench_deepseek_v4.py` measures the speed side against `transformers`.
+
+![DeepSeek-V4 trimmed vs transformers](./docs/images/deepseek_v4_speed.png)
+
+Prefill closes to parity and passes it at seq 2048 (1.06×); decode is CPU-bound rather than kernel-bound — the compressor and indexer walk the batch row by row in Python, so a batch-32 step issues ~8.7k kernel launches for ~22 ms of GPU work. That is on the chart, not hidden behind it, and fp4 weights are not supported yet.
+
 ### Cross-Stream Overlap (L1)
 
 A continuous-batching step can hold up to three passes — prefill, extend, decode — and each pass needs its input tensors on the GPU. With L1 overlap (on by default, `LITE_LLAMA_OVERLAP=0` to disable) the next pass's upload leaves on a dedicated copy stream while the current forward is still running, so the H2D transfer hides inside the compute instead of serialising behind it. The engine step harvests tokens once at the end rather than synchronising after every pass, which is what makes the overlap structurally possible at all.
@@ -325,6 +341,36 @@ The same release fixed a TP=2 + captured-graph shutdown deadlock: `ncclCommAbort
 ![TP teardown timeline](./docs/images/v0111_teardown_timeline.png)
 
 All three figures are generated from the shipped benchmark logs — `python scripts/gen_v0111_release_figs.py` re-renders them; numbers and method in [docs/release-v0.11.1.md](docs/release-v0.11.1.md).
+
+### Compute–Communication Overlap (L2 / L3 / L4)
+
+L1 covers the host↔device axis. Three more primitives hide communication and kernel boundaries, each behind its own switch, so a deployment adopts them one at a time and can attribute any change to a single flag.
+
+![overlap axes](./docs/images/overlap_axes.png)
+
+**L2 two-batch overlap** (`LITE_LLAMA_TBO=1`, off by default) splits a TP decode step into two halves that ping-pong at layer-segment granularity: while half A's `o_proj` all-reduce is on the comm stream, half B's attention GEMMs hold the SMs.
+
+![L2 two-batch overlap timeline](./docs/images/overlap_l2.gif)
+
+The GIF is the engine's own CUDA-event timeline — two compute lanes for the halves, one comm lane for the deferred reductions, and the red band is their intersection on a single device clock. The overlap does happen: the benchmark's timeline counts 792 intersecting pairs totalling 65.5 ms, and the GIF shows one such window. Eager TBO still loses on 2× A10 PCIe (+134% TPOT), because an eager TP decode step costs ~27 ms of Python launch time that a graphed reference of the same load cuts to 6.2 ms — the primitive saves GPU time inside a step whose cost is CPU time. It stays off until graph-captured TBO lands, and the regression is published next to the evidence (`python benchmarks/bench_overlap_l2.py --timeline`).
+
+**L3 chunked all-reduce** (`LITE_LLAMA_COMM_OVERLAP=1`, off by default) splits one row-parallel GEMM by rows: chunk k's reduction goes on the wire the moment its GEMM lands, while chunk k+1 computes.
+
+![L3 chunked all-reduce timeline](./docs/images/overlap_l3.gif)
+
+Row independence is what makes this legal — the sum a chunk reduces is the sum the unsplit GEMM would have produced for those rows. `LITE_LLAMA_L3_MIN_ROWS` (512) plus a 256-row-per-chunk floor keep small GEMMs on the blocking path, where one collective beats two. Prefill is where it earns: TTFT 33.25 → 33.07 ms on a TP2 chunked-prefill load, with 111 real overlaps recorded in the timeline.
+
+**L4 tile-signaling** (`lite_llama/kernels/tile_signal.py`) works inside one device: a persistent Triton producer publishes each output tile with a release-semantics flag write, and a consumer kernel acquires that flag with a bounded spin, so tile k's SiLU·mul epilogue runs while tile k+1's GEMM is still computing.
+
+![L4 tile-signaling timeline](./docs/images/overlap_l4.gif)
+
+Nothing here touches the interconnect, so these numbers say nothing about NVLink: +8.0~13.7% on large shapes (4096×4480×1536: 5.85 → 5.05 ms) and a loss on small ones, where the persistent kernel's resident occupancy is pure overhead. Producer and consumer grids together are capped at the SM count, and a host-side watchdog backs the bounded spin up.
+
+L2 and L3 aim at the same all-reduce, so only one can own it: `row_parallel_forward` dispatches passthrough → deferred (TBO) → chunked (L3) → blocking, and the demotion is tested rather than documented. The eight-cell matrix runs one workload with nothing but the switches moving — it is what caught a TBO numerical regression that every per-feature parity test had passed:
+
+![overlap combination matrix](./docs/images/overlap_combination_matrix.png)
+
+Full tables, the nsys kernel-level evidence, and the negative results sit in [docs/release-v0.11.5.md](./docs/release-v0.11.5.md); `python scripts/gen_overlap_gifs.py` regenerates the three timelines above straight from a live engine.
 
 ### Quantization
 
@@ -456,6 +502,12 @@ with DataParallelEngine(model="my_weight/Qwen2.5-1.5B-Instruct", data_parallel_s
 For serving, `lite-llama serve --data-parallel-size 2 --load-balancer total_tokens` swaps in `AsyncDataParallelEngine`, which streams each request's chunks from whichever replica the balancer picks and aborts a request whose connection drops.
 
 On 2× A10 (Qwen2.5-1.5B-Instruct): **weak scaling 2.00x** (100% linear, 1857 → 3716 tok/s) with byte-identical outputs, and **1.64x** on a fixed 256-prompt batch. Compose it with TP — `data_parallel_size=2, tensor_parallel_size=2` — on a 4-GPU box.
+
+Each replica can also replay a captured decode graph. A replica is tp=1, so no collective is captured inside its graph and the replicas never lockstep through a replay — DP scaling and graph replay compose instead of fighting:
+
+![DP x CUDA graph](./docs/images/dp_cuda_graph.png)
+
+Qwen3-0.6B, batch 16 per replica, 128 steps: TPOT 25.9 → 5.2 ms per replica (**-80%**) and 618 → 6162 tok/s aggregate (**5.1×**) at DP2, with the +2.4 s capture cost and the per-GPU memory delta recorded in the log. `python benchmarks/bench_dp_graph.py` reproduces it; `tests/engine/test_dp_cuda_graph.py` asserts both replicas hold captured graphs and agree greedily.
 
 ## Observability
 
