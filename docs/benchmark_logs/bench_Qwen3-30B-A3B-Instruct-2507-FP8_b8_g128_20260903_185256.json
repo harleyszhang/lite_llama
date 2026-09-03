@@ -1,0 +1,22 @@
+{
+  "config": {
+    "model": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8",
+    "batch_size": 8,
+    "gen_len": 128,
+    "iters": 2,
+    "tensor_parallel_size": 1,
+    "hf_overrides": null,
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "timestamp": "2026-09-03T18:52:56"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "batch_size": 8,
+    "prompt_tokens": 118,
+    "output_tokens": 1024,
+    "ttft_s": 0.04928036127239466,
+    "tpot_ms": 10.161022714331864,
+    "tgs": 764.332971553813,
+    "latency_s": 1.3397302459925413
+  }
+}

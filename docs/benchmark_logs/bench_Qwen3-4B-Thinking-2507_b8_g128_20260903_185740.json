@@ -1,0 +1,32 @@
+{
+  "config": {
+    "model": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507",
+    "batch_size": 8,
+    "gen_len": 128,
+    "iters": 2,
+    "tensor_parallel_size": 1,
+    "hf_overrides": null,
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "timestamp": "2026-09-03T18:57:40"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "batch_size": 8,
+    "prompt_tokens": 118,
+    "output_tokens": 1024,
+    "ttft_s": 0.022772498428821564,
+    "tpot_ms": 4.855106892724206,
+    "tgs": 1601.5738621178757,
+    "latency_s": 0.6393710738047957
+  },
+  "transformers": {
+    "engine": "transformers",
+    "batch_size": 8,
+    "prompt_tokens": 118,
+    "output_tokens": 1024,
+    "ttft_s": 0.031143576838076115,
+    "tpot_ms": 42.054794714089454,
+    "tgs": 190.6143821616194,
+    "latency_s": 5.372102505527437
+  }
+}

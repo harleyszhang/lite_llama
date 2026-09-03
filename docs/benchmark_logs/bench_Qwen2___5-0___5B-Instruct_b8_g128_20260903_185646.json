@@ -1,0 +1,32 @@
+{
+  "config": {
+    "model": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2___5-0___5B-Instruct",
+    "batch_size": 8,
+    "gen_len": 128,
+    "iters": 2,
+    "tensor_parallel_size": 1,
+    "hf_overrides": null,
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "timestamp": "2026-09-03T18:56:46"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "batch_size": 8,
+    "prompt_tokens": 118,
+    "output_tokens": 1024,
+    "ttft_s": 0.013740773312747478,
+    "tpot_ms": 1.2500033911874915,
+    "tgs": 5936.534595921992,
+    "latency_s": 0.17249120399355888
+  },
+  "transformers": {
+    "engine": "transformers",
+    "batch_size": 8,
+    "prompt_tokens": 118,
+    "output_tokens": 1024,
+    "ttft_s": 0.01929941400885582,
+    "tpot_ms": 31.230645246921092,
+    "tgs": 256.9254866874997,
+    "latency_s": 3.9855913603678346
+  }
+}
