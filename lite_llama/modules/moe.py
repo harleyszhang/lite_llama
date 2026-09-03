@@ -74,6 +74,14 @@ class SparseMoeBlock(nn.Module):
         self.gate_weight = nn.Parameter(
             torch.empty(self.num_experts, self.hidden_size, dtype=self.dtype)
         )
+        # fp32 widen of the router weight, cast once on first routing and held
+        # for the module's lifetime. Casting it per step instead would launch
+        # one copy kernel per MoE layer per decode step — pure overhead, since
+        # the weight is frozen after load. ``None`` until the first forward so
+        # a test (or a loader) can still fill ``gate_weight`` afterwards; CUDA
+        # graph capture warms up three eager passes first, so the cached
+        # tensor always exists before a capture records it.
+        self._gate_weight_fp32: torch.Tensor | None = None
         # ``noaux_tc`` (V2.5+/V3) biases the routing scores before selection.
         # fp32 to match the widened router logits: the bias is an absolute
         # additive term and bf16 would round away small-expert differences. The
@@ -134,23 +142,23 @@ class SparseMoeBlock(nn.Module):
                 )
             param.data.copy_(loaded)
             return param.data
-        
+
         expert_index, proj = shard_id
         view = param.data[expert_index]
-        
+
         if proj < 2:
             half = view.shape[0] // 2
             view = view.narrow(0, proj * half, half)
             dim = 0
         else:
             dim = 1
-            
+
         world_size = get_tensor_model_parallel_world_size()
-        
+
         if world_size > 1:
             size = loaded.shape[dim] // world_size
             loaded = loaded.narrow(dim, get_tensor_model_parallel_rank() * size, size)
-            
+
         if view.shape != loaded.shape:
             raise ValueError(
                 f"checkpoint tensor of shape {tuple(loaded.shape)} does not fit "
@@ -171,8 +179,12 @@ class SparseMoeBlock(nn.Module):
         # fp32 logits, as DeepSeek's router (explicit ``.float()`` casts) and
         # qwen3's reference semantics require: a bf16/fp16 GEMM can flip a topk
         # pick on near-ties, and a wrong expert costs far more than the cast.
-        # The gate weight stays stored in the model dtype; only the GEMM widens.
-        router_logits = F.linear(x.float(), self.gate_weight.float())
+        # The gate weight stays stored in the model dtype (parity tests read it
+        # as the model's dtype); only the GEMM widens, through the one-time
+        # cache above.
+        if self._gate_weight_fp32 is None:
+            self._gate_weight_fp32 = self.gate_weight.detach().float()
+        router_logits = F.linear(x.float(), self._gate_weight_fp32)
         if self.topk_method in ("noaux_tc", "group_limited_greedy"):
             weights, ids = grouped_topk(
                 router_logits,

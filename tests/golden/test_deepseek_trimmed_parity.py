@@ -51,8 +51,11 @@ from tests.conftest import checkpoint_problem
 
 pytestmark = [pytest.mark.gpu, pytest.mark.slow]
 
-_DSV2 = "/data/shared/llm_weights/DeepSeek-V2-Lite"
-_DSV3 = "/data/shared/llm_weights/DeepSeek-V3-4layers-MTP-BF16"
+# Relative to the repository root, like conftest's DEFAULT_MODEL_DIR: a
+# default that does not resolve here simply xfails the gate (no silent skip
+# either way), and an absolute path would trip the check-hardcoded-paths hook.
+_DSV2 = "my_weight/DeepSeek-V2-Lite"
+_DSV3 = "my_weight/DeepSeek-V3-4layers-MTP-BF16"
 
 _PROMPTS = [
     "The capital of France is",
@@ -90,12 +93,14 @@ def _checkpoint_gate(path: Path) -> Path:
 
 @pytest.fixture(scope="module")
 def v2lite_dir() -> Path:
-    return _checkpoint_gate(Path(os.environ.get("LITE_LLAMA_TEST_DSV2_DIR", _DSV2)))
+    path = Path(os.environ.get("LITE_LLAMA_TEST_DSV2_DIR", _DSV2))
+    return _checkpoint_gate(path if path.is_absolute() else Path(__file__).parents[2] / path)
 
 
 @pytest.fixture(scope="module")
 def v3_dir() -> Path:
-    return _checkpoint_gate(Path(os.environ.get("LITE_LLAMA_TEST_DSV3_DIR", _DSV3)))
+    path = Path(os.environ.get("LITE_LLAMA_TEST_DSV3_DIR", _DSV3))
+    return _checkpoint_gate(path if path.is_absolute() else Path(__file__).parents[2] / path)
 
 
 # --------------------------------------------------------------------------- #
