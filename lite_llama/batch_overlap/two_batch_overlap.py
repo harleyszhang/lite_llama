@@ -1,0 +1,362 @@
+"""L2 two-batch overlap: the decode ping-pong over a deferred all-reduce.
+
+One tensor-parallel decode step splits its batch into two halves that
+ping-pong at *layer-segment* granularity — while half A's o_proj
+all-reduce is on the wire, half B's attention GEMMs are on the SMs, and
+swapping the roles every segment keeps both engines busy:
+
+::
+    compute:  A.attn0  B.attn0  A.mlp0  B.mlp0  A.attn1  B.attn1  ...
+    comm:       [AR Ao0] [AR Bo0] [AR Ad0] [AR Bd0]  ...
+    # AR Ao0 (Attention的All-Reduce) and AR Ad0 (MLP的All-Reduce)。
+
+The split is sglang's: both halves carry the same padded row count
+(:class:`TboSplitter`), so the EP all-to-all is an equal split and a captured
+graph's shapes never drift with the batch's parity. The op stream is the
+layers' own bound methods, ordered by
+:class:`~lite_llama.batch_overlap.operations_strategy.OperationsStrategy`;
+this module only builds the per-half state and runs the two streams.
+
+Usage:
+    halves = TboSplitter().split(input_ids, positions, atten_info)
+    logits = TwoBatchOverlap(model).forward(halves)
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+import torch
+
+from ..executor.attention_metadata import AttentionMetadata
+from ..kernels import skip_rmsnorm
+from .comm_overlap import CommStreamPool, DeferredArContext, deferred_all_reduce
+from .operations import StateDict, execute_overlapped_operations
+from .operations_strategy import OperationsStrategy
+from .overlap import Timeline
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
+    from ..models.base import CausalLM
+
+#: Environment variable switching the L2 two-batch overlap on (``0`` disables).
+TBO_ENV = "LITE_LLAMA_TBO"
+TBO_MIN_ROWS_ENV = "LITE_LLAMA_TBO_MIN_ROWS"
+
+#: Per-architecture roofline estimates — peak bf16 tensor FLOPS and HBM
+#: bandwidth in bytes/s — used to place the GEMM *ridge point*: the decode batch
+#: above which a GEMM is compute-bound rather than weight-read-bound. These are
+#: documented estimates, not measured specs; the gate only needs their ratio.
+_ROOFLINE: dict[tuple[int, int], tuple[float, float]] = {
+    (8, 6): (125e12, 600e9),     # GA10x: A10 / A16 / RTX 30
+    (8, 0): (312e12, 2.039e12),  # GA100: A100
+    (9, 0): (990e12, 3.35e12),   # GH100: H100
+}
+_ROOFLINE_FALLBACK: tuple[float, float] = (200e12, 1.0e12)
+
+#: A real GEMM reaches only a fraction of peak FLOPS at small ``M``, so the batch
+#: where halving stops doubling the weight read sits *above* the theoretical
+#: ridge ``peak_flops / mem_bw``. This factor covers that gap, calibrated against
+#: ``benchmarks/probe_tbo_cost_model.py``: on an A10 (theoretical ridge ~208) the
+#: measured split penalty is still 1.98x at batch 16 and 1.26x even at 512, so
+#: the profitable regime starts well past the theoretical ridge.
+_RIDGE_SAFETY: float = 2.5
+
+_ridge_cache: int | None = None
+
+
+def _ridge_rows() -> int:
+    """Decode batch above which a row-parallel GEMM is compute-bound.
+
+    Below this batch a decode GEMM is weight-read-bound: its time is flat in the
+    batch because reading the weight shard dominates. Splitting the batch into
+    two halves then makes each half re-read the same shard, so the pair costs
+    ~2x the single full-batch GEMM — measured at 1.98x for Qwen2.5-1.5B TP2 on an
+    A10 (``benchmarks/probe_tbo_cost_model.py``). That doubled weight read is
+    exactly what swallows the all-reduce TBO hides, which is why TBO is a net
+    loss across the whole memory-bound decode range. Above the ridge the GEMM is
+    compute-bound, halving keeps total FLOPS constant, and the split is ~free —
+    the only regime where hiding the all-reduce is a genuine gain.
+    """
+    global _ridge_cache
+    if _ridge_cache is None:
+        if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(torch.cuda.current_device())
+            peak_flops, mem_bw = _ROOFLINE.get(
+                (props.major, props.minor), _ROOFLINE_FALLBACK
+            )
+        else:
+            peak_flops, mem_bw = _ROOFLINE_FALLBACK
+        _ridge_cache = int(peak_flops / mem_bw * _RIDGE_SAFETY)
+    return _ridge_cache
+
+
+def reset_ridge_cache() -> None:
+    """Forget the cached ridge point — test hook between device contexts."""
+    global _ridge_cache
+    _ridge_cache = None
+
+#: State keys that outlive the whole layer stack. Everything else is an
+#: intermediate, and :meth:`TwoBatchOverlap._head` asserts none survived.
+_PERSISTENT_KEYS = (
+    "ar",
+    "ar_events",
+    "atten_info",
+    "position_embeddings",
+    "tag",
+    "timeline",
+)
+
+
+@dataclass(frozen=True)
+class TboPolicy:
+    """Policy for enabling two-batch overlap in TP decode steps.
+
+    Args:
+        enabled: Whether eligible decode steps run two-batch overlapped.
+        min_rows: Decode rows a step must reach before TBO activates. By
+            default this is the roofline ridge point (:func:`_ridge_rows`), so
+            TBO only fires in the compute-bound regime where its split is ~free
+            and never in the memory-bound range where the split doubles the
+            weight read and the overlap is a net loss. An explicit
+            ``LITE_LLAMA_TBO_MIN_ROWS`` overrides it, which is how the parity
+            tests and benchmarks force the interleave on at a small batch.
+    """
+
+    enabled: bool = False
+    min_rows: int = 8
+
+    @classmethod
+    def from_env(cls) -> TboPolicy:
+        raw = os.environ.get(TBO_ENV, "0").strip().lower()
+        explicit = os.environ.get(TBO_MIN_ROWS_ENV)
+        # An explicit floor is a deliberate override (a parity test forcing the
+        # interleave at batch 2); with none set, the cost-model ridge gates TBO
+        # to the compute-bound regime so it can never regress a decode step.
+        min_rows = max(2, int(explicit)) if explicit is not None else _ridge_rows()
+        return cls(
+            enabled=raw not in ("", "0", "false", "off"),
+            min_rows=min_rows,
+        )
+
+    def active(self, *, world_size: int, rows: int, graph_active: bool) -> bool:
+        """Whether a decode step of ``rows`` requests should run overlapped.
+
+        ``graph_active`` excludes the graph path: a captured graph replays
+        one fixed kernel sequence, so an eager TBO must stand down whenever
+        the step might be served by a graph instead. Graphs *can* carry the
+        interleave now (see :meth:`capture_eligible`) — that decision is
+        made once, at capture time, not per step.
+        """
+        return self.enabled and world_size > 1 and not graph_active and rows >= self.min_rows
+
+    def capture_eligible(self, *, world_size: int, batch: int) -> bool:
+        """Whether a graph of ``batch`` rows should record the TBO interleave.
+
+        Same three conditions as :meth:`active`, judged on the captured batch
+        size at capture time instead of the live row count per step: a replay
+        fixes the kernel sequence, so the shape is picked once. Batches below
+        ``min_rows`` capture the plain forward and keep their eager floor.
+        """
+        return self.enabled and world_size > 1 and batch >= self.min_rows
+
+
+_policy_cache: TboPolicy | None = None
+
+
+def tbo_policy() -> TboPolicy:
+    global _policy_cache
+    if _policy_cache is None:
+        _policy_cache = TboPolicy.from_env()
+    return _policy_cache
+
+
+def reset_tbo_policy() -> None:
+    global _policy_cache
+    _policy_cache = None
+
+
+@dataclass
+class TboHalf:
+    """One half of a decode step, padded to the shared micro-batch length.
+
+    Attributes:
+        input_ids: ``[padded_len, 1]`` one-token ids; rows past ``num_rows``
+            repeat the half's last real row.
+        positions: ``[padded_len, 1]`` absolute positions, padded the same way.
+        atten_info: Metadata for this half's rows, padded to match.
+        num_rows: Real rows before padding — the head keeps exactly this many
+            logits, so a padded row never reaches the sampler.
+    """
+
+    input_ids: torch.Tensor
+    positions: torch.Tensor
+    atten_info: AttentionMetadata
+    num_rows: int
+
+
+class TboSplitter:
+    """Split a decode step into two equal-length halves.
+
+    sglang's discipline (``_split_array_by_balanced_sum`` plus
+    ``tbo_padded_len``): both micro-batches carry the same row count, so the EP
+    all-to-all is an equal split with no internal padding, and a captured
+    graph's shapes do not drift with the batch's parity. A decode row is one
+    token, so a balanced split is an equal-count one; an odd batch pads the
+    short half by repeating its last real row — the duplicate attends to the
+    same request's KV, writes the same slot with the same value, and its logits
+    are dropped by ``num_rows``, which is cheaper than zero-padding and then
+    teaching the attention kernels about dead rows.
+    """
+
+    def split(
+        self, input_ids: torch.Tensor, positions: torch.Tensor, atten_info: AttentionMetadata
+    ) -> tuple[TboHalf, TboHalf]:
+        rows = input_ids.shape[0]
+        if rows < 2:
+            raise ValueError(f"two-batch overlap needs >= 2 rows, got {rows}")
+        mid = rows // 2
+        padded_len = rows - mid  # ceil(rows / 2): the length both halves share
+        return (
+            self._half(input_ids, positions, atten_info, 0, mid, padded_len),
+            self._half(input_ids, positions, atten_info, mid, rows, padded_len),
+        )
+
+    @staticmethod
+    def _half(
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        atten_info: AttentionMetadata,
+        start: int,
+        stop: int,
+        padded_len: int,
+    ) -> TboHalf:
+        return TboHalf(
+            input_ids=_pad_rows(input_ids[start:stop], padded_len),
+            positions=_pad_rows(positions[start:stop], padded_len),
+            atten_info=_narrow_metadata(atten_info, start, stop, padded_len),
+            num_rows=stop - start,
+        )
+
+
+def _pad_rows(tensor: torch.Tensor, padded_len: int) -> torch.Tensor:
+    """Grow ``[rows, ...]`` to ``[padded_len, ...]`` by repeating its last row."""
+    rows = tensor.shape[0]
+    if rows == padded_len:
+        return tensor
+    pad = tensor[-1:].expand(padded_len - rows, *tensor.shape[1:])
+    return torch.cat([tensor, pad], dim=0)
+
+
+def _narrow_metadata(
+    meta: AttentionMetadata, start: int, stop: int, padded_len: int
+) -> AttentionMetadata:
+    """Metadata for rows ``[start, stop)``, padded to the micro-batch length.
+
+    Views, no copy. The padded rows repeat the last real row's entries, so the
+    duplicate token attends to the same request's KV and writes the same slot.
+    """
+
+    def slice_and_pad(tensor: torch.Tensor | None) -> torch.Tensor | None:
+        return None if tensor is None else _pad_rows(tensor[start:stop], padded_len)
+
+    return AttentionMetadata(
+        kv_buffer=meta.kv_buffer,
+        cur_select_index=slice_and_pad(meta.cur_select_index),
+        b_req_tokens_table=meta.b_req_tokens_table,
+        b_start_loc=None,
+        b_req_idx=slice_and_pad(meta.b_req_idx),
+        b_seq_len=slice_and_pad(meta.b_seq_len),
+        max_actual_seq_len=meta.max_actual_seq_len,
+        is_prefill=meta.is_prefill,
+    )
+
+
+class TwoBatchOverlap:
+    """Executor that interleaves two half-batches through the decoder stack."""
+
+    def __init__(self, model: CausalLM, *, timeline: Timeline | None = None) -> None:
+        self._model = model
+        self._timeline = timeline
+
+    def forward(self, halves: tuple[TboHalf, TboHalf]) -> torch.Tensor:
+        model = self._model
+        device = halves[0].input_ids.device
+        timeline = self._timeline or CommStreamPool.for_device(device).timeline
+        strategy = OperationsStrategy.init_new_tbo(model.layers)
+        expert_parallel = any(
+            getattr(layer.mlp, "dispatcher", None) is not None for layer in model.layers
+        )
+
+        with deferred_all_reduce(device) as ar:
+            states = [
+                self._initial_state(model, half, ar, timeline, tag, expert_parallel)
+                for half, tag in zip(halves, "ab", strict=True)
+            ]
+            outputs = execute_overlapped_operations(
+                states,
+                [strategy.operations, strategy.operations],
+                delta_stages=[0, strategy.tbo_delta_stages],
+            )
+            ar.drain()
+
+        persistent = _PERSISTENT_KEYS + (("moe_ctx",) if expert_parallel else ())
+        return torch.cat(
+            [
+                self._head(model, state, half.num_rows, persistent)
+                for state, half in zip(outputs, halves, strict=True)
+            ],
+            dim=0,
+        )
+
+    def _initial_state(
+        self,
+        model: CausalLM,
+        half: TboHalf,
+        ar: DeferredArContext,
+        timeline: Timeline,
+        tag: str,
+        expert_parallel: bool,
+    ) -> StateDict:
+        """One micro-batch's state: the step's inputs plus the overlap plumbing.
+
+        ``moe_ctx`` is added only when a layer runs expert parallel, so dense
+        and TP-MoE runs never import the MoE module.
+        """
+        hidden_states = model.get_input_embeddings(half.input_ids)
+        initial: dict = {
+            "hidden_states": hidden_states,
+            "residual": None,
+            "position_embeddings": model.rotary_emb(hidden_states, half.positions),
+            "atten_info": half.atten_info,
+            "ar": ar,
+            "ar_events": [],
+            "timeline": timeline,
+            "tag": tag,
+        }
+        if expert_parallel:
+            from ..modules.moe import MoEOpContext  # lazy: dense runs stay kernel-light
+
+            initial["moe_ctx"] = MoEOpContext()
+        return StateDict(initial)
+
+    def _head(
+        self,
+        model: CausalLM,
+        state: StateDict,
+        num_rows: int,
+        persistent: tuple[str, ...],
+    ) -> torch.Tensor:
+        """Final norm and vocabulary projection for one micro-batch.
+
+        Keeps the first ``num_rows`` logits only: the padded rows a split
+        produced are duplicates, and their predictions must not reach the
+        sampler. ``clear`` then proves the stack released every intermediate —
+        a leftover is an op that skipped its pop.
+        """
+        hidden_states = state.pop("hidden_states")
+        residual = state.pop("residual")
+        state.clear(persistent)
+        hidden, _ = skip_rmsnorm(hidden_states, residual, model.norm_weight, model.rms_norm_eps)
+        return model.lm_head(hidden)[:num_rows]

@@ -35,6 +35,7 @@ _TP_GROUP: dist.ProcessGroup | None = None
 _TP_CPU_GROUP: dist.ProcessGroup | None = None
 _DP_RANK: int = 0
 _DP_WORLD_SIZE: int = 1
+_EP_ENABLED: bool = False
 
 
 def grid_coordinates(global_rank: int, tp_size: int, dp_size: int) -> tuple[int, int]:
@@ -73,6 +74,7 @@ def init_parallel(
     dp_size: int = 1,
     master_port: int = 29500,
     backend: str | None = None,
+    enable_expert_parallel: bool = False,
 ) -> None:
     """Place this process in the ``dp_size x tp_size`` rank grid.
 
@@ -98,10 +100,12 @@ def init_parallel(
             the grid.
     """
     global _TP_RANK, _TP_WORLD_SIZE, _TP_GROUP, _TP_CPU_GROUP, _DP_RANK, _DP_WORLD_SIZE
+    global _EP_ENABLED
 
     _DP_RANK, _TP_RANK = grid_coordinates(global_rank, tp_size, dp_size)
     _DP_WORLD_SIZE = dp_size
     _TP_WORLD_SIZE = tp_size
+    _EP_ENABLED = enable_expert_parallel
     if tp_size <= 1:
         return
 
@@ -223,6 +227,36 @@ def get_data_parallel_world_size() -> int:
 def get_world_size() -> int:
     """Total ranks across the grid, ``dp_size * tp_size``."""
     return _DP_WORLD_SIZE * _TP_WORLD_SIZE
+
+
+def expert_parallel_enabled() -> bool:
+    """Whether MoE experts split whole-expert across this replica's ranks.
+
+    The flag alone does not imply a distributed EP path: a world of one (or a
+    TP-disabled process) answers ``True`` here but :func:`get_ep_world_size`
+    stays 1, and callers treat that as the no-op it is.
+    """
+    return _EP_ENABLED
+
+
+def get_ep_group() -> dist.ProcessGroup | None:
+    """The EP process group — the TP group when EP is enabled, else ``None``.
+
+    EP is a mode over the TP grid, not a new rendezvous: the same ranks that
+    all-reduce attention partials exchange MoE tokens, so the group object is
+    literally shared.
+    """
+    return _TP_GROUP if _EP_ENABLED else None
+
+
+def get_ep_rank() -> int:
+    """This process's rank within the EP group (its TP rank; 0 when EP is off)."""
+    return _TP_RANK if _EP_ENABLED else 0
+
+
+def get_ep_world_size() -> int:
+    """Number of ranks experts split across (the TP world size; 1 when EP is off)."""
+    return _TP_WORLD_SIZE if _EP_ENABLED else 1
 
 
 def divide(a: int, b: int, what: str = "") -> int:

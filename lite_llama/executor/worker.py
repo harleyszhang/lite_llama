@@ -20,7 +20,12 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from ..distributed.parallel_state import tensor_model_parallel_broadcast
+from ..batch_overlap.overlap import OverlapPolicy, StreamPool, Timeline
+from ..batch_overlap.two_batch_overlap import tbo_policy
+from ..distributed.parallel_state import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_broadcast,
+)
 from ..engine.sampler import (
     BatchedSamplingParams,
     GeneratedSpan,
@@ -28,7 +33,6 @@ from ..engine.sampler import (
     SamplingParams,
     rows_logprobs,
 )
-from .overlap import OverlapPolicy, StreamPool, Timeline
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
     from ..engine.llm_engine import LLMEngine
@@ -414,7 +418,21 @@ class ModelWorker:
     def _forward_decode(
         self, plan: ModelInput, prepared: _PreparedPass
     ) -> tuple[torch.Tensor | None, tuple[tuple[PositionLogprobs, ...] | None, ...]]:
-        """One token for every sequence in the plan."""
+        """One token for every sequence in the plan.
+
+        With the L2 policy active (tensor parallelism, enough rows, and no
+        graph serving the step), the step runs two-batch overlapped:
+        ``begin_decode`` still installs the metadata for the *whole* step
+        first, then the TBO forward splits it into halves whose deferred
+        all-reduces ping-pong with each other's compute. Same logits shape,
+        same row order, same downstream sampling -- the split is invisible
+        past this method.
+
+        Under graphs the eager interleave stands down — but the step can
+        still be overlapped. Capture decides per batch size whether to record
+        the interleave itself (see :meth:`ModelRunner.enable_cuda_graph`), so
+        a replay carries the ping-pong instead of this method scheduling it.
+        """
         rows = len(plan.slots)
         self._slot_batch.begin_decode(plan.slots, plan.seq_lens)
         self._pool.consume(prepared.event, prepared.input_ids)
@@ -422,8 +440,16 @@ class ModelWorker:
         positions = self._slot_batch.seq_lens.view(-1, 1) - 1
 
         with self.timeline.region("forward.decode", "compute"):
-            logits = self._runner.forward(prepared.input_ids, positions, None)
-        # Decode has no prompt positions to score (covered in prefill).
+            if tbo_policy().active(
+                world_size=get_tensor_model_parallel_world_size(),
+                rows=rows,
+                graph_active=self._runner.uses_cuda_graph,
+            ):
+                logits = self._runner.forward_tbo(prepared.input_ids, positions)
+            else:
+                logits = self._runner.forward(prepared.input_ids, positions, None)
+        # Decode never has prompt positions to score: they were all covered
+        # during prefill, so the second element is uniformly empty.
         return self._pick(logits[:rows, -1, :], plan.sampled, rows), (None,) * len(plan.slots)
 
     # ---------------------------------------------------------------- sampling #
