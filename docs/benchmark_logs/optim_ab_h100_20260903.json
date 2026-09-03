@@ -1,0 +1,157 @@
+{
+  "meta": {
+    "date": "2026-09-03",
+    "gpu": "NVIDIA H100 80GB HBM3 x1",
+    "models": {
+      "Qwen3-0.6B-FP8": "dense, 28 layers, fp8 checkpoint (isolates optimization B)",
+      "Qwen3-30B-A3B-FP8": "MoE, 48 layers x 128 experts, fp8 checkpoint (optimizations A+B)"
+    },
+    "protocol": "bench_e2e.py, greedy, batch=8 unless suffixed _b1, max_gen_len=256, 2 in-process warmups + 1 measured run, 2 process-level repeats per cell; baseline = optimizations inverted in-tree (identical otherwise)",
+    "optimizations": {
+      "A": "SparseMoeBlock._route caches a one-time fp32 widen of gate_weight (was: per-layer per-step .float() cast kernel)",
+      "B": "PagedAttention caches K/V half-views keyed on buffer identity (was: two slice constructions per layer per step)"
+    }
+  },
+  "rows": [
+    {
+      "run": "base_06b_eager_r1",
+      "mode": "eager",
+      "ttft_ms": 20.36,
+      "tpot_ms": 20.16,
+      "tps": 396.7
+    },
+    {
+      "run": "base_06b_eager_r2",
+      "mode": "eager",
+      "ttft_ms": 20.18,
+      "tpot_ms": 19.77,
+      "tps": 404.5
+    },
+    {
+      "run": "base_06b_graph_r1",
+      "mode": "graph",
+      "ttft_ms": 20.41,
+      "tpot_ms": 3.25,
+      "tps": 2406.8
+    },
+    {
+      "run": "base_06b_graph_r2",
+      "mode": "graph",
+      "ttft_ms": 21.35,
+      "tpot_ms": 3.26,
+      "tps": 2401.1
+    },
+    {
+      "run": "base_30b_b1_r1",
+      "mode": "eager",
+      "ttft_ms": 45.68,
+      "tpot_ms": 45.02,
+      "tps": 22.2
+    },
+    {
+      "run": "base_30b_b1_r2",
+      "mode": "eager",
+      "ttft_ms": 45.69,
+      "tpot_ms": 45.41,
+      "tps": 22.0
+    },
+    {
+      "run": "base_30b_eager_r1",
+      "mode": "eager",
+      "ttft_ms": 48.06,
+      "tpot_ms": 47.14,
+      "tps": 169.7
+    },
+    {
+      "run": "base_30b_eager_r2",
+      "mode": "eager",
+      "ttft_ms": 47.85,
+      "tpot_ms": 46.66,
+      "tps": 171.4
+    },
+    {
+      "run": "base_30b_graph_r1",
+      "mode": "graph",
+      "ttft_ms": 52.21,
+      "tpot_ms": 11.26,
+      "tps": 700.1
+    },
+    {
+      "run": "base_30b_graph_r2",
+      "mode": "graph",
+      "ttft_ms": 48.87,
+      "tpot_ms": 11.26,
+      "tps": 701.2
+    },
+    {
+      "run": "opt_06b_eager_r1",
+      "mode": "eager",
+      "ttft_ms": 20.74,
+      "tpot_ms": 19.61,
+      "tps": 407.9
+    },
+    {
+      "run": "opt_06b_eager_r2",
+      "mode": "eager",
+      "ttft_ms": 20.5,
+      "tpot_ms": 19.62,
+      "tps": 407.7
+    },
+    {
+      "run": "opt_06b_graph_r1",
+      "mode": "graph",
+      "ttft_ms": 20.78,
+      "tpot_ms": 3.25,
+      "tps": 2405.4
+    },
+    {
+      "run": "opt_06b_graph_r2",
+      "mode": "graph",
+      "ttft_ms": 20.16,
+      "tpot_ms": 3.26,
+      "tps": 2403.0
+    },
+    {
+      "run": "opt_30b_b1_r1",
+      "mode": "eager",
+      "ttft_ms": 45.35,
+      "tpot_ms": 43.51,
+      "tps": 23.0
+    },
+    {
+      "run": "opt_30b_b1_r2",
+      "mode": "eager",
+      "ttft_ms": 44.57,
+      "tpot_ms": 43.77,
+      "tps": 22.8
+    },
+    {
+      "run": "opt_30b_eager_r1",
+      "mode": "eager",
+      "ttft_ms": 47.75,
+      "tpot_ms": 45.5,
+      "tps": 175.8
+    },
+    {
+      "run": "opt_30b_eager_r2",
+      "mode": "eager",
+      "ttft_ms": 48.78,
+      "tpot_ms": 45.86,
+      "tps": 174.4
+    },
+    {
+      "run": "opt_30b_graph_r1",
+      "mode": "graph",
+      "ttft_ms": 49.95,
+      "tpot_ms": 11.05,
+      "tps": 714.2
+    },
+    {
+      "run": "opt_30b_graph_r2",
+      "mode": "graph",
+      "ttft_ms": 49.07,
+      "tpot_ms": 11.04,
+      "tps": 714.7
+    }
+  ]
+}
