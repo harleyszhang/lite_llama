@@ -1,11 +1,15 @@
 """Cross-stream overlap: the L1 policy, its stream pool and its timeline.
 
-:class:`OverlapPolicy` (``LITE_LLAMA_OVERLAP``) decides whether uploads run on a
-copy stream; :class:`StreamPool` stages async uploads and reads results back into
-pinned host memory; :class:`Timeline` records regions as overlap evidence. Also
-carries the O3.2 two-batch-overlap executor primitive (:class:`YieldOperation` +
-:func:`execute_overlapped`), the stage/yield interleaving sglang's ``batch_overlap``
-uses, kept here until the model's forward is expressed as operation streams.
+:class:`OverlapPolicy` (read from ``LITE_LLAMA_OVERLAP``) decides whether
+input uploads run on a copy stream; :class:`StreamPool` stages the async
+uploads — and, in the opposite direction, reads results back into pinned
+host memory — while :class:`Timeline` records regions as timeline evidence.
+
+The host↔device axis of the package. Its siblings
+(:mod:`~lite_llama.batch_overlap.comm_overlap`,
+:mod:`~lite_llama.batch_overlap.two_batch_overlap`) own the
+compute↔communication axis, and share this module's :class:`Timeline` so a
+copy region and a comm region compare on one device clock.
 
 Usage:
     policy = OverlapPolicy.from_env()
@@ -16,7 +20,7 @@ from __future__ import annotations
 
 import os
 from collections import deque
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -193,7 +197,10 @@ class StreamPool:
                 tensor.record_stream(stream)
 
     def _acquire(
-        self, ring: deque[tuple[torch.Tensor, torch.cuda.Event | None]], dtype: torch.dtype, numel: int
+        self,
+        ring: deque[tuple[torch.Tensor, torch.cuda.Event | None]],
+        dtype: torch.dtype,
+        numel: int,
     ) -> torch.Tensor:
         """Find a free buffer of ``ring`` holding ``numel`` elements of ``dtype``.
 
@@ -308,71 +315,3 @@ class Timeline:
             f"{r.stream:>8}  {r.name:<24} [{r.start_ms:9.3f}, {r.end_ms:9.3f}] ms"
             for r in self.collect()
         )
-
-
-# --------------------------------------------------------------------------- #
-# O3.2 two-batch-overlap executor primitive
-# --------------------------------------------------------------------------- #
-class YieldOperation:
-    """Stage boundary in an operation stream: where the executor may switch.
-
-    Ops between two yields form one indivisible stage, run to completion before the
-    other micro-batch resumes (sglang's ``batch_overlap`` calls this a yield operation).
-    """
-
-
-def _stages_of(
-    ops: Sequence[Callable[[], Any] | YieldOperation],
-) -> list[list[Callable[[], Any]]]:
-    """Cut an operation stream into stages at yield boundaries."""
-    stages: list[list[Callable[[], Any]]] = [[]]
-    for op in ops:
-        if isinstance(op, YieldOperation):
-            stages.append([])
-        else:
-            stages[-1].append(op)
-    return [stage for stage in stages if stage]
-
-
-def execute_overlapped(
-    ops_a: Sequence[Callable[[], Any] | YieldOperation],
-    ops_b: Sequence[Callable[[], Any] | YieldOperation],
-    *,
-    delta_stages: int = 0,
-) -> None:
-    """Run two micro-batch operation streams interleaved, stage by stage (O3.2).
-
-    The TBO pattern: while A's ops run, B sits at its last yield (ideally inside an op
-    the copy engines or NICs handle without SMs), then they swap. ``delta_stages`` is
-    how far the lead runs before the trailing one starts; ``0`` strictly alternates, A
-    first. Only the executor half of O3.2 lives here, consumer-free, so the day the
-    model's forward is expressed as operation streams reuses it verbatim.
-
-    Args:
-        ops_a: Lead stream — zero-arg callables separated by :class:`YieldOperation`.
-        ops_b: Trailing stream, same shape.
-        delta_stages: Stages A runs ahead of B before alternation starts.
-
-    Raises:
-        ValueError: ``delta_stages`` is negative.
-    """
-    if delta_stages < 0:
-        raise ValueError(f"delta_stages must be >= 0, got {delta_stages}")
-    stages_a = _stages_of(ops_a)
-    stages_b = _stages_of(ops_b)
-
-    def _drain(stages: list[list[Callable[[], Any]]], index: int, count: int) -> int:
-        for stage in stages[index : index + count]:
-            for op in stage:
-                op()
-        return min(index + count, len(stages))
-
-    # Lead runs ahead, then alternation (A then B) while both have stages, then
-    # whichever stream still owes stages drains.
-    ia = _drain(stages_a, 0, delta_stages)
-    ib = 0
-    while ia < len(stages_a) and ib < len(stages_b):
-        ia = _drain(stages_a, ia, 1)
-        ib = _drain(stages_b, ib, 1)
-    _drain(stages_a, ia, len(stages_a))
-    _drain(stages_b, ib, len(stages_b))

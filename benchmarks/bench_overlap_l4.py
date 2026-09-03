@@ -27,7 +27,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.common import require_gpus, timestamped_log_path, write_json_log
-from lite_llama.executor.overlap import Timeline
+from lite_llama.batch_overlap.overlap import Timeline
 from lite_llama.kernels.tile_signal import (
     TileSignalBuffer,
     pipelined_gemm_swiglu,

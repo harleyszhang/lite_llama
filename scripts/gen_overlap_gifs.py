@@ -38,7 +38,7 @@ from PIL import Image, ImageDraw, ImageFont
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from lite_llama.executor.overlap import RegionRecord  # noqa: E402
+from lite_llama.batch_overlap.overlap import RegionRecord  # noqa: E402
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
@@ -137,7 +137,7 @@ def record_l4() -> list[RegionRecord]:
     """One GPU: the tile-signaling producer/consumer pair, instrumented."""
     import torch
 
-    from lite_llama.executor.overlap import Timeline
+    from lite_llama.batch_overlap.overlap import Timeline
     from lite_llama.kernels.tile_signal import TileSignalBuffer, pipelined_gemm_swiglu
 
     # The Qwen2.5-1.5B TP2 MLP shape at a prefill-ish batch: enough tiles that

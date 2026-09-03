@@ -26,7 +26,7 @@ from PIL import Image, ImageDraw, ImageFont
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from lite_llama.executor.overlap import RegionRecord
+from lite_llama.batch_overlap.overlap import RegionRecord  # noqa: E402
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
@@ -116,7 +116,7 @@ def window_around_first_overlap(records):
 
 
 def render(records, t0: float, scale: float, fonts, note: str) -> Image.Image:
-    body, bold, small = fonts
+    _body, bold, small = fonts
     canvas = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(canvas)
 
