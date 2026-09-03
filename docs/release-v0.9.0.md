@@ -15,7 +15,7 @@ v0.9 有两条工作线。
 ### 地基 2 三层落地（commit 65f52a0、dd525f6、509e83d）
 
 | 层 | 目录 | 职责 |
-|----|------|------|
+| ---- | ------ | ------ |
 | 算子域 | `kernels/ops/<group>/__init__.py` | 谁来算：native 行与外部后端的行同处一地 |
 | 选择 | `kernels/dispatcher/` | 怎么选：KernelSpec 六维声明（available / capability / dtypes+schemes / shape / layout / golden）+ filter → rank → cache → report |
 | 接入 | `kernels/backend/<lib>/` | 能算什么：INSTALL 元数据 + 真 import 检测 + adapter |
@@ -83,7 +83,7 @@ multimodal decode 路径接入 CUDA graph replay，并补 TP 与多模态的 e2e
 ### e2e 回归（A10, Qwen2.5-1.5B, batch=8, gen=128, greedy, CUDA graph）
 
 | 指标 | v0.8.0 基线 | v0.9.0 | 变化 |
-|------|------------|--------|------|
+| ------ | ------------ | -------- | ------ |
 | TTFT | 21.92 ms | 20.35 ms | -7.1% |
 | TPOT | 9.36 ms | 8.40 ms | -10.3% |
 | 吞吐 | 844.5 tok/s | 942.0 tok/s | +11.5% |
@@ -108,7 +108,7 @@ golden 门禁在 overlap 默认开启下通过：prepared 路径与 inline 路�
 ## 文件清单（本分支相对 main 的增量）
 
 | 操作 | 路径 |
-|------|------|
+| ------ | ------ |
 | 修改 | `lite_llama/executor/slot_batch.py`（prepare-path helpers：`flatten_extend_rows` / `plan_extend_rows` / `pad_decode_rows`） |
 | 修改 | `lite_llama/executor/worker.py`（`_PreparedPass` + `prepare()` + 三个 `_forward_*` 消费 prepared 并记录 timeline） |
 | 修改 | `lite_llama/engine/continuous_engine.py`（step 改 deferred harvest，一步一次同步） |

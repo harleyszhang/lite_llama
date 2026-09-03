@@ -8,8 +8,8 @@
 ## 功能维度
 
 | # | 亮点 | 状态 | 他们为何不做 |
-|---|---|---|---|
-| F1 | **任意模型任意单层的独立运行 harness**:单层跑 forward、对比 HF、测延迟/显存 | 待建 | 他们没有这个抽象;大模型验证靠整模型跑 + 8 卡 |
+| --- | --- | --- | --- |
+| F1 | **任意模型任意单层的独立运行 harness**:单层跑 forward、对比 HF、测延迟/显存 | 已有(v0.10) | 他们没有这个抽象;大模型验证靠整模型跑 + 8 卡 |
 | F2 | 默认单卡路径全程单进程,`pdb` 可直达 kernel 调用点 | 已有 | v1 全量多进程隔离(pdb 进不了 EngineCore);这里多进程只在 TP/DP>1 时启用(地基 0 的 UniProc/Multiproc 双实现),单卡默认仍是单进程 |
 | F3 | 冷启动秒级(无 CUDA C++ 编译、无 torch.compile、graph 捕获可关) | 已有 | 他们为长驻服务优化,启动 30s–2min 不在乎 |
 | F4 | 后端缺失自动回退原生,永不硬失败 | 待建 | 他们缺库常直接报错退出 |
@@ -23,7 +23,7 @@
 借鉴 TileRT(tile 级运行时,把 compute/IO/comm 动态重叠,追极低 TPOT)、TensorRT-LLM(overlap scheduler)、Flux/TokenWeave/DualPipe(comm-compute 重叠),但每条转成自有设计。每条给目标指标。
 
 | # | 亮点 | 状态 | 借鉴 / 自有设计 | 目标指标 |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | P1 | **decode 层 megakernel**:整层 decode 路径(RMSNorm→QKV→attn→o_proj→MLP)融进极少数持久化 Triton kernel,消除几十次 launch + Python 派发 | 待建 | 借 TileRT tile 运行时;**纯 Triton 可融,vLLM 的 C++/CUTLASS kernel 融不动** | batch=1 TPOT 下降 |
 | P2 | **TP 通信-计算 overlap**(详见第六节) | 待建 | 借 Flux/TokenWeave;PCIe 互联 GPU(如 A10)通信占比高,NVLink GPU(如 H100/B200)气泡更小但仍有收益 | TP=2 decode 隐藏大部分 all-reduce |
 | P3 | **MoE dequant 融合 grouped GEMM + weight-stationary tiling** | 待建 | sm86(如 A10)无 fp8 算力→MoE 卡带宽;sm90+(H100)有 fp8 但仍有 dequant 收益;dequant 融进 epilogue 消除中间张量往返 | MoE decode 带宽利用率提升 |
@@ -38,7 +38,7 @@
 ## 架构设计维度
 
 | # | 亮点 | 状态 | 差异点 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | A1 | **稀疏后端注册表 + 保底行**:外部后端只注册擅长的 (scheme, arch) 格,其余自动落原生 | 待建 | 避免 N×M 类爆炸,这是单人能维护多后端的前提 |
 | A2 | **KV 布局可插拔**:token-level / paged / 未来 DiffKV 并存,重构可增量迁移随时回退 | 待建 | 把高风险大重构变成低风险增量,他们靠人力硬切 |
 | A3 | 调度策略 policy 化:one-shot / continuous / chunked-prefill 共用一个 step 循环 | 待建 | 顺带消灭现有"两套生成循环"债务 |
@@ -57,7 +57,7 @@
 **模块 A · 性能分析 (perf)**
 
 | 工具 | 做什么 | 独特性 |
-|---|---|---|
+| --- | --- | --- |
 | perf.profile | 一次 forward → 逐算子延迟 + roofline 归因(compute/memory-bound)+ achieved vs 峰值算力/带宽 | vLLM 要挂 torch profiler 且输出面向专家;这里一条命令出人可读归因 |
 | perf.timeline | 多 stream 时间线,comm/compute 重叠可视化 | 直接服务第六节 overlap 验证 |
 | perf.watchdog | benchmark 入库,劣化超阈值 CI 报警 | 保证"更快"不悄悄退步 |
@@ -65,7 +65,7 @@
 **模块 B · 精度 (accuracy)**
 
 | 工具 | 做什么 | 独特性 |
-|---|---|---|
+| --- | --- | --- |
 | acc.golden | 多模型×多路径逐 token 门禁,GPU runner 强制跑,禁止静默 skip | 修掉"skip 了还显绿"的假安全 |
 | acc.align | 外部后端 vs 原生 max-abs-diff 阈值门禁 | 使测试量为 N+M 而非 N×M |
 | acc.divergence | **精度断层定位器**:整模型 vs HF 逐层对比,自动定位第一个超阈的层/算子 | 新模型接入 debug 神器,vLLM 无 |
@@ -73,7 +73,7 @@
 **模块 C · 可视化 (viz)**
 
 | 工具 | 做什么 |
-|---|---|
+| --- | --- |
 | viz.structure | 模型结构树/图:每层算子、shape、dtype、参数量、选中后端 |
 | viz.memory | 显存去向:静态分区(weight/KV/activation/graph)+ 随 step 的时间线曲线 |
 | viz.flow | 请求执行流程:scheduler 决策、slot 分配、抢占、prefill/decode 切换 |
@@ -86,7 +86,7 @@
 **模块 E · shape 采集与自动调优 (autotune)**
 
 | 阶段 | 做什么 |
-|---|---|
+| --- | --- |
 | collect | 跑真实负载,导出所有 GEMM/attn/MoE shape(含出现频次) |
 | search | 对高频 shape 搜 tile / num_warps / num_stages |
 | persist | 按 (gpu, op, shape, dtype) 落盘 JSON 到缓存目录 + 可选入仓,启动命中即用、未命中回退启发式并后台补搜 |
@@ -96,14 +96,14 @@
 **模块 F · 运行时可观测性 (observe)**
 
 | 工具 | 做什么 | 独特性 |
-|---|---|---|
+| --- | --- | --- |
 | observe.metrics | 每 step 产出 per-request 的 TTFT/TPOT/KV 占用/采样配置/选中后端;导出 Prometheus 或 JSON | vLLM 的 metrics 面向 SRE;这里面向开发者,粒度到单请求单算子 |
 | observe.trace | 调用链 trace:一次 generate 的 scheduler 决策→slot 分配→forward→sampler→detokenize,每段附耗时;对接 OpenTelemetry span 或自研 JSON timeline | 直接服务 debug,不是 profiling 的事后分析 |
 | observe.overlap | 实时 overlap 时间线:compute/comm/copy 三条 stream 的 event 水位 + 气泡标注,直接驱动第六节验证 | perf.timeline 的在线版,服务运行时调参而非离线分析 |
 
 设计原则:metrics/tracing 是**一等 API**,不是离线工具的附属品。`Engine.step()` 返回的 `RequestOutput` 内嵌 `ObservabilitySpan`,调用方可零成本获取每步的 per-request 延迟分解。单元测试:每个 metric 有 fixture 驱动的 assertion(不是"能跑",是"数值在预期区间")。
 
-真正没人做的:perf.profile 的人可读 roofline 归因、acc.divergence 精度断层定位、viz.* 全套、explain、autotune 自动生成、observe.* 运行时可观测 —— 加上功能维度的 F1(单层 harness)、架构维度的 A1/A2/A6/A7。面试讲"我怎么用自动化保证单人维护多后端框架的质量"是很强的叙事。
+真正没人做的:perf.profile 的人可读 roofline 归因、acc.divergence 精度断层定位、viz.*全套、explain、autotune 自动生成、observe.* 运行时可观测 —— 加上功能维度的 F1(单层 harness)、架构维度的 A1/A2/A6/A7。面试讲"我怎么用自动化保证单人维护多后端框架的质量"是很强的叙事。
 
 # 三、四个地基设计方案
 
@@ -118,7 +118,7 @@
 **架构债(4 条)**:
 
 | # | 问题 | 代码证据 | vLLM/SGLang 的做法 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 1 | **TP 是"镜像进程"不是引擎**:每个 rank 跑一个完整 `TextGenerator`(含 tokenizer/sampler/停止判断),rank 0 把 prompt tokens `dist.broadcast` 给 mirror worker 陪跑,输出丢弃 | `cli.py:_tp_mirror_worker` 的 broadcast 循环 | 调度只在 leader 算一次,广播的是**结构化 SchedulerOutput**,worker 只执行 forward(vLLM `WorkerProc`、SGLang leader scheduler) |
 | 2 | **TP 与持续批处理互斥**:调度/停止/detokenize 在每个 rank 独立执行,靠"相同输入→相同决策"隐式锁步;抢占/异步停止等 rank-local 决策一旦引入就 desync | `continuous_engine.py:from_pretrained` 直接拒绝 tp>1 | 调度决策单点,天然一致 |
 | 3 | **DP worker 是一次性批处理**:副本闲在两次 `generate()` 之间;请求不能中途加入;KV 每次 `free_all()` 全量重置 | `data_parallel.py:_dp_worker` 调 `LLM.generate()` | 副本是常驻 EngineCore 循环,请求随到随入(vLLM `DPEngineCoreProc`) |
@@ -127,8 +127,8 @@
 **bug(3 条)**:
 
 | # | bug | 位置 | 修法 |
-|---|---|---|---|
-| 5 | `tensor_model_parallel_all_reduce_min` 用 `_TP_RANK` 当 CUDA device index;dp>1 时非 leader 副本的 TP rank 0 会算到别人的卡上 | `parallel_state.py:245` `cuda:{_TP_RANK}` | `torch.cuda.current_device()` |
+| --- | --- | --- | --- |
+| 5 | `all_reduce_min` 用 `_TP_RANK` 当 CUDA device index;dp>1 时非 leader 副本的 TP rank 0 会算到别人的卡上 | `parallel_state.py:245` `cuda:{_TP_RANK}` | `torch.cuda.current_device()` |
 | 6 | DP 路由用字符数 `len(prompt)` 当 token 数;`LeastLoadedBalancer.select` 的 `estimated_tokens` 形参实际未用,语义是 total_requests 却起了误导名字 | `data_parallel.py:_route` / `dp_load_balancer.py` | 路由层用 tokenizer 计数(或显式 len/4 启发式并命名 honest);balancer 命名对齐 SGLang 语义 |
 | 7 | TP 采样 RNG 不同步(已修,保留监控) | `tensor_model_parallel_broadcast` 采样后广播 | — |
 
@@ -192,9 +192,9 @@ DP:                    Frontend ── Router(P10) ── EngineCore 进程 × d
 剩下 5 个契约**刻意只声明、不注册 native 行**——契约先定住,实现随对应里程碑到位:
 
 | 契约 | 为何没有 native 行 |
-|---|---|
+| --- | --- |
 | `sample` | 采样归 `engine/sampler.py`,它跑在 TP 切分后的 vocab 分片上并带 repetition penalty;再写一份等于让采样有两处可分歧 |
-| `comm.dispatch` / `comm.combine` | 本仓 MoE 是 **TP**(每 rank 跑全部专家的一段 intermediate),没有 EP 组可 all-to-all;本地 permute 那半已由 `fused_moe` 的 `moe_align_block_size` 承担。EP 组与 deepep 行同在 M2.5 落地 |
+| `comm.dispatch` / `comm.combine` | EP 组已随 v0.11.5 落地(`--enable-expert-parallel`,TP 组兼作 EP 组):`modules/ep_dispatch.py` 的等分 padding `all_to_all` dispatcher 承担 dispatch/combine,本地 permute 那半仍由 `fused_moe` 的 `moe_align_block_size` 承担;DeepEP 低延迟后端需 sm90+,A10(sm86)走纯 `torch.distributed` 路径 |
 | `attention.mla_decode` | 树内尚无 MLA 模型;flashmla 行 + 单层 harness(`models/mla_single_layer.py`)已入库,契约仅有外部行 |
 | `elementwise` | 开放命名空间的根本身,只有成员注册行 |
 
@@ -225,7 +225,7 @@ kernels/
 **④ 一份元数据清单(声明式,集中一处,torch-free)**:借 sglang `KernelSpec`——注册时只存 `target="module:attr"` 字符串,**惰性 import**,注册全程不加载 torch/kernel(保证冷启动秒级、CPU 机器可 `import`)。每份实现声明:
 
 | 字段 | 作用 | 借鉴 |
-|---|---|---|
+| --- | --- | --- |
 | `available()` | import 检测 | sglang 惰性 load |
 | `capability`(device + SM 窗口,OR 语义) | 硬过滤,如 DeepGEMM `>=sm90` | sglang `CapabilityRequirement` |
 | `dtypes` / `scheme` | 支持的精度/量化方案 | 合并现有量化 method |
@@ -270,7 +270,7 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
 这是你 comment 6 的正式方案:
 
 | 阶段 | 做什么 |
-| -- | --- |
+| --- | --- |
 | 采集 | T2 shape 采集器跑一遍真实负载,导出 shape 清单(含出现频次) |
 | 搜索 | warm-up 或离线对高频 shape 搜索 tile/num_warps/num_stages |
 | 落盘 | 按 `(gpu_name, op, shape_key, dtype)` 存 JSON 到用户缓存目录 + 可选提交进仓库 |
@@ -302,7 +302,7 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
 | **TP 持续批处理** | 地基 0 Executor 抽象 | 可(TP=2) | **高** | 当前 TP 只有 CLI 镜像进程+一次性批处理,服务路径完全不支持 TP(见地基 0 问题 1/2) |
 | chunked prefill | 分页 KV + token budget 调度 | 可 | **高** | varlen attention 你已有,主要改调度和 KV 部分写 |
 | prefix caching | 分页 KV + block hash | 可 | **高** | 多轮对话/共享 system prompt 收益直观 |
-| EP | all_to_all | 可(EP=2) | 中高 | Qwen3-MoE 30B-A3B 上可实测 |
+| EP | all_to_all | 可(EP=2,已验证) | 中高 | **已有(v0.11.5,提前于 v0.13)**:`--enable-expert-parallel` 让 TP 组兼作 EP 组,routed experts 按整专家切分(intermediate 不再 TP 切),等分 padding `all_to_all` dispatch/combine;DeepSeek-V2/V3/V4 与 qwen3_moe 共享 `SparseMoeBlock` 即自动可用。首版限非量化 + eager |
 | DCP | all_gather + LSE 校正 | 可(DCP=2) | 中 | 长上下文 decode 扩容;MLA 场景价值最大 |
 | CP / PCP | P2P ring 或 zigzag 切分 + LSE 合并 | 可 | 中 | 降 prefill 延迟 |
 | **PD 分离** | chunked prefill + KV 传输 connector | **可(1P1D)** | 中 | 2 卡就能演示,不需要更多卡 |
@@ -377,7 +377,7 @@ SGLang `DataParallelController.LoadBalanceMethod` 有四种:round-robin / follow
 o rlap 不止"TP 通信藏进计算"一件事。把所有重叠拆成三条正交的 ping-pong 轴,每条轴独立度量、独立验证,组合后逼近零气泡:
 
 | 轴 | 流水两端 | 粒度 | 目标 | 对应层级 |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | **A. Host-Device** | CPU 调度 ↔ GPU 执行 | **batch 级** | CPU 在 GPU 跑 batch i 时即调度 batch i+1,CPU 侧零等待 | P9(第八节) |
 |**B. Memo-Compute** | HBM 读写 ↔ tensor core 计算 | **tile 级** | 算完一块 tile 即可发射下一块的 load/store,访存与计算流水 | L4 |
 | **C. Compute-Comm** | 计算 kernel ↔ 通信 kernel | **batch/micro-batch 级** | A 块做 all-reduce 时 B 块的 GEMM 已在算,通信藏进计算 | L2/L3/L5 |
@@ -385,12 +385,12 @@ o rlap 不止"TP 通信藏进计算"一件事。把所有重叠拆成三条正�
 三条轴由易到难,分五级落地:
 
 | 级 | 轴 | 技术 | 借鉴 | 你的设计 | PCIe GPU | NVLink GPU |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | L1 | C | 跨 stream 算子重叠(shared/routed expert 并行;下层权重 H2D 预取) | — | `torch.cuda.Stream`+event,零 kernel 改动,先验证调度抽象 | 稳定收益 | 稳定收益 |
 | L2 | C | TP 粗粒度 ping-pong:token 切两半,A 做 all-reduce 时 compute 算 B | TokenWeave | 做成 batch 超阈值才启用的 policy | 就有效 | 收益较小 |
 | L3 | C | TP 细粒度分解:GEMM 输出切 chunk,算完一块即发 reduce-scatter | Google 分解 | chunk 流水,气泡更小 | 可 | 可 |
 | L4 | B | **tile-signaling 原语**(核心创新):Triton GEMM 每算完一个 tile 置 flag,消费者自旋消费,访存与计算细到单 tile | Flux(靠 CUTLASS C++) | 用 `tl.atomic`+共享 flag buffer 在**纯 Triton**里实现 tile 级信号量,可读可教学 | 机制可验证;收益有限 | 收益全开 |
-| L5 | C | MoE all-to-all 重叠:token 切 micro-batch,dispatch i+1 与 expert 算 i 重叠 | DualPipe | 依赖 EP + all_to_all,放最后 | 可(EP=2) | 可(EP=2) |
+| L5 | C | MoE all-to-all 重叠:token 切 micro-batch,dispatch i+1 与 expert 算 i 重叠 | DualPipe / SGLang batch_overlap | **已有(v0.11.5)**:EP dispatch/combine 各拆成 a/b 两段,`operations_strategy` 把两 micro-batch 的 a2a 与对侧计算交错(decode delta_stages=2) | 可(EP=2,已验证) | 可(EP=2) |
 
 > **轴 A(Host-Device)** 单独成节(第八节),因为它改的是引擎架构而非 kernel,层级最高。
 
@@ -749,15 +749,20 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
 
 - **feat**
   - B 轴(Memory-Compute)与 C 轴(Compute-Comm)落地:L2 粗粒度 ping-pong + L3 GEMM 输出分解 + L4 tile-signaling 原语(A 轴归 P9,在 v0.12)
+  - **EP + L5(提前于 v0.12/v0.13)**:EP 组状态(`--enable-expert-parallel`,TP 组兼作 EP 组)+ `SparseMoeBlock` 整专家切分与 `expert_map` 权重加载 + `modules/ep_dispatch.py` 等分 padding `all_to_all` dispatcher;L5 把 MoE forward 拆成 sglang 式 op 流(gate/dispatch_a/shared/dispatch_b/experts/combine_a/combine_b),`TwoBatchOverlap` 改由 `operations_strategy` 驱动,两 micro-batch 的 a2a 与对侧计算交错
+  - **refactor**:`executor/tbo.py` 与 `executor/comm_overlap.py` 迁进独立包 `batch_overlap/`(对齐 sglang `srt/batch_overlap/`),新增 `operations_strategy.py`;`executor/overlap.py` 只留 host↔device 轴(L1)
   - P8 DP + CUDA Graph 先行:DP 副本互不通信,各自 capture 各自 replay,无锁步约束
+  - 完整支持 deepseekv2 v3 v4 模型，跑多层 layers 可以跑通，性能提速，精度对齐 transformersvllm（确保覆盖到deepseekv2/v3/v4 所有算子和 module）
 - **docs**
   - Nsight 对照报告:确认三条轴是否真重叠
 - **benchmark**
   - L2 / L3 / L4 逐级叠加的收益分解,PCIe 与 NVLink 两种拓扑分列(L4 在 PCIe 上收益有限,如实标注)
   - DP + CUDA Graph 的 decode TPOT 与 capture 耗时、显存增量
+  - EP=2 与 TP MoE 同卡数对照 + L5 op 流 on/off 的 decode TPOT(收益分解待 profiling;等分 padding 的浪费上界为每层 ep_size-1 行,decode 小 batch 可接受)
 - **验收**
   - 每个 overlap policy 有 on/off 对照数据,断言气泡减少幅度而非只断言"能跑"
   - DP + CUDA Graph 下 decode 无退化
+  - EP=2 权重按 `expert_map` 分区加载正确、forward 与全专家参照数值等价(bf16 容差);EP+TBO op 流与非 TBO EP 路径输出一致(集合通信顺序不交叉错配);端到端 DeepSeek-V2-Lite TP2+EP2(含 TBO)与 TP2 greedy 在 tie-gap 容差内一致
 
 ## v0.12.0 异步调度 + KV 传输
 

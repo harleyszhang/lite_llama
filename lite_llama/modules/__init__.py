@@ -15,6 +15,12 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .attention import PagedAttention
+    from .deepseek_v4.attention import DeepseekV4Attention
+    from .deepseek_v4.hyper_connection import (
+        DeepseekV4HyperConnection,
+        DeepseekV4HyperHead,
+    )
+    from .deepseek_v4.rope import DeepseekV4RotaryEmbedding
     from .linear import (
         ColumnParallelLinear,
         LinearBase,
@@ -34,6 +40,13 @@ if TYPE_CHECKING:
 # RotaryEmbedding`` CPU-only.
 _EXPORTS: dict[str, tuple[str, str]] = {
     "ColumnParallelLinear": (".linear", "ColumnParallelLinear"),
+    "DeepseekV4Attention": (".deepseek_v4.attention", "DeepseekV4Attention"),
+    "DeepseekV4HyperConnection": (
+        ".deepseek_v4.hyper_connection",
+        "DeepseekV4HyperConnection",
+    ),
+    "DeepseekV4HyperHead": (".deepseek_v4.hyper_connection", "DeepseekV4HyperHead"),
+    "DeepseekV4RotaryEmbedding": (".deepseek_v4.rope", "DeepseekV4RotaryEmbedding"),
     "DeepseekV2MLAAttention": (".mla", "DeepseekV2MLAAttention"),
     "FusedMLP": (".mlp", "FusedMLP"),
     "LinearBase": (".linear", "LinearBase"),
@@ -67,6 +80,10 @@ def __dir__() -> list[str]:
 __all__ = [
     "ColumnParallelLinear",
     "DeepseekV2MLAAttention",
+    "DeepseekV4Attention",
+    "DeepseekV4HyperConnection",
+    "DeepseekV4HyperHead",
+    "DeepseekV4RotaryEmbedding",
     "FusedMLP",
     "LinearBase",
     "MRotaryEmbedding",

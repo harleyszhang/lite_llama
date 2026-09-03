@@ -78,7 +78,7 @@ curl localhost:8000/v1/chat/completions -d '{
 数据口径先说明：V2-Lite 是 16B MoE（激活 2.4B），没有「同尺寸」dense 模型可对照，所以 KV 列从各自 config.json 解析、延迟列跑同一份负载，两组数字并列呈现，不宣称可比。TP=2 decode 走 eager（NCCL 集合通信不进 graph 捕获），TP=1 走 CUDA graph——执行路径差异如实标注。
 
 | | DeepSeek-V2-Lite TP=2（eager decode） | Qwen3-1.7B TP=1（CUDA graph） |
-|---|---|---|
+| --- | --- | --- |
 | TTFT（batch=8 prefill） | 64.8 ms | 22.1 ms |
 | TPOT | 63.01 ms（p50 62.35） | 21.72 ms（p50 21.70） |
 | 吞吐 | 126.9 tok/s | 368.3 tok/s |
@@ -95,7 +95,7 @@ KV 几何（每 token 每层 elements，从 config.json 解析）：V2-Lite MLA 
 ### F8 parser 开销（`benchmarks/bench_parser.py`）
 
 | 配置 | 每 token 解析成本 | 相对基线增量 |
-|------|-----------------|-------------|
+| ------ | ----------------- | ------------- |
 | off（裸循环） | 0.04 µs | — |
 | reasoning | 0.11 µs | +0.07 µs |
 | reasoning + tools | 1.21 µs | +1.17 µs |
@@ -121,7 +121,7 @@ golden 的 UNVERIFIED 语义与上一版一致：checkpoint 缺失时 xfail 并�
 ## 文件清单（相对 v0.10.0，只列主干）
 
 | 操作 | 路径 |
-|------|------|
+| ------ | ------ |
 | 新建 | `lite_llama/models/deepseek_v2.py`、`lite_llama/kernels/ops/attention/mla.py`（MLA prefill/decode 算子与参考实现） |
 | 新建 | `lite_llama/tools/accuracy/`（acc.divergence：PrefillCache/Checker/报告） |
 | 新建 | `lite_llama/engine/reasoning.py`、`lite_llama/engine/tool_parser.py`（F8 双 parser） |

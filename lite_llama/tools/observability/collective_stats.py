@@ -41,9 +41,9 @@ class Collective(StrEnum):
     """
 
     ALL_REDUCE = "all_reduce"
-    ALL_REDUCE_MAX = "all_reduce_max"
-    ALL_REDUCE_MIN = "all_reduce_min"
-    ALL_GATHER = "all_gather"
+    ALL_REDUCE_MAX = "tensor_model_parallel_all_reduce_max"
+    ALL_REDUCE_MIN = "tensor_model_parallel_all_reduce_min"
+    ALL_GATHER = "tensor_model_parallel_all_gather"
     REDUCE_SCATTER = "reduce_scatter"
     ALL_TO_ALL = "all_to_all"
     SEND = "send"

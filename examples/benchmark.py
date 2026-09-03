@@ -91,7 +91,7 @@ def _timed(fn) -> tuple[object, float]:
 
 def bench_lite_llama(
     model_dir, prompts, gen_len, iters, device, max_gpu_num_blocks=None,
-    tensor_parallel_size=1, hf_overrides=None,
+    tensor_parallel_size=1, hf_overrides=None, use_cuda_graph=True,
 ) -> Metrics:
     """Measure lite_llama on one (batch_size, gen_len) configuration.
 
@@ -99,7 +99,9 @@ def bench_lite_llama(
     engine: it is the only path whose executor broadcasts each step's plan to
     follower ranks, which is what a sharded forward needs. Decode keeps its
     CUDA graphs there: every rank replays the same captured grid in
-    lockstep, NCCL all-reduce included.
+    lockstep, NCCL all-reduce included. Pass ``use_cuda_graph=False`` for
+    models whose decode step keeps Python-side state (deepseek_v4's
+    sliding-window cache rebinds tensors every step) — eager decode only.
     """
     greedy = dict(temperature=0.0, top_p=1.0, repetition_penalty=1.0, stop_on_repeat=False)
 
@@ -112,6 +114,7 @@ def bench_lite_llama(
             max_gpu_num_blocks=max_gpu_num_blocks,
             tensor_parallel_size=tensor_parallel_size,
             hf_overrides=hf_overrides,
+            use_cuda_graph=use_cuda_graph,
         )
 
         def generate(params):
@@ -122,6 +125,7 @@ def bench_lite_llama(
         gen = TextGenerator(
             checkpoints_dir=model_dir, max_seq_len=2048, device=device,
             max_gpu_num_blocks=max_gpu_num_blocks, hf_overrides=hf_overrides,
+            use_cuda_graph=use_cuda_graph,
         )
 
         def generate(params):
@@ -197,20 +201,6 @@ def bench_transformers(model_dir, prompts, gen_len, iters, device, dtype="fp16",
 def bench_vllm(model_dir, prompts, gen_len, iters, hf_overrides=None,
                gpu_memory_utilization=0.9, tensor_parallel_size=1) -> Metrics:
     """Measure vLLM's offline ``LLM`` on one (batch_size, gen_len) configuration.
-
-    Production defaults stay on (chunked prefill, CUDA graphs, torch.compile)
-    except prefix caching, which lite_llama also leaves off by default — the
-    warmup would otherwise serve every timed run from cache and the measured
-    TTFT would describe the cache, not the engine.
-
-    ``gpu_memory_utilization`` defaults to vLLM's 0.9 but must be lowered for a
-    checkpoint whose weights already fill most of the card (e.g. the 13 GB
-    DeepSeek-V3-4layers on a 22 GiB A10): at 0.9 the KV reserve crowds out the
-    MLA attention workspace and the first forward OOMs.
-
-    ``tensor_parallel_size`` mirrors the other engines: a full-size checkpoint
-    one card cannot hold (e.g. the 30 GB DeepSeek-V2-Lite) is sharded over the
-    same GPUs the lite_llama replica and the transformers baseline run on.
     """
     from vllm import LLM as VllmLLM
     from vllm import SamplingParams as VllmParams
@@ -314,6 +304,13 @@ def main() -> None:
              "in lockstep, NCCL all-reduce included. The transformers baseline then "
              "uses device_map=auto over the same GPUs",
     )
+    parser.add_argument(
+        "--no-cuda-graph", action="store_true",
+        help="Run lite_llama decode eager instead of replaying captured graphs. "
+             "Needed for models whose decode keeps Python-side state (deepseek_v4 "
+             "rebinds its sliding-window cache every step, which capture cannot "
+             "replay)",
+    )
     parser.add_argument("--log-dir", default="docs/benchmark_logs")
     args = parser.parse_args()
 
@@ -327,6 +324,7 @@ def main() -> None:
         results.append(bench_lite_llama(
             args.model, prompts, args.gen_len, args.iters, device,
             args.max_gpu_num_blocks, args.tensor_parallel_size, hf_overrides,
+            use_cuda_graph=not args.no_cuda_graph,
         ))
     if args.engine in ("both", "all", "transformers"):
         # TP runs spread the baseline's layers across the same GPUs (model

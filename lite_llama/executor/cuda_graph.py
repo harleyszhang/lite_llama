@@ -19,9 +19,11 @@ Usage:
 
 from __future__ import annotations
 
-import logging
 import os
 import zlib
+
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -98,6 +100,12 @@ class CUDAGraphRunner:
         kv_buffer: Layer-wise paged KV tensors (shared with the executor).
         b_req_tokens_table: Request-to-cache-row map (shared with the executor).
         device: Torch device string.
+        step: The callable to record — ``(input_ids, position_ids, atten_info) ->
+            logits``. ``None`` records the model's plain forward; a graph
+            captured in the two-batch-overlap shape records the interleaved
+            halves instead (their deferred all-reduces ride the comm stream,
+            whose fork/join event edges record into the graph like any other
+            dependency, so replay keeps the compute/comm overlap).
     """
 
     def __init__(
@@ -109,11 +117,13 @@ class CUDAGraphRunner:
         kv_buffer: list[torch.Tensor],
         b_req_tokens_table: torch.Tensor,
         device: str = "cuda",
+        step: Callable[[torch.Tensor, torch.Tensor, AttentionMetadata], torch.Tensor] | None = None,
     ) -> None:
         self.model = model
         self.batch_size = batch_size
         self.seq_len_bucket = seq_len_bucket
         self.device = device
+        self._step = step if step is not None else model
 
         # Persistent input surface — everything the graph reads goes through these.
         self.input_ids = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
@@ -147,21 +157,25 @@ class CUDAGraphRunner:
             # fault would surface inside the capture, not the warmup.
             self.atten_info.b_req_idx.copy_(b_req_idx)
             self.atten_info.cur_select_index.copy_(cur_select_index)
-            # Longest legal length walks every split branch, writes past the real
-            # request's position.
-            self.atten_info.b_seq_len.fill_(min(self.seq_len_bucket, self.atten_info.b_req_tokens_table.shape[1] - 1))
+            # The longest legal length walks every split branch the kernel has,
+            # and writes at a position the real request has not reached yet.
+            self.atten_info.b_seq_len.fill_(
+                min(self.seq_len_bucket, self.atten_info.b_req_tokens_table.shape[1] - 1)
+            )
         else:
             # Warm up on real work (see above).
             self.atten_info.b_seq_len.fill_(min(self.seq_len_bucket, 32))
 
         # The capture stream must be idle, so warmup runs on its own stream, fenced
-        # both ways; it forces Triton JIT, cuBLAS workspaces and allocator blocks
-        # to happen before the capture (which cannot allocate).
+        # both ways. Those passes force Triton JIT, cuBLAS workspaces and allocator
+        # blocks to happen *before* the capture, which cannot allocate — and under
+        # the TBO shape they also settle the NCCL communicator's channels, which
+        # must exist before its kernels can be recorded.
         warmup_stream = torch.cuda.Stream()
         warmup_stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(warmup_stream):
             for _ in range(3):
-                _ = self.model(self.input_ids, self.position_ids, self.atten_info)
+                _ = self._step(self.input_ids, self.position_ids, self.atten_info)
         torch.cuda.current_stream().wait_stream(warmup_stream)
 
         # Under TP the capture region contains collectives; assert NCCL is already
@@ -170,7 +184,7 @@ class CUDAGraphRunner:
 
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph):
-            self._output = self.model(self.input_ids, self.position_ids, self.atten_info)
+            self._output = self._step(self.input_ids, self.position_ids, self.atten_info)
 
     def _fill_probe_inputs(self, vocab_size: int) -> None:
         """Load a synthetic but valid decode step into the persistent buffers.
@@ -254,6 +268,10 @@ class CUDAGraphManager:
         batch_sizes: Batch sizes to capture; smaller batches fall back to eager.
         seq_len_buckets: Ascending ``max_actual_seq_len`` ceilings to capture.
         device: Torch device string.
+        step_factory: ``batch_size -> step`` (or ``None`` for the plain forward);
+            the runner records whatever it is handed. The factory decides the
+            two-batch-overlap shape per batch — typically by asking the TBO
+            policy whether that batch size reaches its activation floor.
     """
 
     def __init__(
@@ -266,6 +284,7 @@ class CUDAGraphManager:
         seq_len_buckets: tuple[int, ...] = DEFAULT_SEQ_LEN_BUCKETS,
         device: str = "cuda",
         lazy: bool = False,
+        step_factory: Callable[[int], Callable | None] | None = None,
     ) -> None:
         self.model = model
         self.kv_buffer = kv_buffer
@@ -274,6 +293,7 @@ class CUDAGraphManager:
         self.seq_len_buckets = tuple(sorted(set(seq_len_buckets)))
         self.device = device
         self._lazy = lazy
+        self._step_factory = step_factory
         self._runners: dict[_GraphKey, CUDAGraphRunner] = {}
         # Shapes whose on-demand capture failed (usually OOM): never retried.
         self._failed: set[_GraphKey] = set()
@@ -288,19 +308,25 @@ class CUDAGraphManager:
         # Read once: consulted on every decode step.
         self._check_lockstep = os.environ.get(_LOCKSTEP_ENV) == "1" and get_tensor_model_parallel_world_size() > 1
 
+    def _new_runner(self, key: _GraphKey) -> CUDAGraphRunner:
+        """Build the runner for ``key``, asking the factory for its step shape."""
+        step = self._step_factory(key.batch_size) if self._step_factory is not None else None
+        return CUDAGraphRunner(
+            self.model,
+            batch_size=key.batch_size,
+            seq_len_bucket=key.seq_len_bucket,
+            kv_buffer=self.kv_buffer,
+            b_req_tokens_table=self.b_req_tokens_table,
+            device=self.device,
+            step=step,
+        )
+
     def capture_all(self) -> None:
         """Capture a graph for every ``(batch_size, seq_len_bucket)`` pair."""
         for bs in self.batch_sizes:
             for bucket in self.seq_len_buckets:
                 key = _GraphKey(bs, bucket)
-                runner = CUDAGraphRunner(
-                    self.model,
-                    batch_size=bs,
-                    seq_len_bucket=bucket,
-                    kv_buffer=self.kv_buffer,
-                    b_req_tokens_table=self.b_req_tokens_table,
-                    device=self.device,
-                )
+                runner = self._new_runner(key)
                 runner.capture()
                 self._runners[key] = runner
 
@@ -318,14 +344,7 @@ class CUDAGraphManager:
             _GraphKey(self.batch_sizes[-1], self.seq_len_buckets[-1]),
         )
         for key in dict.fromkeys(seeds):  # de-duplicated, order kept
-            runner = CUDAGraphRunner(
-                self.model,
-                batch_size=key.batch_size,
-                seq_len_bucket=key.seq_len_bucket,
-                kv_buffer=self.kv_buffer,
-                b_req_tokens_table=self.b_req_tokens_table,
-                device=self.device,
-            )
+            runner = self._new_runner(key)
             runner.capture()
             self._runners[key] = runner
 
@@ -348,17 +367,8 @@ class CUDAGraphManager:
             # The capture stream must be the only work in flight: pending readback
             # copies and kernels must land first.
             torch.cuda.synchronize()
-            runner = CUDAGraphRunner(
-                self.model,
-                batch_size=key.batch_size,
-                seq_len_bucket=key.seq_len_bucket,
-                kv_buffer=self.kv_buffer,
-                b_req_tokens_table=self.b_req_tokens_table,
-                device=self.device,
-            )
-            runner.capture(
-                warmup_metadata=(atten_info.b_req_idx, atten_info.cur_select_index)
-            )
+            runner = self._new_runner(key)
+            runner.capture(warmup_metadata=(atten_info.b_req_idx, atten_info.cur_select_index))
             self._runners[key] = runner
             logger.info(
                 "Lazy-captured decode graph batch=%d bucket=%d on first use "

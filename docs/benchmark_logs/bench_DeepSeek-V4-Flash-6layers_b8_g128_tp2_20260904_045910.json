@@ -1,0 +1,22 @@
+{
+  "config": {
+    "model": "/data/shared/llm_weights/DeepSeek-V4-Flash-6layers",
+    "batch_size": 8,
+    "gen_len": 128,
+    "iters": 2,
+    "tensor_parallel_size": 2,
+    "hf_overrides": null,
+    "gpu": "NVIDIA A10",
+    "timestamp": "2026-09-04T04:59:10"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "batch_size": 8,
+    "prompt_tokens": 120,
+    "output_tokens": 1070,
+    "ttft_s": 0.13333088345825672,
+    "tpot_ms": 52.520216760101064,
+    "tgs": 150.58991152453072,
+    "latency_s": 7.105389658361673
+  }
+}

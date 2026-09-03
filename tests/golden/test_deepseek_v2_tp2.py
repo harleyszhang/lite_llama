@@ -68,8 +68,19 @@ _KV_BLOCKS = 8192
 
 # Calibration: scripts/dsv2_tp2_parity_probe.py, 2x A10, bf16, 128 steps +
 # 23 prompt positions. Budgets sit at roughly 2x the observed noise.
-_PROMPT_MEAN_DRIFT = 0.12  # observed 0.046
-_PROMPT_MAX_DRIFT = 0.7  # observed 0.298
+#
+# Recalibrated for the v0.11.5 environment (torch 2.11 / triton 3.6 /
+# transformers 5.8): the prompt budgets drifted past their 66ff2bc-era values
+# (mean 0.046 / max 0.298) with no code change — the gate's own introducing
+# commit (262ed17) fails the old budgets in this environment too (verified on
+# a git worktree), so the delta is the stack's bf16 rounding, not a regression.
+# The measured distribution over all 61 scored prompt positions is right-
+# skewed (mean 0.187, p50 0.090, p95 0.613, max 1.225 — scripts/
+# dsv2_tp2_parity_probe.py's pattern): a systematic error shifts p50 and the
+# step budgets through the floor with it; only the routing-flip tail grows.
+# New budgets keep the same ~2x separation from the observed noise.
+_PROMPT_MEAN_DRIFT = 0.4  # observed 0.187
+_PROMPT_MAX_DRIFT = 2.5  # observed 1.225
 _STEP_MEAN_DRIFT = 0.5  # observed 0.221
 _STEP_MAX_DRIFT = 4.0  # observed 1.967
 #: Fraction of greedy steps that must draw the reference's own argmax (a

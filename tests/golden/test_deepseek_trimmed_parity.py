@@ -47,15 +47,21 @@ import torch
 
 from lite_llama.engine.llm import LLM
 from lite_llama.engine.sampler import SamplingParams
-from tests.conftest import checkpoint_problem
+from tests.conftest import REPO_ROOT, checkpoint_problem
 
 pytestmark = [pytest.mark.gpu, pytest.mark.slow]
 
-# Relative to the repository root, like conftest's DEFAULT_MODEL_DIR: a
-# default that does not resolve here simply xfails the gate (no silent skip
-# either way), and an absolute path would trip the check-hardcoded-paths hook.
-_DSV2 = "my_weight/DeepSeek-V2-Lite"
-_DSV3 = "my_weight/DeepSeek-V3-4layers-MTP-BF16"
+# Both checkpoints live in the shared lab store; ``my_weight/`` carries
+# symlinks to them, which keeps these defaults relative (the
+# no-hardcoded-path hook) while pointing at the same weights as the TP=2 gate.
+_DSV2 = os.environ.get("LITE_LLAMA_TEST_DSV2_DIR", "my_weight/DeepSeek-V2-Lite")
+_DSV3 = os.environ.get("LITE_LLAMA_TEST_DSV3_DIR", "my_weight/DeepSeek-V3-4layers-MTP-BF16")
+
+
+def _resolve(path: str) -> Path:
+    """Relative defaults are repo-rooted, like the TP=2 gate's."""
+    resolved = Path(path)
+    return resolved if resolved.is_absolute() else REPO_ROOT / resolved
 
 _PROMPTS = [
     "The capital of France is",
@@ -93,14 +99,12 @@ def _checkpoint_gate(path: Path) -> Path:
 
 @pytest.fixture(scope="module")
 def v2lite_dir() -> Path:
-    path = Path(os.environ.get("LITE_LLAMA_TEST_DSV2_DIR", _DSV2))
-    return _checkpoint_gate(path if path.is_absolute() else Path(__file__).parents[2] / path)
+    return _checkpoint_gate(_resolve(_DSV2))
 
 
 @pytest.fixture(scope="module")
 def v3_dir() -> Path:
-    path = Path(os.environ.get("LITE_LLAMA_TEST_DSV3_DIR", _DSV3))
-    return _checkpoint_gate(path if path.is_absolute() else Path(__file__).parents[2] / path)
+    return _checkpoint_gate(_resolve(_DSV3))
 
 
 # --------------------------------------------------------------------------- #

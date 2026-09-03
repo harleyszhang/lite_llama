@@ -119,6 +119,10 @@ class ServerConfig:
         tensor_parallel_size: GPUs this replica's weights are split over. Above 1
             the engine spawns the follower ranks itself and the server is still
             one process with one scheduler.
+        enable_expert_parallel: Split MoE experts whole-across-ranks over the
+            TP group instead of TP-splitting each expert (vLLM semantics).
+            Decode keeps its CUDA graphs (lazy capture). Per replica, like the
+            fields around it.
         kv_cache_dtype: KV-cache element type (``"auto"`` or an fp8 spelling).
         enable_prefix_cache: Reuse block-aligned prompt prefixes in the local
             replica cache.
@@ -148,6 +152,7 @@ class ServerConfig:
     use_cuda_graph: bool = True
     quantization: str | None = None
     tensor_parallel_size: int = 1
+    enable_expert_parallel: bool = False
     kv_cache_dtype: str = "auto"
     enable_prefix_cache: bool = False
     prefix_cache_blocks: int | None = None
@@ -560,6 +565,7 @@ def build_app(config: ServerConfig, engine: AsyncLLMEngine | AsyncDataParallelEn
                     use_cuda_graph=config.use_cuda_graph,
                     quantization=config.quantization,
                     tensor_parallel_size=config.tensor_parallel_size,
+                    enable_expert_parallel=config.enable_expert_parallel,
                     kv_cache_dtype=config.kv_cache_dtype,
                     enable_prefix_cache=config.enable_prefix_cache,
                     prefix_cache_blocks=config.prefix_cache_blocks,
@@ -578,6 +584,7 @@ def build_app(config: ServerConfig, engine: AsyncLLMEngine | AsyncDataParallelEn
                     use_cuda_graph=config.use_cuda_graph,
                     quantization=config.quantization,
                     tensor_parallel_size=config.tensor_parallel_size,
+                    enable_expert_parallel=config.enable_expert_parallel,
                     kv_cache_dtype=config.kv_cache_dtype,
                     enable_prefix_cache=config.enable_prefix_cache,
                     prefix_cache_blocks=config.prefix_cache_blocks,

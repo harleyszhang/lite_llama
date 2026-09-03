@@ -19,6 +19,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from lite_llama.observe import METRICS_ENV, EngineMetrics, Tracer
+
 from benchmarks.lib import (
     GREEDY_PARAMS,
     PROMPTS,
@@ -32,7 +34,6 @@ from benchmarks.lib import (
 )
 from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
 from lite_llama.engine.sampler import SamplingParams
-from lite_llama.tools.observability import METRICS_ENV, EngineMetrics, Tracer
 
 CKPT = "my_weight/Qwen3-0.6B"
 

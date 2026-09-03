@@ -124,7 +124,7 @@ def test_dispatch_mode_priority():
 # --------------------------------------------------------------------------- #
 def _cpu_layer(tp_size: int) -> RowParallelLinear:
     """A deterministically weighted layer for the ambient grid (CPU, fp32)."""
-    layer = RowParallelLinear(IN, OUT, dtype=torch.float32)
+    layer = RowParallelLinear(IN, OUT, params_dtype=torch.float32)
     gen = torch.Generator().manual_seed(3)
     with torch.no_grad():
         layer.weight.copy_(torch.randn(OUT, IN // tp_size, generator=gen))
@@ -170,7 +170,7 @@ def test_below_threshold_falls_back_to_the_blocking_reduce(grid, monkeypatch):
         calls.append(tuple(tensor.shape))
         return tensor
 
-    monkeypatch.setattr(comm_overlap, "all_reduce", spy)
+    monkeypatch.setattr(comm_overlap, "tensor_model_parallel_all_reduce", spy)
     layer = _cpu_layer(2)
     layer.forward(torch.randn(2, 4, IN // 2))  # 8 tokens: far below 4096
     assert calls == [(2, 4, OUT)]
@@ -188,7 +188,7 @@ def _shard_weight(rank: int, world: int) -> torch.Tensor:
 
 
 def _layer_on(rank: int, device: torch.device) -> RowParallelLinear:
-    layer = RowParallelLinear(IN, OUT, dtype=torch.float32).to(device)
+    layer = RowParallelLinear(IN, OUT, params_dtype=torch.float32).to(device)
     with torch.no_grad():
         layer.weight.copy_(_shard_weight(rank, 2).to(device))
     return layer

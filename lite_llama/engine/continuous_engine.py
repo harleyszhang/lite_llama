@@ -380,6 +380,7 @@ class ContinuousBatchingEngine:
         use_cuda_graph: bool = True,
         quantization: str | None = None,
         tensor_parallel_size: int = 1,
+        enable_expert_parallel: bool = False,
         kv_cache_dtype: str = "auto",
         enable_prefix_cache: bool = False,
         prefix_cache_blocks: int | None = None,
@@ -417,6 +418,13 @@ class ContinuousBatchingEngine:
                 broadcast to them; this process stays rank 0. If this process
                 already sits in a TP group (the CLI, a DP controller), that group
                 is reused and the value only has to agree with it.
+            enable_expert_parallel: Split MoE experts whole-across-ranks over
+                the TP group instead of TP-splitting each expert's intermediate
+                dim (vLLM semantics). Attention and shared experts stay TP;
+                routed tokens travel by all-to-all. Decode keeps its CUDA
+                graphs — the a2a exchanges capture with the same comm-stream
+                discipline the deferred all-reduce uses, and EP defaults to
+                lazy capture so the larger exchange buffers fit.
             kv_cache_dtype: KV-cache element type, forwarded to the engine
                 (``"auto"`` for fp16, or an fp8 spelling to halve the cache).
             enable_prefix_cache: Reuse the K/V of prompt prefixes already
@@ -498,11 +506,17 @@ class ContinuousBatchingEngine:
                 f"tensor-parallel group, but tensor_parallel_size={tensor_parallel_size}"
             )
         if joined == 1 and tensor_parallel_size > 1:
-            followers = launch_tensor_parallel(tensor_parallel_size, engine_kwargs, max_num_seqs)
+            followers = launch_tensor_parallel(
+                tensor_parallel_size,
+                engine_kwargs,
+                max_num_seqs,
+                enable_expert_parallel=enable_expert_parallel,
+            )
 
         engine = LLMEngine(
             device=device,
             tensor_parallel_size=tensor_parallel_size,
+            enable_expert_parallel=enable_expert_parallel,
             **engine_kwargs,
         )
         config = SchedulerConfig(
@@ -907,9 +921,26 @@ class ContinuousBatchingEngine:
         if self._tokenize_pool is not None:
             self._tokenize_pool.shutdown(wait=False)
         self._executor.shutdown()
+        # Break every reference this shell still holds into the engine's object
+        # graph (executor -> worker -> model runner -> weights and KV cache).
+        # The caller usually drops its last reference right after shutdown, but
+        # a reference cycle would then wait for a gc pass: a second engine
+        # built in this process would profile a KV budget of zero cache tokens
+        # and crash on its first step. Nulling the links frees the weights and
+        # the cache by refcount alone; empty_cache hands them back to the
+        # driver so the profiler sees them as free.
+        import gc
+
+        self._executor = None
+        self.engine = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def timeline_summary(self) -> str:
         """Stream region table of the steps run so far; empty unless tracing is on."""
+        if self._executor is None:
+            return ""
         return self._executor.timeline_summary()
 
     def _graph_manager(self):

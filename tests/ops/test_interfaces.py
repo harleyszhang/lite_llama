@@ -89,6 +89,7 @@ class CpuMoe(MoeOp):
         w2_zeros=None,
         group_n=0,
         group_k=0,
+        swiglu_limit=float("inf"),
     ):
         inter = w1.shape[1] // 2
         out = torch.zeros_like(hidden_states, dtype=torch.float32)
@@ -96,6 +97,9 @@ class CpuMoe(MoeOp):
             for j in range(topk_ids.shape[1]):
                 e, w = int(topk_ids[t, j]), float(topk_weights[t, j])
                 gate, up = w1[e, :inter] @ hidden_states[t], w1[e, inter:] @ hidden_states[t]
+                if swiglu_limit < float("inf"):
+                    gate = min(gate, swiglu_limit)
+                    up = torch.clamp(up, -swiglu_limit, swiglu_limit)
                 out[t] += w * (w2[e] @ (torch.nn.functional.silu(gate) * up))
         return out.to(hidden_states.dtype)
 
@@ -244,7 +248,7 @@ SIGNATURES = {
     ),
     MoeOp: (
         ["hidden_states", "w1", "w2", "topk_weights", "topk_ids"],
-        ["w1_scale", "w2_scale", "w1_zeros", "w2_zeros", "group_n", "group_k"],
+        ["w1_scale", "w2_scale", "w1_zeros", "w2_zeros", "group_n", "group_k", "swiglu_limit", "mxfp4"],
     ),
     DispatchOp: (["x", "topk_idx"], ["num_experts"]),
     CombineOp: (["x", "unsorted_src_idx", "unsorted_weights"], []),

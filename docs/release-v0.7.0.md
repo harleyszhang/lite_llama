@@ -25,7 +25,7 @@ v0.7.0 升级调度器（参考 vLLM Scheduler v1），引入三项能力：
 ### 实测数据（真实 scheduler 输出）
 
 | 配置 | Prefill 步数 | 单 step 峰值 prefill token | 每步 decode 请求数 |
-|------|-------------|--------------------------|------------------|
+| ------ | ------------- | -------------------------- | ------------------ |
 | `max_chunk_size=0` (v0.6) | 1 | **2000** | 4 |
 | `max_chunk_size=512` (v0.7) | 4 | **512** | 4 |
 | `max_chunk_size=256` | 8 | **256** | 4 |
@@ -65,7 +65,7 @@ sched = Scheduler(config, num_slots=64)
 场景：4 个请求共享 768-token system prompt，各带 32-token 独立 user tail。
 
 | 请求 | Cached (KV 复用) | 实际 prefill | 累计命中率 |
-|------|----------------|-------------|-----------|
+| ------ | ---------------- | ------------- | ----------- |
 | req-0 (cold) | 0 | **800** | 0.0% |
 | req-1 (shared) | 768 | **32** | 48.0% |
 | req-2 (shared) | 768 | **32** | 64.0% |
@@ -110,7 +110,7 @@ print(f"prefix cache hit rate: {sched.prefix_cache_hit_rate:.1%}")
 ### 实测数据（真实 scheduler 输出）
 
 | step | prefill/recompute | decode (+1 tok) | preempted | 累计抢占 |
-|------|-------------------|-----------------|-----------|---------|
+| ------ | ------------------- | ----------------- | ----------- | --------- |
 | 1 | req-0, req-1 | — | — | 0 |
 | 2 | — | req-0, req-1 | — | 0 |
 | 3 | req-2 | req-0 | req-1 | 1 |
@@ -147,7 +147,7 @@ print(f"total preemptions: {sched.num_preemptions}")
 > 分片 prefill（`chunk_lens`），最后一步超订触发抢占（`preempted` 被填充）。
 
 | step | prefill | prefill_chunk_lens | decode | preempted | prefill+decode 并存 |
-|------|---------|--------------------|--------|-----------|-------------------|
+| ------ | --------- | -------------------- | -------- | ----------- | ------------------- |
 | 1 | [short-a, short-b] | [20, 20] | [] | [] | 否 |
 | 2 | [long-c] | [256] | [short-a, short-b] | [] | **是** |
 | 3 | [long-c] | [256] | [short-a, short-b] | [] | **是** |
@@ -159,10 +159,10 @@ print(f"total preemptions: {sched.num_preemptions}")
 ## 5. SchedulerConfig 新增参数
 
 | 参数 | 默认值 | 说明 |
-|------|--------|------|
+| ------ | -------- | ------ |
 | `max_chunk_size` | 512 | 每步最大 prefill token 数。0=不分片 |
-| `enable_prefix_cache` | False | 开启 block-hash 前缀复用（v0.7 已实现）|
-| `enable_preemption` | False | 允许 `max_num_seqs` 超订 slot，用 recompute 时分复用（v0.7 已实现）|
+| `enable_prefix_cache` | False | 开启 block-hash 前缀复用（v0.7 已实现） |
+| `enable_preemption` | False | 允许 `max_num_seqs` 超订 slot，用 recompute 时分复用（v0.7 已实现） |
 
 ## 6. 测试结果
 
@@ -177,7 +177,7 @@ print(f"total preemptions: {sched.num_preemptions}")
 ## 7. 设计参考 (vLLM)
 
 | lite_llama v0.7 | vLLM 对应 | 说明 |
-|-----------------|-----------|------|
+| ----------------- | ----------- | ------ |
 | `SchedulerConfig.max_chunk_size` | `SchedulerConfig.max_num_batched_tokens` | 控制 prefill 粒度 |
 | `PrefixCache` (block-hash 链式) | `BlockHashType` + `KVCacheManager` prefix cache | 共享前缀 KV 复用 |
 | `Scheduler._preempt()` | `Scheduler._preempt()` | recompute 策略 |

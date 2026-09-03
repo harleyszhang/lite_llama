@@ -620,3 +620,93 @@ def test_fused_moe_fp8_blockwise_matches_reference(act_dtype):
     )
     ref = fused_moe_reference(x, deq1, deq2, weights.to(act_dtype), ids)
     torch.testing.assert_close(out.float(), ref, rtol=2e-2, atol=2e-2)
+
+
+# e2m1 code points indexed by nibble (bit3 sign, bits[2:1] exponent, bit0 mantissa).
+_E2M1_LUT = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+             -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+
+
+def _pack_mxfp4(nibbles: torch.Tensor) -> torch.Tensor:
+    """``[E, N, K]`` uint8 nibbles -> ``[E, N, K//8]`` int32, low nibble = lower K."""
+    b = (nibbles[..., 0::2] & 0xF) | ((nibbles[..., 1::2] & 0xF) << 4)
+    return (
+        b[..., 0::4].to(torch.int64)
+        | (b[..., 1::4].to(torch.int64) << 8)
+        | (b[..., 2::4].to(torch.int64) << 16)
+        | (b[..., 3::4].to(torch.int64) << 24)
+    ).to(torch.int32)
+
+
+@pytest.mark.parametrize("act_dtype", [torch.float16, torch.bfloat16])
+def test_fused_moe_mxfp4_matches_reference(act_dtype):
+    """MXFP4 e2m1 expert weights with per-32 e8m0 scales (DeepSeek-V4 routed
+    experts).
+
+    GROUP_K (32) is narrower than BLOCK_K, so one k-tile spans four scale
+    groups; the kernel must switch scales inside the tile. swiglu_limit
+    exercises V4's bounded SwiGLU on the same launch.
+    """
+    torch.manual_seed(0)
+    hidden, inter, num_experts, top_k = 256, 128, 8, 2
+    limit = 7.0
+    x = torch.randn(7, hidden, device="cuda", dtype=act_dtype) / hidden**0.5
+    n1 = torch.randint(0, 16, (num_experts, 2 * inter, hidden), device="cuda", dtype=torch.uint8)
+    n2 = torch.randint(0, 16, (num_experts, hidden, inter), device="cuda", dtype=torch.uint8)
+    # e8m0 scales are powers of two.
+    s1 = torch.exp2(
+        torch.randint(-6, -1, (num_experts, 2 * inter, hidden // 32), device="cuda").float()
+    )
+    s2 = torch.exp2(
+        torch.randint(-6, -1, (num_experts, hidden, inter // 32), device="cuda").float()
+    )
+    ids = torch.randint(0, num_experts, (7, top_k), device="cuda")
+    weights = torch.softmax(torch.randn(7, top_k, device="cuda", dtype=torch.float32), dim=-1)
+
+    out = fused_moe(
+        x,
+        _pack_mxfp4(n1),
+        _pack_mxfp4(n2),
+        weights,
+        ids,
+        w1_scale=s1,
+        w2_scale=s2,
+        group_n=1,
+        group_k=32,
+        swiglu_limit=limit,
+        mxfp4=True,
+    )
+
+    # Reference: dequantise via the LUT and matmul in fp32, with V4's clamps.
+    lut = torch.tensor(_E2M1_LUT, device="cuda")
+    deq1 = lut[n1.long()] * s1.repeat_interleave(32, 2)
+    deq2 = lut[n2.long()] * s2.repeat_interleave(32, 2)
+    xf = x.float()
+    ref = torch.zeros_like(xf)
+    flat_ids = ids.reshape(-1)
+    flat_weights = weights.reshape(-1)
+    token_of_slot = torch.arange(x.shape[0], device="cuda").repeat_interleave(top_k)
+    for e in flat_ids.unique():
+        sel = flat_ids == e
+        rows = token_of_slot[sel]
+        gate_up = xf[rows] @ deq1[e].T
+        gate = gate_up[:, :inter].clamp(max=limit)
+        up = gate_up[:, inter:].clamp(min=-limit, max=limit)
+        h = F.silu(gate) * up
+        ref.index_add_(0, rows, (h @ deq2[e].T) * flat_weights[sel, None])
+
+    torch.testing.assert_close(out.float(), ref, rtol=2e-2, atol=2e-2)
+
+
+def test_fused_moe_mxfp4_rejects_non_32_group_k():
+    x = torch.randn(2, 64, device="cuda", dtype=torch.float16)
+    w1 = torch.zeros(4, 32, 64, device="cuda", dtype=torch.int32)
+    w2 = torch.zeros(4, 64, 16, device="cuda", dtype=torch.int32)
+    ids = torch.zeros(2, 2, device="cuda", dtype=torch.int32)
+    weights = torch.ones(2, 2, device="cuda", dtype=torch.float16)
+    scale = torch.ones(4, 32, 1, device="cuda")
+    with pytest.raises(ValueError, match="group_k"):
+        fused_moe(
+            x, w1, w2, weights, ids,
+            w1_scale=scale, w2_scale=scale, group_n=1, group_k=64, mxfp4=True,
+        )

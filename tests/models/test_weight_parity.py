@@ -196,6 +196,50 @@ CASES: dict[str, tuple[dict, str]] = {
         },
         "transformers:Qwen3VLForConditionalGeneration",
     ),
+    # V4's attention modules are real HF submodules, so nearly everything
+    # passes through by name; the mapping work is the two layernorm leaves
+    # that fold, the shared expert's fused gate/up, the router's bare
+    # parameters, and the pre-stacked 3D experts. One sliding layer plus
+    # one compressed layer covers both attention families, hash + top-k
+    # covers both routers. ``tie_word_embeddings`` stays False so the
+    # shipped ``lm_head`` mapping is what the parity asserts.
+    "deepseek_v4": (
+        {
+            "model_type": "deepseek_v4",
+            "vocab_size": 128,
+            "hidden_size": 64,
+            "moe_intermediate_size": 32,
+            "num_hidden_layers": 2,
+            "layer_types": ["sliding_attention", "compressed_sparse_attention"],
+            "compress_rates": {"compressed_sparse_attention": 4},
+            "mlp_layer_types": ["hash_moe", "moe"],
+            "num_attention_heads": 4,
+            "num_key_value_heads": 1,
+            "head_dim": 16,
+            "q_lora_rank": 16,
+            "o_groups": 2,
+            "o_lora_rank": 8,
+            "partial_rotary_factor": 0.5,
+            "sliding_window": 16,
+            "hc_mult": 2,
+            "hc_sinkhorn_iters": 4,
+            "n_routed_experts": 4,
+            "num_experts_per_tok": 2,
+            "n_shared_experts": 1,
+            "routed_scaling_factor": 1.5,
+            "scoring_func": "sqrtsoftplus",
+            "index_n_heads": 2,
+            # Stays >= head_dim * partial_rotary_factor (8): the indexer
+            # heads take the trailing rope slice.
+            "index_head_dim": 16,
+            "index_topk": 4,
+            "swiglu_limit": 7.0,
+            "max_position_embeddings": 256,
+            "rms_norm_eps": 1e-6,
+            "tie_word_embeddings": False,
+        },
+        "transformers:DeepseekV4ForCausalLM",
+    ),
 }
 
 
@@ -242,6 +286,11 @@ def write_hf_checkpoint(directory: Path, model_type: str) -> tuple[dict, ModelCo
     for key, value in state.items():
         if key.endswith("e_score_correction_bias"):
             state[key] = torch.randn_like(value)
+        elif key.endswith(".gate.tid2eid"):
+            # The hash router's table is an integer buffer — randomise it too,
+            # or the parity assertion below would compare zeros to zeros.
+            n_experts = state[key[: -len("gate.tid2eid")] + "gate.weight"].shape[0]
+            state[key] = torch.randint(0, n_experts, value.shape, dtype=value.dtype)
     _save(state, directory)
     return state, config
 
@@ -279,13 +328,59 @@ def test_decoder_weights_land_in_the_right_place(model_type: str, tmp_path: Path
         # loader's ``copy_`` performs, so parity stays bit-exact in the model dtype.
         assert torch.equal(params[lite_key].data[index], state[hf_key].to(config.dtype)), lite_key
 
+    def same_raw(hf_key: str, lite_key: str) -> None:
+        # V4's mHC tables are :class:`RawParameter`\ s: fp32 checkpoint values
+        # copied verbatim, never rounded through the model dtype — unlike
+        # every regular parameter above.
+        assert torch.equal(params[lite_key].data, state[hf_key]), lite_key
+
     same(f"{hf}embed_tokens.weight", f"{lite}embed_tokens.weight")
     same(f"{hf}norm.weight", f"{lite}norm_weight")
+    if model_type == "deepseek_v4":
+        # The mHC head is a real HF submodule too; its three tables land under
+        # the same name — in fp32 storage.
+        for leaf in ("hc_base", "hc_fn", "hc_scale"):
+            same_raw(f"{hf}hc_head.{leaf}", f"{lite}hc_head.{leaf}")
 
     for i in range(config.num_layers):
         attn, lite_attn = f"{hf}layers.{i}.self_attn", f"{lite}layers.{i}.self_attn"
-        same(f"{attn}.o_proj.weight", f"{lite_attn}.o_proj.weight")
-        if f"{attn}.kv_a_proj_with_mqa.weight" in state:
+        if model_type == "deepseek_v4":
+            # V4 has no ``o_proj``: the output projection is the O-LoRA pair
+            # (``o_a_proj`` per group, ``o_b_proj`` row-parallel), and the mHC
+            # mixers plus the compressor/indexer modules are real HF
+            # submodules — every attention key passes through by name except
+            # the two layernorm leaves, which fold their module path like
+            # every other family.
+            for leaf in (
+                "q_a_proj.weight",
+                "q_a_norm.weight",
+                "q_b_proj.weight",
+                "kv_proj.weight",
+                "kv_norm.weight",
+                "o_a_proj.weight",
+                "o_b_proj.weight",
+                "sinks",
+            ):
+                same(f"{attn}.{leaf}", f"{lite_attn}.{leaf}")
+            for hc in ("attn_hc", "ffn_hc"):
+                for leaf in ("base", "fn", "scale"):
+                    same_raw(f"{hf}layers.{i}.{hc}.{leaf}", f"{lite}layers.{i}.{hc}.{leaf}")
+            same(
+                f"{hf}layers.{i}.input_layernorm.weight",
+                f"{lite}layers.{i}.input_layernorm_weight",
+            )
+            same(
+                f"{hf}layers.{i}.post_attention_layernorm.weight",
+                f"{lite}layers.{i}.post_attention_layernorm_weight",
+            )
+        else:
+            same(f"{attn}.o_proj.weight", f"{lite_attn}.o_proj.weight")
+        if model_type == "deepseek_v4":
+            # Every V4 attention key was asserted above (pass-throughs, the
+            # mHC tables, the folded layernorms) — there is no MLA/GQA block
+            # left to check for this family.
+            pass
+        elif f"{attn}.kv_a_proj_with_mqa.weight" in state:
             # MLA: the projections are separate modules that pass through by
             # name; only the latent/query layernorms fold their ``weight`` leaf
             # (the same _FLATTENED rule as the q/k norms).
@@ -359,6 +454,12 @@ def test_decoder_weights_land_in_the_right_place(model_type: str, tmp_path: Path
                 params[f"{lite_mlp}.gate_e_score_correction_bias"].data,
                 state[f"{mlp}.gate.e_score_correction_bias"],
             ), f"{lite_mlp}.gate_e_score_correction_bias"
+        if f"{mlp}.gate.tid2eid" in state:
+            # V4's hash router: the integer expert-id table, no dtype cast on
+            # the way in.
+            assert torch.equal(
+                params[f"{lite_mlp}.gate_tid2eid"].data, state[f"{mlp}.gate.tid2eid"]
+            ), f"{lite_mlp}.gate_tid2eid"
         same(f"{mlp}.experts.gate_up_proj", f"{lite_mlp}.experts.gate_up_proj")
         same(f"{mlp}.experts.down_proj", f"{lite_mlp}.experts.down_proj")
         # DeepSeek's shared expert rides the MoE layers: one dense MLP every

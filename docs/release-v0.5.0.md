@@ -52,7 +52,7 @@ if config is None:
 **Qwen3-0.6B 搜索结果 (A10):**
 
 | Op | Shape | Best Config | Latency |
-|----|-------|-------------|---------|
+| ---- | ------- | ------------- | --------- |
 | fused_moe | M16_N6144_K1024 | BM=32, BN=32, BK=128 | 436.7 us |
 | fused_moe | M64_N6144_K1024 | BM=128, BN=32, BK=128 | -- |
 | fused_moe | M128_N6144_K1024 | BM=64, BN=32, BK=128 | -- |
@@ -75,7 +75,7 @@ if config is None:
 **精度测试 (6/6 PASS):**
 
 | Shape (M, N, K) | max-abs-diff | relative error |
-|-----------------|-------------|----------------|
+| ----------------- | ------------- | ---------------- |
 | (1, 128, 1024) | < 0.1 | < 1% |
 | (4, 256, 512) | < 0.1 | < 1% |
 | (16, 1024, 2048) | < 0.1 | < 1% |
@@ -86,7 +86,7 @@ if config is None:
 三个 kernel 的 launch 路径统一改为"先查缓存 → 命中用最优 → 未命中回退启发式":
 
 | Kernel | 文件 | 搜索空间大小 |
-|--------|------|-------------|
+| -------- | ------ | ------------- |
 | `fused_moe` | `lite_llama/kernels/fused_moe.py` | 432 configs |
 | `flash_attn_nopad` | `lite_llama/kernels/flashattention2_nopad.py` | 72 configs (原 144 组) |
 | `w4a16_matmul` | `lite_llama/kernels/quantization/w4a16.py` | 接入 lookup |
@@ -109,7 +109,7 @@ if config is None:
 ## 文件清单
 
 | 操作 | 路径 |
-|------|------|
+| ------ | ------ |
 | 新建 | `lite_llama/kernels/autotune/__init__.py` |
 | 新建 | `lite_llama/kernels/autotune/config_key.py` |
 | 新建 | `lite_llama/kernels/autotune/config_store.py` |

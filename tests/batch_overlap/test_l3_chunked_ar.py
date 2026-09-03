@@ -40,7 +40,7 @@ def _payload_overlap_evidence(rank: int) -> dict:
     CommStreamPool.reset()
     reset_comm_overlap_policy()
     device = torch.device("cuda", rank)
-    layer = RowParallelLinear(HIDDEN, HIDDEN, dtype=torch.float32).to(device)
+    layer = RowParallelLinear(HIDDEN, HIDDEN, params_dtype=torch.float32).to(device)
     with torch.no_grad():
         layer.weight.copy_(torch.randn(HIDDEN, HIDDEN // 2, device=device))
     x = torch.randn(TOKENS, HIDDEN // 2, device=device)
@@ -78,7 +78,7 @@ def _payload_blocking_records_no_comm_region(rank: int) -> str:
     CommStreamPool.reset()
     reset_comm_overlap_policy()
     device = torch.device("cuda", rank)
-    layer = RowParallelLinear(HIDDEN, HIDDEN, dtype=torch.float32).to(device)
+    layer = RowParallelLinear(HIDDEN, HIDDEN, params_dtype=torch.float32).to(device)
     with torch.no_grad():
         layer.weight.copy_(torch.randn(HIDDEN, HIDDEN // 2, device=device))
     x = torch.randn(TOKENS, HIDDEN // 2, device=device)

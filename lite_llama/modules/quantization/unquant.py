@@ -50,13 +50,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
     """Plain stacked experts; the grouped GEMM runs without scales."""
 
     def create_weights(self, block: nn.Module) -> dict[str, nn.Parameter]:
-        # ``block.dtype`` follows the checkpoint (SparseMoeBlock reads
-        # ``config.dtype``); a stub without one defers to PyTorch's default.
-        dtype = getattr(block, "dtype", None) or torch.get_default_dtype()
+        # ``block.dtype`` is the model's dtype; the getattrs keep bare stubs
+        # (tests) on the fp16 default and pre-EP blocks on the full expert
+        # count (``num_local_experts`` only differs under expert parallelism).
+        dtype = getattr(block, "dtype", torch.float16)
+        num_experts = getattr(block, "num_local_experts", block.num_experts)
         return {
             "gate_up_proj": nn.Parameter(
                 torch.empty(
-                    block.num_experts,
+                    num_experts,
                     2 * block.moe_intermediate_size,
                     block.hidden_size,
                     dtype=dtype,
@@ -65,7 +67,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
             ),
             "down_proj": nn.Parameter(
                 torch.empty(
-                    block.num_experts,
+                    num_experts,
                     block.hidden_size,
                     block.moe_intermediate_size,
                     dtype=dtype,

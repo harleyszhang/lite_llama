@@ -13,12 +13,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ..distributed.parallel_state import (
-    divide,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
-)
+from ..distributed.parallel_state import divide, get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from ..batch_overlap import row_parallel_forward
 from .quantization import QuantizationConfig, UnquantizedLinearMethod
 
 
@@ -302,13 +298,11 @@ class RowParallelLinear(LinearBase):
         return super()._weight_loader(param.data, loaded)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        output_parallel = self.apply_linear(x)
-        # vLLM's insertion point: the collective rides on the layer, after the multiply
-        # and before anything downstream consumes the output. The world-of-one early
-        # return lives inside the collective, so a call site only sets reduce_results.
-        if self.reduce_results:
-            return tensor_model_parallel_all_reduce(output_parallel)
-        return output_parallel
+        # The multiply is this layer's; *when and where the reduction happens*
+        # is the comm-overlap module's — deferred under TBO, chunked under L3,
+        # blocking otherwise. Dispatched rather than inlined here so the
+        # policy lives in exactly one place.
+        return row_parallel_forward(self, x)
 
 
 def _check_shard_alignment(quant: QuantizationConfig | None, local_size: int, what: str) -> None:

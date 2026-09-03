@@ -4,16 +4,15 @@ lite_llama 支持多种权重量化方案，架构与 [sglang](https://github.co
 
 ## 支持的方案
 
-| 方案 | 配置类 | 权重 | 激活 | Scale 粒度 | 适用场景 |
-|---|---|---|---|---|---|
-| **fp8** | `Fp8Config` | fp8-e4m3 | fp16 | 128×128 block | Qwen/DeepSeek FP8 checkpoint |
-| **w8a8_fp8** | `W8A8Fp8Config` | fp8-e4m3 | fp8-e4m3（动态） | per-channel / per-token | 真 W8A8 运行时（`--quantization fp8`），dense 与 MoE 均可 |
-| **blockwise_int8** | `BlockInt8Config` | int8 | fp16 | per-channel / group-wise | 运行时 int8（`--quantization int8`） |
-| **w8a8_int8** | `W8A8Int8Config` | int8 | int8（动态） | per-channel / per-token | SmoothQuant（`--quantization smoothquant`） |
-| **nvfp4** | `NVFP4Config` | fp4-e2m1 | bf16/fp16 | 16 元素 block + per-tensor | 仅权重 4-bit（`--quantization nvfp4`），仅 dense |
-| **awq** | `AWQConfig` | int4 | fp16 | group-wise（128） | 预量化 AWQ checkpoint |
-| **gptq** | `GPTQConfig` | int4 | fp16 | group-wise（128） | 预量化 GPTQ checkpoint |
-| **fp8 KV cache** | `Fp8KVCacheMethod` | — | — | per-tensor | `--kv-cache-dtype fp8` 把 KV 显存减半 |
+| Scheme | Config Class | Weight | Activation | Scale Granularity | Use Case |
+| -------- | ------------- | -------- | ------------ | ------------------- | ---------- |
+| **fp8** | `Fp8Config` | fp8-e4m3 | fp16 | 128×128 block | Qwen/DeepSeek FP8 checkpoints |
+| **w8a8_fp8** | `W8A8Fp8Config` | fp8-e4m3 | fp8-e4m3 (dynamic) | per-channel / per-token | True W8A8 runtime (`--quantization fp8`) |
+| **blockwise_int8** | `BlockInt8Config` | int8 | fp16 | per-channel / group-wise | Runtime int8 (`--quantization int8`) |
+| **w8a8_int8** | `W8A8Int8Config` | int8 | int8 (dynamic) | per-channel / per-token | SmoothQuant (`--quantization smoothquant`) |
+| **awq** | `AWQConfig` | int4 | fp16 | group-wise (128) | Pre-quantised AWQ checkpoints |
+| **gptq** | `GPTQConfig` | int4 | fp16 | group-wise (128) | Pre-quantised GPTQ checkpoints |
+| **fp8 KV cache** | `Fp8KVCacheMethod` | — | — | per-tensor | `--kv-cache-dtype fp8` halves KV memory |
 
 ## 快速上手
 
@@ -74,9 +73,9 @@ lite_llama/modules/quantization/
 
 ### 与 sglang 的对齐表
 
-| lite_llama | sglang 对应 | 说明 |
-|---|---|---|
-| `QuantizationConfig` | `QuantizationConfig` | 抽象基类，含 `get_quant_method(layer, prefix)` |
+| lite_llama | sglang equivalent | Notes |
+| ------------ | ------------------- | ------- |
+| `QuantizationConfig` | `QuantizationConfig` | ABC with `get_quant_method(layer, prefix)` |
 | `LinearMethodBase` | `LinearMethodBase` | `create_weights` + `apply` |
 | `FusedMoEMethodBase` | `FusedMoEMethodBase` | 堆叠专家（stacked expert）策略 |
 | `Fp8Config` | `Fp8Config` | 仅权重 fp8（block-wise scales） |
@@ -114,8 +113,8 @@ method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 ### Qwen3-0.6B（dense，28 层，hidden=1024）
 
 | Config | Model Mem | KV Capacity | TPOT (ms) | TPS | vs HF Speedup |
-|---|---|---|---|---|---|
-| HF fp16（基线） | 1.17 GB | — | 28.19 | 141.7 | 1.0× |
+| -------- | ----------- | ------------- | ----------- | ----- | --------------- |
+| HF fp16 (baseline) | 1.17 GB | — | 28.19 | 141.7 | 1.0× |
 | lite fp16 | 1.40 GB | 147,875 tok | 4.14 | 918.8 | 6.5× |
 | lite int8 | 0.99 GB | 141,549 tok | 4.16 | 904.1 | 6.4× |
 | lite int8-blockwise | 1.00 GB | 138,385 tok | 4.44 | 849.4 | 6.0× |
@@ -141,7 +140,7 @@ method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 按层分发的量化算子（`Fp8Config.get_quant_method`）：
 
 | 层 | Quant Method | Kernel | 权重格式 |
-|----|--------------|--------|---------|
+| ---- | -------------- | -------- | --------- |
 | `self_attn.qkv_proj` / `o_proj` | `Fp8LinearMethod` | `w8a16_matmul` | fp8-e4m3 + 128×128 block scales |
 | `mlp.experts`（128 专家的 gate_up / down） | `Fp8MoEMethod` | `fused_moe` `QUANT_MODE=1` | fp8-e4m3 + block scales（sm89+ 单条硬件 `cvt` 加宽；旧设备 bit-trick 折 256× 进 `DEQUANT_SCALE`） |
 | `mlp.gate`（router）/ `lm_head` | `UnquantizedLinearMethod` | cuBLAS 线性层 | bf16 |
@@ -190,7 +189,11 @@ method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 - **INT4 MoE（AWQ/GPTQ）**：fused_moe kernel 支持带 group-wise scales+zeros 的 int4 权重，byte 布局（2 nibble/uint8）+ 寄存器 nibble 分离的双 dot kernel；见[下文 INT4 byte 布局与双 dot kernel](#int4-byte-布局与双-dot-kernel)
 - **KV cache fp8**：未反映在上表中（与权重量化正交）；把 KV cache 占用减半，可支持约 2× 更长的序列
 
-## NVFP4 仅权重 FP4
+| Scheme | Token Match vs HF fp16 | Expected |
+| -------- | ---------------------- | ---------- |
+| lite fp16 | ~25% | Normal — different attention kernel numerics cause divergence after first mismatch |
+| int8 per-channel | ~23% | Within fp16 divergence range |
+| fp8 W8A8 | ~5% | e4m3's 3 mantissa bits cause earlier divergence |
 
 NVIDIA ModelOpt / TensorRT-LLM 布局，实现于 `lite_llama/kernels/ops/quantization/nvfp4.py`，以 `native/linear_nvfp4` 派发：
 

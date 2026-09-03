@@ -85,7 +85,12 @@ def vocab_parallel_embedding(
         ``[*input_ids.shape, hidden]``. CPU tensors take a torch-native path
         with the same semantics — Triton cannot run there.
     """
-    flat = input_ids.reshape(-1)
+    # ``reshape`` on a strided slice (the decode path feeds ``ids[:, :1]``)
+    # returns a *view* with stride > 1 rather than a copy, and the kernel
+    # indexes ids as stride-1 — it would silently read neighbouring tokens.
+    # ``contiguous`` is a no-op on already-dense ids, so only strided inputs
+    # pay the (int64, tokens-sized) copy.
+    flat = input_ids.contiguous().view(-1)
     if not input_ids.is_cuda:
         return _eager_embedding(flat, weight, shard_start, local_vocab)
 

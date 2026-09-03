@@ -55,12 +55,12 @@ class LLM(LLMEngine):
         quantization: Runtime weight quantisation (``"int8"``); ``None`` keeps
             the checkpoint's native format (fp16 or auto-detected fp8).
         tensor_parallel_size: Number of GPUs this replica's weights are split over.
-            Above 1, this process must *already* be a rank of the group (a CLI
-            worker, a DP replica, a test harness): ``LLM`` drives the model with a
-            lockstep batch loop that has no way to hand a follower rank its work,
-            so it cannot start a group of its own. Use
-            :meth:`~lite_llama.engine.continuous_engine.ContinuousBatchingEngine.from_pretrained`,
-            whose executor broadcasts each step's plan, to spawn one.
+        enable_expert_parallel: Split MoE experts whole-across-ranks over the
+            TP group (vLLM semantics); decode keeps its CUDA graphs (EP
+            defaults to lazy capture for the larger a2a buffers). The group
+            state itself is set by whoever rendezvoused this process (the DP
+            controller or ``from_pretrained``'s launcher) — this flag only
+            drives the graph decision and is stored for introspection.
         data_parallel_size: Accepted only as ``1``. DP replicates the whole model
             across processes, which cannot be done from inside one of them; use
             :class:`~lite_llama.engine.data_parallel.DataParallelEngine`, which owns
@@ -86,6 +86,7 @@ class LLM(LLMEngine):
         quantization: str | None = None,
         tensor_parallel_size: int = 1,
         data_parallel_size: int = 1,
+        enable_expert_parallel: bool = False,
         kv_cache_dtype: str = "auto",
         cuda_graph_lazy: bool = False,
         hf_overrides: dict[str, object] | None = None,
@@ -115,6 +116,13 @@ class LLM(LLMEngine):
         spec = _resolve_spec(model)
         if use_cuda_graph is None:
             use_cuda_graph = True
+        # CUDA graphs are incompatible with TP (NCCL collectives inside the graph)
+        if tensor_parallel_size > 1:
+            use_cuda_graph = False
+        # Architectures whose forward mutates Python-side per-step state (V4's
+        # per-layer rolling caches) cannot be replayed from a capture.
+        if use_cuda_graph and not spec.supports_cuda_graph:
+            use_cuda_graph = False
 
         super().__init__(
             checkpoints_dir=model,
@@ -125,6 +133,7 @@ class LLM(LLMEngine):
             use_cuda_graph=use_cuda_graph,
             quantization=quantization,
             tensor_parallel_size=tensor_parallel_size,
+            enable_expert_parallel=enable_expert_parallel,
             kv_cache_dtype=kv_cache_dtype,
             cuda_graph_lazy=cuda_graph_lazy,
             hf_overrides=hf_overrides,

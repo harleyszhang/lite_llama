@@ -21,6 +21,7 @@ from ..distributed.parallel_state import (
     tensor_model_parallel_broadcast,
 )
 from ..executor.model_runner import ModelRunner
+from ..utils.logger import get_logger
 from ..utils.path_utils import get_model_name_from_path
 from .detokenizer import IncrementalDetokenizer
 from .sampler import GeneratedSpan, PositionLogprobs, Sampler, SamplingParams, rows_logprobs
@@ -30,6 +31,8 @@ from .stop_criteria import (
     detect_repetition,
     load_stop_token_ids,
 )
+
+_log = get_logger(__name__)
 
 
 class _DecodeSession:
@@ -374,6 +377,7 @@ class LLMEngine:
         use_cuda_graph: bool = True,
         quantization: str | None = None,
         tensor_parallel_size: int = 1,
+        enable_expert_parallel: bool = False,
         kv_cache_dtype: str = "auto",
         cuda_graph_lazy: bool = False,
         hf_overrides: dict[str, object] | None = None,
@@ -381,6 +385,27 @@ class LLMEngine:
         self.device = device
         self.model_path = checkpoints_dir
         self.tensor_parallel_size = tensor_parallel_size
+        self.enable_expert_parallel = enable_expert_parallel
+
+        # EP keeps its graphs. Its decode path posts the dispatch/combine
+        # all-to-all exchanges on the shared comm stream with the same
+        # wait_stream -> NCCL -> record -> fence discipline the deferred
+        # all-reduce uses, and TBO already captures that discipline into a
+        # graph (the fork/join event edges record like any other dependency).
+        # The exchange buffers are equal-split, so their shapes are fixed by the
+        # captured batch and the routing kernels recompute from the live ids at
+        # replay — a captured a2a replays correctly in lockstep across ranks,
+        # exactly like the captured TP all-reduce. Keeping graphs on is what
+        # lets the EP decode step escape the Python launch floor, which is the
+        # only thing that ever swallowed the SBO overlap's gain.
+        if enable_expert_parallel and use_cuda_graph:
+            # EP's a2a buffers (ep_size * rows * top_k * hidden) make each
+            # captured graph far larger than a dense TP one, so the full grid
+            # does not fit beside a profiled KV pool. Lazy capture seeds a pair
+            # and captures the rest on demand — the mode that keeps EP+graph
+            # within memory; the OOM fallback in enable_cuda_graph covers any
+            # shape that still does not fit.
+            cuda_graph_lazy = True
 
         self.model_runner = ModelRunner.build(
             checkpoints_dir=checkpoints_dir,
@@ -393,8 +418,11 @@ class LLMEngine:
             cuda_graph_lazy=cuda_graph_lazy,
             hf_overrides=hf_overrides,
         )
+
         if use_cuda_graph:
-            self.model_runner.enable_cuda_graph(lazy=cuda_graph_lazy)
+            from ..batch_overlap.two_batch_overlap import tbo_policy
+
+            self.model_runner.enable_cuda_graph(lazy=cuda_graph_lazy, tbo=tbo_policy().enabled)
         self.tokenizer = self._load_tokenizer(tokenizer_path or checkpoints_dir)
         self.sampler = Sampler()
         self.max_seq_len = self.model_runner.max_seq_len

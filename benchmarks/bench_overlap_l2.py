@@ -2,13 +2,16 @@
 
 ``measure`` A/B-runs the same workload with the two-batch overlap enabled and
 disabled — the only difference between arms is ``LITE_LLAMA_TBO``. Both arms
-run eager (TBO's policy excludes CUDA graphs for now), so a third
+run eager (the eager policy stands down under graphs), so a third
 ``graph_reference`` arm reports the graphed deployment shape beside them:
 the eager pair answers "does the interleave pay while every kernel is
 launched from Python", and the reference shows what replay-from-graph TPOT
 looks like on the same load. The gap between the two is the CPU launch floor
-the eager arms sit on — not a property of the overlap itself. Prompts stay
-short and generation long, making TPOT (not TTFT) the headline number.
+the eager arms sit on — not a property of the overlap itself. The fourth
+``tbo_graph`` arm is where the interleave finally gets a fair trial: graphs
+on, TBO on, the op stream captured inside the graph, so replay carries the
+compute/comm overlap at launch-floor-free speed. Prompts stay short and
+generation long, making TPOT (not TTFT) the headline number.
 
 Usage:
     python benchmarks/bench_overlap_l2.py --model-dir <ckpt> --timeline
@@ -85,6 +88,35 @@ def graph_reference(model_dir: str, prompts: list[str], max_gen_len: int) -> Ben
     )
     try:
         return backend.measure(prompts, max_gen_len, greedy=True)
+    finally:
+        backend.close()
+
+
+def tbo_graph(
+    model_dir: str, prompts: list[str], max_gen_len: int
+) -> tuple[BenchResult, list[str]]:
+    """The arm the L2 switch was building toward: the interleave captured.
+
+    Graphs on, TBO switch on: every eligible captured batch size records
+    the ping-pong op stream — halves' compute on the capture stream,
+    deferred all-reduces on the comm stream, event fences between — so
+    decode replays the overlap instead of scheduling it from Python. The
+    launch floor that swallowed the eager TBO arm is gone; what remains of
+    the on/off gap against ``graph_reference`` is the overlap's own value.
+    """
+    os.environ[TBO_ENV] = "1"
+    from lite_llama.batch_overlap.two_batch_overlap import reset_tbo_policy
+
+    reset_tbo_policy()
+    backend = make_backend(
+        model_dir,
+        tensor_parallel_size=2,
+        use_cuda_graph=True,
+        max_seq_len=2048,
+        max_num_seqs=64,
+    )
+    try:
+        return backend.measure(prompts, max_gen_len, greedy=True), backend.texts()
     finally:
         backend.close()
 
@@ -169,12 +201,23 @@ def main() -> int:
         graph = graph_reference(args.model_dir, prompts, args.max_gen_len)
         print(graph.row("graph_reference"))
 
+        graphed, graphed_texts = tbo_graph(args.model_dir, prompts, args.max_gen_len)
+        print(graphed.row("tbo_graph"))
+        graph_delta = graph.tpot_ms - graphed.tpot_ms
+        print(
+            f"-> captured TBO cuts graphed TPOT by {graph_delta:.2f} ms "
+            f"({graph_delta / graph.tpot_ms:.1%} vs graph_reference)"
+        )
+        report_agreement(texts["tbo_off"], [("tbo_graph", graphed_texts)])
+
         summary[str(batch)] = {
             "tpot_ms": {k: v.tpot_ms for k, v in results.items()},
             "ttft_ms": {k: v.ttft_ms for k, v in results.items()},
             "total_s": {k: v.total_s for k, v in results.items()},
             "tpot_improvement_pct": round(delta / off.tpot_ms * 100, 2),
             "graph_reference_tpot_ms": graph.tpot_ms,
+            "tbo_graph_tpot_ms": graphed.tpot_ms,
+            "tbo_graph_improvement_pct": round(graph_delta / graph.tpot_ms * 100, 2),
         }
         all_texts[str(batch)] = texts
 
@@ -192,16 +235,17 @@ def main() -> int:
                 "batches": summary,
                 "timeline": evidence,
                 "note": (
-                    "measured after the lazy-state closure fix in"
-                    " batch_overlap/two_batch_overlap.py (output parity"
-                    " restored); greedy divergences at batch 8/32 are bf16"
-                    " reduction-order noise on low-confidence rows."
-                    " graph_reference is the graphed TP2 deployment shape"
-                    " beside the eager arms: the eager TPOTs sit on the"
-                    " Python launch floor, so eager TBO pays its scheduling"
-                    " overhead against a floor the graph never sees — the"
-                    " profitable TBO is graph-captured, which the policy"
-                    " does not support yet"
+                    "measured after TBO gained graph capture"
+                    " (batch_overlap/two_batch_overlap.py + executor/):"
+                    " eager arms still sit on the Python launch floor, so"
+                    " eager TBO pays its scheduling against a floor the"
+                    " graph never sees. graph_reference is the graphed"
+                    " deployment shape (TBO off); tbo_graph is the same"
+                    " shape with the interleave captured — replay carries"
+                    " the compute/comm overlap at launch-floor-free speed,"
+                    " and tbo_graph vs graph_reference is the overlap's"
+                    " marginal value. Greedy divergences vs eager arms are"
+                    " bf16 reduction-order noise on low-confidence rows."
                 ),
             },
         )

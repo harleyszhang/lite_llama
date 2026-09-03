@@ -56,6 +56,8 @@ def grouped_moe(
     w2_zeros: torch.Tensor | None = None,
     group_n: int = 0,
     group_k: int = 0,
+    swiglu_limit: float = float("inf"),
+    mxfp4: bool = False,
 ) -> torch.Tensor:
     """Run all dispatched experts via DeepGEMM's grouped fp8 GEMMs.
 
@@ -68,10 +70,19 @@ def grouped_moe(
         w1_scale / w2_scale: Native block scales for the expert weights.
         w1_zeros / w2_zeros: Ignored — fp8 is symmetric.
         group_n / group_k: Native scale-block geometry of ``w1``/``w2``.
+        swiglu_limit: Clamp gate at ``+limit`` and up at ``+-limit`` before the
+            activation — the same gpt-oss semantics the native ``fused_moe``
+            applies (DeepSeek-V4's ``7.0``); ``inf`` keeps plain SwiGLU.
+        mxfp4: Unsupported here (DeepGEMM groups fp8 experts only); present so
+            the signature satisfies the shared ``moe`` contract. The native
+            Triton row carries the MXFP4 e2m1 decode.
 
     Returns:
         ``[tokens, hidden]`` in ``hidden_states.dtype``.
     """
+    if mxfp4:
+        raise ValueError("the deepgemm backend does not decode MXFP4 experts; "
+                         "route the block at the native Triton row instead")
     import deep_gemm  # the JIT kernels live with the library; import at call time
 
     tokens, hidden = hidden_states.shape
@@ -104,6 +115,11 @@ def grouped_moe(
         qa, qa_scales, w1_fp8, w1_scales, m_indices
     )  # [m_padded, 2 * intermediate]
     gate, up = h.chunk(2, dim=-1)
+    # The contract's swiglu_limit: gate at +limit, up at +-limit, then silu*up
+    # — matching the native kernel's LIMIT branch bit for bit.
+    if swiglu_limit < float("inf"):
+        gate = gate.clamp(max=swiglu_limit)
+        up = up.clamp(min=-swiglu_limit, max=swiglu_limit)
     h = F.silu(gate) * up
 
     w2_fp8, w2_scales = _nt_experts(w2, w2_scale, group_n, group_k)

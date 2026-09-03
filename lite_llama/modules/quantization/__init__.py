@@ -23,7 +23,14 @@ from .blockwise_int8 import BlockInt8Config
 from .fp8 import FP8_BLOCK, Fp8Config
 from .gptq import GPTQConfig
 from .kv_cache import BaseKVCacheMethod, Fp8KVCacheMethod, get_kv_cache_method
-from .nvfp4 import NVFP4Config
+from .mxfp4 import (
+    MXFP4_GROUP,
+    DeepseekV4Fp8Config,
+    Mxfp4MoEMethod,
+    e8m0_to_fp32,
+    repack_mxfp4_pairs,
+)
+from .nvfp4 import NVFP4Config, NVFP4LinearMethod
 from .parameter import RawParameter
 from .unquant import UnquantizedConfig, UnquantizedFusedMoEMethod, UnquantizedLinearMethod
 from .utils import adapt_packed_checkpoint
@@ -42,6 +49,7 @@ SCALE_SUFFIX = "weight_scale_inv"
 # --------------------------------------------------------------------------- #
 BASE_QUANTIZATION_METHODS: dict[str, type[QuantizationConfig]] = {
     "fp8": Fp8Config,
+    "deepseek_v4_fp8": DeepseekV4Fp8Config,
     "w8a8_fp8": W8A8Fp8Config,
     "w8a8_int8": W8A8Int8Config,
     "blockwise_int8": BlockInt8Config,
@@ -88,13 +96,30 @@ def get_quant_config_from_hf(hf_config: Any) -> QuantizationConfig | None:
     params = raw if isinstance(raw, dict) else raw.to_dict()
 
     method_name = str(params.get("quant_method", "")).lower()
+    # DeepSeek-V4 fp8 checkpoints share quant_method="fp8" with plain
+    # blockwise-fp8 models, but add ue8m0 scales and (usually) mxfp4 routed
+    # experts; the model_type picks the V4-aware config.
+    if method_name == "fp8" and str(getattr(hf_config, "model_type", "") or "") == (
+        "deepseek_v4"
+    ):
+        method_name = "deepseek_v4_fp8"
     cls = BASE_QUANTIZATION_METHODS.get(method_name)
     if cls is None:
         raise ValueError(
             f"unsupported quant_method {method_name!r}; "
             f"supported: {sorted(BASE_QUANTIZATION_METHODS)}"
         )
-    return cls.from_config(params)
+    config = cls.from_config(params)
+    # expert_dtype lives at the HF config's top level (fp4 = Flash's mxfp4
+    # experts, fp8 = Flash-Base's), not inside quantization_config.
+    if isinstance(config, DeepseekV4Fp8Config):
+        config.expert_dtype = str(getattr(hf_config, "expert_dtype", "fp4") or "fp4")
+        if config.expert_dtype not in ("fp4", "fp8"):
+            raise ValueError(
+                f"unsupported DeepSeek-V4 expert_dtype {config.expert_dtype!r}; "
+                "expected 'fp4' or 'fp8'"
+            )
+    return config
 
 
 def for_runtime_scheme(name: str) -> QuantizationConfig:
@@ -125,6 +150,7 @@ __all__ = [  # noqa: RUF022
     "FusedMoEMethodBase",
     # Configs
     "Fp8Config",
+    "DeepseekV4Fp8Config",
     "W8A8Fp8Config",
     "W8A8Int8Config",
     "BlockInt8Config",
@@ -142,10 +168,13 @@ __all__ = [  # noqa: RUF022
     # Infrastructure
     "RawParameter",
     "FP8_BLOCK",
+    "MXFP4_GROUP",
     "SCALE_SUFFIX",
     "BASE_QUANTIZATION_METHODS",
     "RUNTIME_SCHEMES",
-    "adapt_packed_checkpoint",
+    "adapt_int4_checkpoint",
+    "e8m0_to_fp32",
+    "repack_mxfp4_pairs",
     # Factories
     "get_quantization_config",
     "get_quant_config_from_hf",

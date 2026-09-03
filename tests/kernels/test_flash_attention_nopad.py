@@ -139,3 +139,50 @@ def test_sequences_do_not_leak_into_each_other():
     )
     # Guard against a vacuous pass: the second sequence really did change.
     assert not torch.allclose(before[split:].float(), after[split:].float(), rtol=_RTOL, atol=_ATOL)
+
+
+@pytest.mark.skipif(
+    not __import__(
+        "lite_llama.kernels.backend.flashinfer", fromlist=["available"]
+    ).available(),
+    reason="flashinfer not installed",
+)
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        pytest.param([13, 15, 12], id="ragged"),
+        pytest.param([3, 5], id="uneven-pair"),
+        pytest.param([32, 32], id="equal-lengths"),
+    ],
+)
+def test_flashinfer_prefill_survives_the_padded_grid(seq_lens):
+    """The engine pads every prefill chunk to the widest (slot_batch).
+
+    A ragged wrapper wants compact rows, so unequal lengths cannot reach it:
+    the flashinfer backend must hand the pass to this kernel — and its answer
+    on the real rows must still match the reference. Equal lengths used to be
+    the only shapes that worked; they still do.
+    """
+    from lite_llama.kernels.backend.flashinfer.attention import prefill_attention
+
+    width = max(seq_lens)
+    rows = len(seq_lens) * width
+    head_dim = 64
+    # Junk in the padding rows: the kernels must never let it reach the output
+    # of a real row (the engine overwrites those rows on later steps).
+    q = torch.randn(rows, 4, head_dim, device="cuda", dtype=torch.float16) * 0.3
+    k = torch.randn(rows, 2, head_dim, device="cuda", dtype=torch.float16) * 0.3
+    v = torch.randn(rows, 2, head_dim, device="cuda", dtype=torch.float16) * 0.3
+
+    b_start_loc = torch.tensor(
+        [i * width for i in range(len(seq_lens))], dtype=torch.int32, device="cuda"
+    )
+    b_seq_len = torch.tensor(seq_lens, dtype=torch.int32, device="cuda")
+    plain_scale = 1.0 / math.sqrt(head_dim)
+
+    out = prefill_attention(q, k, v, plain_scale, b_start_loc, b_seq_len, width)
+    ref = varlen_causal_attention(q, k, v, b_start_loc, b_seq_len, plain_scale)
+
+    for i, n in enumerate(seq_lens):  # compare only the real rows
+        sl = slice(b_start_loc[i].item(), b_start_loc[i].item() + n)
+        torch.testing.assert_close(out[sl].float(), ref[sl].float(), rtol=_RTOL, atol=_ATOL)

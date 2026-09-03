@@ -13,7 +13,7 @@ v0.4.0 建立 lite_llama 的可信基线：量化子系统从 `models/quantizati
 **重构内容：**
 
 | Before (v0.3.x) | After (v0.4.0) |
-|------------------|----------------|
+| ------------------ | ---------------- |
 | `lite_llama/models/quantization/` (分散式) | `lite_llama/modules/quantization/` (集中式) |
 | 无 MoE 量化 Method | `AWQMoEMethod`, `GPTQMoEMethod`, `W8A8Fp8MoEMethod`, `W8A8Int8MoEMethod` |
 | `GPTQLinearMethod` 继承自 `AWQLinearMethod` | 独立实现，各有自己的 `create_weights`/`apply` |
@@ -120,7 +120,7 @@ if get_tp_world_size() > 1:
 ## 5. Chore: CI 与工程治理
 
 | Item | 变更 |
-|------|------|
+| ------ | ------ |
 | `.github/workflows` | 适配 `modules/quantization` 新路径 |
 | `tools/pre_commit/check_hardcoded_paths.py` | exempt `benchmarks/` 和 `scripts/`（机器相关脚本） |
 | `pyproject.toml` | 版本号 `0.3.0` → `0.4.0` |
@@ -131,7 +131,7 @@ if get_tp_world_size() > 1:
 ### Qwen3-0.6B (A10, batch=4, seq_len=25, gen_len=64, greedy)
 
 | Config | Model Mem | KV Capacity | TPOT (ms) | TPS | vs HF fp16 |
-|--------|-----------|-------------|-----------|-----|------------|
+| -------- | ----------- | ------------- | ----------- | ----- | ------------ |
 | HF fp16 (baseline) | 1.17 GB | — | 28.19 | 141.7 | 1.0× |
 | lite fp16 | 1.40 GB | 147,875 tok | 4.14 | 918.8 | **6.5×** |
 | lite int8 | 0.99 GB | 141,549 tok | 4.16 | 904.1 | **6.4×** |
@@ -144,7 +144,7 @@ if get_tp_world_size() > 1:
 ### Qwen3-VL-4B-Instruct (A10, batch=4, seq_len=25, gen_len=64, greedy)
 
 | Config | Model Mem | KV Capacity | TPOT (ms) | TPS |
-|--------|-----------|-------------|-----------|-----|
+| -------- | ----------- | ------------- | ----------- | ----- |
 | lite fp16 | 8.99 GB | 73,676 tok | 23.36 | 170.7 |
 | lite int8 | 5.61 GB | 93,559 tok | 27.47 | 145.3 |
 | lite int8-blockwise | 5.71 GB | 92,748 tok | 27.97 | 142.7 |

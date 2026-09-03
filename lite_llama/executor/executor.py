@@ -292,6 +292,7 @@ def launch_tensor_parallel(
     engine_kwargs: dict[str, Any],
     max_num_seqs: int,
     master_port: int | None = None,
+    enable_expert_parallel: bool = False,
 ) -> tuple[mp.process.BaseProcess, ...]:
     """Start ranks 1..``tp_size``-1 and join this process as rank 0.
 
@@ -301,10 +302,14 @@ def launch_tensor_parallel(
 
     Args:
         tp_size: Ranks in the group, including this one.
-        engine_kwargs: Constructor args every rank builds from, minus ``device`` (the
-            rank's own GPU); must be picklable.
-        max_num_seqs: Concurrency ceiling, so followers size their scratch to match.
-        master_port: Rendezvous port (rank 0 listens); defaults to a free one.
+        engine_kwargs: Constructor arguments every rank builds its engine from,
+            minus ``device``, which is the rank's own GPU. Must be picklable.
+        max_num_seqs: Concurrency ceiling, so followers size their scratch to
+            match.
+        master_port: Rendezvous port; rank 0 listens. Defaults to a free one.
+        enable_expert_parallel: MoE expert split mode every rank's group state
+            must agree on before its engine builds (see
+            :func:`~lite_llama.distributed.parallel_state.init_parallel`).
 
     Returns:
         The follower processes, in rank order.
@@ -316,7 +321,7 @@ def launch_tensor_parallel(
     followers = [
         context.Process(
             target=run_follower,
-            args=(rank, tp_size, engine_kwargs, max_num_seqs, master_port),
+            args=(rank, tp_size, engine_kwargs, max_num_seqs, master_port, enable_expert_parallel),
             name=f"lite-llama-tp{rank}",
             daemon=True,
         )
@@ -324,7 +329,12 @@ def launch_tensor_parallel(
     ]
     for process in followers:
         process.start()
-    init_tensor_parallel(rank=0, world_size=tp_size, master_port=master_port)
+    init_tensor_parallel(
+        rank=0,
+        world_size=tp_size,
+        master_port=master_port,
+        enable_expert_parallel=enable_expert_parallel,
+    )
     return tuple(followers)
 
 
@@ -355,6 +365,7 @@ def run_follower(
     engine_kwargs: dict[str, Any],
     max_num_seqs: int,
     master_port: int,
+    enable_expert_parallel: bool = False,
 ) -> None:
     """Body of a non-driver tensor-parallel rank: rendezvous, build, serve plans.
 
@@ -364,9 +375,20 @@ def run_follower(
     from ..engine.llm_engine import LLMEngine
 
     torch.cuda.set_device(rank)
-    init_tensor_parallel(rank=rank, world_size=tp_size, master_port=master_port)
+    init_tensor_parallel(
+        rank=rank,
+        world_size=tp_size,
+        master_port=master_port,
+        enable_expert_parallel=enable_expert_parallel,
+    )
+    engine = None
     try:
-        engine = LLMEngine(device=f"cuda:{rank}", tensor_parallel_size=tp_size, **engine_kwargs)
+        engine = LLMEngine(
+            device=f"cuda:{rank}",
+            tensor_parallel_size=tp_size,
+            enable_expert_parallel=enable_expert_parallel,
+            **engine_kwargs,
+        )
         _log.info("tp rank %d ready on cuda:%d", rank, rank)
         serve_plans(engine, max_num_seqs)
     finally:

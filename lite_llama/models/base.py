@@ -17,6 +17,8 @@ import torch
 import torch.nn as nn
 
 from ..kernels import qk_rmsnorm, rope_emb_forward, skip_rmsnorm
+from ..batch_overlap.two_batch_overlap import TboHalf, TwoBatchOverlap
+from ..kernels import rope_emb_forward, skip_rmsnorm
 from ..modules import (
     FusedMLP,
     LinearBase,
@@ -184,6 +186,154 @@ class DecoderLayer(nn.Module):
         # the default is the dense SwiGLU.
         self.mlp = mlp if mlp is not None else FusedMLP(config, quant)
 
+    def forward_attn_stage(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        atten_info,
+        layer_index: int,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """First half of the block: input norm through the attention output.
+
+        The two-stage split exists for two-batch overlap
+        (:mod:`lite_llama.batch_overlap.two_batch_overlap`): the stage boundary is exactly the
+        o_proj row-parallel all-reduce, whose deferral is what the *other*
+        micro-batch's compute overlaps. Stage callers fence that reduction
+        at the head of :meth:`forward_mlp_stage`; everyone else keeps using
+        :meth:`forward`, which runs the stages back to back.
+
+        Returns the *un-normalised* attention output plus the running
+        residual — :meth:`forward_mlp_stage`'s fused add-and-norm consumes
+        the pair.
+        """
+        hidden_states, residual = skip_rmsnorm(
+            hidden_states, residual, self.input_layernorm_weight, self.rms_norm_eps
+        )
+        return (
+            self.self_attn(hidden_states, atten_info, layer_index, position_embeddings),
+            residual,
+        )
+
+    def _post_attention_norm(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The fused add-and-norm both MLP paths start with (dense and EP)."""
+        return skip_rmsnorm(
+            hidden_states,
+            residual,
+            self.post_attention_layernorm_weight,
+            self.rms_norm_eps,
+        )
+
+    def forward_mlp_stage(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Second half of the block: post-attention norm through the MLP.
+
+        The fence point for the attention stage's deferred o_proj
+        all-reduce is this method's head: the post-attention norm is the
+        first op that reads the reduction's result.
+        """
+        hidden_states, residual = self._post_attention_norm(hidden_states, residual)
+        return self.mlp(hidden_states), residual
+
+    # ------------------------------------------------------------------ #
+    # TBO op stream (sglang ``batch_overlap`` building blocks)
+    # ------------------------------------------------------------------ #
+    #
+    # The layer hands these bound methods to
+    # :class:`~lite_llama.batch_overlap.operations_strategy.OperationsStrategy`,
+    # which orders them and places the yields. Every op takes the
+    # micro-batch's ``StateDict``, pops what it consumes and writes its result
+    # under a *new* key — so an op that clobbers a live key raises instead of
+    # silently feeding a predecessor's stale result downstream. ``op_attn``'s
+    # ``layer_index`` is bound by the strategy at build time, because the layer
+    # takes the index as an argument rather than storing it.
+
+    def op_attn(self, state, *, layer_index: int) -> None:
+        """Attention segment: fence this half's promise, then run attention.
+
+        The fence sits at the head because this stage is the first to read the
+        previous stage's deferred reduction (the MLP's down_proj, or nothing on
+        the first layer); the o_proj reduction this stage defers is what the
+        *other* micro-batch's compute overlaps.
+        """
+        ar = state.ar
+        ar.fence(state.ar_events)
+        with (
+            ar.collecting(state.ar_events),
+            state.timeline.region(f"tbo.attn.{state.tag}", "compute"),
+        ):
+            state.attn_output, state.residual_after_attn = self.forward_attn_stage(
+                state.pop("hidden_states"),
+                state.pop("residual"),
+                state.atten_info,
+                layer_index,
+                state.position_embeddings,
+            )
+
+    def op_mlp(self, state) -> None:
+        """MLP segment: the dense stream's tail, writing the next layer's input."""
+        ar = state.ar
+        ar.fence(state.ar_events)
+        with (
+            ar.collecting(state.ar_events),
+            state.timeline.region(f"tbo.mlp.{state.tag}", "compute"),
+        ):
+            state.hidden_states, state.residual = self.forward_mlp_stage(
+                state.pop("attn_output"), state.pop("residual_after_attn")
+            )
+
+    def op_gate(self, state) -> None:
+        """Post-attention norm (consumes the o_proj promise), then routing."""
+        ar = state.ar
+        ar.fence(state.ar_events)
+        with (
+            ar.collecting(state.ar_events),
+            state.timeline.region(f"tbo.gate.{state.tag}", "compute"),
+        ):
+            normed, residual = self._post_attention_norm(
+                state.pop("attn_output"), state.pop("residual_after_attn")
+            )
+            state.mlp_input = self.mlp.op_gate(normed, state.moe_ctx)
+            state.residual = residual
+
+    def op_dispatch_a(self, state) -> None:
+        """Post the forward a2a; the other half's compute covers the wire."""
+        with state.timeline.region(f"tbo.dispatch_a.{state.tag}", "compute"):
+            self.mlp.op_dispatch_a(state.mlp_input, state.moe_ctx)
+
+    def op_shared_experts(self, state) -> None:
+        """Shared expert MLP — the longest shadow-filler for the dispatch."""
+        with state.timeline.region(f"tbo.shared.{state.tag}", "compute"):
+            self.mlp.op_shared_experts(state.mlp_input, state.moe_ctx)
+
+    def op_dispatch_b(self, state) -> None:
+        """Fence the dispatch; the stream now carries this rank's expert batch."""
+        with state.timeline.region(f"tbo.dispatch_b.{state.tag}", "compute"):
+            state.local_batch = self.mlp.op_dispatch_b(state.pop("mlp_input"), state.moe_ctx)
+
+    def op_experts(self, state) -> None:
+        """Grouped GEMM over the received batch."""
+        with state.timeline.region(f"tbo.experts.{state.tag}", "compute"):
+            state.expert_output = self.mlp.op_experts(state.pop("local_batch"), state.moe_ctx)
+
+    def op_combine_a(self, state) -> None:
+        """Post the return a2a; the other half's experts cover the wire."""
+        with state.timeline.region(f"tbo.combine_a.{state.tag}", "compute"):
+            self.mlp.op_combine_a(state.expert_output, state.moe_ctx)
+
+    def op_combine_b(self, state) -> None:
+        """Fence the combine; the layer output is complete on every rank.
+
+        ``op_combine_b`` folds in the shared expert and fences its deferred
+        all-reduce promise itself (the moe.py sum discipline), so
+        ``hidden_states`` is final for the next layer's attention stage.
+        """
+        with state.timeline.region(f"tbo.combine_b.{state.tag}", "compute"):
+            state.hidden_states = self.mlp.op_combine_b(state.pop("expert_output"), state.moe_ctx)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -192,19 +342,11 @@ class DecoderLayer(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        hidden_states, residual = skip_rmsnorm(
-            hidden_states, residual, self.input_layernorm_weight, self.rms_norm_eps
+        """One whole block: attention stage then MLP stage, back to back."""
+        hidden_states, residual = self.forward_attn_stage(
+            hidden_states, residual, atten_info, layer_index, position_embeddings
         )
-        hidden_states = self.self_attn(hidden_states, atten_info, layer_index, position_embeddings)
-
-        hidden_states, residual = skip_rmsnorm(
-            hidden_states,
-            residual,
-            self.post_attention_layernorm_weight,
-            self.rms_norm_eps,
-        )
-        hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
+        return self.forward_mlp_stage(hidden_states, residual)
 
 
 class CausalLM(nn.Module):
@@ -438,3 +580,23 @@ class CausalLM(nn.Module):
             rows = torch.arange(hidden_states.shape[0], device=hidden_states.device)
             hidden_states = hidden_states[rows, logits_positions]
         return self.lm_head(hidden_states)
+
+    def forward_tbo(self, halves: tuple[TboHalf, TboHalf]) -> torch.Tensor:
+        """Two-batch overlapped decode forward (L2).
+
+        Thin seam: the interleaving, the deferred all-reduces and their
+        fences are the executor's business
+        (:class:`~lite_llama.batch_overlap.two_batch_overlap.TwoBatchOverlap`); the model only
+        contributes the parts only it knows -- embeddings, the layer stack
+        (through its two-stage methods), the final norm and the vocabulary
+        head. The result matches what :meth:`forward` of the same step
+        returns, row for row, with both halves' reductions resolved.
+
+        Args:
+            halves: The split decode step, as
+                :class:`~lite_llama.batch_overlap.two_batch_overlap.TboSplitter.split` built it.
+
+        Returns:
+            ``[rows, 1, vocab]`` logits, rows in batch order.
+        """
+        return TwoBatchOverlap(self).forward(halves)
