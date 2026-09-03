@@ -9,14 +9,28 @@ Usage:
 """
 
 import torch
-import triton
-import triton.language as tl
 
-from ..utils import calculate_settings
-from .activations import silu
+try:
+    import triton
+    import triton.language as tl
+
+    from ..utils import calculate_settings
+    from .activations import silu
+except ImportError:  # Triton is optional on CPU-only and macOS installs.
+    triton = None
+    silu = None
+    calculate_settings = None
+
+    class _TritonLanguageStub:
+        constexpr = object()
+
+    tl = _TritonLanguageStub()
 
 
-@triton.jit
+_jit = triton.jit if triton is not None else lambda function: function
+
+
+@_jit
 def _swiglu_forward_kernel(
     a_ptr, b_ptr, c_ptr, row_stride, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr
 ):
@@ -47,6 +61,9 @@ def swiglu_forward(gate, up):
     Returns:
         ``[..., n_cols]`` product, in the inputs' dtype.
     """
+    if triton is None or not gate.is_cuda:
+        return torch.nn.functional.silu(gate) * up
+
     ori_shape = gate.shape  # ori_shape is [batch_size, seq_len, hidden_size]
 
     n_cols = ori_shape[-1]
@@ -69,7 +86,7 @@ def swiglu_forward(gate, up):
     return c.view(*ori_shape)
 
 
-@triton.jit
+@_jit
 def _swiglu_forward_fused_kernel(
     x_ptr, c_ptr, row_stride, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr
 ):
@@ -97,6 +114,10 @@ def swiglu_forward_fused(x):
     activates both halves in a single pass without slicing them apart first
     (a slice of a fused row is not contiguous, so the split would copy).
     """
+    if triton is None or not x.is_cuda:
+        gate, up = x.chunk(2, dim=-1)
+        return torch.nn.functional.silu(gate) * up
+
     ori_shape = x.shape  # [..., 2 * n_cols]
     n_cols = ori_shape[-1] // 2
     x = x.reshape(-1, ori_shape[-1])  # GEMM output is contiguous: no copy

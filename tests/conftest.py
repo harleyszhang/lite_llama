@@ -1,8 +1,9 @@
 """Shared fixtures and collection policy for the rapid_llm test suite.
 
-``pytest_ignore_collect`` drops GPU-only and golden directories when no
-checkpoint or device is available; fixtures expose the resolved model
-dir, reset torch state, and keep dispatch deterministic between tests.
+``pytest_ignore_collect`` drops tests that import Triton-only runtime paths
+before Python imports them on a machine without CUDA; fixtures expose the
+resolved model dir, reset torch state, and keep dispatch deterministic
+between tests.
 
 Usage:
     pytest tests/   # collection policy from this file applies automatically
@@ -31,6 +32,38 @@ MODELZOO_ENV = "RAPID_LLM_MODELZOO"
 #: Directories whose tests always need a CUDA device.
 _GPU_ONLY_DIRS = ("kernels",)
 
+# These modules exercise the full GPU runtime but import it at module scope.
+# A ``gpu`` marker cannot help there: pytest evaluates it only after importing
+# the module, by which point macOS/CPU environments have already failed on the
+# optional Linux-only ``triton`` dependency. Keep CPU unit tests in their
+# neighbouring directories collectable instead of excluding whole directories.
+_GPU_RUNTIME_FILES = frozenset(
+    {
+        "compile/test_cuda_graph.py",
+        "distributed/test_data_parallel.py",
+        "distributed/test_parallel_sampling.py",
+        "distributed/test_qkv_parallel.py",
+        "distributed/test_vocab_parallel.py",
+        "engine/test_async_engine.py",
+        "engine/test_chunked_prefill.py",
+        "engine/test_continuous_batching.py",
+        "engine/test_continuous_perf.py",
+        "engine/test_engine_e2e.py",
+        "engine/test_llm_entrypoint.py",
+        "entrypoints/test_cli_wiring.py",
+        "evals/test_gsm8k_correctness.py",
+        "evals/test_gsm8k_scoring.py",
+        "golden/test_deepseek_trimmed_parity.py",
+        "golden/test_logprob_parity.py",
+        "golden/test_token_parity.py",
+        "models/test_grouped_topk.py",
+        "models/test_quant_methods.py",
+        "models/test_qwen3_moe.py",
+        "models/test_weight_mapping.py",
+        "multimodal/test_multimodal.py",
+    }
+)
+
 #: Directories that constitute the golden gate — these must never silently skip.
 _GOLDEN_DIRS = ("golden",)
 
@@ -51,7 +84,9 @@ def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool 
         relative = collection_path.relative_to(REPO_ROOT)
     except ValueError:
         return None
-    return any(relative.parts[:2] == ("tests", d) for d in _GPU_ONLY_DIRS) or None
+    if any(relative.parts[:2] == ("tests", d) for d in _GPU_ONLY_DIRS):
+        return True
+    return relative.as_posix().removeprefix("tests/") in _GPU_RUNTIME_FILES or None
 
 
 def checkpoint_candidates(reference: str) -> list[Path]:

@@ -12,7 +12,7 @@ The format is NVIDIA ModelOpt's ``modelopt_fp4`` / TensorRT-LLM's NVFP4:
 Weight-only, permanently so on this hardware: sm90 has no fp4 MMA, so
 activations stay 16-bit and the win is bytes, not FLOPs — lower decode latency
 and a smaller resident model. See
-:mod:`rapid_llm.kernels.ops.quantization.nvfp4` for why that is a property of
+:mod:`lite_llama.kernels.ops.quantization.nvfp4` for why that is a property of
 the device.
 
 MoE experts are not implemented (the fused grouped GEMM would need its own
@@ -22,6 +22,7 @@ rather than handing a MoE block a linear method it cannot use.
 
 from __future__ import annotations
 
+from math import lcm
 from typing import Any
 
 import torch
@@ -32,28 +33,19 @@ from .base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
     run_quant_linear,
-    scale_parameter,
 )
 from .parameter import RawParameter
-
-
-def _nvfp4_block() -> int:
-    """The format's block length, read from the kernel layer on first use.
-
-    Deferred: importing any ``kernels`` submodule registers every spec row as a
-    side effect, which ``tests/test_imports.py`` forbids ``rapid_llm.modules``
-    to trigger.
-    """
-    from ...kernels.ops.quantization import NVFP4_BLOCK
-
-    return NVFP4_BLOCK
-
 
 #: Weight elements per byte.
 _PACK_FACTOR = 2
 
-#: Smallest k-shard splitting neither a byte nor a block scale: ``lcm(2, 16)``.
-_SHARD_GRANULARITY = 16
+#: NVFP4's fixed block-scale width. This is format metadata, not a kernel
+#: implementation detail: configuration must be readable on CPU-only installs
+#: where Triton is intentionally absent.
+_NVFP4_BLOCK = 16
+
+#: Smallest k-shard splitting neither a byte nor a block scale.
+_SHARD_GRANULARITY = lcm(_PACK_FACTOR, _NVFP4_BLOCK)
 
 
 # --------------------------------------------------------------------------- #
@@ -69,7 +61,7 @@ class NVFP4Config(QuantizationConfig):
     def __init__(self, ignored: tuple[str, ...] = ()) -> None:
         super().__init__()
         self.group_n = 1
-        self.group_k = _nvfp4_block()
+        self.group_k = _NVFP4_BLOCK
         self.ignored = ignored
         self.method = "nvfp4"
 
@@ -94,10 +86,10 @@ class NVFP4Config(QuantizationConfig):
         bits = int(config.get("bits", 4))
         if bits != 4:
             raise ValueError(f"only 4-bit NVFP4 is supported, got {bits}")
-        group_size = int(config.get("group_size", _nvfp4_block()))
-        if group_size != _nvfp4_block():
+        group_size = int(config.get("group_size", _NVFP4_BLOCK))
+        if group_size != _NVFP4_BLOCK:
             raise ValueError(
-                f"NVFP4 block size is fixed at {_nvfp4_block()} by the format, "
+                f"NVFP4 block size is fixed at {_NVFP4_BLOCK} by the format, "
                 f"checkpoint declares {group_size}"
             )
         ignored = tuple(config.get("modules_to_not_convert") or ())
@@ -139,7 +131,7 @@ class NVFP4LinearMethod(LinearMethodBase):
     """NVFP4 weight-only linear; runs ``native/linear_nvfp4``."""
 
     def create_weights(self, layer: nn.Module, input_size: int, output_size: int, **kw) -> None:
-        block = _nvfp4_block()
+        block = _NVFP4_BLOCK
         if input_size % block != 0:
             raise ValueError(f"NVFP4 needs in_features divisible by {block}, got {input_size}")
         config: NVFP4Config = layer.quant  # type: ignore[assignment]
@@ -149,8 +141,8 @@ class NVFP4LinearMethod(LinearMethodBase):
         # uint8, not float8_e4m3fn: the kernel bit-shifts these bytes, and
         # RawParameter keeps the loader from casting them to the activation
         # dtype on the way in.
-        layer.weight_scale = scale_parameter(
-            config.scale_shape(output_size, input_size), dtype=torch.uint8
+        layer.weight_scale = RawParameter(
+            torch.empty(*config.scale_shape(output_size, input_size), dtype=torch.uint8)
         )
         layer.weight_global_scale = RawParameter(torch.empty(1, dtype=torch.float32))
 
