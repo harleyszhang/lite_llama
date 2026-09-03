@@ -353,7 +353,10 @@ def _distribution_records(
     local = ids - offset
     valid = (local >= 0) & (local < width)
     gathered = scaled.gather(-1, local.clamp(0, width - 1))
-    chosen = tensor_model_parallel_all_reduce(torch.where(valid, gathered, torch.zeros_like(gathered))) - log_z
+    chosen = (
+        tensor_model_parallel_all_reduce(torch.where(valid, gathered, torch.zeros_like(gathered)))
+        - log_z
+    )
     if k <= 0:
         return chosen, None, None
     local_values, local_ids = (scaled - log_z).topk(min(k, width), dim=-1)

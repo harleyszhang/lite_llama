@@ -18,9 +18,13 @@ from .quant import nt_block_fp8_from_checkpoint, per_token_group_quant_fp8
 #: The contiguous grouped kernel wants each expert segment aligned to this.
 ALIGNMENT = 128
 
-# data_ptr -> (w_fp8, w_scales, shape) — one entry per expert weight tensor,
-# built once on first call and reused for the lifetime of the weights.
-_EXPERT_CACHE: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Size]] = {}
+# data_ptr -> (w_fp8, w_scales, source_weight). Holding the source tensor is
+# what makes the data_ptr key sound: while the reference lives, the caching
+# allocator cannot hand that address to another tensor, so a hit is always
+# this weight's own repack. A shape check alone could not promise that -- a
+# freed-and-reused allocation of the same shape would slip through. The same
+# contract as ``linear._NT_CACHE``.
+_EXPERT_CACHE: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
 
 def _nt_experts(
@@ -32,10 +36,10 @@ def _nt_experts(
     """Cached stacked NT fp8 experts for ``w`` ``[E, n, k]``."""
     key = w.data_ptr()
     hit = _EXPERT_CACHE.get(key)
-    if hit is not None and hit[2] == w.shape:
+    if hit is not None and hit[2] is w:
         return hit[0], hit[1]
     w_fp8, w_scales = nt_block_fp8_from_checkpoint(w, w_scale, group_n, group_k)
-    _EXPERT_CACHE[key] = (w_fp8, w_scales, w.shape)
+    _EXPERT_CACHE[key] = (w_fp8, w_scales, w)
     return w_fp8, w_scales
 
 

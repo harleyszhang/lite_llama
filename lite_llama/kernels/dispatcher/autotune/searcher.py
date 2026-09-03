@@ -61,11 +61,16 @@ class AutotuneSearcher:
 
         Returns:
             The config dict that achieved the lowest median latency.
+
+        Raises:
+            ValueError: ``configs`` is empty.
+            RuntimeError: every candidate failed to run — there is no winner
+                to persist.
         """
         if not configs:
             raise ValueError("configs list must not be empty")
 
-        best_config: dict = configs[0]
+        best_config: dict | None = None
         best_latency: float = float("inf")
 
         for cfg in configs:
@@ -78,7 +83,13 @@ class AutotuneSearcher:
                 best_latency = latency
                 best_config = cfg
 
-        # Persist the winner
+        if best_config is None:
+            # Nothing measured. Falling back to ``configs[0]`` here would write
+            # an infinite latency into the store, and ``json.dumps`` renders
+            # that as ``Infinity`` -- not valid JSON, so every later read of
+            # this op's file would fail.
+            raise RuntimeError(f"no candidate config for {op!r} ran successfully")
+
         m, n, k = shape
         key = TuneKey.build(op, m=m, n=n, k=k, dtype=dtype, gpu=self.gpu)
         self._store.put(key, best_config, latency_us=best_latency)

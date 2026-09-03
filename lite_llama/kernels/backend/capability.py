@@ -17,12 +17,12 @@ from functools import cache
 
 logger = logging.getLogger(__name__)
 
-#: The external backends of v0.9, in the order their milestones land them.
-#: A name here must be a module (package) in this directory declaring
-#: ``INSTALL`` and ``available()``; :func:`survey` walks exactly this tuple.
-#: (``tileops`` was dropped when the three-tier refactor landed: its tile-lang
-#: toolchain window never overlapped a box we could test on, and a row nobody
-#: can ever dispatch is a row that only misleads ``explain``.)
+#: The external backends :func:`survey` walks. A name here must be a package
+#: in this directory declaring ``INSTALL`` and ``available()``.
+#:
+#: ``tileops`` is deliberately absent: its tile-lang toolchain window never
+#: overlapped a machine we could test on, and a row nobody can ever dispatch
+#: only misleads ``explain``.
 EXTERNAL_BACKENDS = ("flashinfer", "deepgemm", "flashmla", "deepep")
 
 

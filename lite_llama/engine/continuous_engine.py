@@ -222,9 +222,7 @@ def _decode_work(running: list[Request], *, from_device: bool = False) -> _Work:
             ),
             sampling=tuple(request.params for request in running),
             sampled=tuple(range(len(running))),
-            gen_counts=tuple(
-                len(request.output_token_ids) + ahead(request) for request in running
-            ),
+            gen_counts=tuple(len(request.output_token_ids) + ahead(request) for request in running),
             # A decode step that crossed a block boundary was given a fresh page
             # by the scheduler; its table entry has to land before the gather.
             block_writes=tuple(
@@ -492,7 +490,10 @@ class ContinuousBatchingEngine:
         executor: Executor | None = None
         if get_tensor_model_parallel_world_size() > 1:
             executor = MultiprocExecutor(
-                engine, config.max_num_seqs, config.max_seq_len, followers,
+                engine,
+                config.max_num_seqs,
+                config.max_seq_len,
+                followers,
                 pipeline=resolved_pipeline,
             )
         return cls(
@@ -621,7 +622,9 @@ class ContinuousBatchingEngine:
     def has_unfinished_requests(self) -> bool:
         """Whether anything is queued, in flight, or awaiting its harvest."""
         return (
-            self.scheduler.has_unfinished_requests() or bool(self._inflight) or bool(self._tokenizing)
+            self.scheduler.has_unfinished_requests()
+            or bool(self._inflight)
+            or bool(self._tokenizing)
         )
 
     @torch.inference_mode()
@@ -725,9 +728,7 @@ class ContinuousBatchingEngine:
                     event.synchronize()
                 values = host.tolist()
                 emitted: list[tuple[Request, int, PositionLogprobs | None]] = []
-                for request, token, record in zip(
-                    work_item.requests, values, records, strict=True
-                ):
+                for request, token, record in zip(work_item.requests, values, records, strict=True):
                     # The token is spent either way — the ledger closes for
                     # retired requests too, so it drains to exactly zero.
                     request.pending_tokens -= 1
