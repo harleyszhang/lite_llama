@@ -12,8 +12,8 @@ engine overlaps a reduction for free and is not the claim under test.
 | --- | --- | --- | --- | --- | --- |
 | overlap off | 0 | 6778 | 1150.66 ms | 0.00 ms (0.0%) | 1150.66 ms (100.0%) |
 | overlap off | 1 | 6778 | 213.77 ms | 0.00 ms (0.0%) | 213.77 ms (100.0%) |
-| overlap on  | 0 | 12934 | 2103.34 ms | 206.12 ms (9.8%) | 1897.22 ms (90.2%) |
-| overlap on  | 1 | 12934 | 1464.44 ms | 126.04 ms (8.6%) | 1338.41 ms (91.4%) |
+| overlap on | 0 | 12934 | 2103.34 ms | 206.12 ms (9.8%) | 1897.22 ms (90.2%) |
+| overlap on | 1 | 12934 | 1464.44 ms | 126.04 ms (8.6%) | 1338.41 ms (91.4%) |
 
 GPU NVIDIA A10 (0): reduction time hidden under compute goes 0.0% -> 9.8%.
 GPU NVIDIA A10 (1): reduction time hidden under compute goes 0.0% -> 8.6%.

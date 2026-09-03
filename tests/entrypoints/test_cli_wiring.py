@@ -275,6 +275,54 @@ class TestTensorParallelSurface:
         assert args.handler.run(args) == 0
         assert captured["config"].tensor_parallel_size == 2
 
+    def test_the_expert_parallel_flag_reaches_the_engine_factory(self, model_dir, monkeypatch):
+        """``--enable-expert-parallel`` travels the tensor-parallel chain: the
+        engine factory sees it, and its absence stays ``False`` (vLLM spelling)."""
+        seen: dict = {}
+
+        def fake_from_pretrained(model, **kwargs):
+            seen.update(model=model, **kwargs)
+            return object()
+
+        monkeypatch.setattr(cli.ContinuousBatchingEngine, "from_pretrained", fake_from_pretrained)
+        options_for(["batch", "--enable-expert-parallel"], model_dir).build_engine()
+        assert seen["enable_expert_parallel"] is True
+
+        seen.clear()
+        options_for(["batch"], model_dir).build_engine()
+        assert seen["enable_expert_parallel"] is False
+
+    def test_serve_passes_expert_parallel_to_the_server_config(self, model_dir, monkeypatch):
+        captured: dict = {}
+        from lite_llama.entrypoints import api_server
+
+        monkeypatch.setattr(
+            api_server, "run_server", lambda config, host, port: captured.update(config=config)
+        )
+        args = build_parser().parse_args(
+            ["serve", "--model-dir", str(model_dir), "--enable-expert-parallel"]
+        )
+
+        assert args.handler.run(args) == 0
+        assert captured["config"].enable_expert_parallel is True
+
+    def test_vl_chat_refuses_expert_parallelism_with_the_grid(self, model_dir):
+        """The vision path refuses the expert split for the same reason it
+        refuses TP: no sharded engine behind it."""
+        args = build_parser().parse_args(
+            [
+                "vl-chat",
+                "--model-dir",
+                str(model_dir),
+                "--image",
+                "cat.png",
+                "--enable-expert-parallel",
+            ]
+        )
+
+        with pytest.raises(SystemExit, match="single-GPU"):
+            args.handler.run(args)
+
     def test_vl_chat_refuses_tensor_parallelism_instead_of_faking_it(self, model_dir):
         """Vision has no sharded path yet, and the mirror process that pretended
         otherwise is gone: refusing beats a run whose ranks quietly disagree."""

@@ -1,0 +1,48 @@
+{
+  "config": {
+    "batches": [
+      32,
+      64
+    ],
+    "gen": 64,
+    "repeat": 3,
+    "json": "docs/benchmark_logs/overlap_sbo_graph_20260904.json",
+    "timestamp": "2026-09-04T04:43:02"
+  },
+  "results": {
+    "batches": {
+      "32": {
+        "tpot_ms": {
+          "sbo_off": 41.78961407807139,
+          "sbo_on": 40.87377262730447
+        },
+        "ttft_ms": {
+          "sbo_off": 168.91149058938026,
+          "sbo_on": 171.54130712151527
+        },
+        "tps": {
+          "sbo_off": 724.5504728838059,
+          "sbo_on": 745.6257274951581
+        },
+        "tpot_improvement_pct": 2.19
+      },
+      "64": {
+        "tpot_ms": {
+          "sbo_off": 55.395462742400554,
+          "sbo_on": 53.96998644111648
+        },
+        "ttft_ms": {
+          "sbo_off": 299.91650953888893,
+          "sbo_on": 302.0107187330723
+        },
+        "tps": {
+          "sbo_off": 1076.5418946920288,
+          "sbo_on": 1104.7425264232152
+        },
+        "tpot_improvement_pct": 2.57
+      }
+    },
+    "timeline": "dispatch regions 1248, shared-MLP regions 624; 198 overlapping pairs totalling 78.92 ms of overlap",
+    "note": "SBO on/off both under CUDA graph now that EP keeps its graphs: the launch floor that swallowed the eager arms is gone, so the dispatch exchange SBO hides behind the shared MLP is a real share of a GPU-bound step. Greedy divergences are the bf16 reduction-order noise the EP arms already show."
+  }
+}

@@ -38,7 +38,11 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 import torch.distributed as dist
 
-from ..distributed.parallel_state import all_reduce, get_tp_group, get_tp_world_size
+from ..distributed.parallel_state import (
+    get_tensor_model_parallel_group,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from ..tools.observability import Collective, CollectiveStats
 from ..utils.logger import get_logger
 from .overlap import Timeline
@@ -244,7 +248,7 @@ class CommStreamPool:
             The reduction's completion event on the comm stream, or ``None``
             when the tensor is already final.
         """
-        group = get_tp_group() if group is None else group
+        group = get_tensor_model_parallel_group() if group is None else group
         if group is None or dist.get_world_size(group) <= 1:
             return None
         payload = tensor.numel() * tensor.element_size()
@@ -292,7 +296,7 @@ class CommStreamPool:
             The exchange's completion event on the comm stream, or ``None``
             when ``output`` is already final.
         """
-        group = get_tp_group() if group is None else group
+        group = get_tensor_model_parallel_group() if group is None else group
         if group is None or dist.get_world_size(group) <= 1:
             output.copy_(input)
             return None
@@ -480,7 +484,7 @@ def row_parallel_forward(layer: LinearBase, x: torch.Tensor) -> torch.Tensor:
             <lite_llama.modules.linear.LinearBase.apply_linear>` is called.
         x: ``[..., input_size]`` activations — the leading dims are tokens.
     """
-    world_size = get_tp_world_size()
+    world_size = get_tensor_model_parallel_world_size()
     rows = x.shape[:-1].numel()
     mode = _dispatch_mode(world_size, _deferred.get() is not None, comm_overlap_policy(), rows)
     if mode == "passthrough":
@@ -489,7 +493,7 @@ def row_parallel_forward(layer: LinearBase, x: torch.Tensor) -> torch.Tensor:
         return _deferred.get().defer(layer.apply_linear(x))
     if mode == "chunked":
         return _chunked_row_parallel(layer, x, rows)
-    return all_reduce(layer.apply_linear(x))
+    return tensor_model_parallel_all_reduce(layer.apply_linear(x))
 
 
 def _chunked_row_parallel(layer: LinearBase, x: torch.Tensor, rows: int) -> torch.Tensor:
@@ -505,7 +509,7 @@ def _chunked_row_parallel(layer: LinearBase, x: torch.Tensor, rows: int) -> torc
     policy = comm_overlap_policy()
     count = policy.chunk_count(rows)
     if count <= 1:
-        return all_reduce(layer.apply_linear(x))
+        return tensor_model_parallel_all_reduce(layer.apply_linear(x))
     pool = CommStreamPool.for_device(x.device)
     flat = x.reshape(rows, x.shape[-1])
     partials: list[torch.Tensor] = []

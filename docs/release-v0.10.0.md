@@ -99,7 +99,7 @@ autotune store 经 `set_perf_provider` 接进 rank 步：有冻结记录就按�
 ### 观测面开销（`benchmarks/bench_observability.py`）
 
 | 配置 | TTFT | TPOT | 吞吐 | 相对基线 |
-|------|------|------|------|---------|
+| ------ | ------ | ------ | ------ | --------- |
 | baseline | 23.2 ms | 4.77 ms | 3257.8 tok/s | — |
 | metrics | 23.5 ms | 4.78 ms | 3246.5 tok/s | -0.1%（低于噪声） |
 | metrics + trace | 23.3 ms | 4.78 ms | 3248.4 tok/s | -0.0%（低于噪声） |
@@ -114,7 +114,7 @@ autotune store 经 `set_perf_provider` 接进 rank 步：有冻结记录就按�
 ### dispatch 开销（`benchmarks/kernels/bench_dispatch.py`）
 
 | 档 | 耗时 | 占一步 decode（4.75 ms） |
-|----|------|------------------------|
+| ---- | ------ | ------------------------ |
 | 首次决策（含后端检测 import） | 761 ms | 一次性，只发生在启动 |
 | 换 key 后的 filter + rank | 27.0 µs | 0.57% |
 | 命中缓存 | 15.2 µs | 0.32% |
@@ -128,7 +128,7 @@ autotune store 经 `set_perf_provider` 接进 rank 步：有冻结记录就按�
 同一份不依赖 `benchmarks/` 的探针脚本，分别以两个 worktree 的 `PYTHONPATH` 运行，保证只有 lite_llama 不同、测量代码逐字相同：
 
 | 路径 | 指标 | v0.9.0 | v0.10.0 | 差值 |
-|------|------|--------|---------|------|
+| ------ | ------ | -------- | --------- | ------ |
 | continuous | 吞吐 | 3274.6 tok/s | 3269.9 tok/s | -0.14% |
 | continuous | TTFT | 22.77 ms | 23.19 ms | +1.84% |
 | static graph | 吞吐 | 3380.6 tok/s | 3387.0 tok/s | +0.19% |
@@ -151,7 +151,7 @@ autotune store 经 `set_perf_provider` 接进 rank 步：有冻结记录就按�
 ## 文件清单（相对 v0.9.0）
 
 | 操作 | 路径 |
-|------|------|
+| ------ | ------ |
 | 新建 | `lite_llama/observe/{__init__,metrics,trace}.py`（A7 registry + OTLP tracer） |
 | 新建 | `lite_llama/tools/harness/`、`scripts/layer_harness.py`（F1 单层 harness） |
 | 新建 | `lite_llama/kernels/dispatcher/autotune/frozen.py`、`benchmarks/kernels/freeze_dispatch_ranking.py`（冻结实测排序） |

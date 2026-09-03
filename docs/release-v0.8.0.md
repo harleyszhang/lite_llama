@@ -17,7 +17,7 @@ v0.8.0 有两条工作线：
 三个只在 DP 与 TP **复合**后才浮出水面的缺陷：
 
 | 问题 | 症状 | 修法 |
-|------|------|------|
+| ------ | ------ | ------ |
 | DP×TP 进程网格 | 协调器 spawn `dp_size` 个进程，而 `init_parallel(tp_size > 1)` 要 rendezvous `dp_size × tp_size` 个 rank——每一次 DP×TP 运行都**永久挂在从未启动的 rank 上** | 每个网格单元各占一个进程与请求队列，`grid_coordinates()` 从 global rank 反解 `(dp_rank, tp_rank)`；副本内 TP follower 镜像 leader 的前向，只有 `tp_rank == 0` 回复协调器 |
 | `all_reduce_min` device index | 张量建在 `cuda:{tp_rank}`，而 DP×TP 下本进程拥有的是 `dp_rank * tp_size + tp_rank`（`CUDA_VISIBLE_DEVICES` 重映射下同样不成立） | 改问 `torch.cuda.current_device()` |
 | DP 路由 token 估计 | 路由器把 `len(prompt)`——**字符数而非 token 数**——喂进一个从没有 balancer 读过的 `estimated_tokens` 参数 | 策略名对齐 SGLang（`round_robin` / `total_requests` / `total_tokens`），`total_tokens` 用真实 tokenizer 计数，新的 `needs_token_estimate` 契约让 `round_robin` 跳过 tokenizer |
@@ -29,7 +29,7 @@ v0.8.0 有两条工作线：
 引擎不知道模型在本进程还是在八个进程里，它只做一件事：把 plan 交给 `Executor`，拿回采样出的 token。
 
 | 角色 | 本仓库 | vLLM |
-|------|--------|------|
+| ------ | -------- | ------ |
 | 一次前向的**数据描述** | `executor/worker.py::ModelInput` | `SchedulerOutput` / `ModelRunnerOutput` |
 | 执行一次 plan（本进程） | `UniProcExecutor` | `UniProcExecutor` |
 | 执行一次 plan（多进程） | `MultiprocExecutor` | `MultiprocExecutor` |
@@ -53,7 +53,7 @@ plan 是 Python 对象而 NCCL 只能搬显存，用它传 plan 就得把每个 
 ### A.4 Feature: A11 并行 module 补齐
 
 | 模块 | 切的维度 | 每步通信 |
-|------|---------|---------|
+| ------ | --------- | --------- |
 | `ColumnParallelLinear` | 输出维 | 无（保持切开） |
 | `RowParallelLinear` | 输入维 | 一次 `all_reduce` |
 | `QKVParallelLinear` | 输出维，**按 q / k / v 分段** | 无 |
@@ -95,7 +95,7 @@ total                         1464     29.2 MB   (data 29.2 MB, control 10.0 KB)
 `test_tp_engine.py` 让测试自己测出噪声下限：每条 prompt 答两次（在它的 batch 里、单独一条），单卡引擎与自己不一致的条目就是踩在贪心平局上的条目。三层断言：
 
 | 断言 | 范围 |
-|------|------|
+| ------ | ------ |
 | tp=2 与 tp=1 **逐字节**相同（两种分组都比） | 单卡上 batched == alone 的条目 |
 | 共享前缀 ≥ 16 字符 | 踩在平局上的条目——错的 shard offset 毁掉的是**第一个** token |
 | 稳定条目占比 ≥ 2/3 | 防止上面那条强断言被静默架空 |
@@ -105,7 +105,7 @@ total                         1464     29.2 MB   (data 29.2 MB, control 10.0 KB)
 ### A.7 性能：DP 副本 scaling（A10 ×2 实测）
 
 | 口径 | 配置 | 总请求 | 墙钟 | 吞吐 | 加速 |
-|------|------|-------|------|------|------|
+| ------ | ------ | ------- | ------ | ------ | ------ |
 | weak（每副本 16 条） | dp=2 | 32 | 1.10 s | **3716 tok/s** | **2.00x** |
 | strong（固定 256 条切分） | dp=2 | 256 | 1.75 s | **18695 tok/s** | **1.64x** |
 
@@ -135,7 +135,7 @@ class Backend:
 **注册的后端：**
 
 | Op | Backend | Priority | Probe |
-|----|---------|----------|-------|
+| ---- | --------- | ---------- | ------- |
 | linear | fp8_native | 110 | sm89+ |
 | linear | triton_quant | 100 | Triton + CUDA |
 | linear | triton_fp16 | 90 | Triton + CUDA |
@@ -181,7 +181,7 @@ Backend 'linear' selection:
 并行相关测试规模：
 
 | 文件 | 数量 | 需要 |
-|------|-----:|------|
+| ------ | -----: | ------ |
 | `tests/distributed/test_tp_control_plane.py` | 7 | CPU（gloo 控制面 + 存活检测） |
 | `tests/distributed/test_parallel_sampling.py` | 9 | CPU（分布式采样数学） |
 | `tests/distributed/test_collective_log.py` | 19 | CPU（记账窗口 + gloo 双 rank + 词表无关性） |
@@ -196,7 +196,7 @@ Backend 'linear' selection:
 ## 文件清单（Part A）
 
 | 操作 | 路径 |
-|------|------|
+| ------ | ------ |
 | 新建 | `lite_llama/executor/executor.py`（Executor / UniProc / Multiproc / serve_plans） |
 | 新建 | `lite_llama/executor/worker.py`（ModelInput / ModelWorker / PassKind） |
 | 新建 | `lite_llama/modules/vocab_parallel.py`（VocabParallelEmbedding / ParallelLMHead） |

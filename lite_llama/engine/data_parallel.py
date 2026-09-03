@@ -328,7 +328,16 @@ def _dp_worker(
     engine: ContinuousBatchingEngine | None = None
     try:
         torch.cuda.set_device(global_rank)
-        init_parallel(global_rank=global_rank, tp_size=tp_size, dp_size=dp_size)
+        # The EP flag rides in engine_kwargs (it configures the replica's
+        # engine too) but must reach the group state *before* any model is
+        # built: expert placement is read at construction, not at forward.
+        ep_enabled = engine_kwargs.get("enable_expert_parallel", False)
+        init_parallel(
+            global_rank=global_rank,
+            tp_size=tp_size,
+            dp_size=dp_size,
+            enable_expert_parallel=ep_enabled,
+        )
         device = f"cuda:{global_rank}"
         if tp_rank == 0:
             # ``from_pretrained`` finds this process already in a TP group and
@@ -341,7 +350,8 @@ def _dp_worker(
                 enable_prefix_cache=enable_prefix_cache,
                 prefix_cache_blocks=prefix_cache_blocks,
                 enable_preemption=enable_preemption,
-                **engine_kwargs,
+                enable_expert_parallel=ep_enabled,
+                **{k: v for k, v in engine_kwargs.items() if k != "enable_expert_parallel"},
             )
         else:
             follower = LLM(device=device, **engine_kwargs)

@@ -97,6 +97,15 @@ COMMON_OPTIONS: tuple[CliOption, ...] = (
             "help": "Number of GPUs for tensor parallelism (splits weights across cards)",
         },
     ),
+    CliOption(
+        "--enable-expert-parallel",
+        {
+            "action": "store_true",
+            "help": "Split MoE experts whole-across-ranks over the tensor-parallel "
+            "group instead of splitting each expert's intermediate dim (vLLM "
+            "--enable-expert-parallel semantics)",
+        },
+    ),
 )
 
 
@@ -162,6 +171,7 @@ class BaseOptions:
     quantization: str | None = None
     kv_cache_dtype: str = "auto"
     tensor_parallel_size: int = 1
+    enable_expert_parallel: bool = False
     use_cuda_graph: bool = False
 
     @classmethod
@@ -178,6 +188,7 @@ class BaseOptions:
             "quantization": getattr(args, "quantization", None),
             "kv_cache_dtype": getattr(args, "kv_cache_dtype", "auto"),
             "tensor_parallel_size": getattr(args, "tensor_parallel_size", 1),
+            "enable_expert_parallel": getattr(args, "enable_expert_parallel", False),
             # ``cuda_graph`` is the dest every --cuda-graph flag writes (text
             # commands and vl-chat alike); the fallback fires only if a command
             # forgot to register the flag, and eager is the safe default.
@@ -224,6 +235,7 @@ class TextEngineOptions(BaseOptions):
             use_cuda_graph=self.use_cuda_graph,
             quantization=self.quantization,
             tensor_parallel_size=self.tensor_parallel_size,
+            enable_expert_parallel=self.enable_expert_parallel,
             kv_cache_dtype=self.kv_cache_dtype,
         )
 
@@ -425,13 +437,14 @@ class VlChatCommand(CliCommand):
     def run(self, args: argparse.Namespace) -> int:
         opts = BaseOptions.from_args(args)
 
-        if opts.tensor_parallel_size > 1:
+        if opts.tensor_parallel_size > 1 or opts.enable_expert_parallel:
             # Text commands shard through the engine's executor; the vision path
             # still runs one replica, and the scheme that used to fake it here --
             # a mirror process re-deriving the batch from a broadcast prompt --
             # is exactly what this release removed.
             raise SystemExit(
-                "vl-chat is single-GPU: --tensor-parallel-size > 1 needs the "
+                "vl-chat is single-GPU: --tensor-parallel-size > 1 and "
+                "--enable-expert-parallel need the "
                 "continuous-batching engine, which does not host vision models yet"
             )
 
@@ -526,6 +539,7 @@ class ServeCommand(CliCommand):
             use_cuda_graph=opts.use_cuda_graph,
             quantization=opts.quantization,
             tensor_parallel_size=opts.tensor_parallel_size,
+            enable_expert_parallel=opts.enable_expert_parallel,
             kv_cache_dtype=opts.kv_cache_dtype,
             data_parallel_size=args.data_parallel_size,
             load_balancer=args.load_balancer,

@@ -158,10 +158,12 @@ def test_shared_expert_output_is_unscaled(tmp_path):
     with torch.no_grad():
         actual = lite_moe(x.clone())
         # Same surgery on the HF side: its experts keep one stacked parameter
-        # per projection, not one module per expert.
+        # per projection, not one module per expert. transformers >= 5 routes
+        # with a 3-D "[batch, seq, hidden]" shape, so the row-major test input
+        # rides in as a single sequence.
         hf_moe.experts.gate_up_proj.data.zero_()
         hf_moe.experts.down_proj.data.zero_()
-        expected = hf_moe(x.clone())
+        expected = hf_moe(x.clone().unsqueeze(0)).squeeze(0)
 
     torch.testing.assert_close(
         actual.float(),

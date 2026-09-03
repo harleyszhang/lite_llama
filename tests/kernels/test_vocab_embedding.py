@@ -118,6 +118,33 @@ def test_mixed_ownership_matches_the_eager_chain(shape, hidden):
     torch.testing.assert_close(out, _eager_chain(ids.reshape(-1), weight, SHARD_START, LOCAL_VOCAB))
 
 
+def test_strided_input_slice_matches_the_eager_chain():
+    """A non-contiguous slice (the decode path feeds ``ids[:, :1]``) must read
+    the ids it displays.
+
+    ``reshape`` on such a slice returns a *view* with stride > 1 rather than a
+    copy; a kernel that indexes ids as stride-1 then silently reads
+    neighbouring tokens. Caught by the DeepSeek V4 TP2 parity test as an
+    O(1) logits error on decode while prefill stayed exact — this pins the
+    fix (``contiguous().view(-1)``) at the kernel's own tier.
+    """
+    weight = _weight()
+    ids = torch.randint(
+        0, SHARD_START + 3 * LOCAL_VOCAB, (4, 17), device="cuda", dtype=torch.int64
+    )
+
+    for col in (0, 1, 8, 16):  # 0 and 16 keep one stride step, the rest two
+        sl = ids[:, col : col + 1]
+        assert not sl.is_contiguous(), "the case only bites on strided views"
+
+        out = vocab_parallel_embedding(sl, weight, SHARD_START, LOCAL_VOCAB)
+
+        assert out.shape == (4, HIDDEN)
+        torch.testing.assert_close(
+            out, _eager_chain(sl.reshape(-1), weight, SHARD_START, LOCAL_VOCAB)
+        )
+
+
 def test_empty_batch_returns_empty_without_launching():
     """A zero-token batch (the TP empty-input path) must not launch a kernel."""
     weight = _weight()

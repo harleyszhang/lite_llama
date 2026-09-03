@@ -11,17 +11,15 @@ Usage:
 from __future__ import annotations
 
 import os
+
+from collections.abc import Callable
 from typing import Any
 
 import torch
 import torch.nn as nn
 
-from ..distributed.parallel_state import (
-    divide,
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce_min,
-    tensor_model_parallel_ranks_agree,
-)
+from ..batch_overlap.two_batch_overlap import TboSplitter, TwoBatchOverlap, tbo_policy
+from ..distributed.parallel_state import tensor_model_parallel_all_reduce_min, divide, get_tensor_model_parallel_world_size
 from ..kernels import update_kv_index
 from ..models.config import ModelConfig
 from ..models.registry import ModelRegistry, ModelSpec
@@ -72,6 +70,12 @@ class ModelRunner:
             # MLA caches one latent vector per token: no head axis to shard, so every
             # TP rank holds the full row (as vLLM does).
             self.kv_row = (1, config.kv_lora_rank + config.qk_rope_head_dim)
+        elif config.model_type == "deepseek_v4":
+            # V4's kv_proj emits one head_dim-wide latent row per token — the
+            # same no-head-axis geometry as MLA. The layers manage their own
+            # sliding-window/compressor state on top; this row is the engine
+            # side's reservation shape, never sharded.
+            self.kv_row = (1, config.head_dim)
         else:
             # Heads are dealt across TP ranks, so this rank caches only its own K/V.
             kv_heads = divide(config.num_kv_heads, get_tensor_model_parallel_world_size(), "key/value heads")
@@ -174,7 +178,13 @@ class ModelRunner:
             config, spec.load_class(), checkpoints_dir, device, quantization
         )
         return cls(
-            checkpoints_dir, config, spec, model, max_gpu_num_blocks, device, use_cuda_graph,
+            checkpoints_dir,
+            config,
+            spec,
+            model,
+            max_gpu_num_blocks,
+            device,
+            use_cuda_graph,
             cuda_graph_lazy=cuda_graph_lazy,
         )
 
@@ -285,18 +295,31 @@ class ModelRunner:
         seq_len_buckets: tuple[int, ...] = DEFAULT_SEQ_LEN_BUCKETS,
         *,
         lazy: bool = False,
+        tbo: bool = False,
     ) -> None:
         """Capture decode graphs for the given ``(batch, seq_len_bucket)`` grid.
 
-        Multimodal is supported: a capture only replays a decode step, by which point
-        vision tokens are ordinary KV rows (the vision tower runs in prefill, eager).
-        ``lazy`` (O13) captures a seed pair now and the rest on first use via
-        :meth:`CUDAGraphManager.try_replay`; the KV profiler must reserve with
-        ``cuda_graph_lazy`` too. Under TP the captured region holds the blocks'
-        all-reduce, so graphs are installed only after :meth:`_tp_graphs_are_safe`;
-        everything below the kill-switch runs on every rank from decisions each rank
-        computes identically, and the capture result folds into the fingerprint rather
-        than returning early (an asymmetric exit would hang the group).
+        Multimodal models are supported: a capture only ever replays a decode
+        step, and by then the vision tokens are ordinary KV-cache rows — the
+        vision tower and DeepStack hooks run during prefill, which stays eager.
+
+        ``lazy`` (O13) captures only a seed pair now and lets
+        :meth:`CUDAGraphManager.try_replay` capture the remaining shapes the
+        first time a step needs them — the cold start stops paying for shapes
+        the workload may never produce. The KV profiler must have reserved
+        with ``cuda_graph_lazy`` too, or on-demand captures fight the cache for
+        the workspace that eager startup would have withheld.
+
+        ``tbo`` records eligible batches as the two-batch-overlap interleave
+        instead of the plain forward. The op stream is static, so the whole
+        ping-pong records like any other kernel sequence — halves' compute on
+        the capture stream, deferred all-reduces on the comm stream, event
+        fences between — and replay keeps the compute/comm overlap that eager
+        TBO pays its Python scheduling against a launch floor to achieve.
+        Eligibility still follows the TBO policy (its switch and its
+        ``min_rows`` floor), judged on each captured batch size, so small
+        batches keep the plain shape. Ranks stay in lockstep: the policy, the
+        grid and the world size are identical on every side.
         """
         if self._graph_manager is not None:
             return  # idempotent
@@ -340,6 +363,7 @@ class ModelRunner:
             seq_len_buckets=seq_len_buckets,
             device=self.device,
             lazy=lazy,
+            step_factory=self._tbo_step_factory() if tbo else None,
         )
         captured = True
         try:
@@ -347,10 +371,19 @@ class ModelRunner:
                 manager.capture_seed()
             else:
                 manager.capture_all()
-        except torch.cuda.OutOfMemoryError:
-            # A failed capture may leave a half-open graph; dropping the manager is
-            # safe (replay state is installed only on success). Under TP this cannot
-            # just return: peers are heading to a collective, so report into it.
+        except (torch.cuda.OutOfMemoryError, torch.AcceleratorError) as exc:
+            # A failed capture may leave a half-open graph; dropping the manager
+            # is safe because replay state is only installed on success. An
+            # allocation failure inside ``capture_end`` surfaces as a generic
+            # CUDA ``AcceleratorError`` ("out of memory") rather than
+            # ``OutOfMemoryError``; EP's a2a buffers make each graph far larger
+            # than the dense estimate the KV profiler reserved, so capturing a
+            # full EP grid beside a profiled KV pool lands here. Anything that
+            # is not an OOM is a real capture bug and must not be swallowed.
+            if not isinstance(exc, torch.cuda.OutOfMemoryError) and "out of memory" not in str(
+                exc
+            ).lower():
+                raise
             logger.warning("CUDA graph capture ran out of memory; falling back to eager decode")
             captured = False
 
@@ -361,50 +394,78 @@ class ModelRunner:
             return
         self._graph_manager = manager
 
-    def _tp_graphs_are_safe(self, manager: CUDAGraphManager, captured: bool) -> bool:
-        """Whether this rank's captured graphs may serve traffic. Same answer everywhere.
+    @property
+    def uses_cuda_graph(self) -> bool:
+        """Whether a captured graph may serve the next decode step.
 
-        Two checks, ordered so the first makes the second well-defined:
-
-        1. **Grid agreement.** Each rank contributes a fingerprint (or ``0`` if it
-           captured nothing); ranks that disagree all return ``False`` (an asymmetric
-           grid means one rank replays where another runs eager, hanging the replayed
-           all-reduce). ``0`` fails even when unanimous, so passing means every rank
-           *has* graphs and all enter the parity check.
-        2. **Numerical parity.** Each rank compares every graph against an eager step
-           and keeps them only if all ranks are within :data:`TP_GRAPH_PARITY_ATOL`,
-           reduced with a minimum so one failure retires the graphs everywhere.
-
-        Both are functions of a collective's output, so every rank branches alike.
+        The two-batch overlap policy asks before every decode step: an eager
+        interleave would fight the graph for the step, so when this is true
+        the eager TBO stands down. The graph itself may still be *captured*
+        in the TBO shape (see :meth:`enable_cuda_graph`) — replay carries the
+        interleave, and the policy is only consulted for the eager fallback.
         """
-        fingerprint = manager.grid_fingerprint() if captured else 0
-        if not tensor_model_parallel_ranks_agree(fingerprint) or fingerprint == 0:
-            logger.warning(
-                "tensor-parallel ranks captured different CUDA graph grids "
-                "(this rank: %d); dropping graphs on every rank and decoding eager",
-                fingerprint,
-            )
-            return False
+        return self._graph_manager is not None
 
-        error = manager.max_parity_error(self.vocab_size)
-        # ``error <= tol``, not ``not error > tol``, so a NaN difference (a graph
-        # reading freed memory) fails the gate instead of slipping through.
-        local_ok = error <= TP_GRAPH_PARITY_ATOL
-        if tensor_model_parallel_all_reduce_min(int(local_ok)) != 1:
-            logger.warning(
-                "CUDA graph replay disagrees with eager decode by %.3e (tolerance %.1e) "
-                "on at least one rank; dropping graphs and decoding eager",
-                error,
-                TP_GRAPH_PARITY_ATOL,
-            )
-            return False
+    def _run_tbo(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        atten_info: AttentionMetadata,
+    ) -> torch.Tensor:
+        """The interleave itself: split into halves, ping-pong, concat back.
 
-        logger.info(
-            "TP CUDA graphs verified: worst graph-vs-eager logit difference %.3e (tolerance %.1e)",
-            error,
-            TP_GRAPH_PARITY_ATOL,
-        )
-        return True
+        One implementation behind both arms — the eager one
+        (:meth:`forward_tbo`, metadata installed by ``begin_decode``) and the
+        captured one (:meth:`_tbo_step`, metadata from the graph's persistent
+        surface). They differ only in where the metadata comes from, so the
+        captured arm cannot drift from the eager reference it is tested
+        against.
+        """
+        halves = TboSplitter().split(input_ids, position_ids, atten_info)
+        return TwoBatchOverlap(self.model).forward(halves)
+
+    def _tbo_step(self) -> Callable[[torch.Tensor, torch.Tensor, AttentionMetadata], torch.Tensor]:
+        """The step shape a TBO graph records: split, interleave, concat."""
+
+        def step(
+            input_ids: torch.Tensor, position_ids: torch.Tensor, atten_info: AttentionMetadata
+        ) -> torch.Tensor:
+            return self._run_tbo(input_ids, position_ids, atten_info)
+
+        return step
+
+    def _tbo_step_factory(self) -> Callable[[int], Callable | None]:
+        """Per-batch decision on which step shape a captured graph records."""
+        policy = tbo_policy()
+        world_size = get_tensor_model_parallel_world_size()
+
+        def factory(batch_size: int) -> Callable | None:
+            if policy.capture_eligible(world_size=world_size, batch=batch_size):
+                return self._tbo_step()
+            return None
+
+        return factory
+
+    def forward_tbo(self, input_ids: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+        """One decode step in two interleaved halves (L2 two-batch overlap).
+
+        Splits the step with :class:`~lite_llama.batch_overlap.two_batch_overlap.TboSplitter`
+        -- narrow views of the inputs plus per-half attention metadata over
+        the shared paged KV cache -- and runs the halves through
+        :class:`~lite_llama.batch_overlap.two_batch_overlap.TwoBatchOverlap`. The metadata must
+        already be installed for the whole step (``begin_decode``), which
+        the decode path does before choosing between this and
+        :meth:`forward`.
+
+        Args:
+            input_ids: ``[rows, 1]`` the step's token ids.
+            position_ids: ``[rows, 1]`` absolute position per row.
+
+        Returns:
+            ``[rows, 1, vocab]`` logits, rows in batch order -- the same
+            shape :meth:`forward` returns for the step.
+        """
+        return self._run_tbo(input_ids, position_ids, self.atten_info)
 
     def forward(
         self,

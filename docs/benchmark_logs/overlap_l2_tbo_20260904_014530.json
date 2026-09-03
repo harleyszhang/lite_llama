@@ -1,0 +1,75 @@
+{
+  "config": {
+    "model_dir": "my_weight/Qwen2.5-1.5B-Instruct",
+    "batches": [
+      8,
+      16,
+      32
+    ],
+    "max_gen_len": 64,
+    "repeat": 2,
+    "timeline": false,
+    "json": "benchmarks/logs/overlap_l2_tbo_graph.json",
+    "timestamp": "2026-09-04T01:45:38"
+  },
+  "results": {
+    "batches": {
+      "8": {
+        "tpot_ms": {
+          "tbo_off": 25.668592857463018,
+          "tbo_on": 59.99546929720848
+        },
+        "ttft_ms": {
+          "tbo_off": 24.76164698600769,
+          "tbo_on": 24.558451026678085
+        },
+        "total_s": {
+          "tbo_off": 1.641920167952776,
+          "tbo_on": 3.8043084144592285
+        },
+        "tpot_improvement_pct": -133.73,
+        "graph_reference_tpot_ms": 6.162921705889324,
+        "tbo_graph_tpot_ms": 9.923340959681404,
+        "tbo_graph_improvement_pct": -61.02
+      },
+      "16": {
+        "tpot_ms": {
+          "tbo_off": 25.4748710800731,
+          "tbo_on": 59.97617211606768
+        },
+        "ttft_ms": {
+          "tbo_off": 24.856016039848328,
+          "tbo_on": 25.00109001994133
+        },
+        "total_s": {
+          "tbo_off": 1.6298079378902912,
+          "tbo_on": 3.8035361133515835
+        },
+        "tpot_improvement_pct": -135.43,
+        "graph_reference_tpot_ms": 6.617714192659136,
+        "tbo_graph_tpot_ms": 10.480059281228082,
+        "tbo_graph_improvement_pct": -58.36
+      },
+      "32": {
+        "tpot_ms": {
+          "tbo_off": 26.33130532645044,
+          "tbo_on": 60.250692306056855
+        },
+        "ttft_ms": {
+          "tbo_off": 26.74054726958275,
+          "tbo_on": 26.721905916929245
+        },
+        "total_s": {
+          "tbo_off": 1.6856498420238495,
+          "tbo_on": 3.8225508891046047
+        },
+        "tpot_improvement_pct": -128.82,
+        "graph_reference_tpot_ms": 7.634170530807404,
+        "tbo_graph_tpot_ms": 11.187795963552263,
+        "tbo_graph_improvement_pct": -46.55
+      }
+    },
+    "timeline": "",
+    "note": "measured after TBO gained graph capture (batch_overlap/two_batch_overlap.py + executor/): eager arms still sit on the Python launch floor, so eager TBO pays its scheduling against a floor the graph never sees. graph_reference is the graphed deployment shape (TBO off); tbo_graph is the same shape with the interleave captured \u2014 replay carries the compute/comm overlap at launch-floor-free speed, and tbo_graph vs graph_reference is the overlap's marginal value. Greedy divergences vs eager arms are bf16 reduction-order noise on low-confidence rows."
+  }
+}

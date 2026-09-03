@@ -52,14 +52,7 @@ _QUANT_NONE = 0
 _QUANT_FP8 = 1
 _QUANT_INT8 = 2
 _QUANT_INT4 = 3
-_QUANT_FP8_A8 = 4
-_QUANT_INT8_A8 = 5
-
-#: Exponent correction for the pre-sm89 path of mode 4, where *both* operands
-#: are widened by the e4m3 -> fp16 bit trick and each is short a factor of 256.
-#: Derived from the one imported constant rather than restated, so it cannot
-#: drift from ``quantization.fp8``'s copy of the same reasoning.
-_FP8_BIT_TRICK_SCALE_SQ = FP8_E4M3_BIT_TRICK_SCALE * FP8_E4M3_BIT_TRICK_SCALE
+_QUANT_MXFP4 = 4
 
 #: k-tile of the quantised path: one byte per weight element, k-contiguous, so a
 #: 128-wide tile is one full memory transaction per output channel.
@@ -358,27 +351,9 @@ def _fused_moe_kernel(
     A: ``[num_tokens, K]`` activations. B: ``[E, N, K]`` stacked expert weights,
     fp16 or 8-bit or int4 packed. C: ``[num_tokens * top_k, N]`` (each token's per-slot output row).
     When ``QUANT_MODE`` is non-zero, ``b_scale_ptr`` holds dequantisation scales.
-    When ``QUANT_MODE == 3`` (INT4), B is ``[E, N, K//2]`` uint8 (two nibbles per
-    byte along K, the layout :func:`repack_int4_experts` produces),
-    ``b_scale_ptr`` is ``[E, N, K//group_k]``, and optionally ``b_zeros_ptr`` holds zero points.
-    When ``QUANT_MODE`` is 4 or 5 (fp8 / int8 W8A8), A is 8-bit too and
-    ``a_scale_ptr`` holds one fp32 scale per A row; ``NATIVE_FP8`` then picks
-    between keeping both operands 8-bit for the sm89+ fp8 MMA and the pre-sm89
-    widening. Both are read only in those modes, and unused elsewhere.
-
-    ``A_QUANT`` moves the mode-4/5 activation quantisation *inside* this kernel:
-    A arrives at full precision (fp16/bf16), one extra pass over the gathered rows
-    derives each row's scale, and the k-loop quantises on the fly instead of
-    reading pre-quantised bytes. ``a_scale_ptr`` is then unread. This exists for
-    the launch-bound decode shapes, where the separate quantiser kernel's host
-    time exceeds the whole GEMM's device time (measured on H100 at 1 token:
-    ~35 us of host per call against ~15 us of device work in both GEMMs).
-
-    ``SCALE_HOISTED`` says the b-scale does not vary along k -- one scale group
-    spans the whole of K, which is what per-output-channel scales are. The
-    k-loop then accumulates *inside* ``tl.dot`` and the scale is applied once in
-    the epilogue; otherwise (int4 group scales, block-wise fp8) each k-tile
-    reads its own scale and has to leave the dot to multiply by it.
+    When ``QUANT_MODE`` is 3 (INT4) or 4 (MXFP4), B is ``[E, N, K//8]`` int32
+    packed (8 nibbles per word), ``b_scale_ptr`` is ``[E, N, K//group_k]``, and
+    (INT4 only) ``b_zeros_ptr`` optionally holds zero points.
     """
     # Grouped pid ordering for L2 reuse (same scheme as vLLM/triton matmul).
     pid = tl.program_id(axis=0)
@@ -404,20 +379,11 @@ def _fused_moe_kernel(
     offs_k = tl.arange(0, BLOCK_K)
     a_ptrs = a_ptr + (offs_token[:, None] // top_k) * stride_am + offs_k[None, :] * stride_ak
 
-    if QUANT_MODE == 3:
-        # INT4: B is [E, N, K//2] uint8, two nibbles per byte along K;
-        # stride_bk is per byte. The load is the *dense* [BLOCK_K // 2, BLOCK_N]
-        # byte tile -- affine in both axes, so it vectorises and the software
-        # pipeliner keeps it on cp.async. Replicated addressing (vLLM's idiom:
-        # logical k reads byte k // 2 inside a [BLOCK_K, BLOCK_N] tile, every
-        # byte appearing in its two nibble rows) compiles to 128 scalar
-        # ``ld.global.b8`` here: the non-affine ``k // 2`` index defeats
-        # Triton's coalescing analysis, and vLLM's own kernel measures 13-18
-        # ms/GEMM on these same bytes and GPU (they ship int4 on the Marlin
-        # CUDA kernel instead). The byte's two nibble planes are separated in
-        # registers instead, and the A tile's even/odd k columns line them
-        # back up as two half-K dots (in the loop below).
-        offs_kh = tl.arange(0, BLOCK_K // 2)
+    if QUANT_MODE == 3 or QUANT_MODE == 4:
+        # INT4 / MXFP4: B is [E, N, K//8] int32, packed along K dim. stride_bk is
+        # per-word. For each k-tile of BLOCK_K logical elements, we load
+        # BLOCK_K//8 int32 words.
+        offs_k_words = tl.arange(0, BLOCK_K // 8)
         b_ptrs = (
             b_ptr
             + off_experts * stride_be
@@ -466,90 +432,67 @@ def _fused_moe_kernel(
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     acc_int = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.int32)
     for k in range(0, tl.cdiv(K, BLOCK_K)):
-        if A_QUANT:
-            a = tl.load(
-                a_ptrs,
-                mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_K),
-                other=0.0,
-            ).to(tl.float32)
-            q = a / a_scale[:, None]
-            if QUANT_MODE == 4:
-                a = tl.minimum(tl.maximum(q, -A_QMAX), A_QMAX).to(tl.float8e4nv)
-            else:
-                # rint, not a plain .to(int8): the torch reference rounds to
-                # nearest even, and .to truncates toward zero -- a different
-                # byte for every value whose fraction is above one half.
-                r = tl.extra.cuda.libdevice.rint(q)
-                a = tl.minimum(tl.maximum(r, -A_QMAX), A_QMAX).to(tl.int8)
-        else:
-            a = tl.load(
-                a_ptrs,
-                mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_K),
-                # An int literal, not 0.0: in modes 4/5 this pointer is ``uint8``
-                # or ``int8``, and the e4m3 / int8 bit pattern 0 is +0 anyway,
-                # so one spelling serves every dtype the pointer can carry.
+        a = tl.load(
+            a_ptrs,
+            mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_K),
+            other=0.0,
+        )
+        if QUANT_MODE == 3 or QUANT_MODE == 4:
+            # INT4 / MXFP4 path: load int32 words [BLOCK_K//8, BLOCK_N], unpack
+            # to [BLOCK_K, BLOCK_N] nibbles (low nibble = lower K position).
+            b_packed = tl.load(
+                b_ptrs,
+                mask=offs_k_words[:, None] < (K // 8) - k * (BLOCK_K // 8),
                 other=0,
-            )
-        if QUANT_MODE == 3:
-            # INT4 path: one dense [BLOCK_K // 2, BLOCK_N] byte tile; the two
-            # nibble planes come out in registers (see the addressing note
-            # above the loop). The masked form predicates per element along k,
-            # which decomposes the load into scalar bytes -- the same reason
-            # replicated addressing was slow -- so it is compiled out whenever
-            # K is tile-aligned, which both Qwen3-30B-A3B GEMMs are.
-            if EVEN_K:
-                b_byte = tl.load(b_ptrs)
-            else:
-                rem = K - k * BLOCK_K
-                b_byte = tl.load(
-                    b_ptrs,
-                    # ceil: the low plane covers k = 2i and the high one
-                    # k = 2i + 1, so an odd remainder leaves one dead high
-                    # nibble -- whose A column the a-load's own mask has
-                    # already zeroed.
-                    mask=offs_kh[:, None] < (rem + 1) // 2,
-                    other=0,
+            )  # [BLOCK_K//8, BLOCK_N]
+            # Unpack 8 int4 nibbles per word: shift by [0,4,8,...,28] and mask 0xF
+            shifts = (tl.arange(0, 8) * 4).to(tl.int32)  # [8]
+            # Reshape for broadcast: [BLOCK_K//8, 1, BLOCK_N] x [1, 8, 1] -> [BLOCK_K//8, 8, BLOCK_N]
+            b_expanded = (b_packed[:, None, :] >> shifts[None, :, None]) & 0xF
+            # Flatten to [BLOCK_K, BLOCK_N]
+            nibbles = tl.reshape(b_expanded, (BLOCK_K, BLOCK_N))
+            if QUANT_MODE == 4:
+                # MXFP4 e2m1: bit3 sign, bits[2:1] exponent, bit0 mantissa.
+                # Normal: (1 + m/2) * 2^(e-1); e==0: m*0.5 subnormal, 0 stays 0.
+                # The scale/decode arithmetic stays fp32; only the product the
+                # tensor cores consume comes back to the activation's dtype.
+                sign = ((nibbles >> 3) & 1).to(tl.float32)
+                e = (nibbles >> 1) & 3
+                m = (nibbles & 1).to(tl.float32)
+                mag = tl.where(
+                    e == 0, m * 0.5, (1.0 + 0.5 * m) * tl.exp2((e - 1).to(tl.float32))
                 )
-            # Straight to compute_type: both planes are small integers and the
-            # zero point is an integer in [0, 15], so the difference is exact
-            # in the 16-bit formats -- no fp32 detour, and the epilogue's fp32
-            # scale multiply is where the precision budget belongs anyway.
-            b_lo = (b_byte & 0xF).to(compute_type)
-            b_hi = ((b_byte >> 4) & 0xF).to(compute_type)
-            # Load scale and optionally zero point
-            if not SCALE_HOISTED:
-                b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
-            if HAS_ZEROS:
-                # The zero point joins its plane in compute_type: an fp32 zero
-                # would promote the subtraction and drag the operand back out
-                # of the dtype the dot needs.
-                b_zero = tl.load(
-                    b_zeros_ptr
-                    + off_experts * stride_bse
-                    + (offs_bn // GROUP_N) * stride_bsn
-                    + ((k * BLOCK_K) // GROUP_K) * stride_bsk
-                ).to(compute_type)
-                b_lo = b_lo - b_zero[None, :]
-                b_hi = b_hi - b_zero[None, :]
-            # (m, k) with k = 2i + j reshapes row-major to
-            # [BLOCK_M, BLOCK_K // 2, 2], so tl.split hands out the even and
-            # odd k columns with no memory round trip; each half multiplies
-            # its own nibble plane and the pair sums to the old full-K dot.
-            a_even, a_odd = tl.split(tl.reshape(a, (BLOCK_M, BLOCK_K // 2, 2)))
-            if SCALE_HOISTED:
-                accumulator = tl.dot(a_even, b_lo, acc=accumulator)
-                accumulator = tl.dot(a_odd, b_hi, acc=accumulator)
+                val = tl.where(sign == 1, -mag, mag)
+                # GROUP_K (32) is narrower than BLOCK_K, so one k-tile spans
+                # BLOCK_K // GROUP_K scale groups: load one scale per group
+                # and broadcast it over the group's k rows, instead of the
+                # per-tile scalar the wider-group formats use.
+                scale_row = k * (BLOCK_K // GROUP_K) + tl.arange(0, BLOCK_K // GROUP_K)
+                s = tl.load(
+                    b_scale_ptrs[None, :] + scale_row[:, None] * stride_bsk,
+                    mask=(scale_row < K // GROUP_K)[:, None],
+                    other=0.0,
+                )  # [BLOCK_K // GROUP_K, BLOCK_N]
+                val_g = tl.reshape(val, (BLOCK_K // GROUP_K, GROUP_K, BLOCK_N))
+                b = tl.reshape(val_g * s[:, None, :], (BLOCK_K, BLOCK_N)).to(a.dtype)
             else:
-                # Both planes share the k-block's scale (GROUP_K is a multiple
-                # of BLOCK_K -- the group_k check in _fused_moe guarantees it),
-                # so one multiply covers the two half-K dots together.
-                accumulator += (
-                    tl.dot(a_even, b_lo) + tl.dot(a_odd, b_hi)
-                ) * b_scale[None, :]
-            # ``_INT4_PACK_FACTOR`` spelled as its literal: Triton kernels only
-            # resolve globals that are tl.constexpr instances (see the modes'
-            # note above), so the kernel body cannot name the launcher's constant.
-            b_ptrs += (BLOCK_K // 2) * stride_bk
+                # Load scale and optionally zero point
+                b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
+                b = nibbles.to(a.dtype)
+                if HAS_ZEROS:
+                    b_zero = tl.load(
+                        b_zeros_ptr
+                        + off_experts * stride_bse
+                        + (offs_bn // GROUP_N) * stride_bsn
+                        + ((k * BLOCK_K) // GROUP_K) * stride_bsk
+                    )
+                    # The scale/zero arithmetic stays fp32; only the product the
+                    # tensor cores consume comes back to the activation's dtype.
+                    b = ((b.to(tl.float32) - b_zero[None, :]) * b_scale[None, :]).to(a.dtype)
+                else:
+                    b = (b.to(tl.float32) * b_scale[None, :]).to(a.dtype)
+            accumulator += tl.dot(a, b)
+            b_ptrs += (BLOCK_K // 8) * stride_bk
         else:
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0)
             if QUANT_MODE == 0:
@@ -822,23 +765,10 @@ def _invoke_moe_gemm(
     em = sorted_token_ids.numel()
     num_slots = c.shape[0]
     n, k = b.shape[1], b.shape[2]
-    # For INT4 mode, K in the tensor is K_logical // 2 (two nibbles per byte),
-    # but the kernel walks logical k and addresses bytes as k // 2.
-    k_logical = k * _INT4_PACK_FACTOR if quant_mode == _QUANT_INT4 else k
-    # Only mode 4 puts A through the tensor cores as fp8, so only it cares which
-    # of the two widenings the kernel compiles; the weight-only modes always take
-    # the bit trick and always pay its single correction factor.
-    native_fp8 = quant_mode == _QUANT_FP8_A8 and has_native_fp8(a.device.index)
-    # Mode 1's widening has its own capability split: sm89+ converts e4m3 with a
-    # hardware cvt (one instruction, no 256x correction), older devices keep the
-    # bit trick and its DEQUANT_SCALE.
-    fp8_cvt = quant_mode == _QUANT_FP8 and has_native_fp8(a.device.index)
-    if quant_mode == _QUANT_FP8_A8:
-        dequant_scale = 1.0 if native_fp8 else _FP8_BIT_TRICK_SCALE_SQ
-    elif quant_mode == _QUANT_FP8:
-        dequant_scale = 1.0 if fp8_cvt else FP8_E4M3_BIT_TRICK_SCALE
-    else:
-        dequant_scale = 1.0
+    # For INT4/MXFP4 mode, K in the tensor is K_logical // 8 (packed), but we pass K_logical.
+    k_logical = (
+        k * _INT4_PACK_FACTOR if quant_mode in (_QUANT_INT4, _QUANT_MXFP4) else k
+    )
     grid = (triton.cdiv(em, config["BLOCK_M"]) * triton.cdiv(n, config["BLOCK_N"]),)
     group_k_eff = min(group_k, k_logical) if group_k else 1
     _fused_moe_kernel[grid](
@@ -905,21 +835,14 @@ def _silu_and_mul_kernel(
     scale_ptr,
     stride_xm,
     N,
-    QMAX: tl.constexpr,
-    QUANT_OUT: tl.constexpr,
+    LIMIT: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
     """``out = silu(x[:, :N]) * x[:, N:]`` on a contiguous ``[tokens, 2N]`` input.
 
-    With ``QUANT_OUT`` set (1 = fp8, 2 = int8) the result leaves as bytes plus
-    one fp32 scale per row, which is what the W8A8 second GEMM wants; ``QMAX`` is
-    the target format's range. The launcher only sets it when one program owns a
-    whole row (``BLOCK_N >= N``): the row's amax has to be known before any
-    element of it can be scaled, and a program that holds half a row cannot know
-    it without a second pass through HBM -- which is exactly the separate
-    quantiser this fusion removes. The saving is a launch (~40 us of host time
-    on an H100, against a 13 us second GEMM at decode) and a full fp16
-    round-trip of the intermediate.
+    ``LIMIT`` clamps the gate at ``+LIMIT`` and up at ``+-LIMIT`` before the
+    activation — DeepSeek-V4's ``swiglu_limit`` (gpt-oss semantics). ``inf``
+    (the default every other family passes) makes both clamps no-ops.
     """
     pid_m = tl.program_id(0).to(tl.int64)
     pid_n = tl.program_id(1)
@@ -928,6 +851,9 @@ def _silu_and_mul_kernel(
     # silu evaluates its sigmoid in fp32, matching the dense swiglu kernel.
     gate = tl.load(x_ptr + pid_m * stride_xm + offs, mask=mask, other=0.0).to(tl.float32)
     up = tl.load(x_ptr + pid_m * stride_xm + N + offs, mask=mask, other=0.0).to(tl.float32)
+    if LIMIT < float("inf"):
+        gate = tl.minimum(gate, LIMIT)
+        up = tl.minimum(tl.maximum(up, -LIMIT), LIMIT)
     out = silu(gate) * up
     if QUANT_OUT:
         # Masked lanes carry 0 from the loads above, so they cannot raise the
@@ -976,41 +902,14 @@ def _moe_sum_kernel(
 # --------------------------------------------------------------------------- #
 # Facade
 # --------------------------------------------------------------------------- #
-def _quant_mode(
-    weight: torch.Tensor, scale: torch.Tensor | None, zeros: torch.Tensor | None = None
-) -> int:
-    """Classify an expert weight tensor into one of the ``QUANT_MODE`` values.
-
-    Never returns the W8A8 modes: the dtype cannot tell weight-only fp8 from W8A8
-    fp8 (both store ``uint8`` e4m3 experts) nor weight-only int8 from W8A8 int8
-    (both ``int8``). Only the entry point the caller chose says which, so
-    :func:`fused_moe_w8a8_fp8` and :func:`fused_moe_w8a8_int8` promote the mode
-    after this classification.
-
-    ``zeros`` disambiguates the other dtype collision: byte-packed int4 experts
-    are ``uint8`` just like fp8, and both int4 and asymmetric int8 (GPTQ
-    ``bits=8``) carry zero points, so ``zeros`` plus the dtype picks between
-    them. The int32 word packing that int4 and GPTQ-8 checkpoints ship never
-    reaches the kernel -- converting it is a one-time load step
-    (:func:`repack_int4_experts` / :func:`unpack_int8_experts`), not something a
-    per-call path should pay.
-    """
+def _quant_mode(weight: torch.Tensor, scale: torch.Tensor | None, mxfp4: bool = False) -> int:
+    """Classify an expert weight tensor into one of the ``QUANT_MODE`` values."""
     if scale is None:
         return _QUANT_NONE
-    if zeros is not None:
-        if weight.dtype == torch.uint8:
-            return _QUANT_INT4
-        if weight.dtype == torch.int8:
-            # Asymmetric int8 (GPTQ bits=8): one int8 byte per element plus an
-            # integer zero point, dequantised as (byte - zero) * scale. The
-            # kernel's HAS_ZEROS branch subtracts the zero point; symmetric int8
-            # (zeros is None) takes the same mode without it.
-            return _QUANT_INT8
-        raise ValueError(
-            "int4 expert weights must be byte-packed uint8 [E, N, K//2], got "
-            f"{weight.dtype}; convert the [E, N, K//8] int32 checkpoint layout "
-            "once at load with repack_int4_experts"
-        )
+    if mxfp4:
+        if weight.dtype != torch.int32:
+            raise ValueError(f"mxfp4 expert weights must be int32 packed, got {weight.dtype}")
+        return _QUANT_MXFP4
     if weight.dtype == torch.uint8:
         return _QUANT_FP8
     if weight.dtype == torch.int8:
@@ -1258,6 +1157,8 @@ def fused_moe(
     w2_zeros: torch.Tensor | None = None,
     group_n: int = 0,
     group_k: int = 0,
+    swiglu_limit: float = float("inf"),
+    mxfp4: bool = False,
 ) -> torch.Tensor:
     """Run the routed-expert FFN: ``sum_k w_k * (silu(x @ W1g.T) * (x @ W1u.T)) @ W2.T``.
 
@@ -1267,9 +1168,10 @@ def fused_moe(
     entry points that quantise it.
 
     Args:
-        hidden_states: ``[num_tokens, hidden]`` activations (fp16 or bf16,
-            contiguous rows). Every quantised weight tile is widened to this
-            dtype before the dot.
+        swiglu_limit: Clamp gate at ``+limit`` and up at ``+-limit`` before the
+            activation (DeepSeek-V4's gpt-oss-style bounded SwiGLU). ``inf``
+            keeps the plain silu every other family uses.
+        hidden_states: ``[num_tokens, hidden]`` activations (fp16, contiguous rows).
         w1: ``[E, 2 * moe_intermediate, hidden]`` fused gate/up projections, fp16
             or 8-bit (``uint8`` fp8-e4m3 / ``int8``) or int4 packed (``int32``).
         w2: ``[E, hidden, moe_intermediate]`` down projections, same dtype as ``w1``.
@@ -1281,13 +1183,90 @@ def fused_moe(
         w2_zeros: Zero points for ``w2``; ``None`` for symmetric.
         group_n: Rows of one scale block (``1`` = per output channel).
         group_k: Columns of one scale block.
+        mxfp4: ``True`` interprets the int32-packed nibbles as MXFP4 e2m1
+            code points with per-``group_k``-element e8m0 scales (DeepSeek-V4
+            routed experts; ``group_k`` is 32 there) instead of linear int4.
 
     Returns:
         ``[num_tokens, hidden]`` combined expert output, in ``hidden_states``' dtype.
     """
-    return _fused_moe(
+    num_tokens, hidden = hidden_states.shape
+    num_experts, two_inter, _ = w1.shape
+    intermediate = two_inter // 2
+    top_k = topk_ids.shape[1]
+    device = hidden_states.device
+    dtype = hidden_states.dtype
+
+    quant_mode = _quant_mode(w1, w1_scale, mxfp4)
+    if quant_mode != _quant_mode(w2, w2_scale, mxfp4):
+        raise ValueError("w1 and w2 must use the same quantisation format")
+    if quant_mode and quant_mode != _QUANT_MXFP4 and group_k % 128 != 0 and (
+        group_k < min(hidden, intermediate)
+    ):
+        raise ValueError(f"group_k ({group_k}) must be a multiple of 128 unless it covers K")
+    if quant_mode == _QUANT_MXFP4 and group_k != 32:
+        raise ValueError(f"mxfp4 scale groups are 32 elements wide, got group_k={group_k}")
+
+    topk_ids = topk_ids.to(torch.int32)
+    flat_weights = topk_weights.reshape(-1).to(dtype).contiguous()
+
+    # Autotune lookup: use persisted best config if available, else heuristic.
+    from ...dispatcher.autotune import get_best_config
+
+    dtype_label = {
+        _QUANT_NONE: "fp16",
+        _QUANT_FP8: "fp8",
+        _QUANT_INT8: "int8",
+        _QUANT_INT4: "int4",
+        _QUANT_MXFP4: "mxfp4",
+    }.get(quant_mode, "fp16")
+    config = get_best_config("fused_moe", m=num_tokens, n=two_inter, k=hidden, dtype=dtype_label)
+    if config is None:
+        config = _launch_config(num_tokens, quant_mode)
+    sorted_ids, expert_ids, num_post = moe_align_block_size(
+        topk_ids, config["BLOCK_M"], num_experts
+    )
+
+    # GEMM1: [M, hidden] x [E, 2I, hidden] -> [M * top_k, 2I]
+    gate_up = torch.empty((num_tokens * top_k, two_inter), device=device, dtype=dtype)
+    _invoke_moe_gemm(
         hidden_states,
         w1,
+        gate_up,
+        w1_scale,
+        w1_zeros,
+        flat_weights,
+        sorted_ids,
+        expert_ids,
+        num_post,
+        top_k,
+        mul_routed_weight=False,
+        quant_mode=quant_mode,
+        group_n=group_n,
+        group_k=group_k,
+        config=config,
+    )
+
+    # silu(gate) * up -> [M * top_k, I]
+    act = torch.empty((num_tokens * top_k, intermediate), device=device, dtype=dtype)
+    block_n = min(triton.next_power_of_2(intermediate), 1024)
+    _silu_and_mul_kernel[(num_tokens * top_k, triton.cdiv(intermediate, block_n))](
+        gate_up,
+        act,
+        gate_up.stride(0),
+        intermediate,
+        LIMIT=swiglu_limit,
+        BLOCK_N=block_n,
+        num_warps=4,
+    )
+
+    # GEMM2 with the routing weight folded in: [M * top_k, I] x [E, hidden, I].
+    # ``act`` is already expanded per slot, so the kernel's A-row gather must use
+    # top_k=1 (vLLM does the same: the second invocation passes ``1``), turning
+    # ``offs_token // top_k`` into the identity on slot indices.
+    expanded = torch.empty((num_tokens * top_k, hidden), device=device, dtype=dtype)
+    _invoke_moe_gemm(
+        act,
         w2,
         topk_weights,
         topk_ids,

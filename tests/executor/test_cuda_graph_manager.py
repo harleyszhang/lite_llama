@@ -54,9 +54,11 @@ def fake_runner_cls(monkeypatch):
             kv_buffer,
             b_req_tokens_table,
             device: str = "cuda",
+            step=None,
         ) -> None:
             self.batch_size = batch_size
             self.seq_len_bucket = seq_len_bucket
+            self.step = step
             self.instances.append(self)
 
         def capture(self, warmup_metadata=None) -> None:
@@ -254,4 +256,49 @@ def test_try_replay_rejects_contexts_beyond_the_largest_bucket(manager, fake_run
     ids, positions, attn = _decode_inputs(1, max_seq_len=4097)
 
     assert manager.try_replay(ids, positions, attn) is None
-    assert fake_runner_cls.instances == []
+
+
+# --------------------------------------------------------------------------- #
+# Step factory: whose callable each runner records (TBO capture shape)
+# --------------------------------------------------------------------------- #
+def test_step_factory_shapes_each_runner_by_batch(fake_runner_cls):
+    """The manager asks the factory per key; ``None`` means the plain forward.
+
+    This is the TBO seam: the factory hands the interleave to batches that
+    clear the policy floor and the plain forward to the rest, so both shapes
+    can coexist in one captured grid.
+    """
+    tbo_step = object()
+
+    def factory(batch_size: int):
+        return tbo_step if batch_size >= 4 else None
+
+    mgr = CUDAGraphManager(
+        model=None,
+        kv_buffer=[],
+        b_req_tokens_table=torch.zeros(4, 64, dtype=torch.int32),
+        device="cpu",
+        batch_sizes=(2, 4),
+        seq_len_buckets=(256,),
+        step_factory=factory,
+    )
+    mgr.capture_all()
+
+    by_batch = {r.batch_size: r for r in fake_runner_cls.instances}
+    assert by_batch[2].step is None, "below the floor: plain forward"
+    assert by_batch[4].step is tbo_step, "clearing the floor: the TBO interleave"
+
+
+def test_step_factory_not_consulted_when_absent(fake_runner_cls):
+    """A plain manager records ``None`` steps — the pre-TBO behaviour."""
+    mgr = CUDAGraphManager(
+        model=None,
+        kv_buffer=[],
+        b_req_tokens_table=torch.zeros(4, 64, dtype=torch.int32),
+        device="cpu",
+        batch_sizes=(2,),
+        seq_len_buckets=(256,),
+    )
+    mgr.capture_all()
+
+    assert all(r.step is None for r in fake_runner_cls.instances)

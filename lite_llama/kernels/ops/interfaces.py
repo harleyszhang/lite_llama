@@ -294,6 +294,8 @@ class MoeOp(LogicalOp):
         w2_zeros: torch.Tensor | None = None,
         group_n: int = 0,
         group_k: int = 0,
+        swiglu_limit: float = float("inf"),
+        mxfp4: bool = False,
     ) -> torch.Tensor:
         """Run all dispatched experts for every token.
 
@@ -307,6 +309,13 @@ class MoeOp(LogicalOp):
             w1_zeros, w2_zeros: Zero points for the asymmetric formats — int4
                 experts and GPTQ ``bits=8`` int8; ``None`` for symmetric.
             group_n, group_k: Scale block geometry.
+            swiglu_limit: Clamp the SwiGLU gate at ``+limit`` and up at
+                ``+-limit`` (gpt-oss semantics, DeepSeek-V4's ``7.0``);
+                ``inf`` keeps plain SwiGLU.
+            mxfp4: Read ``w1``/``w2`` as packed MXFP4 e2m1 nibbles (two
+                elements per int8 byte, low nibble first) with e8m0-derived
+                fp32 scales in ``w1_scale``/``w2_scale`` — DeepSeek-V4's
+                weight-only expert format.
 
         Returns:
             ``[tokens, hidden]`` combined expert output.

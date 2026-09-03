@@ -23,6 +23,7 @@ EXPECTED_TYPES = {
     "qwen3_vl",
     "deepseek_v2",
     "deepseek_v3",
+    "deepseek_v4",
 }
 
 

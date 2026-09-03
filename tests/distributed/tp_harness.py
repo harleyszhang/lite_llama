@@ -41,6 +41,8 @@ def _worker(
     port: int,
     backend: str,
     results: mp.Queue,
+    acks: mp.Queue,
+    enable_expert_parallel: bool = False,
 ) -> None:
     """One rank: take a device, join the grid, run the payload, report answer or traceback.
 
@@ -57,13 +59,19 @@ def _worker(
         if backend == "nccl":
             torch.cuda.set_device(rank)
         ps.init_parallel(
-            global_rank=rank, tp_size=tp_size, dp_size=dp_size, master_port=port, backend=backend
+            global_rank=rank, tp_size=tp_size, dp_size=dp_size, master_port=port, backend=backend,
+            enable_expert_parallel=enable_expert_parallel,
         )
         results.put((rank, payload(rank), None))
     except BaseException:  # reported to the parent, which re-raises it verbatim
         results.put((rank, None, traceback.format_exc()))
     finally:
         ps.destroy_parallel()
+    # torch tensors ride the queue as shared-memory fds the parent picks up
+    # while *unpickling* its get(); a daemon worker that returns here can die
+    # before that rendezvous, leaving the parent with ConnectionResetError.
+    # Park until the parent signals every result has been drained.
+    acks.get()
 
 
 def run_on_tp_ranks(
@@ -73,6 +81,7 @@ def run_on_tp_ranks(
     dp_size: int = 1,
     timeout: float = 300.0,
     backend: str = "nccl",
+    enable_expert_parallel: bool = False,
 ) -> list[Any]:
     """Run ``payload(rank)`` on every rank of a ``dp_size x tp_size`` grid.
 
@@ -89,6 +98,9 @@ def run_on_tp_ranks(
             exercise the control plane, which is what
             :func:`~lite_llama.distributed.parallel_state.broadcast_object` and the
             executor's plan hand-off live on.
+        enable_expert_parallel: Set the EP group state (the TP group doubles as
+            the EP group) before the payload runs, so expert-parallel code paths
+            see :func:`~lite_llama.distributed.parallel_state.get_ep_group`.
 
     Returns:
         One result per global rank, in rank order.
@@ -103,11 +115,15 @@ def run_on_tp_ranks(
 
     context = mp.get_context("spawn")
     results: mp.Queue = context.Queue()
+    acks: mp.Queue = context.Queue()  # workers park on it until results are drained
     port = free_port()
     workers = [
         context.Process(
             target=_worker,
-            args=(payload, rank, tp_size, dp_size, port, backend, results),
+            args=(
+                payload, rank, tp_size, dp_size, port, backend, results, acks,
+                enable_expert_parallel,
+            ),
             daemon=True,
         )
         for rank in range(world_size)
@@ -130,6 +146,11 @@ def run_on_tp_ranks(
                 raise AssertionError(f"rank {rank} failed:\n{error}")
             collected[rank] = value
     finally:
+        # Release the workers parked on the ack queue *before* joining them;
+        # the fds behind tensor results stay valid only while their sender
+        # lives, so every get() must have finished unwrapping first.
+        for _ in range(world_size):
+            acks.put(True)
         for worker in workers:
             worker.join(timeout=10)
             if worker.is_alive():

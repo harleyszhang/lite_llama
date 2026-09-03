@@ -69,7 +69,7 @@ table = export_memory_budget(
 ```
 
 | Component | Size | Percentage |
-|-----------|------|------------|
+| ----------- | ------ | ------------ |
 | Model Weights | 1.24 GB | 12.8% |
 | KV Cache (fp16) | 7.90 GB | 82.0% |
 | Activations | 0.25 GB | 2.6% |

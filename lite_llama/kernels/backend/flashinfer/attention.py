@@ -62,6 +62,17 @@ def prefill_attention(q, k, v, sm_scale, b_start_loc, b_seq_len, max_seq_len):
     """
     _total_q, num_heads, head_dim = q.shape
     num_kv_heads = k.shape[1]
+    # The ragged wrapper needs compact rows; the engine's prefill grid is
+    # padded to the widest chunk (slot_batch.begin_prefill), so a batch of
+    # unequal prompt lengths only agrees with this layout by accident. When
+    # the declared packed total differs from the rows actually here, hand the
+    # pass to the native kernel, which addresses each sequence at
+    # b_start_loc and bounds it by b_seq_len — the exact padded contract.
+    declared = int(b_start_loc[-1].item()) + int(b_seq_len[-1].item())
+    if _total_q != declared:
+        from ...ops.attention.flashattention2_nopad import flash_attention2_no_pad
+
+        return flash_attention2_no_pad(q, k, v, sm_scale, b_start_loc, b_seq_len, max_seq_len)
     qo_indptr = torch.cat(
         [b_start_loc.new_zeros(1), b_start_loc[1:], b_start_loc[-1:] + b_seq_len[-1:]]
     ).to(torch.int32)
