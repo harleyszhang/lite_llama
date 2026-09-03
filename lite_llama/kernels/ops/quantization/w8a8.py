@@ -14,6 +14,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .w8a16 import sm_version
+
 
 # --------------------------------------------------------------------------- #
 # Activation quantisation kernel
@@ -227,8 +229,8 @@ def _smoothquant_matmul_kernel(
 # --------------------------------------------------------------------------- #
 # Launch configuration
 # --------------------------------------------------------------------------- #
-def _launch_config(num_tokens: int) -> dict:
-    """Tile shape for ``num_tokens`` rows of activations.
+def _launch_config(num_tokens: int, device_index: int | None) -> dict:
+    """Tile shape for ``num_tokens`` rows on this device.
 
     Swept over the five dense projections of both test models on an H100
     (the ``bench_quant_gemm.py`` shape set), same methodology as the fp8
@@ -237,7 +239,40 @@ def _launch_config(num_tokens: int) -> dict:
     tiles carry every band, with wider tiles only where M itself supplies
     the parallelism. Each band's entry never loses to any tested shape in
     that band; prefill gains the most (up to 1.5x at ``m=2048``).
+
+    Pre-Hopper devices (``sm_version`` gate) keep the A10-era table the
+    sm90 sweep replaced, measured on that hardware; weight shape (N) is
+    not an input -- narrow/wide projection groups pick the same
+    geomean-best tile in every band.
     """
+    if sm_version(device_index) < (9, 0):
+        # A10-era table (sm86, measured): fatter tiles, fewer of them.
+        if num_tokens <= 32:
+            return {
+                "BLOCK_M": 16,
+                "BLOCK_N": 128,
+                "BLOCK_K": 128,
+                "GROUP_M": 1,
+                "num_warps": 8,
+                "num_stages": 3,
+            }
+        if num_tokens <= 128:
+            return {
+                "BLOCK_M": 32,
+                "BLOCK_N": 128,
+                "BLOCK_K": 128,
+                "GROUP_M": 8,
+                "num_warps": 4,
+                "num_stages": 3,
+            }
+        return {
+            "BLOCK_M": 64,
+            "BLOCK_N": 256,
+            "BLOCK_K": 128,
+            "GROUP_M": 8,
+            "num_warps": 8,
+            "num_stages": 3,
+        }
     if num_tokens <= 32:
         return {
             "BLOCK_M": 16,
@@ -327,7 +362,7 @@ def smoothquant_matmul(
 
     # Run int8 @ int8 GEMM
     out = torch.empty((m, n), dtype=x.dtype, device=x.device)
-    cfg = _launch_config(m)
+    cfg = _launch_config(m, x.device.index)
     grid = (triton.cdiv(m, cfg["BLOCK_M"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
 
     _smoothquant_matmul_kernel[grid](

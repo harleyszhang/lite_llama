@@ -15,7 +15,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
+from .w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3, sm_version
 from .w8a16 import (
     has_native_fp8 as has_native_fp8,  # re-exported: MoE launcher imports it from here
 )
@@ -262,8 +262,8 @@ def _fp8_matmul_kernel(
 # --------------------------------------------------------------------------- #
 # Launch configuration
 # --------------------------------------------------------------------------- #
-def _launch_config(num_tokens: int, single_scale: bool) -> dict:
-    """Tile shape for ``num_tokens`` rows of activations.
+def _launch_config(num_tokens: int, single_scale: bool, device_index: int | None) -> dict:
+    """Tile shape for ``num_tokens`` rows on this device.
 
     Swept over the five dense projections of both test models on an H100
     (the ``bench_quant_gemm.py`` shape set). Decode stays ``BLOCK_N=64``
@@ -275,7 +275,41 @@ def _launch_config(num_tokens: int, single_scale: bool) -> dict:
     geomean-best config over the five shapes at that ``num_tokens``; the
     mid band trades 1.4 us on the 4B qkv projection for 11-21% on the other
     four.
+
+    Pre-Hopper devices (``sm_version`` gate) keep the A10-era table the
+    sm90 sweep replaced, measured on that hardware; weight shape (N) is
+    not an input -- narrow/wide projection groups pick the same
+    geomean-best tile in every band.
     """
+    if sm_version(device_index) < (9, 0):
+        # A10-era table (sm86, measured): one tile set, no single_scale
+        # fork -- the block-scale/per-row paths had not diverged yet.
+        if num_tokens <= 32:
+            return {
+                "BLOCK_M": 16,
+                "BLOCK_N": 128,
+                "BLOCK_K": 128,
+                "GROUP_M": 1,
+                "num_warps": 8,
+                "num_stages": 3,
+            }
+        if num_tokens <= 128:
+            return {
+                "BLOCK_M": 32,
+                "BLOCK_N": 128,
+                "BLOCK_K": 128,
+                "GROUP_M": 8,
+                "num_warps": 4,
+                "num_stages": 3,
+            }
+        return {
+            "BLOCK_M": 64,
+            "BLOCK_N": 256,
+            "BLOCK_K": 128,
+            "GROUP_M": 8,
+            "num_warps": 8,
+            "num_stages": 3,
+        }
     if num_tokens <= 32:
         return {
             "BLOCK_M": 16,
@@ -363,7 +397,7 @@ def fp8_matmul(
     # so the kernel can hoist its load out of the k loop.
     single_scale = group_k >= k
 
-    cfg = _launch_config(m, single_scale)
+    cfg = _launch_config(m, single_scale, qx.device.index)
     grid = (triton.cdiv(m, cfg["BLOCK_M"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
     _fp8_matmul_kernel[grid](
         a,
