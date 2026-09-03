@@ -125,7 +125,7 @@ method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 > Model Mem 仅指模型权重；KV Capacity 为最大缓存 token 数（分页池占满剩余 GPU 显存）。
 > 基准日志：[`docs/benchmark_logs/`](../docs/benchmark_logs/)
 >
-> 上表是 0.6B 模型在 A10 上的结果。Qwen3-4B 与 Qwen3-30B-A3B 在 2×H100 上的完整矩阵——每种方案 × TP/DP × CUDA graph × KV dtype，离线与在线，附两套精度参照——见 [`quant_matrix_20260901.md`](benchmark_logs/quant_matrix_20260901.md)。它的头条结论（在 H100 的 4B 上没有任何量化方案在速度上胜过 bf16）已被 0903 的三轮 dense GEMM 修复推翻：int8 W8A8 现在 48 个 kernel 级测试点中胜 13 个、fp8 W8A8 胜 5 个、fp8 W8A16 胜 2 个（见[第三次 tile 重扫](#dense-量化-gemm-的第三次-tile-重扫h100)、[第四轮 epilogue 化](#in-loop-scale-的消除epilogue-化与-wgmma-流水线h100-第四轮)与[第五轮 launch 配置维度](#launch-配置的设备与-dtype-维度h100-第五轮)，后者另给 int8 per-channel 换了专属 tile 表，kernel 级再提 ~1.19×），量化矩阵表待重跑后更新。
+> 上表是 0.6B 模型在 A10 上的结果。Qwen3-4B 与 Qwen3-30B-A3B 在 2×H100 上的完整矩阵——每种方案 × TP/DP × CUDA graph × KV dtype，离线与在线，附两套精度参照——见 [`quant_matrix_20260901.md`](benchmark_logs/quant_matrix_20260901.md)。它的头条结论（在 H100 的 4B 上没有任何量化方案在速度上胜过 bf16）已被 0903 的三轮 dense GEMM 修复推翻：int8 W8A8 现在 48 个 kernel 级测试点中胜 13 个、fp8 W8A8 胜 5 个、fp8 W8A16 胜 2 个（见[第三次 tile 重扫](#dense-量化-gemm-的第三次-tile-重扫h100)、[第四轮 epilogue 化](#in-loop-scale-的消除epilogue-化与-wgmma-流水线h100-第四轮)与[第五轮 launch 配置维度](#launch-配置的设备与-dtype-维度h100-第五轮)，后者另给 int8 per-channel 换了专属 tile 表，kernel 级再提 ~1.18×），量化矩阵表待重跑后更新。
 
 ### Qwen3-30B-A3B-Instruct-2507-FP8 (MoE, 2×H100)
 
@@ -320,7 +320,7 @@ result *= b_scale[None, :]
 | fp8 W8A16（block-scale 行） | 1.000 | 1.000 | 1.005 | 1.004 | in-loop 路径未变，控制行 |
 | w8a16 int8 per-channel（SINGLE_SCALE） | — | — | — | 1.06–1.13× | kernel 级 A/B 脚本实测，bench 未覆盖此布局 |
 
-（表内数字是 new/old 时长几何均值，<1 为更快。）至此 48 个测试点上共 20 个 scheme 胜场（int8 13、fp8 W8A8 5、fp8 W8A16 2），落在 17 个测试点里——gate_up 全六档、qkv 五档、30b qkv/o 的 m2048 各一；bf16 在其余 31 个测试点上仍是最快行。胜场的带宽门槛分层：int8 W8A8 从 ~44% 的 bf16 带宽占比起赢（qkv m1 1.07×；38.5% 处 0.96× 差一点），fp8 两格式只在 60.9%（gate_up）赢——int8 的 scale 全在 epilogue 且 imma 无 `BLOCK_M >= 64` 门槛，fp8 还驮着 Triton wgmma codegen 与激活量化 pass。
+（表内数字是 new/old 时长几何均值，<1 为更快。）至此 48 个测试点上共 20 个 scheme 胜场（int8 13、fp8 W8A8 5、fp8 W8A16 2），落在 13 个测试点里——gate_up 全六档、qkv 五档、30b qkv/o 的 m2048 各一；bf16 在其余 35 个测试点上仍是最快行。胜场的带宽门槛分层：int8 W8A8 从 ~44% 的 bf16 带宽占比起赢（qkv m1 1.07×；38.5% 处 0.96× 差一点），fp8 两格式只在 60.9%（gate_up）赢——int8 的 scale 全在 epilogue 且 imma 无 `BLOCK_M >= 64` 门槛，fp8 还驮着 Triton wgmma codegen 与激活量化 pass。
 
 ### e2e 验证（第四轮修复的端到端效应）
 
@@ -339,7 +339,7 @@ kernel 级的收益要在 e2e 上兑现。第四轮代码对 modelzoo 全部可�
 
 前四轮的 fallback 只按行数选 tile，三个维度从未检验过：设备（表是 H100 实测，A10 用户吃到的是 H100 的窄 tile）、dtype（w8a16 的表只用 fp8 权重扫过，int8 权重一直吃 fp8 的表——launcher docstring 当时的原话是 "int8 weights share the kernel's load/dot structure so the geometry carries over"，这是个假设）、shape（N 宽度从未进入选表逻辑）。三个维度逐一用测量裁决：
 
-- **dtype：假设被推翻，int8 拿到自己的表。** 用与 launcher 相同的 EPILOGUE_SCALE 分档补扫 int8 per-channel（1360 个候选，五个投影 × 五档）：fp8 的表让 int8 在 decode 档慢 30–57%（geo 1.299）——fp8 表 decode 档为 N=19456 保留的 `BLOCK_N=128` 对 int8 是错误宽度，int8 全档想要 64，m=2048 还想要 `BLOCK_M=256`（128 行 tile 在该档慢至 31%）。int8 专属表（四档：16×64w8s5 / 32×64w4s3 / 128×64w8s3 / 256×64w8s3）在 launcher 级 A/B 上 25 个测试点中 23 个胜出 1.07–1.46×（几何均值约 1.19×）；仅 m512 档 down/gate_up 两个测试点回退 5–6%（N64 vs N128 的档内取舍，其余三投影同档 +27–42%）。条件是 `single_scale and not is_fp8`，即 e2e `--quantization int8` 的真实路径；int8 block-scale（GPTQ bits=8）与 fp8 共表——它共享 in-loop 路径且 zero-point 加载无专项扫描，docstring 如实注明。
+- **dtype：假设被推翻，int8 拿到自己的表。** 用与 launcher 相同的 EPILOGUE_SCALE 分档补扫 int8 per-channel（1360 个候选，五个投影 × 五档）：fp8 的表让 int8 在 decode 档慢 7–57%（geo 1.30）——fp8 表 decode 档为 N=19456 保留的 `BLOCK_N=128` 对 int8 是错误宽度，int8 全档想要 64，m=2048 还想要 `BLOCK_M=256`（128 行 tile 在该档慢至 31%）。int8 专属表（四档：16×64w8s5 / 32×64w4s3 / 128×64w8s3 / 256×64w8s3）在 launcher 级 A/B 上 25 个测试点中 23 个胜出 1.07–1.46×（几何均值 1.18×）；仅 m512 档 down/gate_up 两个测试点回退 6–8%（N64 vs N128 的档内取舍，其余三投影同档 +16–41%）。条件是 `single_scale and not is_fp8`，即 e2e `--quantization int8` 的真实路径；int8 block-scale（GPTQ bits=8）与 fp8 共表——它共享 in-loop 路径且 zero-point 加载无专项扫描，docstring 如实注明。
 - **设备：sm90 门槛，A10 恢复实测旧表。** 三个 8-bit kernel 的 launcher 加 `sm_version` 门槛（缓存查询，`has_native_fp8` 同源）：sm90+ 用 H100 表，pre-Hopper 回到被第三次重扫替换掉的 A10 表（sm86 实测，三个 kernel 当年同一张）。`EPILOGUE_SCALE` 同步 gate 到 sm90——A10 保持其 tile 表被测量时的 in-loop kernel 形态，而非未经实测的 epilogue 组合。
 - **shape：检验后否定。** 五个投影（N=1536–19456）按窄（≤2560）/宽（≥6144）分组重析：三个 8-bit kernel 每档两组的 geomean-best 都是同一配置（fp8/w8a8）或差在噪声内（w8a16）——`n` 不是选表的有效输入，这个否定结论写进了 launcher docstring，避免后人重走一遍。
 
