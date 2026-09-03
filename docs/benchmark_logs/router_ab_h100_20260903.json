@@ -1,0 +1,96 @@
+{
+  "meta": {
+    "date": "2026-09-03",
+    "gpu": "NVIDIA H100 80GB HBM3 x1",
+    "model": "Qwen3-30B-A3B-Instruct-2507-FP8 (qwen3_moe, hidden 2048, 128 experts, 48 layers, fp8)",
+    "protocol": "bench_e2e_router_ab.py, greedy, batch=8, max_gen_len=256, mode both; 2 process-level repeats per variant; --router-variant monkey-patches SparseMoeBlock._route, downstream routing identical so the A/B isolates the router GEMM",
+    "variants": {
+      "fp32_cache": "2617933 path: F.linear(x.float(), cached fp32 gate_weight) -> simt SGEMM",
+      "tier4": "torch.mm(x, gate_weight.T, out_dtype=fp32) -> single nvjet bf16 tensor-core GEMM, fp32 out"
+    }
+  },
+  "rows": [
+    {
+      "variant": "fp32_cache",
+      "rep": 1,
+      "mode": "eager",
+      "ttft_ms": 49.11,
+      "tpot_ms": 46.69,
+      "tps": 171.3
+    },
+    {
+      "variant": "fp32_cache",
+      "rep": 1,
+      "mode": "graph",
+      "ttft_ms": 48.41,
+      "tpot_ms": 10.82,
+      "tps": 729.2
+    },
+    {
+      "variant": "fp32_cache",
+      "rep": 2,
+      "mode": "eager",
+      "ttft_ms": 48.6,
+      "tpot_ms": 46.23,
+      "tps": 173.0
+    },
+    {
+      "variant": "fp32_cache",
+      "rep": 2,
+      "mode": "graph",
+      "ttft_ms": 47.76,
+      "tpot_ms": 10.94,
+      "tps": 721.6
+    },
+    {
+      "variant": "tier4",
+      "rep": 1,
+      "mode": "eager",
+      "ttft_ms": 48.0,
+      "tpot_ms": 46.3,
+      "tps": 172.8
+    },
+    {
+      "variant": "tier4",
+      "rep": 1,
+      "mode": "graph",
+      "ttft_ms": 47.81,
+      "tpot_ms": 10.51,
+      "tps": 750.6
+    },
+    {
+      "variant": "tier4",
+      "rep": 2,
+      "mode": "eager",
+      "ttft_ms": 48.23,
+      "tpot_ms": 46.02,
+      "tps": 173.8
+    },
+    {
+      "variant": "tier4",
+      "rep": 2,
+      "mode": "graph",
+      "ttft_ms": 48.45,
+      "tpot_ms": 10.68,
+      "tps": 738.7
+    }
+  ],
+  "summary": {
+    "eager": {
+      "fp32_cache_tpot_ms": 46.46,
+      "tier4_tpot_ms": 46.16,
+      "tpot_delta_pct": -0.7,
+      "fp32_cache_tps": 172.1,
+      "tier4_tps": 173.3,
+      "tps_delta_pct": 0.7
+    },
+    "graph": {
+      "fp32_cache_tpot_ms": 10.88,
+      "tier4_tpot_ms": 10.59,
+      "tpot_delta_pct": -2.6,
+      "fp32_cache_tps": 725.4,
+      "tier4_tps": 744.7,
+      "tps_delta_pct": 2.7
+    }
+  }
+}

@@ -44,7 +44,7 @@
 - **Metrics and tracing** (v0.10): Prometheus `/metrics` (queue time, TTFT, TPOT, token counters) with no `prometheus_client` dependency, plus one OTLP span per request when a collector is configured. Measured cost is below the 0.5% run-to-run noise.
 - **MLA — DeepSeek-V2-Lite end-to-end** (v0.11): latent KV — 576 elements/token/layer vs 5120 for the same architecture uncompressed — through the same `(dim,)` KV row every other model uses; under TP the latent is replicated, not sharded. On 2× A10: **33.6k vs 9.3k KV tokens per GiB** of pool memory vs a GQA model on the same card, golden-gated against `transformers` token by token.
 - **Streaming reasoning & tool-call parsing** (v0.11): `reasoning_parser` / `tool_parser` are **request fields**, not server flags — one deployment serves R1-style and direct models side by side. Streamed frames concatenate to the one-shot message by construction (tested as an axiom); DeepSeek/Qwen tool marker families; ~1.2 µs/token.
-- **Decode host-overhead cuts** (v0.11.1): the MoE router's fp32 gate widen and the attention K/V half-view slicing each happen once per layer per step — now once per engine. TPOT on Qwen3-30B-A3B (H100, eager): **-3.5%** at batch 1, -2.6% at batch 8; graphs gain +2.0% throughput with byte-identical greedy output. Numbers and method in [docs/release-v0.11.1.md](docs/release-v0.11.1.md).
+- **Decode host-overhead cuts** (v0.11.1): the MoE router's fp32 gate widen and the attention K/V half-view slicing each happen once per layer per step — now once per engine. TPOT on Qwen3-30B-A3B (H100, eager): **-3.5%** at batch 1, -2.6% at batch 8; graphs gain +2.0% throughput with byte-identical greedy output. The router then moved to vllm's tier-4 path — `torch.mm(x, gate_weight.T, out_dtype=fp32)`, one bf16 tensor-core GEMM with an fp32 epilogue — worth 2.2–5.28× at the operator level and another -2.6% graph TPOT e2e. Numbers, method and figures in [docs/release-v0.11.1.md](docs/release-v0.11.1.md).
 - **TP shutdown deadlock fixed** (v0.11.1): a TP=2 engine with captured CUDA graphs used to hang forever at shutdown — `ncclCommAbort` on a graph-captured communicator parks in a futex (a PyTorch/NCCL interaction). Teardown now rendezvouses every rank at a gloo barrier and destroys with a deadline, abandoning a wedged group to die with the process. The graph × TP × quant cross-validation suite (bf16/fp8/nvfp4, logit parity, byte-identical greedy) went from a 900 s timeout to 11/11 green.
 
 ## Setup and Installation
@@ -309,6 +309,22 @@ A continuous-batching step can hold up to three passes — prefill, extend, deco
 ![L1 cross-stream overlap](./docs/images/overlap_l1.gif)
 
 The GIF is rendered from the engine's own CUDA-event timeline (`LITE_LLAMA_OVERLAP_TIMELINE=1`): the extend forward fills the window on the compute stream while the next pass's upload lands inside it on the copy stream — the intersection is the overlap, not a rendering trick. Measure both sides with `python benchmarks/bench_overlap_l1.py --timeline`; regenerate the picture with `python scripts/gen_overlap_l1_gif.py`.
+
+### Decode Host-Overhead Cuts (v0.11.1)
+
+Two things every layer did every decode step now happen once per engine: the MoE router's fp32 gate widen (a cast kernel per layer per step for a weight that is frozen after load) and the attention K/V half-view slicing (the paged layout packs K and V in one row; both kernels want halves, so each step cut two views of a buffer that never changes identity). Both are host-side costs, so the win grows with depth and shrinks with batch: Qwen3-30B-A3B eager TPOT **-3.5%** at batch 1, -2.6% at batch 8; graphs +2.0% throughput with byte-identical greedy output.
+
+![router GEMM evolution](./docs/images/v0111_router_evolution.png)
+
+The router kept evolving after the release: the cached fp32 widen gave way to vllm's tier-4 path — `torch.mm(x, gate_weight.T, out_dtype=fp32)`, a single bf16 tensor-core GEMM whose epilogue emits fp32 logits directly, dropping both the weight copy and the per-step activation widen. Operator-level (H100, topk parity verified before timing): 2.2× at decode, 5.28× at 2048 tokens, geomean 3.23×; e2e A/B on the same tree: graph TPOT another **-2.6%** / TPS +2.7%.
+
+![e2e A/B TPOT](./docs/images/v0111_e2e_tpot_ab.png)
+
+The same release fixed a TP=2 + captured-graph shutdown deadlock: `ncclCommAbort` on a graph-captured communicator parks in a futex, and the old teardown ordered the two ranks' aborts one after another instead of side by side. Teardown now rendezvouses every rank at a gloo barrier, destroys before joining followers, and carries a 15 s deadline whose last resort is abandoning the wedged group to die with the process. The graph × TP × quant cross-validation suite went from a 900 s timeout to 11/11 green.
+
+![TP teardown timeline](./docs/images/v0111_teardown_timeline.png)
+
+All three figures are generated from the shipped benchmark logs — `python scripts/gen_v0111_release_figs.py` re-renders them; numbers and method in [docs/release-v0.11.1.md](docs/release-v0.11.1.md).
 
 ### Quantization
 
