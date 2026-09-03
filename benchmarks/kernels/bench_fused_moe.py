@@ -432,7 +432,6 @@ def _build_int4(w1: torch.Tensor, w2: torch.Tensor) -> Built:
     return call, ref1, ref2, nbytes(s1, s2, z1, z2)
 
 
-
 _RTOL, _ATOL = 2e-2, 2e-2
 _A8_RMS_REL = {torch.float16: 1.5e-2, torch.bfloat16: 4.0e-2}[ACT_DTYPE]
 _A8_MAX_OVER_PEAK = 5.0e-2
@@ -509,8 +508,7 @@ _OLD_BASELINE_BLOCK_K = 32
 
 @contextmanager
 def forced_block_k(block_k: int) -> Iterator[None]:
-    """Run ``fused_moe`` with one ``BLOCK_K``, whatever its heuristic would pick.
-    """
+    """Run ``fused_moe`` with one ``BLOCK_K``, whatever its heuristic would pick."""
     original = fused_moe_module._launch_config
     fused_moe_module._launch_config = lambda n, q, r, d: {
         **original(n, q, r, d),
@@ -533,8 +531,7 @@ def forced_block_k(block_k: int) -> Iterator[None]:
 # Routing — built once per case, outside every timed region
 # --------------------------------------------------------------------------- #
 def routing(tokens: int, geo: MoeGeometry) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """Router output for one case, plus how many distinct experts it selected.
-    """
+    """Router output for one case, plus how many distinct experts it selected."""
     ids = torch.rand(tokens, geo.num_experts, device="cuda").topk(geo.top_k, dim=-1).indices
     ids = ids.to(torch.int32)
     weights = torch.softmax(
@@ -602,8 +599,7 @@ def verify_a8(name: str, out: torch.Tensor, ref: torch.Tensor) -> float:
 
 
 def check_correctness() -> None:
-    """Verify every scheme against a torch reference on the dequantised weights.
-    """
+    """Verify every scheme against a torch reference on the dequantised weights."""
     geo = CHECK_GEOMETRY
     print("Correctness (per-expert torch gather-matmul on dequantised weights):")
     for tokens in CHECK_TOKENS:

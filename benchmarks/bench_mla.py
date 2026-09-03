@@ -83,17 +83,28 @@ def print_geometry(mla: dict, mha: dict) -> None:
     gqa = mha["gqa_elements_per_token_per_layer"]
     print("== KV geometry, parsed from each config.json (elements per token per layer) ==")
     print(f"  DeepSeek-V2-Lite  MLA latent      {latent:5d}   ({mla['layers']} layers)")
-    print(f"  DeepSeek-V2-Lite  if uncompressed {uncompressed:5d}   -> latent is "
-          f"{uncompressed / latent:.1f}x smaller")
+    print(
+        f"  DeepSeek-V2-Lite  if uncompressed {uncompressed:5d}   -> latent is "
+        f"{uncompressed / latent:.1f}x smaller"
+    )
     print(f"  Qwen3-1.7B        GQA             {gqa:5d}   ({mha['layers']} layers)")
-    print(f"  per-token totals: V2-Lite latent {mla['latent_bytes_per_token'] / 1024:.1f} KiB, "
-          f"uncompressed {mla['uncompressed_bytes_per_token'] / 1024:.1f} KiB, "
-          f"Qwen3-1.7B {mha['gqa_bytes_per_token'] / 1024:.1f} KiB")
+    print(
+        f"  per-token totals: V2-Lite latent {mla['latent_bytes_per_token'] / 1024:.1f} KiB, "
+        f"uncompressed {mla['uncompressed_bytes_per_token'] / 1024:.1f} KiB, "
+        f"Qwen3-1.7B {mha['gqa_bytes_per_token'] / 1024:.1f} KiB"
+    )
     print()
 
 
-def measure(label: str, model_dir: str, *, tensor_parallel_size: int, prompts: list[str],
-            max_gen_len: int, replicas: int) -> dict:
+def measure(
+    label: str,
+    model_dir: str,
+    *,
+    tensor_parallel_size: int,
+    prompts: list[str],
+    max_gen_len: int,
+    replicas: int,
+) -> dict:
     """One backend end to end: latency, footprint, and rank-0 peak memory."""
     print(f"-- {label}: tp={tensor_parallel_size}, building engine ...")
     reset_peak_mem()
@@ -167,13 +178,24 @@ def main() -> int:
     )
 
     print("== Same workload, both engines (decode paths differ: TP=2 runs eager) ==")
-    print_table({"DeepSeek-V2-Lite TP=2": BenchResult(**{
-        k: v for k, v in results["mla_tp2"].items()
-        if k in BenchResult.__dataclass_fields__
-    }), "Qwen3-1.7B TP=1": BenchResult(**{
-        k: v for k, v in results["mha_tp1"].items()
-        if k in BenchResult.__dataclass_fields__
-    })})
+    print_table(
+        {
+            "DeepSeek-V2-Lite TP=2": BenchResult(
+                **{
+                    k: v
+                    for k, v in results["mla_tp2"].items()
+                    if k in BenchResult.__dataclass_fields__
+                }
+            ),
+            "Qwen3-1.7B TP=1": BenchResult(
+                **{
+                    k: v
+                    for k, v in results["mha_tp1"].items()
+                    if k in BenchResult.__dataclass_fields__
+                }
+            ),
+        }
+    )
 
     if args.json:
         write_json_log(

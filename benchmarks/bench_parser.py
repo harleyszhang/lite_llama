@@ -104,9 +104,7 @@ def main() -> int:
     for label, kwargs in configs.items():
         # Warm-up round outside the measurement, then medians over iters.
         run_once(chunks, **kwargs)
-        elapsed = statistics.median(
-            run_once(chunks, **kwargs) for _ in range(args.iters)
-        )
+        elapsed = statistics.median(run_once(chunks, **kwargs) for _ in range(args.iters))
         per_token_us = elapsed / tokens * 1e6
         results[label] = {
             "total_ms": round(elapsed * 1000, 2),
@@ -118,8 +116,10 @@ def main() -> int:
             delta_us = per_token_us - results["off"]["per_token_us"]
             extra = f"  (+{delta_us:.2f} us/token over off, "
             f"{delta_us / (args.tpot_ms * 1000) * 100:.3f}% of {args.tpot_ms:.2f} ms TPOT)"
-        print(f"{label:16s} {elapsed * 1000:8.2f} ms for {tokens} tokens "
-              f"({per_token_us:.2f} us/token){extra}")
+        print(
+            f"{label:16s} {elapsed * 1000:8.2f} ms for {tokens} tokens "
+            f"({per_token_us:.2f} us/token){extra}"
+        )
 
     if args.json:
         write_json_log(args.json, vars(args), results)

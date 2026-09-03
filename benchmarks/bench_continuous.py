@@ -38,7 +38,7 @@ CKPT = "my_weight/Qwen2.5-1.5B-Instruct"
 
 @dataclass
 class Measurement:
-    """一次测量结果;``gen_tokens`` 只算真正交付给用户的 token。"""
+    """One measurement; ``gen_tokens`` counts only tokens actually delivered."""
 
     label: str
     total_s: float
@@ -46,7 +46,7 @@ class Measurement:
     requests: int
     ttfts_ms: list[float] = field(default_factory=list)
     latencies_ms: list[float] = field(default_factory=list)
-    wasted_tokens: int = 0  # 整批共用一个上限多算出来的 token
+    wasted_tokens: int = 0  # tokens a single batch-wide cap generated past a request's own
 
     @property
     def tps(self) -> float:
@@ -73,7 +73,7 @@ class Measurement:
 
 @contextmanager
 def static_engine(model_dir: str, kv_blocks: int, max_seq_len: int, warm_prompts: list[str]):
-    """LLMEngine with CUDA graph; 显存预算必须显式给定(见 bench_e2e 同款约束)。"""
+    """LLMEngine with CUDA graph; the KV budget must be stated (as in bench_e2e)."""
     engine = LLMEngine(
         model_dir, max_seq_len=max_seq_len, max_gpu_num_blocks=kv_blocks, use_cuda_graph=True
     )
@@ -109,7 +109,7 @@ def continuous_engine(
 
 
 def skewed_caps(count: int, short: int, long: int, every: int = 4) -> list[int]:
-    """每 ``every`` 个请求里一个要长输出,其余要短输出。"""
+    """One long-output request per ``every``, the rest short."""
     return [long if index % every == 0 else short for index in range(count)]
 
 
@@ -119,7 +119,8 @@ def measure_static_offline(
     with static_engine(model_dir, kv_blocks, max_seq_len, warm_prompts=prompts) as engine:
         token_ids = [engine.tokenizer.encode(p, add_special_tokens=True) for p in prompts]
 
-        # 流式接口一趟同时拿 TTFT 和完整文本,不必为两个数跑两遍
+        # The streaming interface yields TTFT and the full text in one pass, so the
+        # two numbers do not need two runs.
         torch.cuda.synchronize()
         started = time.perf_counter()
         first_token_at = 0.0
@@ -133,7 +134,8 @@ def measure_static_offline(
         elapsed = time.perf_counter() - started
         ttft = (first_token_at - started) * 1000 if first_token_at else 0.0
         tokenizer = engine.tokenizer
-    # 锁步:整批同时开始、同时被最长序列拖住,TTFT/延迟全批共享
+    # Lockstep: the batch starts together and is held back by its longest sequence,
+    # so TTFT and latency are shared across all requests.
     return Measurement(
         label="static (one-shot)",
         total_s=elapsed,
@@ -147,7 +149,7 @@ def measure_static_offline(
 def measure_static_skewed(
     model_dir: str, prompts: list[str], caps: list[int], kv_blocks: int, max_seq_len: int
 ) -> Measurement:
-    """一次性批处理按最长的上限跑;短请求的超额产出计入 wasted_tokens。"""
+    """One-shot batching runs to the longest cap; a short request's excess is waste."""
     with static_engine(model_dir, kv_blocks, max_seq_len, warm_prompts=prompts) as engine:
         token_ids = [engine.tokenizer.encode(p, add_special_tokens=True) for p in prompts]
 
@@ -180,7 +182,7 @@ def measure_continuous_batch(
     max_num_seqs: int,
     label: str,
 ) -> Measurement:
-    """整批一起提交的连续批处理路径;params_list 逐请求参数化(允许不同上限)。"""
+    """Continuous batching over a batch submitted at once; ``params_list`` is per request."""
     with continuous_engine(
         model_dir, kv_blocks, max_seq_len, max_num_seqs, warm_prompts=prompts[:2]
     ) as engine:
@@ -205,13 +207,13 @@ def measure_continuous_batch(
 def measure_static_online(
     model_dir: str, prompts: list[str], params, kv_blocks: int, max_seq_len: int, interval: float
 ) -> Measurement:
-    """一次性批处理没有"插入正在跑的 batch"的能力,只能一条条串行服务。"""
+    """One-shot batching cannot join a running batch, so requests are served serially."""
     with static_engine(model_dir, kv_blocks, max_seq_len, warm_prompts=prompts[:1]) as engine:
         started = time.perf_counter()
         completions, latencies = [], []
         for index, prompt in enumerate(prompts):
             arrival = started + index * interval
-            # 请求没到就等;到了但引擎在忙,排队时间自然计入延迟
+            # Wait for the arrival; if the engine is busy, queueing time counts as latency.
             now = time.perf_counter()
             if now < arrival:
                 time.sleep(arrival - now)
@@ -248,7 +250,7 @@ def measure_continuous_online(
 
         while pending or engine.has_unfinished_requests():
             now = time.perf_counter()
-            # 到点的请求立刻插进正在跑的 batch
+            # A request whose arrival time has passed joins the running batch at once.
             while pending and now - started >= pending[0][0] * interval:
                 index, prompt = pending.pop(0)
                 request = engine.add_request(prompt, params)
@@ -283,14 +285,20 @@ def main() -> int:
         choices=["offline", "offline-skew", "online", "both", "all"],
         default="all",
     )
-    ap.add_argument("--batch", type=int, default=16, help="请求数")
+    ap.add_argument("--batch", type=int, default=16, help="Request count")
     ap.add_argument("--max-gen-len", type=int, default=256)
     ap.add_argument("--max-seq-len", type=int, default=1024)
     ap.add_argument("--max-num-seqs", type=int, default=16)
     ap.add_argument("--kv-blocks", type=int, default=40960)
-    ap.add_argument("--interval", type=float, default=0.25, help="online 场景的到达间隔(秒)")
-    ap.add_argument("--skew-short", type=int, default=32, help="offline-skew 里短请求的上限")
-    ap.add_argument("--skew-long", type=int, default=256, help="offline-skew 里长请求的上限")
+    ap.add_argument(
+        "--interval", type=float, default=0.25, help="Arrival interval for the online scenario (s)"
+    )
+    ap.add_argument(
+        "--skew-short", type=int, default=32, help="Cap for the short requests in offline-skew"
+    )
+    ap.add_argument(
+        "--skew-long", type=int, default=256, help="Cap for the long requests in offline-skew"
+    )
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
 
