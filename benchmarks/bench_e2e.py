@@ -4,8 +4,14 @@
 checks the graph path still answers exactly like eager — the numbers
 and the guarantee in one run.
 
+``--router-variant`` turns this into a process-level A/B for the MoE router
+GEMM: one variant per process, patched in before the model is built, so the
+topk/renormalise tail stays production code and nothing has to be restored.
+Always pair it with ``--greedy``, or the two cells decode different tokens.
+
 Usage:
     python benchmarks/bench_e2e.py --model-dir <ckpt> --verify
+    python benchmarks/bench_e2e.py --model-dir <ckpt> --router-variant tier4 --greedy
 """
 
 from __future__ import annotations
@@ -15,6 +21,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import torch
+import torch.nn.functional as F
 
 from benchmarks.common import (
     GREEDY_PARAMS,
@@ -27,8 +36,39 @@ from benchmarks.common import (
     print_table,
     write_json_log,
 )
+from lite_llama.modules import moe
 
 CKPT = "my_weight/Qwen2.5-0.5B"
+
+#: fp32 weight copies the ``fp32_cache`` variant keeps, keyed by ``id()`` of the
+#: source weight. The dict holds the copy alive, so an id cannot be reused under it.
+_FP32_CACHE: dict[int, torch.Tensor] = {}
+
+
+def _patched_router_gemm(variant: str):
+    """A ``_router_gemm`` whose only variant-dependent part is the GEMM itself.
+
+    ``tier4`` is the production path (bf16 operands, fp32 accumulate/output in
+    one cuBLAS GEMM); ``fp32_cache`` is the predecessor it replaced — a cached
+    fp32 weight copy plus a per-step ``x.float()`` widen and a simt SGEMM. Both
+    emit fp32 logits and pick the same experts, so the A/B isolates the GEMM.
+    """
+
+    def _gemm(x: torch.Tensor, gate_weight: torch.Tensor) -> torch.Tensor:
+        if variant == "tier4":
+            low_prec = gate_weight.dtype in (torch.bfloat16, torch.float16)
+            if gate_weight.is_cuda and low_prec:
+                x_gemm = x if x.dtype == gate_weight.dtype else x.to(gate_weight.dtype)
+                return torch.mm(x_gemm, gate_weight.t(), out_dtype=torch.float32)
+            return F.linear(x.float(), gate_weight.float())
+        if variant == "fp32_cache":
+            cached = _FP32_CACHE.get(id(gate_weight))
+            if cached is None:
+                cached = _FP32_CACHE[id(gate_weight)] = gate_weight.detach().float()
+            return F.linear(x.float(), cached)
+        raise ValueError(f"unknown router variant {variant!r}")
+
+    return _gemm
 
 
 def run_hf(args, prompts: list[str]) -> None:
@@ -115,11 +155,22 @@ def main() -> int:
         help="KV pool size in tokens; shrink for checkpoints near the device budget",
     )
     ap.add_argument(
+        "--router-variant",
+        choices=["tier4", "fp32_cache"],
+        default=None,
+        help="Patch moe._router_gemm to one router GEMM variant for a process-level A/B",
+    )
+    ap.add_argument(
         "--image",
         default="examples/assets/vision_bench.jpg",
         help="Image fed to vision-language checkpoints (ignored for text models)",
     )
     args = ap.parse_args()
+
+    # Patch before any model is built, and say which path this process took.
+    if args.router_variant:
+        moe._router_gemm = _patched_router_gemm(args.router_variant)
+        print(f"[router-ab] variant = {args.router_variant}", flush=True)
 
     prompts = expand_prompts(PROMPTS, args.batch)
 
