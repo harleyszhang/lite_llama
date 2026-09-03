@@ -14,11 +14,8 @@ import argparse
 import os
 import statistics
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
-
-import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -30,7 +27,7 @@ from benchmarks.common import (
     free_gpu,
     print_table,
     require_gpus,
-    steps_to_result,
+    run_requests,
     write_json_log,
 )
 from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
@@ -120,22 +117,7 @@ def build_tracer(enabled: bool) -> Tracer:
 
 def measure(engine, prompts: list[str], params: SamplingParams) -> BenchResult:
     """Submit the whole batch then time each step, the same discipline as EngineBackend."""
-    requests = [engine.add_request(prompt, params) for prompt in prompts]
-    torch.cuda.synchronize()
-    t_start = time.perf_counter()
-    step_ends: list[float] = []
-    while engine.has_unfinished_requests():
-        engine.step()
-        step_ends.append(time.perf_counter())
-    torch.cuda.synchronize()
-    total = time.perf_counter() - t_start
-    return steps_to_result(
-        step_ends,
-        t_start=t_start,
-        total_s=total,
-        batch=len(prompts),
-        gen_tokens=sum(len(r.output_token_ids) for r in requests),
-    )
+    return run_requests(engine, prompts, params).result(len(prompts))
 
 
 def run_variant(

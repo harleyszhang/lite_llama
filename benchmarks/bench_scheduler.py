@@ -53,11 +53,17 @@ from benchmarks.common import (
     free_gpu,
     gpu_tag,
     require_gpus,
+    run_requests,
     sampling_params,
     write_json_log,
 )
 
-_DEFAULT_MODEL = "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2___5-0___5B-Instruct"
+#: The modelzoo root when it is set, else the ``my_weight`` convention every other
+#: bench script uses — a machine-specific path here would only work on one host.
+_MODELZOO = os.environ.get("LITE_LLAMA_MODELZOO")
+_DEFAULT_MODEL = (
+    f"{_MODELZOO}/Qwen/Qwen2___5-0___5B-Instruct" if _MODELZOO else "my_weight/Qwen2.5-0.5B"
+)
 _FILLER = "Follow every instruction carefully and answer as precisely as you can. "
 
 
@@ -154,21 +160,15 @@ def run_workload(engine, label: str, prompts: list[str], gen_len: int) -> Worklo
     mgr = getattr(engine, "_graph_manager", lambda: None)()
     replays_before = mgr.replays if mgr else 0
 
-    params = sampling_params(gen_len)
-    torch.cuda.synchronize()
-    started = time.perf_counter()
-    requests = [engine.add_request(prompt, params) for prompt in prompts]
-    while engine.has_unfinished_requests():
-        engine.step()
-    torch.cuda.synchronize()
-    stats.total_s = time.perf_counter() - started
+    run = run_requests(engine, prompts, sampling_params(gen_len))
 
     engine.scheduler.schedule = schedule  # restore
 
-    stats.gen_tokens = sum(len(r.output_token_ids) for r in requests)
-    stats.ttfts_ms = [(r.first_token_time - started) * 1000 for r in requests if r.first_token_time]
-    stats.latencies_ms = [(r.finish_time - started) * 1000 for r in requests if r.finish_time]
-    stats.texts = [r.text for r in requests]
+    stats.total_s = run.total_s
+    stats.gen_tokens = run.gen_tokens
+    stats.ttfts_ms = run.ttfts_ms()
+    stats.latencies_ms = run.latencies_ms()
+    stats.texts = run.texts
 
     if mgr is not None:
         stats.graph_replays = mgr.replays - replays_before
@@ -1065,13 +1065,8 @@ def _diag_prefix_main(args: argparse.Namespace) -> int:
 
         engine.scheduler.schedule = counted
 
-        torch.cuda.synchronize()
-        started = time.perf_counter()
-        requests = [engine.add_request(p, params) for p in prompts]
-        while engine.has_unfinished_requests():
-            engine.step()
-        torch.cuda.synchronize()
-        total = time.perf_counter() - started
+        run = run_requests(engine, prompts, params)
+        requests, started, total = run.requests, run.started, run.total_s
 
         engine.scheduler.schedule = schedule
 
