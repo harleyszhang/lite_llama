@@ -228,31 +228,40 @@ def _smoothquant_matmul_kernel(
 # Launch configuration
 # --------------------------------------------------------------------------- #
 def _launch_config(num_tokens: int) -> dict:
-    """Tile shape for ``num_tokens`` rows of activations."""
+    """Tile shape for ``num_tokens`` rows of activations.
+
+    Swept over the five dense projections of both test models on an H100
+    (the ``bench_quant_gemm.py`` shape set), same methodology as the fp8
+    kernel: the old ``BLOCK_N`` 128/256 starves the grid at every weight
+    shape (24 column blocks at ``N=6144`` against 132 SMs), so narrow N
+    tiles carry every band, with wider tiles only where M itself supplies
+    the parallelism. Each band's entry never loses to any tested shape in
+    that band; prefill gains the most (up to 1.5x at ``m=2048``).
+    """
     if num_tokens <= 32:
         return {
             "BLOCK_M": 16,
-            "BLOCK_N": 128,
+            "BLOCK_N": 64,
             "BLOCK_K": 128,
-            "GROUP_M": 1,
+            "GROUP_M": 8,
             "num_warps": 8,
-            "num_stages": 3,
+            "num_stages": 4,
         }
     if num_tokens <= 128:
         return {
-            "BLOCK_M": 32,
-            "BLOCK_N": 128,
+            "BLOCK_M": 64,
+            "BLOCK_N": 64,
             "BLOCK_K": 128,
             "GROUP_M": 8,
             "num_warps": 4,
             "num_stages": 3,
         }
     return {
-        "BLOCK_M": 64,
-        "BLOCK_N": 256,
+        "BLOCK_M": 128,
+        "BLOCK_N": 128,
         "BLOCK_K": 128,
         "GROUP_M": 8,
-        "num_warps": 8,
+        "num_warps": 4,
         "num_stages": 3,
     }
 

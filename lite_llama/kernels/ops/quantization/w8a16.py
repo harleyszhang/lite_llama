@@ -1,8 +1,8 @@
 """W8A16 GEMM: 8-bit weights (fp8-e4m3 or int8), fp16 activations.
 
-The kernel dequantises each weight tile on the fly (fp8 via a bit-trick
-fast path, int8 by scale multiply) and accumulates in fp32, so
-activations never leave fp16.
+The kernel dequantises each weight tile on the fly (fp8 via one hardware
+``cvt`` on sm89+, falling back to a bit-trick below that; int8 by scale
+multiply) and accumulates in fp32, so activations never leave fp16.
 
 Usage:
     y = w8a16_matmul(x, qweight, scales)
@@ -10,12 +10,22 @@ Usage:
 
 from __future__ import annotations
 
+import functools
+
 import torch
 import triton
 import triton.language as tl
 
 #: Exponent correction of the e4m3 -> fp16 bit trick, see :func:`dequant_fp8e4m3`.
 FP8_E4M3_BIT_TRICK_SCALE = 256.0
+
+@functools.cache
+def has_native_fp8(device_index: int | None) -> bool:
+    """Whether this device has the fp8 MMA (sm89+), cached because the query is
+    not free.
+    """
+    return torch.cuda.get_device_capability(device_index) >= (8, 9)
+
 
 #: Block size of the fine-grained FP8 format used by Qwen FP8 checkpoints.
 FP8_BLOCK = 128
@@ -73,6 +83,8 @@ def _w8a16_matmul_kernel(
     HAS_ZEROS: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     DEQUANT_SCALE: tl.constexpr,
+    FP8_CVT: tl.constexpr,
+    SINGLE_SCALE: tl.constexpr,
 ):
     """One ``[BLOCK_M, BLOCK_N]`` tile of ``C = A @ dequant(B).T``.
 
@@ -106,6 +118,14 @@ def _w8a16_matmul_kernel(
     # kernel's trace entirely, so ``None`` never reaches ``+``.
     if HAS_ZEROS:
         zero_ptrs = zero_ptr + (offs_bn // GROUP_N) * stride_sn
+        if SINGLE_SCALE:
+            zero = tl.load(zero_ptrs)
+    # One scale per weight row (per-channel / per-row quantisation): its k
+    # address never moves, so load it before the loop and keep the loop body
+    # down to weight tiles and dots -- a per-iteration [BLOCK_N] scale load
+    # and its address arithmetic otherwise ride every k step.
+    if SINGLE_SCALE:
+        scale = tl.load(scale_ptrs)
 
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_K)):
@@ -117,16 +137,25 @@ def _w8a16_matmul_kernel(
         # bf16): e4m3 values are exact in fp16 and the fp16 -> bf16 hop rounds
         # at 2^-8, an order below the 2^-4 the 8-bit weight itself carries;
         # int8 values are exact in both 16-bit dtypes.
+        # sm89+ widens e4m3 with one hardware cvt per element; the bit trick
+        # below needs five integer instructions per element and a 256x
+        # correction folded into DEQUANT_SCALE by the launcher -- the cvt needs
+        # no correction and no pre-sm89 care here, it is guarded by FP8_CVT.
         if IS_FP8:
-            b = dequant_fp8e4m3(b).to(a.dtype)
+            if FP8_CVT:
+                b = b.to(tl.float8e4nv, bitcast=True).to(a.dtype)
+            else:
+                b = dequant_fp8e4m3(b).to(a.dtype)
         elif HAS_ZEROS:
             # Differences of int8 integers are integers within [-255, 255],
             # exact in fp16 and bf16 alike, so the widened tile loses nothing.
-            zero = tl.load(zero_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_sk)
+            if not SINGLE_SCALE:
+                zero = tl.load(zero_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_sk)
             b = (b.to(tl.float32) - zero[None, :]).to(a.dtype)
         else:
             b = b.to(a.dtype)
-        scale = tl.load(scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_sk)
+        if not SINGLE_SCALE:
+            scale = tl.load(scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_sk)
         accumulator += tl.dot(a, b) * scale[None, :]
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
@@ -146,37 +175,42 @@ def _w8a16_matmul_kernel(
 # Launch configuration
 # --------------------------------------------------------------------------- #
 def _launch_config(num_tokens: int) -> dict:
-    """Tile shape for ``num_tokens`` rows of activations, measured on an A10.
+    """Tile shape for ``num_tokens`` rows of activations.
 
-    ``BLOCK_K`` is always 128: one byte per weight element, k-contiguous, so a
-    128-wide k-tile is exactly one 128-byte memory transaction per output
-    channel. Decode wants the narrowest ``BLOCK_M`` ``tl.dot`` accepts; prefill
-    grows it towards a compute-shaped block.
+    Swept over the five dense projections of both test models on an H100
+    (the ``bench_quant_gemm.py`` shape set, fp8 weights; int8 weights share
+    the kernel's load/dot structure so the geometry carries over). Decode
+    keeps ``BLOCK_N`` 128 -- the N=19456 gate_up projection regresses 38%
+    on ``BLOCK_N=64`` -- and gains from deeper pipelining (``s=5``); mid
+    trades 14% on the narrow 30B o projection for 2-54% on the rest;
+    prefill wants a compute-shaped ``BLOCK_M``. The A10 numbers of the old
+    default do not transfer: H100 SM count rewards wider grids, not fatter
+    tiles.
     """
     if num_tokens <= 32:
         return {
             "BLOCK_M": 16,
             "BLOCK_N": 128,
             "BLOCK_K": 128,
-            "GROUP_M": 1,
-            "num_warps": 8,
-            "num_stages": 3,
+            "GROUP_M": 8,
+            "num_warps": 4,
+            "num_stages": 5,
         }
     if num_tokens <= 128:
         return {
-            "BLOCK_M": 32,
+            "BLOCK_M": 16,
             "BLOCK_N": 128,
             "BLOCK_K": 128,
             "GROUP_M": 8,
             "num_warps": 4,
-            "num_stages": 3,
+            "num_stages": 4,
         }
     return {
         "BLOCK_M": 64,
-        "BLOCK_N": 256,
+        "BLOCK_N": 128,
         "BLOCK_K": 128,
         "GROUP_M": 8,
-        "num_warps": 8,
+        "num_warps": 4,
         "num_stages": 3,
     }
 
@@ -243,6 +277,12 @@ def w8a16_matmul(
     m = a.shape[0]
     out = torch.empty((m, n), dtype=x.dtype, device=x.device)
 
+    # hardware cvt (one instruction, no 256x correction), older devices keep the
+    # bit trick -- same split as the fused MoE kernel.
+    fp8_cvt = is_fp8 and has_native_fp8(x.device.index)
+    # per-row scales (group_k >= k): the scale's k address never moves, so the
+    # kernel can hoist its load out of the k loop.
+    single_scale = group_k >= k
     cfg = _launch_config(m)
     grid = (triton.cdiv(m, cfg["BLOCK_M"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
     _w8a16_matmul_kernel[grid](
@@ -268,7 +308,9 @@ def w8a16_matmul(
         IS_FP8=is_fp8,
         HAS_ZEROS=zeros is not None,
         HAS_BIAS=bias is not None,
-        DEQUANT_SCALE=FP8_E4M3_BIT_TRICK_SCALE if is_fp8 else 1.0,
+        DEQUANT_SCALE=1.0 if fp8_cvt else (FP8_E4M3_BIT_TRICK_SCALE if is_fp8 else 1.0),
+        FP8_CVT=fp8_cvt,
+        SINGLE_SCALE=single_scale,
         **cfg,
     )
     return out.reshape(*leading, n)

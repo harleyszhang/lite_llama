@@ -11,13 +11,14 @@ Usage:
 
 from __future__ import annotations
 
-import functools
-
 import torch
 import triton
 import triton.language as tl
 
 from .w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
+from .w8a16 import (
+    has_native_fp8 as has_native_fp8,  # re-exported: MoE launcher imports it from here
+)
 
 #: Exponent correction when *both* operands went through the e4m3 -> bf16 bit
 #: trick: each is short a factor of 256, so the product is short 256**2.
@@ -33,22 +34,6 @@ FP8_E4M3_MAX = 448.0
 #: pass. A row is walked in tiles rather than loaded whole so that a 9728-wide
 #: FFN row does not need 38 KB of registers per program.
 _QUANT_BLOCK_K = 1024
-
-
-@functools.cache
-def has_native_fp8(device_index: int | None) -> bool:
-    """Whether this device has the fp8 MMA (sm89+), cached because the query is
-    not free.
-
-    ``torch.cuda.get_device_capability`` costs ~2.7 us of host time per call, and
-    this module's entry points ask on *every* launch — twice per W8A8 layer —
-    while the fused MoE GEMM launcher asks per GEMM. On a launch-bound decode
-    step that is real money for a property that cannot change while the process
-    lives. Importers use the device *index* as the cache key because that is
-    what a tensor's ``.device.index`` gives; pass ``None`` for the current
-    device, mirroring ``torch.cuda.get_device_capability``.
-    """
-    return torch.cuda.get_device_capability(device_index) >= (8, 9)
 
 
 # --------------------------------------------------------------------------- #
@@ -195,6 +180,7 @@ def _fp8_matmul_kernel(
     NATIVE_FP8: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     DEQUANT_SCALE: tl.constexpr,
+    SINGLE_SCALE: tl.constexpr,
 ):
     """One ``[BLOCK_M, BLOCK_N]`` tile of ``C = (A @ B.T) * a_scale * b_scale``.
 
@@ -224,6 +210,11 @@ def _fp8_matmul_kernel(
     # in-register: the fp8 MMA wants its second operand K-major.
     b_ptrs = b_ptr + offs_bn[:, None] * stride_bn + offs_k[None, :] * stride_bk
     b_scale_ptrs = b_scale_ptr + (offs_bn // GROUP_N) * stride_bsn
+    # One scale per weight row (per-channel quantisation, the scheme's default):
+    # its k address never moves, so load it before the loop and keep the loop
+    # body down to fp8 tiles and dots.
+    if SINGLE_SCALE:
+        b_scale = tl.load(b_scale_ptrs)
 
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_K)):
@@ -239,7 +230,8 @@ def _fp8_matmul_kernel(
         else:
             a = dequant_fp8e4m3(a)
             b = dequant_fp8e4m3(b)
-        b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
+        if not SINGLE_SCALE:
+            b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
         accumulator += tl.dot(a, tl.trans(b)) * b_scale[None, :]
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
@@ -262,22 +254,28 @@ def _fp8_matmul_kernel(
 def _launch_config(num_tokens: int) -> dict:
     """Tile shape for ``num_tokens`` rows of activations.
 
-    Same shapes as w8a16: one byte per operand element, k-contiguous, so a
-    128-wide k-tile is exactly one memory transaction per output channel.
+    Swept over the five dense projections of both test models on an H100
+    (the ``bench_quant_gemm.py`` shape set). The bias of the old default —
+    ``BLOCK_N`` 128/256 — is grid starvation: at ``N=6144`` a 256-wide N tile
+    yields 24 column blocks against 132 SMs. ``BLOCK_N=64`` fills the device
+    at every weight shape, which is why it wins everywhere below prefill.
+    Each band's entry is the fastest config that never loses to any other
+    tested shape at that ``num_tokens`` band; the mid band trades 1.4 us on
+    the 4B qkv projection for 11-21% on the other four.
     """
     if num_tokens <= 32:
         return {
             "BLOCK_M": 16,
-            "BLOCK_N": 128,
+            "BLOCK_N": 64,
             "BLOCK_K": 128,
-            "GROUP_M": 1,
+            "GROUP_M": 8,
             "num_warps": 8,
             "num_stages": 3,
         }
     if num_tokens <= 128:
         return {
             "BLOCK_M": 32,
-            "BLOCK_N": 128,
+            "BLOCK_N": 64,
             "BLOCK_K": 128,
             "GROUP_M": 8,
             "num_warps": 4,
@@ -285,10 +283,10 @@ def _launch_config(num_tokens: int) -> dict:
         }
     return {
         "BLOCK_M": 64,
-        "BLOCK_N": 256,
+        "BLOCK_N": 128,
         "BLOCK_K": 128,
         "GROUP_M": 8,
-        "num_warps": 8,
+        "num_warps": 4,
         "num_stages": 3,
     }
 
@@ -348,6 +346,9 @@ def fp8_matmul(
 
     out = torch.empty((m, n), dtype=out_dtype, device=qx.device)
     native = has_native_fp8(qx.device.index)
+    # per-row weight scales (group_k >= k): the scale's k address never moves,
+    # so the kernel can hoist its load out of the k loop.
+    single_scale = group_k >= k
 
     cfg = _launch_config(m)
     grid = (triton.cdiv(m, cfg["BLOCK_M"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
@@ -374,6 +375,7 @@ def fp8_matmul(
         NATIVE_FP8=native,
         HAS_BIAS=bias is not None,
         DEQUANT_SCALE=1.0 if native else _FP8_BIT_TRICK_SCALE_SQ,
+        SINGLE_SCALE=single_scale,
         **cfg,
     )
     return out.reshape(*leading, n)
