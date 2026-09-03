@@ -1,0 +1,28 @@
+{
+  "config": {
+    "max_gen_len": 128,
+    "batch": 8,
+    "json": "/tmp/lite_30b_bf16_b8.json",
+    "greedy": true,
+    "mode": "graph",
+    "backend": "lite",
+    "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen3-30B-A3B-Instruct-2507",
+    "attn": "sdpa",
+    "verify": false,
+    "max_gpu_num_blocks": 40960,
+    "image": "examples/assets/vision_bench.jpg",
+    "timestamp": "2026-09-03T20:17:31"
+  },
+  "results": {
+    "graph": {
+      "ttft_ms": 44.274572283029556,
+      "tpot_ms": 11.024681117942952,
+      "total_s": 1.444793315604329,
+      "steps": 128,
+      "batch": 8,
+      "gen_tokens": 1024,
+      "tpot_p50_ms": 11.044245213270187,
+      "tps": 708.7518947799676
+    }
+  }
+}
