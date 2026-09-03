@@ -21,8 +21,20 @@ Usage:
 from __future__ import annotations
 
 import torch
-import triton
-import triton.language as tl
+
+try:
+    import triton
+    import triton.language as tl
+except ImportError:  # Triton is optional on CPU-only and macOS installs.
+    triton = None
+
+    class _TritonLanguageStub:
+        constexpr = object()
+
+    tl = _TritonLanguageStub()
+
+
+_jit = triton.jit if triton is not None else lambda function: function
 
 
 def grouped_topk_torch(
@@ -125,7 +137,7 @@ def grouped_topk_torch(
 # --------------------------------------------------------------------------- #
 # The kernel: one program per token, everything in registers.
 # --------------------------------------------------------------------------- #
-@triton.jit
+@_jit
 def _grouped_topk_kernel(
     logits_ptr,
     bias_ptr,
@@ -252,7 +264,8 @@ def grouped_topk(
         raise ValueError(f"unsupported MoE scoring_func {scoring_func!r}")
     per_group = n_experts // num_expert_group
     kernelable = (
-        router_logits.is_cuda
+        triton is not None
+        and router_logits.is_cuda
         and router_logits.dtype == torch.float32
         # the kernel picks one new expert per round; it cannot fill a row
         # from fewer survivors than it owes columns.

@@ -387,6 +387,7 @@ class TestRegistryStaysTorchFree:
                 assert callable(resolve_target(spec.target)), spec.name
 
 
+@pytest.mark.skipif(not TRITON_AVAILABLE, reason="resolving GPU targets requires Triton")
 class TestTargetsMatchTheirContract:
     """Parameter *names, kinds and defaults* are the contract, because nothing adapts them.
 
