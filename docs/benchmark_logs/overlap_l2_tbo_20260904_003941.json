@@ -1,0 +1,69 @@
+{
+  "config": {
+    "model_dir": "my_weight/Qwen2.5-1.5B-Instruct",
+    "batches": [
+      8,
+      16,
+      32
+    ],
+    "max_gen_len": 64,
+    "repeat": 2,
+    "timeline": true,
+    "json": "benchmarks/logs/bench_overlap_l2.json",
+    "timestamp": "2026-09-04T00:20:55"
+  },
+  "results": {
+    "batches": {
+      "8": {
+        "tpot_ms": {
+          "tbo_off": 27.275999446236895,
+          "tbo_on": 64.4827534755071
+        },
+        "ttft_ms": {
+          "tbo_off": 28.221242129802704,
+          "tbo_on": 30.917972326278687
+        },
+        "total_s": {
+          "tbo_off": 1.7466489039361477,
+          "tbo_on": 4.093379072844982
+        },
+        "tpot_improvement_pct": -136.41,
+        "graph_reference_tpot_ms": 6.2433456972477925
+      },
+      "16": {
+        "tpot_ms": {
+          "tbo_off": 27.101549896455946,
+          "tbo_on": 63.409937575222955
+        },
+        "ttft_ms": {
+          "tbo_off": 28.571277856826782,
+          "tbo_on": 27.90248766541481
+        },
+        "total_s": {
+          "tbo_off": 1.736015722155571,
+          "tbo_on": 4.022765856236219
+        },
+        "tpot_improvement_pct": -133.97,
+        "graph_reference_tpot_ms": 6.69875019599521
+      },
+      "32": {
+        "tpot_ms": {
+          "tbo_off": 28.125770153507354,
+          "tbo_on": 65.83082185141625
+        },
+        "ttft_ms": {
+          "tbo_off": 31.482577323913574,
+          "tbo_on": 30.405480414628983
+        },
+        "total_s": {
+          "tbo_off": 1.8034441694617271,
+          "tbo_on": 4.177796844393015
+        },
+        "tpot_improvement_pct": -134.06,
+        "graph_reference_tpot_ms": 7.578726384847883
+      }
+    },
+    "timeline": "comm regions 1568, half-B segments 784; 792 overlapping pairs totalling 65.49 ms of overlap",
+    "note": "measured after the lazy-state closure fix in batch_overlap/two_batch_overlap.py (output parity restored); greedy divergences at batch 8/32 are bf16 reduction-order noise on low-confidence rows. graph_reference is the graphed TP2 deployment shape beside the eager arms: the eager TPOTs sit on the Python launch floor, so eager TBO pays its scheduling overhead against a floor the graph never sees \u2014 the profitable TBO is graph-captured, which the policy does not support yet"
+  }
+}

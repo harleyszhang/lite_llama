@@ -1,11 +1,14 @@
 """L2 two-batch overlap: decode ping-pong on/off, TP=2.
 
 ``measure`` A/B-runs the same workload with the two-batch overlap enabled and
-disabled — the only difference between arms is ``LITE_LLAMA_TBO``. Decode is
-where L2 earns: each eager decode step splits its rows in halves whose
-attention/MLP segments interleave, so one half's deferred all-reduce rides the
-comm stream under the other half's compute. Prompts stay short and generation
-long, making TPOT (not TTFT) the headline number.
+disabled — the only difference between arms is ``LITE_LLAMA_TBO``. Both arms
+run eager (TBO's policy excludes CUDA graphs for now), so a third
+``graph_reference`` arm reports the graphed deployment shape beside them:
+the eager pair answers "does the interleave pay while every kernel is
+launched from Python", and the reference shows what replay-from-graph TPOT
+looks like on the same load. The gap between the two is the CPU launch floor
+the eager arms sit on — not a property of the overlap itself. Prompts stay
+short and generation long, making TPOT (not TTFT) the headline number.
 
 Usage:
     python benchmarks/bench_overlap_l2.py --model-dir <ckpt> --timeline
@@ -42,7 +45,7 @@ def measure(
     max_gen_len: int,
     tbo: bool,
 ) -> tuple[BenchResult, list[str]]:
-    """One arm: the only difference is the TBO switch. TP=2 forces eager decode."""
+    """One eager arm: the only difference between the two arms is the TBO switch."""
     os.environ[TBO_ENV] = "1" if tbo else "0"
     from lite_llama.batch_overlap.two_batch_overlap import reset_tbo_policy
 
@@ -56,6 +59,32 @@ def measure(
     )
     try:
         return backend.measure(prompts, max_gen_len, greedy=True), backend.texts()
+    finally:
+        backend.close()
+
+
+def graph_reference(model_dir: str, prompts: list[str], max_gen_len: int) -> BenchResult:
+    """The graphed deployment shape: TP2 decode replaying a captured graph.
+
+    Not an arm — a reference. Since the TP graph capture landed, eager decode
+    on this shape measures the Python launch floor, and the eager TBO arms
+    inherit it; this run shows the TPOT the same load gets when decode runs
+    from a captured graph instead (~300 kernel launches a step collapse to
+    one replay). Read the eager on/off pair against this line.
+    """
+    os.environ[TBO_ENV] = "0"
+    from lite_llama.batch_overlap.two_batch_overlap import reset_tbo_policy
+
+    reset_tbo_policy()
+    backend = make_backend(
+        model_dir,
+        tensor_parallel_size=2,
+        use_cuda_graph=True,
+        max_seq_len=2048,
+        max_num_seqs=64,
+    )
+    try:
+        return backend.measure(prompts, max_gen_len, greedy=True)
     finally:
         backend.close()
 
@@ -124,8 +153,7 @@ def main() -> int:
         for tbo in (False, True):
             label = "tbo_on" if tbo else "tbo_off"
             runs = [
-                measure(args.model_dir, prompts, args.max_gen_len, tbo)
-                for _ in range(args.repeat)
+                measure(args.model_dir, prompts, args.max_gen_len, tbo) for _ in range(args.repeat)
             ]
             results[label], texts[label] = min(runs, key=lambda r: r[0].total_s)
 
@@ -138,11 +166,15 @@ def main() -> int:
         print(f"-> TBO cuts TPOT by {delta:.2f} ms ({delta / off.tpot_ms:.1%})")
         report_agreement(texts["tbo_off"], [("tbo_on", texts["tbo_on"])])
 
+        graph = graph_reference(args.model_dir, prompts, args.max_gen_len)
+        print(graph.row("graph_reference"))
+
         summary[str(batch)] = {
             "tpot_ms": {k: v.tpot_ms for k, v in results.items()},
             "ttft_ms": {k: v.ttft_ms for k, v in results.items()},
             "total_s": {k: v.total_s for k, v in results.items()},
             "tpot_improvement_pct": round(delta / off.tpot_ms * 100, 2),
+            "graph_reference_tpot_ms": graph.tpot_ms,
         }
         all_texts[str(batch)] = texts
 
@@ -163,7 +195,13 @@ def main() -> int:
                     "measured after the lazy-state closure fix in"
                     " batch_overlap/two_batch_overlap.py (output parity"
                     " restored); greedy divergences at batch 8/32 are bf16"
-                    " reduction-order noise on low-confidence rows"
+                    " reduction-order noise on low-confidence rows."
+                    " graph_reference is the graphed TP2 deployment shape"
+                    " beside the eager arms: the eager TPOTs sit on the"
+                    " Python launch floor, so eager TBO pays its scheduling"
+                    " overhead against a floor the graph never sees — the"
+                    " profitable TBO is graph-captured, which the policy"
+                    " does not support yet"
                 ),
             },
         )
