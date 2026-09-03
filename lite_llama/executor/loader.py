@@ -34,10 +34,9 @@ PARAM_DTYPE = torch.bfloat16
 def init_empty_parameters():
     """Skeleton context: parameters allocate on the meta device, buffers do not.
 
-    Mirrors ``accelerate.init_empty_weights(include_buffers=False)``. Buffers must
-    keep real storage because non-persistent ones such as
-    :attr:`~lite_llama.modules.rotary_embedding.RotaryEmbedding.inv_freq` are absent
-    from checkpoints and are computed, not loaded.
+    Mirrors ``accelerate.init_empty_weights(include_buffers=False)``. Buffers keep real
+    storage because non-persistent ones (e.g. ``RotaryEmbedding.inv_freq``) are absent
+    from checkpoints and computed, not loaded.
     """
     original = nn.Module.register_parameter
 
@@ -66,17 +65,12 @@ def materialise_parameters(
 ) -> None:
     """Give every meta parameter real, uninitialised storage on ``device``.
 
-    Only floating-point parameters are cast to ``dtype``; integer ones (a
-    handful of HF vision towers keep index tables as parameters) keep theirs, and
-    so do the quantisation parameters marked
-    :class:`~lite_llama.models.quantization.RawParameter` — an 8-bit weight must
-    not be widened, and its fp32 scales must not be narrowed.
-    The storage stays uninitialised because :func:`load_weights` overwrites all
-    of it and verifies that it did.
-
-    ``requires_grad=False`` is load-bearing, not just tidy: copying into a leaf
-    tensor that requires grad is an in-place autograd error, and the copy is how
-    the fused parameters get filled.
+    Only floating-point parameters are cast to ``dtype``; integer ones (some HF vision
+    towers keep index tables as parameters) and :class:`RawParameter` quantisation
+    parameters keep theirs (an 8-bit weight must not be widened, its fp32 scales not
+    narrowed). Storage stays uninitialised because :func:`load_weights` overwrites and
+    verifies it. ``requires_grad=False`` is load-bearing: copying into a leaf that
+    requires grad is an in-place autograd error, and the copy fills fused parameters.
     """
     for module in model.modules():
         for name, param in module._parameters.items():
@@ -88,7 +82,7 @@ def materialise_parameters(
                 requires_grad=False,
             )
             # Attribute carrier as well as storage: the ``weight_loader`` bound at
-            # construction time must survive into the materialised parameter.
+            # construction must survive into the materialised parameter.
             new.__dict__.update(param.__dict__)
             module._parameters[name] = new
 
@@ -121,16 +115,14 @@ class DefaultModelLoader:
         """Build ``model_cls`` and fill it from the checkpoint in ``checkpoints_dir``.
 
         Args:
-            config: Parsed configuration, already carrying ``max_seq_len`` and the
-                checkpoint's own weight format (``config.quant``).
-            model_cls: The implementation class resolved from the registry.
-            checkpoints_dir: HuggingFace checkpoint directory (``config.json`` plus
-                ``*.safetensors``).
-            device: Torch device string the model must end up on.
-            quantization: Post-load quantisation to apply to an fp16 checkpoint
-                (see :data:`~lite_llama.models.quantization.RUNTIME_SCHEMES`),
-                or ``None``. Ignored for a checkpoint that is already quantised,
-                which needs no conversion.
+            config: Parsed config, carrying ``max_seq_len`` and the checkpoint's weight
+                format (``config.quant``).
+            model_cls: Implementation class resolved from the registry.
+            checkpoints_dir: HF checkpoint dir (``config.json`` + ``*.safetensors``).
+            device: Torch device the model must end up on.
+            quantization: Post-load quantisation for an fp16 checkpoint (see
+                :data:`RUNTIME_SCHEMES`), or ``None``; ignored for an already-quantised
+                checkpoint.
         """
         start = time.time()
         self._check_device(device)
@@ -180,8 +172,8 @@ class DefaultModelLoader:
     @staticmethod
     def _check_device(device: str) -> None:
         if device.startswith("cuda") and not torch.cuda.is_available():
-            # Copying into cuda parameters would otherwise fail deep inside torch
-            # with a message that says nothing about drivers.
+            # Copying into cuda parameters would otherwise fail deep inside torch with
+            # a message that says nothing about drivers.
             raise RuntimeError(
                 "device='cuda' was requested but torch.cuda.is_available() is False. "
                 "This usually means the installed torch build targets a newer CUDA "

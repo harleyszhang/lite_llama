@@ -28,8 +28,8 @@ _SCALE_SUFFIX = "." + SCALE_SUFFIX
 def hf_weight_files(checkpoints_dir: str | Path) -> list[Path]:
     """Return the weight files of a HuggingFace checkpoint directory.
 
-    safetensors wins when both formats are present, which is what HF repos that
-    still carry legacy ``.bin`` mirrors look like.
+    safetensors wins when both formats are present (HF repos that still carry legacy
+    ``.bin`` mirrors).
 
     Raises:
         FileNotFoundError: If the directory holds no recognised weight file.
@@ -52,9 +52,8 @@ def dequant_block_fp8(
 ) -> torch.Tensor:
     """Dequantise a block-wise FP8 (e4m3) matrix: ``W[i,j] = w8[i,j] * s[i//B, j//B]``.
 
-    The multiply runs in fp32; casting the fp8 values first is exact (every e4m3
-    value is representable in fp32), so accuracy is governed solely by the final
-    cast to *dtype*.
+    The multiply runs in fp32; casting fp8 first is exact (every e4m3 value is
+    representable in fp32), so accuracy is governed solely by the final cast to *dtype*.
     """
     w = weight.to(torch.float32)
     scale = scale_inv.to(torch.float32)
@@ -74,21 +73,17 @@ def hf_weights_iterator(
     """Stream ``(key, tensor)`` pairs from a checkpoint, tensors already on ``device``.
 
     Args:
-        checkpoints_dir: Directory holding the ``*.safetensors`` (or ``*.bin``)
-            shards.
-        device: Where the tensors land. Passing the compute device lets the
-            caller copy straight into its parameters and makes the FP8
-            dequantisation a GPU op.
-        dequantize_fp8: Whether to widen FP8 weights to 16-bit and consume their
-            scales, or hand both through untouched for a w8a16 model.
-        dequant_dtype: Element type widened FP8 weights land in; matches the
-            parameters the loader is about to copy into.
-        key_filter: Optional predicate applied to the key *before* the tensor is
-            read. A caller that wants one layer out of a sharded checkpoint
-            (:mod:`lite_llama.tools.harness`) then pays for that layer rather
-            than for the whole model, because the shards are memory-mapped and an
-            unread tensor never leaves the file. Filtering afterwards would not:
-            the read and the host-to-device copy have already happened by then.
+        checkpoints_dir: Directory holding the ``*.safetensors`` (or ``*.bin``) shards.
+        device: Where tensors land; the compute device lets the caller copy straight
+            into its parameters and makes FP8 dequantisation a GPU op.
+        dequantize_fp8: Widen FP8 weights to 16-bit and consume their scales, or hand
+            both through untouched for a w8a16 model.
+        dequant_dtype: Element type widened FP8 weights land in (matches the parameters
+            the loader copies into).
+        key_filter: Predicate applied to the key *before* the tensor is read. A caller
+            wanting one layer of a sharded checkpoint pays for that layer, not the whole
+            model (shards are mmap'd, an unread tensor never leaves the file); filtering
+            afterwards would not (the read and H2D copy already happened).
 
     Yields:
         Pairs in shard order.
@@ -131,8 +126,8 @@ def _iter_safetensors(
                         dequant_dtype,
                     )
                     if dequantize_fp8
-                    # Reinterpret rather than convert: Ampere cannot compute on
-                    # fp8, and the w8a16 kernel widens the raw bytes itself.
+                    # Reinterpret, not convert: Ampere cannot compute on fp8, and the
+                    # w8a16 kernel widens the raw bytes itself.
                     else tensor.view(torch.uint8)
                 )
             yield key, tensor.to(device)
@@ -145,8 +140,8 @@ def _iter_torch_bin(
     dequant_dtype: torch.dtype,
     key_filter: Callable[[str], bool] | None = None,
 ) -> Iterator[tuple[str, torch.Tensor]]:
-    # mmap keeps the shard out of the process's resident set; weights_only rejects
-    # the arbitrary-code-execution pickle payloads a downloaded .bin could carry.
+    # mmap keeps the shard out of the resident set; weights_only rejects the
+    # arbitrary-code-execution pickle payloads a downloaded .bin could carry.
     state = torch.load(path, map_location="cpu", mmap=True, weights_only=True)
     scales = {k: v for k, v in state.items() if k.endswith(_SCALE_SUFFIX)}
     for key, tensor in state.items():

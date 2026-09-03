@@ -25,15 +25,12 @@ from .quantization import QuantizationConfig, UnquantizedLinearMethod
 class LinearBase(nn.Module):
     """``y = x @ W.T (+ b)`` with the weight stored however the quant method says.
 
-    Subclasses decide how ``input_size``/``output_size`` are split; the
-    :attr:`quant_method` owns the parameters and the multiply — composition,
-    not subclassing, because sharding and storage format are orthogonal
-    choices. ``params_dtype`` follows vLLM's auto convention: the layer
-    prescribes no precision of its own — the model layer passes
-    ``config.dtype`` (which follows the checkpoint's ``torch_dtype``), and
-    only a direct instantiation without one falls back to
-    ``torch.get_default_dtype()``. The resolved type is threaded into
-    :meth:`create_weights` so a bf16 checkpoint never allocates fp16.
+    Subclasses decide how ``input_size``/``output_size`` are split; :attr:`quant_method`
+    owns the parameters and the multiply (composition, not subclassing — sharding and
+    storage format are orthogonal). ``params_dtype`` follows vLLM's auto convention: the
+    layer prescribes no precision, the model passes ``config.dtype``, and a direct
+    instantiation falls back to ``torch.get_default_dtype()``. The resolved type is
+    threaded into :meth:`create_weights` so a bf16 checkpoint never allocates fp16.
     """
 
     def __init__(
@@ -49,9 +46,8 @@ class LinearBase(nn.Module):
         self.input_size = input_size
         self.output_size = output_size
         self.quant = quant
-        # The checkpoint's element type. The model layer passes ``config.dtype``
-        # (auto: follow config.json); ``None`` — a direct instantiation — defers
-        # to PyTorch's default dtype rather than prescribing one here.
+        # The checkpoint's element type. The model passes ``config.dtype`` (auto);
+        # ``None`` (a direct instantiation) defers to PyTorch's default dtype.
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.dtype = params_dtype
@@ -64,9 +60,8 @@ class LinearBase(nn.Module):
             if bias
             else None
         )
-        # One rule fills every parameter this layer owns: the weight, the quant
-        # method's scale grids and the bias are all direct attributes, so the
-        # non-recursive parameter iterator covers them all.
+        # One rule fills every parameter this layer owns (weight, scale grids, bias
+        # are all direct attributes), so the non-recursive iterator covers them.
         for param in self.parameters(recurse=False):
             param.weight_loader = self._weight_loader
 
@@ -82,12 +77,11 @@ class LinearBase(nn.Module):
     ) -> torch.Tensor:
         """Fill ``param`` from one checkpoint tensor and return the view written.
 
-        The terminal step every subclass lands on: check the incoming tensor
-        fits, copy, report what was written (the loader loop counts elements
-        to verify coverage). Subclasses with a sharding rule override to
-        compute the destination view and narrow ``loaded`` first, then call
-        ``super()._weight_loader(view, loaded)``. ``shard_id`` names a block
-        of a packed parameter (q/k/v, gate/up); ``None`` for unpacked.
+        The terminal step every subclass lands on: check the tensor fits, copy, report
+        what was written (the loader counts elements to verify coverage). Subclasses with
+        a sharding rule override to compute the destination view and narrow ``loaded``,
+        then call ``super()._weight_loader(view, loaded)``. ``shard_id`` names a block of
+        a packed parameter (q/k/v, gate/up); ``None`` for unpacked.
         """
         if param.shape != loaded.shape:
             raise ValueError(
@@ -101,21 +95,20 @@ class LinearBase(nn.Module):
     def quantize_(self, quant: QuantizationConfig) -> None:
         """Replace a loaded 16-bit weight with its quantised form, in place.
 
-        The ``--quantization <scheme>`` path: the fp16 storage is dropped as
-        each layer converts, so peak memory stays at the size of the fp16
-        checkpoint. Already-quantised layers (an fp8 checkpoint) are left alone.
+        The ``--quantization <scheme>`` path: fp16 storage is dropped as each layer
+        converts, so peak memory stays at the fp16 checkpoint's size. Already-quantised
+        layers (an fp8 checkpoint) are left alone.
         """
         if self.quant is not None:
             return
         method = quant.get_quant_method(self)
         method.quantize_from_fp16(self, quant)
-        # Set quant before the hook: a method whose kernel layout differs from
-        # what quantize_from_fp16 produced — GPTQ bits=8 unpacks its packed
-        # words to int8 bytes — reads self.quant.bits inside the hook.
+        # Set quant before the hook: a method whose kernel layout differs from what
+        # quantize_from_fp16 produced (GPTQ bits=8 unpacks to int8 bytes) reads
+        # self.quant.bits inside the hook.
         self.quant = quant
         self.quant_method = method
-        # Same post-load hook the checkpoint path runs (CausalLM.load_weights):
-        # for every other method it is a no-op.
+        # Same post-load hook the checkpoint path runs; a no-op for other methods.
         method.process_weights_after_loading(self)
 
     def extra_repr(self) -> str:
@@ -130,10 +123,10 @@ class ReplicatedLinear(LinearBase):
 class ColumnParallelLinear(LinearBase):
     """Splits the output features across ranks; no communication.
 
-    Each rank returns its slice of the output feature dimension, which the
-    next :class:`RowParallelLinear` consumes as its own slice of the
-    contracted dimension — that pairing keeps the all-reduce count at one
-    per block. ``what`` names the split dimension for the error message.
+    Each rank returns its slice of the output feature dimension, which the next
+    :class:`RowParallelLinear` consumes as its slice of the contracted dimension — that
+    pairing keeps the all-reduce count at one per block. ``what`` names the split
+    dimension for the error message.
     """
 
     def __init__(
@@ -153,10 +146,10 @@ class ColumnParallelLinear(LinearBase):
         self.full_output_size = output_size
 
     def _weight_loader(self, param, loaded, shard_id=None):
-        # ``shard_id`` selects a half of the packed gate/up pair (``FusedMLP``
-        # builds its fused projection from this class). The narrow is by
-        # proportion of the incoming tensor, so scale grids — the same matrix
-        # at scale-block resolution — follow the same rule as the weight.
+        # ``shard_id`` selects a half of the packed gate/up pair (``FusedMLP`` builds its
+        # fused projection from this class). The narrow is by proportion of the incoming
+        # tensor, so scale grids (the same matrix at scale-block resolution) follow the
+        # same rule as the weight.
         view = param.data
         if shard_id is not None:
             half = view.shape[0] // 2
@@ -173,22 +166,18 @@ class ColumnParallelLinear(LinearBase):
 class QKVParallelLinear(LinearBase):
     """The query, key and value projections as one column-parallel weight.
 
-    Three GEMMs over the same activation become one over ``[q | k | v]``:
-    the activation is read once and one kernel launch replaces three, which
-    matters most on the memory-bound decode path where TP disables CUDA
-    graphs and nothing hides launch overhead.
-
-    Not simply ``ColumnParallelLinear(hidden, q + 2*kv)``: grouped-query
-    attention gives more query heads than key/value heads, and the two block
-    boundaries must be split independently — one cut of ``q + 2*kv`` would
-    hand the low ranks nothing but query heads and the high ranks nothing but
-    key/value heads. The local layout is ``[q | k | v]`` with heads adjacent
-    inside a row, so :meth:`split` never copies: RoPE rotates the q and k
-    blocks in place and the KV write addresses them by stride.
+    Three GEMMs over the same activation become one over ``[q | k | v]``: the activation
+    is read once and one launch replaces three, which matters most on the memory-bound
+    decode path where TP disables CUDA graphs and nothing hides launch overhead. Not
+    simply ``ColumnParallelLinear(hidden, q + 2*kv)``: GQA gives more query than kv heads,
+    and the two block boundaries must split independently (one cut of ``q + 2*kv`` would
+    hand low ranks only query heads, high ranks only kv heads). The local layout is
+    ``[q | k | v]`` with heads adjacent in a row, so :meth:`split` never copies (RoPE
+    rotates q/k in place, the KV write addresses them by stride).
 
     Raises:
-        ValueError: If either head count does not divide across the ranks, or
-            a block's local width is not a whole number of scale blocks.
+        ValueError: If either head count does not divide across the ranks, or a block's
+            local width is not a whole number of scale blocks.
     """
 
     def __init__(
@@ -207,8 +196,8 @@ class QKVParallelLinear(LinearBase):
         local_kv_heads = divide(num_kv_heads, world_size, "key/value heads")
         q_size = local_heads * head_dim
         kv_size = local_kv_heads * head_dim
-        # Checked per block, not on the total: a fused width can be a whole
-        # number of scale blocks while the query block alone is not.
+        # Checked per block, not on the total: a fused width can be a whole number of
+        # scale blocks while the query block alone is not.
         _check_shard_alignment(quant, q_size, "query features")
         _check_shard_alignment(quant, kv_size, "key/value features")
         super().__init__(
@@ -234,10 +223,9 @@ class QKVParallelLinear(LinearBase):
         return self.split(self.apply_linear(x))
 
     def _weight_loader(self, param, loaded, shard_id=None):
-        # ``shard_id`` is which of [q | k | v] arrived. Block boundaries come
-        # from this layer's own head geometry, scaled to the parameter's
-        # resolution: factor 1 for weight/bias, ``group_n`` for a scale grid
-        # whose rows count scale blocks instead of channels.
+        # ``shard_id`` is which of [q | k | v] arrived. Block boundaries come from this
+        # layer's head geometry, scaled to the parameter's resolution: factor 1 for
+        # weight/bias, ``group_n`` for a scale grid (rows count scale blocks).
         if shard_id is None:
             raise ValueError("qkv_proj is packed: a checkpoint tensor must name its block")
         factor = (self.q_size + 2 * self.kv_size) // param.shape[0]
@@ -263,27 +251,23 @@ class QKVParallelLinear(LinearBase):
 class RowParallelLinear(LinearBase):
     """Splits the contracted features across ranks and all-reduces the result.
 
-    Each rank multiplies its slice of ``x`` by its slice of ``W``, so what comes
-    out is a partial sum; :func:`~lite_llama.distributed.parallel_state.tensor_model_parallel_all_reduce`
-    completes it. The collective is inserted after the local multiply and gated
-    on ``reduce_results`` and the world size — the same insertion point vLLM's
-    ``RowParallelLinear`` uses, with the same flag. A bias is rejected rather
-    than silently added ``world_size`` times — no projection in the supported
-    models has one.
+    Each rank multiplies its slice of ``x`` by its slice of ``W``, so the output is a
+    partial sum that :func:`tensor_model_parallel_all_reduce` completes. The collective is
+    inserted after the local multiply, gated on ``reduce_results`` and world size (the same
+    insertion point and flag vLLM's ``RowParallelLinear`` uses). A bias is rejected, not
+    silently added ``world_size`` times (no supported projection has one).
 
     Args:
         input_size: Full contracted width, split ``world_size`` ways.
         output_size: Full output width (not split).
         quant: Quantisation layout, or ``None``.
-        reduce_results: Whether ``forward`` all-reduces the partial sums into the
-            full output. ``True`` — the o_proj/down_proj default — keeps the
-            collective inside the layer; ``False`` hands back the partial sum so
-            a caller can time, batch or defer the collective itself (vLLM's
+        reduce_results: Whether ``forward`` all-reduces the partial sums. ``True``
+            (o_proj/down_proj default) keeps the collective in the layer; ``False`` hands
+            back the partial sum so a caller can time, batch or defer it (vLLM's
             ``ParallelLMHead`` uses the same escape hatch).
         what: Name of the dimension being split, for the error message.
-        params_dtype: Storage type of the parameters; ``None`` defers to
-            ``torch.get_default_dtype()`` (vLLM's auto convention — the layer
-            itself prescribes no precision).
+        params_dtype: Parameter storage type; ``None`` defers to
+            ``torch.get_default_dtype()`` (vLLM's auto convention).
     """
 
     def __init__(
@@ -309,8 +293,8 @@ class RowParallelLinear(LinearBase):
         self.reduce_results = reduce_results
 
     def _weight_loader(self, param, loaded, shard_id=None):
-        # The split is along the contracted dimension (columns of the weight
-        # and of the scale grid alike); no packed form of this layer exists.
+        # The split is along the contracted dimension (columns of the weight and scale
+        # grid alike); no packed form of this layer exists.
         world_size = get_tensor_model_parallel_world_size()
         if world_size > 1:
             size = loaded.shape[1] // world_size
@@ -319,10 +303,9 @@ class RowParallelLinear(LinearBase):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         output_parallel = self.apply_linear(x)
-        # vLLM's insertion point: the collective rides on the layer itself, after
-        # the multiply and before anything downstream can consume the output. The
-        # world-of-one early return lives inside the collective, so the only
-        # decision a call site makes is the reduce_results policy.
+        # vLLM's insertion point: the collective rides on the layer, after the multiply
+        # and before anything downstream consumes the output. The world-of-one early
+        # return lives inside the collective, so a call site only sets reduce_results.
         if self.reduce_results:
             return tensor_model_parallel_all_reduce(output_parallel)
         return output_parallel
@@ -332,9 +315,8 @@ def _check_shard_alignment(quant: QuantizationConfig | None, local_size: int, wh
     """Reject a split that would cut a quantisation scale block in half.
 
     Raises:
-        ValueError: If ``local_size`` is not a whole number of scale blocks, i.e.
-            the requested tensor-parallel size is too large for this checkpoint's
-            block size.
+        ValueError: If ``local_size`` is not a whole number of scale blocks (the
+            tensor-parallel size is too large for this checkpoint's block size).
     """
     if quant is not None and not quant.shard_is_aligned(local_size):
         raise ValueError(

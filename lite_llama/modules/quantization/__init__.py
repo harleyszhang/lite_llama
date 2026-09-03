@@ -26,7 +26,7 @@ from .kv_cache import BaseKVCacheMethod, Fp8KVCacheMethod, get_kv_cache_method
 from .nvfp4 import NVFP4Config
 from .parameter import RawParameter
 from .unquant import UnquantizedConfig, UnquantizedFusedMoEMethod, UnquantizedLinearMethod
-from .utils import adapt_int4_checkpoint, adapt_packed_checkpoint
+from .utils import adapt_packed_checkpoint
 from .w8a8_fp8 import W8A8Fp8Config
 from .w8a8_int8 import W8A8Int8Config
 
@@ -107,20 +107,11 @@ def for_runtime_scheme(name: str) -> QuantizationConfig:
         raise ValueError(
             f"unknown runtime quantisation {name!r}; supported: {sorted(RUNTIME_SCHEMES)}"
         )
-    # Each config has sensible defaults for its runtime variant.
+    # int8 is the one scheme with two variants; the rest run on their defaults.
     if cls is BlockInt8Config:
         if name.lower() == "int8-blockwise":
             return BlockInt8Config.groupwise()
         return BlockInt8Config.per_channel()
-    if cls is W8A8Fp8Config:
-        return W8A8Fp8Config()
-    if cls is W8A8Int8Config:
-        return W8A8Int8Config()
-    if cls is AWQConfig:
-        return AWQConfig()
-    if cls is NVFP4Config:
-        return NVFP4Config()
-    # Fallback (shouldn't reach here).
     return cls.from_config({})
 
 
@@ -154,7 +145,6 @@ __all__ = [  # noqa: RUF022
     "SCALE_SUFFIX",
     "BASE_QUANTIZATION_METHODS",
     "RUNTIME_SCHEMES",
-    "adapt_int4_checkpoint",
     "adapt_packed_checkpoint",
     # Factories
     "get_quantization_config",

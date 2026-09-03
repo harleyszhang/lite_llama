@@ -23,14 +23,11 @@ from .quantization.kv_cache import get_kv_cache_method
 class PagedAttention(nn.Module):
     """Writes K/V into the paged cache and runs the phase-appropriate kernel.
 
-    Both phases share the cache layout ``[2 * max_tokens, num_kv_heads, head_dim]``:
-    K rows occupy the first half, V rows the second. ``kv_cache_dtype`` of
-    ``torch.uint8`` stores fp8-e4m3 bytes; the dequantisation scales come from
-    the strategy object that :func:`~lite_llama.modules.quantization.kv_cache.get_kv_cache_method`
-    returns, so write and read cannot disagree about them. Both dtype
-    arguments follow vLLM's auto convention — ``None`` defers to
-    ``torch.get_default_dtype()`` rather than the layer prescribing a
-    precision of its own; the model layer passes the checkpoint's dtype.
+    Both phases share the cache layout ``[2 * max_tokens, num_kv_heads, head_dim]`` (K rows
+    first half, V rows second). ``kv_cache_dtype`` of ``torch.uint8`` stores fp8-e4m3 bytes;
+    the dequant scales come from the strategy ``get_kv_cache_method`` returns, so write and
+    read cannot disagree. Both dtype args follow vLLM's auto convention (``None`` defers to
+    ``torch.get_default_dtype()``; the model passes the checkpoint's dtype).
     """
 
     def __init__(
@@ -50,16 +47,15 @@ class PagedAttention(nn.Module):
         self.scale = 1.0 / math.sqrt(head_dim)
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_cache_method = get_kv_cache_method(kv_cache_dtype)
-        # Scales live on the strategy, not on this layer: the quantise-on-write
-        # and dequantise-on-read halves are only correct as a pair.
+        # Scales live on the strategy, not this layer: the quantise-on-write and
+        # dequantise-on-read halves are only correct as a pair.
         method = self.kv_cache_method
         self.k_scale = method.k_scale if method is not None else 1.0
         self.v_scale = method.v_scale if method is not None else 1.0
 
-        # One dispatch decision per op, held for the module's lifetime. kv_write
-        # carries no dtype window on purpose: with an fp8 cache the K/V arrive
-        # already quantised, so uint8 rows are as legal as bf16 ones. The decode
-        # op's scheme key encodes the cache dtype this module writes.
+        # One dispatch decision per op, held for the module's lifetime. kv_write carries
+        # no dtype window: with an fp8 cache the K/V arrive already quantised, so uint8
+        # rows are as legal as bf16. The decode op's scheme key encodes the cache dtype.
         self._kv_write = dispatch("kv_write", dtype=kv_cache_dtype, layout=PAGED_KV_TAGS).load()
         self._prefill = dispatch("attention.prefill", dtype=params_dtype).load()
         self._chunked = dispatch("attention.chunked_prefill", dtype=params_dtype).load()
@@ -70,15 +66,13 @@ class PagedAttention(nn.Module):
             layout=PAGED_KV_TAGS,
         ).load()
 
-        # K/V halves of this layer's cache row, rebuilt only when the backing
-        # buffer changes. The live buffers are allocated once (the executor owns
-        # them for its lifetime and the CUDA graph shares the same list), so
-        # after the first step the identity check below hits and each decode
-        # step skips two slice-view constructions per layer. Profiling is the
-        # one legitimate buffer swap — its dummy forward runs on scratch rows —
-        # and the check absorbs it. Keeping the source alive alongside the
-        # views is what makes ``is`` safe: the comparison can never see a
-        # recycled address because the cached buffer cannot be freed.
+        # K/V halves of this layer's cache row, rebuilt only when the backing buffer
+        # changes. The live buffers are allocated once (the executor owns them, the CUDA
+        # graph shares the list), so after the first step the identity check hits and each
+        # decode step skips two slice-view constructions per layer. Profiling is the one
+        # legitimate swap (its dummy forward runs on scratch rows) and the check absorbs it.
+        # Keeping the source alive alongside the views makes ``is`` safe: the comparison
+        # never sees a recycled address because the cached buffer cannot be freed.
         self._kv_view_pair: tuple[torch.Tensor, torch.Tensor] | None = None
         self._kv_view_source: torch.Tensor | None = None
 
@@ -98,9 +92,9 @@ class PagedAttention(nn.Module):
     def _kv_views(self, kv_buffer: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """K and V halves of a layer's cache row, held while the buffer holds.
 
-        The cache layout packs K into the first ``num_kv_heads`` rows and V into
-        the rest; both kernels want the halves as separate tensors, and both
-        call sites used to slice them afresh on every step.
+        The cache packs K into the first ``num_kv_heads`` rows and V into the rest; both
+        kernels want the halves as separate tensors, and both call sites used to slice them
+        afresh every step.
         """
         views = self._kv_view_pair
         if views is None or self._kv_view_source is not kv_buffer:
@@ -122,14 +116,12 @@ class PagedAttention(nn.Module):
     ) -> torch.Tensor:
         """Prefill: causal attention over the freshly computed q/k/v.
 
-        The plain kernel reads the unquantised tensors it was handed, not the
-        cache — the write above only has to make them available to later decode
-        steps. A chunk resuming on cached rows (``b_prefix_len`` armed) cannot
-        use it: self-attention over the grid alone would drop the prefix. Its
-        queries instead run through the chunked kernel, whose keys and values
-        are the slot's own cache rows — prefix plus this chunk, contiguous from
-        ``b_kv_base`` — at tensor-core prefill prices rather than the one-row-
-        per-token extend path.
+        The plain kernel reads the unquantised tensors it was handed, not the cache (the
+        write above only makes them available to later decode steps). A chunk resuming on
+        cached rows (``b_prefix_len`` armed) cannot use it — self-attention over the grid
+        alone would drop the prefix — so its queries run through the chunked kernel, whose
+        keys/values are the slot's cache rows (prefix plus this chunk, contiguous from
+        ``b_kv_base``) at tensor-core prefill prices, not the one-row-per-token extend path.
 
         Returns:
             ``[tokens, num_heads, head_dim]``.

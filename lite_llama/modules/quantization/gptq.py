@@ -1,10 +1,8 @@
 """GPTQ config and method (mirrors sglang ``gptq/gptq.py``).
 
-:class:`GPTQConfig` carries the checkpoint's bits (4 or 8) and group size;
-the linear/MoE methods load the packed word layout AutoGPTQ produces and
-repack it in ``process_weights_after_loading`` into whatever their kernel
-eats — byte-packed int4 for the fused MoE path, one int8 byte per element
-for the dense w8a16 path.
+:class:`GPTQConfig` carries the checkpoint's bits (4 or 8) and group size; the
+linear/MoE methods load the packed int32 words AutoGPTQ produces and repack
+them in ``process_weights_after_loading`` into the layout their kernel eats.
 
 Usage:
     quant = GPTQConfig(group_size, ignored, bits=8)
@@ -35,9 +33,8 @@ from .utils import quantize_int4_groupwise, quantize_int8_groupwise_asym
 class GPTQConfig(QuantizationConfig):
     """AutoGPTQ checkpoint config: group-wise int4/int8 with configurable group size.
 
-    ``bits=4`` and ``bits=8`` share one container — AutoGPTQ packs 8 nibbles or
-    4 bytes per int32 word — and one scale/zero grid; only the pack factor and
-    the kernel the methods route to differ.
+    Both bit widths share one container (8 nibbles or 4 bytes per int32 word)
+    and one scale/zero grid; only the pack factor and the target kernel differ.
     """
 
     def __init__(self, group_size: int = 128, ignored: tuple[str, ...] = (), bits: int = 4) -> None:
@@ -99,13 +96,12 @@ class GPTQConfig(QuantizationConfig):
 
 
 class GPTQLinearMethod(LinearMethodBase):
-    """Group-wise int4/int8 from an AutoGPTQ checkpoint; runs the w4a16 kernel.
+    """Group-wise int4/int8 from an AutoGPTQ checkpoint.
 
-    Both bit widths load as ``[N, K//pack_factor]`` int32 words. The int4 rows
-    feed the w4a16 kernel in exactly that form; the int8 rows instead leave
-    :meth:`process_weights_after_loading` as ``[N, K]`` int8 bytes — the layout
-    the w8a16 kernel (under the ``gptq_int8`` scheme) and every other int8
-    consumer shares.
+    Both bit widths load as ``[N, K//pack_factor]`` int32 words. int4 feeds the
+    w4a16 kernel in that form; int8 leaves
+    :meth:`process_weights_after_loading` as ``[N, K]`` int8 bytes, the layout
+    the w8a16 kernel (scheme ``gptq_int8``) takes.
     """
 
     def create_weights(self, layer: nn.Module, input_size: int, output_size: int, **kw) -> None:
@@ -142,12 +138,9 @@ class GPTQLinearMethod(LinearMethodBase):
         layer.weight_zeros = RawParameter(zeros)
 
     def process_weights_after_loading(self, layer: nn.Module) -> None:
-        """Expand the int8 word packing to the bytes the w8a16 kernel eats.
+        """Expand the int8 word packing to the bytes the w8a16 kernel takes.
 
-        int4 rows load in the dense kernel's layout already (packed int32 words)
-        and return immediately; int8 rows cross the same bridge the MoE method
-        does, just ending at ``[N, K]`` int8 because that is what the dense
-        w8a16 kernel takes rather than a stacked-expert variant.
+        int4 already loads in its kernel's layout and needs nothing here.
         """
         config: GPTQConfig = layer.quant  # type: ignore[assignment]
         if config.bits == 8:
@@ -160,11 +153,9 @@ class GPTQMoEMethod(FusedMoEMethodBase):
     """GPTQ int4/int8 MoE: stacked experts through the fused kernel.
 
     Expert weights load in the checkpoint's ``[E, N, K//pack_factor]`` int32
-    packing (8 nibbles or 4 bytes per word) with ``[E, N, K//group_k]`` fp32
-    scales and zeros; :meth:`process_weights_after_loading` then swaps each
-    stacked tensor for the fused kernel's per-element container — ``[E, N,
-    K//2]`` uint8 for int4 (two nibbles per byte), ``[E, N, K]`` int8 for the
-    asymmetric bits=8 mode — in one repack.
+    packing with ``[E, N, K//group_k]`` fp32 scales and zeros;
+    :meth:`process_weights_after_loading` swaps each stacked tensor for the
+    fused kernel's per-element container.
     """
 
     def create_weights(self, block: nn.Module) -> dict[str, nn.Parameter]:
@@ -204,12 +195,9 @@ class GPTQMoEMethod(FusedMoEMethodBase):
 
         ``create_weights`` allocates the checkpoint's ``[E, N, K//pack_factor]``
         int32 so the expert loader (and its TP narrow) fills it directly; the
-        fused MoE kernel instead wants one byte per nibble pair (int4, ``[E, N,
-        K//2]`` uint8 — vLLM's layout, whose replicated addressing this cannot
-        pay per call) or one byte per value (int8, ``[E, N, K]`` int8, the
-        asymmetric mode the kernel's zeros branch dequantises). One repack
-        here, on the load device, exactly the role ``awq_marlin_repack`` plays
-        in vLLM's same-named hook.
+        kernel instead wants ``[E, N, K//2]`` uint8 for int4 or ``[E, N, K]``
+        int8 for the asymmetric bits=8 mode. One repack here, on the load
+        device, exactly the role ``awq_marlin_repack`` plays in vLLM.
         """
         from ...kernels import repack_int4_experts, unpack_int8_experts
 

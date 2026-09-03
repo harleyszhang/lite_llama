@@ -23,10 +23,9 @@ class BaseKVCacheMethod(QuantizeMethodBase, ABC):
 
     Attributes:
         k_scale: Per-tensor scale the write side applied to keys, which the read
-            side must divide back out. It belongs to the strategy rather than to
-            the attention layer because the two halves are only correct together:
-            a layer holding its own copy of the scale can disagree with the
-            method that quantised the bytes, and nothing would report it.
+            side must divide back out. Both scales belong to the strategy rather
+            than the attention layer: the two halves are only correct together,
+            and a layer holding its own copy could silently disagree.
         v_scale: Same for values.
     """
 

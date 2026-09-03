@@ -20,10 +20,26 @@ from .base_config import (
     LinearMethodBase,
     QuantizationConfig,
     QuantizeMethodBase,
+    allocate_expert_weights,
+    allocate_linear_weights,
     run_quant_linear,
 )
 from .parameter import RawParameter
 from .utils import quantize_int8_groupwise, quantize_int8_per_channel
+
+# --------------------------------------------------------------------------- #
+# Runtime quantisation helper
+# --------------------------------------------------------------------------- #
+
+
+def _quantize_int8(
+    weight: torch.Tensor, group_k: int, limit: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Group-wise when a scale spans fewer channels than ``limit``, per-channel otherwise."""
+    if group_k < limit:
+        return quantize_int8_groupwise(weight, group_k)
+    return quantize_int8_per_channel(weight)
+
 
 # --------------------------------------------------------------------------- #
 # Config
@@ -83,13 +99,7 @@ class BlockInt8LinearMethod(LinearMethodBase):
     """int8 weight + fp16 activation; per-channel or group-wise scale grid."""
 
     def create_weights(self, layer: nn.Module, input_size: int, output_size: int, **kw) -> None:
-        config: BlockInt8Config = layer.quant  # type: ignore[assignment]
-        layer.weight = RawParameter(
-            torch.empty(output_size, input_size, dtype=config.storage_dtype)
-        )
-        layer.weight_scale_inv = RawParameter(
-            torch.empty(*config.scale_shape(output_size, input_size), dtype=torch.float32)
-        )
+        allocate_linear_weights(layer, input_size, output_size)
 
     def apply(
         self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
@@ -107,10 +117,7 @@ class BlockInt8LinearMethod(LinearMethodBase):
 
     def quantize_from_fp16(self, layer: nn.Module, config: QuantizationConfig) -> None:
         cfg: BlockInt8Config = config  # type: ignore[assignment]
-        if cfg.group_k < layer.input_size:
-            qweight, scale = quantize_int8_groupwise(layer.weight.data, cfg.group_k)
-        else:
-            qweight, scale = quantize_int8_per_channel(layer.weight.data)
+        qweight, scale = _quantize_int8(layer.weight.data, cfg.group_k, layer.input_size)
         layer.weight = RawParameter(qweight)
         layer.weight_scale_inv = RawParameter(scale)
 
@@ -119,29 +126,7 @@ class BlockInt8MoEMethod(FusedMoEMethodBase):
     """int8 stacked experts, fp16 activations."""
 
     def create_weights(self, block: nn.Module) -> dict[str, nn.Parameter]:
-        config: BlockInt8Config = block.quant  # type: ignore[assignment]
-        gate_up_n, gate_up_k = 2 * block.moe_intermediate_size, block.hidden_size
-        down_n, down_k = block.hidden_size, block.moe_intermediate_size
-        return {
-            "gate_up_proj": RawParameter(
-                torch.empty(block.num_experts, gate_up_n, gate_up_k, dtype=config.storage_dtype)
-            ),
-            "gate_up_proj_scale_inv": RawParameter(
-                torch.empty(
-                    block.num_experts,
-                    *config.scale_shape(gate_up_n, gate_up_k),
-                    dtype=torch.float32,
-                )
-            ),
-            "down_proj": RawParameter(
-                torch.empty(block.num_experts, down_n, down_k, dtype=config.storage_dtype)
-            ),
-            "down_proj_scale_inv": RawParameter(
-                torch.empty(
-                    block.num_experts, *config.scale_shape(down_n, down_k), dtype=torch.float32
-                )
-            ),
-        }
+        return allocate_expert_weights(block)
 
     def apply(self, block, x, topk_weights, topk_ids) -> torch.Tensor:
         from ...kernels import fused_moe
@@ -162,9 +147,8 @@ class BlockInt8MoEMethod(FusedMoEMethodBase):
     def quantize_from_fp16(self, block: nn.Module, config: QuantizationConfig) -> None:
         cfg: BlockInt8Config = config  # type: ignore[assignment]
         for name in ("gate_up_proj", "down_proj"):
-            if cfg.group_k < block.hidden_size:
-                qweight, scale = quantize_int8_groupwise(block.experts[name].data, cfg.group_k)
-            else:
-                qweight, scale = quantize_int8_per_channel(block.experts[name].data)
+            qweight, scale = _quantize_int8(
+                block.experts[name].data, cfg.group_k, block.hidden_size
+            )
             block.experts[name] = RawParameter(qweight)
             block.experts[f"{name}_scale_inv"] = RawParameter(scale)
