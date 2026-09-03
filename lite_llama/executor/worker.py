@@ -310,11 +310,23 @@ class ModelWorker:
             padded = len(padded_slots)
 
         if kind is PassKind.DECODE and self._pipeline:
-            # Pipeline: the plan's tokens are placeholders (``-1``); gather the
-            # real inputs off the device grid the last sampler wrote, pad, and
-            # skip the upload.
+            # The launch/harvest pipeline: the plan's token entries are
+            # placeholders (``-1``), because the engine has not harvested the
+            # tokens it would name. Gather the real inputs off the device grid
+            # the last pass's sampler wrote, pad with inert ids up to the graph
+            # width, and skip the upload entirely — there is nothing to upload.
+            #
+            # The gather index rides the pool's pinned async upload: a pageable
+            # ``torch.tensor(..., device=...)`` would synchronise on the copy,
+            # and the copy sits behind the previous step's still-running replay
+            # — the host would wait a whole forward out per step, exactly the
+            # serialisation the pipeline exists to remove.
             real = len(plan.slots)
-            gathered = self._next_tokens[self._to_device(plan.slots)]
+            slots_idx, slot_event = self._pool.upload_async(
+                plan.slots, dtype=torch.long, label="upload.decode.slots"
+            )
+            self._pool.consume(slot_event, slots_idx)
+            gathered = self._next_tokens[slots_idx]
             pad = padded - real
             if pad > 0:
                 gathered = torch.cat(
@@ -323,9 +335,7 @@ class ModelWorker:
                         torch.full((pad,), self._pad_id, dtype=torch.long, device=self._device),
                     ]
                 )
-            return _PreparedPass(
-                input_ids=gathered.view(padded, 1), event=None, padded=padded
-            )
+            return _PreparedPass(input_ids=gathered.view(padded, 1), event=None, padded=padded)
 
         rows = plan.tokens + (self._pad_id,) * (padded - len(plan.tokens))
         input_ids, event = self._pool.upload_async(
@@ -429,8 +439,21 @@ class ModelWorker:
             return torch.empty(0, dtype=torch.long, device=logits.device), None
 
         sampling = self._batched_sampling(plan.sampling)
-        slots = self._to_device([plan.slots[index] for index in plan.sampled])
-        columns = self._to_device(plan.gen_counts)
+        # Both index uploads ride the pinned async lane for the same reason as
+        # the pipeline's gather index: a pageable H2D would synchronise behind
+        # whatever the queue still holds, serialising the host against the GPU
+        # mid-pass. They are tiny, but tiny and blocking still blocks.
+        slots, slots_event = self._pool.upload_async(
+            [plan.slots[index] for index in plan.sampled], dtype=torch.long,
+            label="upload.sample.slots",
+        )
+        # Where each row's new token goes, which is also how much history its
+        # repetition penalty may look at.
+        columns, columns_event = self._pool.upload_async(
+            plan.gen_counts, dtype=torch.long, label="upload.sample.columns"
+        )
+        self._pool.consume(slots_event, slots)
+        self._pool.consume(columns_event, columns)
 
         generated = None
         width = max(plan.gen_counts)
@@ -450,9 +473,7 @@ class ModelWorker:
             self._next_tokens[slots] = tokens
         return tokens, records
 
-    def readback(
-        self, tokens: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.cuda.Event | None]:
+    def readback(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.cuda.Event | None]:
         """Stage a pass's sampled tokens for the host, without waiting.
 
         The D2H copy rides the copy stream; the caller syncs on the returned
