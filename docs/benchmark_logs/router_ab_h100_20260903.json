@@ -3,7 +3,7 @@
     "date": "2026-09-03",
     "gpu": "NVIDIA H100 80GB HBM3 x1",
     "model": "Qwen3-30B-A3B-Instruct-2507-FP8 (qwen3_moe, hidden 2048, 128 experts, 48 layers, fp8)",
-    "protocol": "bench_e2e_router_ab.py, greedy, batch=8, max_gen_len=256, mode both; 2 process-level repeats per variant; --router-variant monkey-patches SparseMoeBlock._route, downstream routing identical so the A/B isolates the router GEMM",
+    "protocol": "bench_e2e.py --router-variant (measured through the standalone bench_e2e_router_ab.py driver, since folded into bench_e2e.py as a flag), greedy, batch=8, max_gen_len=256, mode both; 2 process-level repeats per variant; --router-variant monkey-patches moe._router_gemm, downstream routing identical so the A/B isolates the router GEMM",
     "variants": {
       "fp32_cache": "2617933 path: F.linear(x.float(), cached fp32 gate_weight) -> simt SGEMM",
       "tier4": "torch.mm(x, gate_weight.T, out_dtype=fp32) -> single nvjet bf16 tensor-core GEMM, fp32 out"

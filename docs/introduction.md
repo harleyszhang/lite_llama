@@ -413,10 +413,9 @@ benchmarks/ 全部脚本的分工：
 
 | 脚本 | 测什么 |
 |------|--------|
-| [bench_e2e.py](bench_e2e.py) | TTFT/TPOT/TPS 基线，eager vs CUDA graph，附贪心输出一致性断言 |
+| [bench_e2e.py](bench_e2e.py) | TTFT/TPOT/TPS 基线，eager vs CUDA graph，附贪心输出一致性断言；`--router-variant` 复用同一入口做 MoE 路由 GEMM 的进程级 A/B |
 | [bench_continuous.py](bench_continuous.py) | 连续批处理 vs 静态批处理，离线与偏斜到达两种场景 |
-| [bench_data_parallel.py](bench_data_parallel.py) | DP 吞吐扩展（weak/strong scaling），输出逐条 diff 防止速度掩盖错误 |
-| [bench_dp_prefix_cache.py](bench_dp_prefix_cache.py) | 前缀缓存跨 DP 副本的命中率与路由质量 |
+| [bench_data_parallel.py](bench_data_parallel.py) | DP 两个实验：`--mode scaling` 吞吐扩展（weak/strong scaling，输出逐条 diff 防止速度掩盖错误）· `--mode prefix` 前缀缓存跨副本的命中率与路由质量 |
 | [bench_scheduler.py](../benchmarks/bench_scheduler.py) | 调度器基准入口：`matrix`（特性矩阵）· `serving`（在线量化 × TP/DP × graph，HTTP + SSE）· `diag-prefix` · `diag-preempt` |
 | [bench_quant.py](bench_quant.py) | 离线量化矩阵：每行同时带吞吐与输出偏移，缺一半就不是合格的量化表 |
 | [bench_overlap_l1.py](bench_overlap_l1.py) | L1 copy-stream 重叠开关 A/B，附 timeline 证据 |
