@@ -1,18 +1,15 @@
 """Quantisation GEMM kernels: one Triton kernel per numeric format.
 
-Re-exports the five matmul entry points — fp8, nvfp4, w8a16, w4a16
-and smoothquant int8 — each the registered implementation of the
-``linear`` op under its scheme; the one-shot word→byte repack helpers
-(``int8_repack`` / ``int4_repack``), the per-token-group activation
-quantiser (``activation``) and the scale-grid layout descriptors it
-allocates to (``scale_layout``) ride along here so the quant methods can
-pull them from the package root.
+Re-exports the five matmul entry points — fp8, nvfp4, w8a16, w4a16 and
+smoothquant int8, each the registered implementation of the ``linear`` op
+under its scheme — plus the one-shot word→byte repack helpers, the
+per-token-group activation quantiser and the scale-grid layout descriptors it
+allocates to, so the quant methods can pull them from the package root.
 
 Usage:
     from lite_llama.kernels.ops.quantization import fp8_matmul
 
-``nvfp4`` breaks the naming convention's implied progression: it is
-weight-only despite the narrow weight, because sm90 has no fp4 MMA —
+``nvfp4`` is weight-only despite the narrow weight: sm90 has no fp4 MMA, so
 its return is bytes, not FLOPs.
 """
 
@@ -55,4 +52,3 @@ __all__ = [
     "w4a16_matmul",
     "w8a16_matmul",
 ]
-

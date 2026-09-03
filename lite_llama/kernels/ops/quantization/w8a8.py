@@ -1,8 +1,8 @@
 """SmoothQuant W8A8 GEMM: int8 weights + dynamic per-token int8 activations.
 
-A pre-kernel quantises activations per token
-(``_quantize_activations_kernel``) and the main GEMM multiplies int8 x
-int8 with fp32 accumulation, applying both scales in the epilogue.
+``int8_quantize_per_token`` quantises the activations per token, then the GEMM
+multiplies int8 x int8 with int32 accumulation and applies both scales in the
+epilogue.
 
 Usage:
     y = smoothquant_matmul(x, qweight, weight_scales)
@@ -14,61 +14,16 @@ import torch
 import triton
 import triton.language as tl
 
-from .w8a16 import sm_version
-
+from ..tile_policy import TileTier, resolve_tiles, tile_tier
 
 # --------------------------------------------------------------------------- #
-# Activation quantisation kernel
+# Per-token activation quantisation
 # --------------------------------------------------------------------------- #
-@triton.jit
-def _quantize_activations_kernel(
-    x_ptr,
-    q_ptr,
-    scale_ptr,
-    M,
-    K,
-    stride_xm,
-    stride_xk,
-    stride_qm,
-    stride_qk,
-    BLOCK_K: tl.constexpr,
-):
-    """Quantise ``[M, K]`` fp16 activations to int8 with per-token scales.
-
-    Each row gets its own scale: ``scale[m] = max(|x[m]|) / 127``.
-    """
-    pid_m = tl.program_id(0)
-
-    # First pass: find the max abs value across the entire row
-    abs_max = 0.0
-    for k_start in range(0, K, BLOCK_K):
-        offs_k = k_start + tl.arange(0, BLOCK_K)
-        x_ptrs = x_ptr + pid_m * stride_xm + offs_k * stride_xk
-        x = tl.load(x_ptrs, mask=offs_k < K, other=0.0).to(tl.float32)
-        abs_max = tl.maximum(abs_max, tl.max(tl.abs(x), axis=0))
-
-    scale = abs_max / 127.0
-    scale = tl.where(scale > 0, scale, 1.0)
-
-    # Second pass: quantise and store
-    for k_start in range(0, K, BLOCK_K):
-        offs_k = k_start + tl.arange(0, BLOCK_K)
-        x_ptrs = x_ptr + pid_m * stride_xm + offs_k * stride_xk
-        x = tl.load(x_ptrs, mask=offs_k < K, other=0.0).to(tl.float32)
-        q = (x / scale).to(tl.int8)
-        q_ptrs = q_ptr + pid_m * stride_qm + offs_k * stride_qk
-        tl.store(q_ptrs, q, mask=offs_k < K)
-
-    tl.store(scale_ptr + pid_m, scale)
-
 
 #: Largest magnitude symmetric int8 stores.
 _INT8_MAX = 127.0
 
 
-# --------------------------------------------------------------------------- #
-# Per-token activation quantisation (the MoE W8A8 path's separate quantiser)
-# --------------------------------------------------------------------------- #
 @triton.jit
 def _quantize_int8_per_token_kernel(
     x_ptr,
@@ -82,10 +37,9 @@ def _quantize_int8_per_token_kernel(
 ):
     """Quantise one row of ``x`` to int8 with its own scale.
 
-    Same two-pass shape as :func:`_quantize_activations_kernel`, as a standalone
-    function because the MoE path quantises *before* its GEMM launch rather
-    than inside the dense one: the amax must be known before any element can be
-    scaled, and both passes stay in one program so the scale is a register.
+    Two passes over the row, both inside one program: the amax must be known
+    before any element can be scaled, and keeping both passes here makes the
+    scale a register rather than a round trip through HBM.
     """
     row = tl.program_id(0)
     x_row = x_ptr + row * stride_xm
@@ -118,9 +72,8 @@ def _quantize_int8_per_token_kernel(
 def int8_quantize_per_token(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantise activations to int8, one scale per row, in one launch.
 
-    The separate quantiser of the W8A8-int8 MoE path — the grouped GEMM
-    quantises inline on the launch-bound small shapes, this serves the rest —
-    mirroring
+    Serves the dense SmoothQuant path and the W8A8-int8 MoE path (whose grouped
+    GEMM quantises inline only on the launch-bound small shapes), mirroring
     :func:`~lite_llama.kernels.ops.quantization.fp8.fp8_quantize_per_token`. No
     host synchronisation, so a layer holding it on its critical path stays
     CUDA-graph capturable.
@@ -181,8 +134,8 @@ def _smoothquant_matmul_kernel(
 ):
     """One ``[BLOCK_M, BLOCK_N]`` tile of ``C = dequant(A @ B.T)``.
 
-    A is ``[M, K]`` int8, B is ``[N, K]`` int8, C is ``[M, N]`` fp16.
-    ``a_scale`` is ``[M]`` per-token, ``b_scale`` is ``[N]`` per-channel.
+    A is ``[M, K]`` int8, B is ``[N, K]`` int8, C is ``[M, N]`` in ``a``'s
+    dtype. ``a_scale`` is ``[M]`` per-token, ``b_scale`` is ``[N]`` per-channel.
     """
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_M)
@@ -201,7 +154,8 @@ def _smoothquant_matmul_kernel(
     a_ptrs = a_ptr + offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak
     b_ptrs = b_ptr + offs_bn[None, :] * stride_bn + offs_k[:, None] * stride_bk
 
-    # int32 accumulation for int8 @ int8
+    # int32 accumulation: int8 x int8 products fit exactly, and the scales
+    # apply once in the epilogue instead of every k step.
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.int32)
     for k in range(0, tl.cdiv(K, BLOCK_K)):
         k_rem = K - k * BLOCK_K
@@ -211,7 +165,7 @@ def _smoothquant_matmul_kernel(
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
 
-    # Dequantise: multiply by per-token and per-channel scales
+    # Both scales are k-invariant, so the dequantisation rides out here.
     a_scale = tl.load(a_scale_ptr + offs_am, mask=offs_am < M, other=1.0)
     b_scale = tl.load(b_scale_ptr + offs_bn, mask=offs_bn < N, other=1.0)
     result = accumulator.to(tl.float32) * a_scale[:, None] * b_scale[None, :]
@@ -233,19 +187,14 @@ def _launch_config(num_tokens: int, device_index: int | None) -> dict:
     """Tile shape for ``num_tokens`` rows on this device.
 
     Swept over the five dense projections of both test models on an H100
-    (the ``bench_quant_gemm.py`` shape set), same methodology as the fp8
-    kernel: the old ``BLOCK_N`` 128/256 starves the grid at every weight
-    shape (24 column blocks at ``N=6144`` against 132 SMs), so narrow N
-    tiles carry every band, with wider tiles only where M itself supplies
-    the parallelism. Each band's entry never loses to any tested shape in
-    that band; prefill gains the most (up to 1.5x at ``m=2048``).
-
-    Pre-Hopper devices (``sm_version`` gate) keep the A10-era table the
-    sm90 sweep replaced, measured on that hardware; weight shape (N) is
-    not an input -- narrow/wide projection groups pick the same
-    geomean-best tile in every band.
+    (the ``bench_quant_gemm.py`` shape set): the old ``BLOCK_N`` 128/256
+    starves the grid at every weight shape (24 column blocks at ``N=6144``
+    against 132 SMs), so narrow N tiles carry every band, with wider tiles
+    only where M itself supplies the parallelism. Pre-Hopper keeps the
+    A10-era table the sm90 sweep replaced; ``n`` is not an input, because
+    narrow/wide projection groups pick the same geomean-best tile per band.
     """
-    if sm_version(device_index) < (9, 0):
+    if tile_tier(device_index) is TileTier.PRE_HOPPER:
         # A10-era table (sm86, measured): fatter tiles, fewer of them.
         if num_tokens <= 32:
             return {
@@ -314,7 +263,7 @@ def smoothquant_matmul(
     """``x @ dequant(qweight).T (+ bias)`` with dynamic per-token activation quantisation.
 
     Args:
-        x: ``[..., K]`` fp16 activations. Leading dims are flattened.
+        x: ``[..., K]`` fp16/bf16 activations. Leading dims are flattened.
         qweight: ``[N, K]`` int8 weights (per-channel quantised).
         weight_scales: ``[N]`` or ``[N, 1]`` fp32 per-channel dequantisation scales.
         bias: Optional ``[N]`` bias, added in fp32 before the output cast.
@@ -337,32 +286,24 @@ def smoothquant_matmul(
         a = a.contiguous()
     m = a.shape[0]
 
-    # Quantise activations on the fly
-    qactivations = torch.empty((m, k), dtype=torch.int8, device=x.device)
-    activation_scales = torch.empty((m,), dtype=torch.float32, device=x.device)
+    qactivations, activation_scales = int8_quantize_per_token(a)
+    qactivations = qactivations.reshape(-1, k)
+    activation_scales = activation_scales.reshape(-1)
 
-    block_k = min(triton.next_power_of_2(k), 1024)
-    _quantize_activations_kernel[(m,)](
-        a,
-        qactivations,
-        activation_scales,
-        m,
-        k,
-        a.stride(0),
-        a.stride(1),
-        qactivations.stride(0),
-        qactivations.stride(1),
-        BLOCK_K=block_k,
-        num_warps=4,
-    )
-
-    # Flatten weight scales to [N]
     if weight_scales.dim() > 1:
         weight_scales = weight_scales.squeeze(-1)
 
-    # Run int8 @ int8 GEMM
     out = torch.empty((m, n), dtype=x.dtype, device=x.device)
-    cfg = _launch_config(m, x.device.index)
+    # Autotune lookup (per-GPU entry) or the device-tiered heuristic.
+    cfg = resolve_tiles(
+        "smoothquant_matmul",
+        m=m,
+        n=n,
+        k=k,
+        dtype_label="int8",
+        heuristic=lambda dev: _launch_config(m, dev),
+        device_index=x.device.index,
+    )
     grid = (triton.cdiv(m, cfg["BLOCK_M"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
 
     _smoothquant_matmul_kernel[grid](

@@ -1,28 +1,24 @@
 """Standalone dynamic activation quantisation (per-token-group).
 
-The W8A8 GEMM files each embed their own quantiser — ``w8a8.py`` and
-``fp8.py`` quantise activations per *token*, because a per-token scale is what
-their GEMM epilogues consume — so until now the package had no separate
-activation-quantisation op of its own. This module adds the one the
-block-wise schemes need, mirroring sglang's ``per_token_group_quant``
-(``kernels/ops/quantization/per_token_group_quant.py``): the activation-side
-companion of a ``block_shape=[128, 128]`` W8A8 checkpoint, where every
-``group_size``-element slice of every token carries its own scale.
+The W8A8 GEMM files quantise activations per *token*, because that is what
+their GEMM epilogues consume; this is the finer-grained op the block-wise
+schemes need, mirroring sglang's ``per_token_group_quant`` — the
+activation-side companion of a ``block_shape=[128, 128]`` W8A8 checkpoint,
+where every ``group_size``-element slice of every token carries its own scale.
 
 One launch, one pass. A per-token scale needs the whole row's amax before any
-element of the row can be scaled, which is why the per-token quantisers walk
-their row twice. A *group* fits in one tile, so the amax reduction and the
-scaling happen on data that is already in registers: the row is read once,
-and each program carries ``_QUANT_TILE`` elements' worth of groups (eight at
-``group_size=128``) where sglang's flat kernel carries one.
+element can be scaled, which is why the per-token quantisers walk their row
+twice; a *group* fits in one tile, so the amax reduction and the scaling are
+register work and the row is read once. Each program carries ``_QUANT_TILE``
+elements' worth of groups (eight at ``group_size=128``) where sglang's flat
+kernel carries one.
 
 Usage:
     qx, scales = per_token_group_quant(x, 128, out_dtype=torch.uint8)
 
-Scale layout is decided at allocation, not consumption: pass ``layout=``
-and the scale grid is born in the consumer's storage order (see
-``scale_layout.py``), or hand in caller-owned ``output_q``/``output_s``
-buffers and the layout they carry is read back off their strides.
+Scale layout is decided at allocation, not consumption: pass ``layout=`` and
+the grid is born in the consumer's storage order (``scale_layout.py``), or
+hand in caller-owned buffers and their strides declare the layout.
 """
 
 from __future__ import annotations
@@ -41,8 +37,8 @@ from .scale_layout import (
     infer_scale_layout,
 )
 
-#: Largest magnitude symmetric int8 stores. A local restatement of
-#: ``w8a8._INT8_MAX`` — kept private there, so this module states its own.
+#: Largest magnitude symmetric int8 stores. ``w8a8`` keeps its own private
+#: copy; this module states its own rather than importing a private name.
 _INT8_MAX = 127.0
 
 #: Elements one program of :func:`_per_token_group_quant_kernel` covers. Eight
@@ -110,20 +106,17 @@ def _per_token_group_quant_kernel(
     tl.store(s_ptr + row * stride_sm + g * stride_sk, scale, mask=g < G)
     if OUT_FP8:
         # Same cast story as fp8.py's per-token kernel: the hardware cvt is
-        # round-to-nearest-even except on an exact e4m3 tie (a quotient landing
-        # halfway between two codes), where it may pick the other neighbour
-        # from torch's software cast — one code, about one element in 30k. The
-        # byte-difference tests below gate that bound.
+        # round-to-nearest-even except on an exact e4m3 tie, where it may pick
+        # the other neighbour from torch's software cast — one code, about one
+        # element in 30k. The byte-difference tests gate that bound.
         q = q.to(tl.float8e4nv).to(tl.uint8, bitcast=True)
     else:
         # rint, not a plain .to(int8): round-to-nearest-even matches torch's
-        # .round() (and the per-token int8 quantiser), where .to truncates
-        # toward zero — a different byte wherever the quotient's fraction
-        # exceeds one half. Like the e4m3 cast above, it agrees with the torch
-        # chain everywhere except on a quotient landing exactly on a .5
-        # boundary, where a 1 ULP difference between this kernel's and torch's
-        # fp32 division flips the tie (~4e-4 of elements on a 512x7168 row);
-        # the byte-difference tests gate that bound.
+        # .round() and the per-token int8 quantiser, where .to truncates toward
+        # zero. Like the e4m3 cast above it agrees with the torch chain except
+        # on a quotient landing exactly on a .5 boundary, where a 1 ULP
+        # difference between this kernel's and torch's fp32 division flips the
+        # tie; the byte-difference tests gate that bound.
         q = tl.extra.cuda.libdevice.rint(q).to(tl.int8)
     tl.store(q_ptr + row * stride_qm + offs, q, mask=mask)
 
@@ -171,18 +164,16 @@ def per_token_group_quant(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantise activations with one scale per token per ``group_size`` elements.
 
-    The activation-side companion of a ``block_shape=[128, 128]`` W8A8 scheme
-    (sglang's ``per_token_group_quant``): where the per-token quantisers give
-    every row one scale, this gives every ``group_size``-wide slice of every
-    row its own — the granularity a block-quantised *weight* can exploit.
-    No host synchronisation, so a layer holding this on its critical path
-    stays CUDA-graph capturable.
+    Where the per-token quantisers give every row one scale, this gives every
+    ``group_size``-wide slice of every row its own — the granularity a
+    block-quantised *weight* can exploit. No host synchronisation, so a layer
+    holding this on its critical path stays CUDA-graph capturable.
 
     The scale layout is decided where the buffer is born, not where it is
     read: pass ``layout=`` and the grid comes out of ``torch.empty`` already
     in the consumer's storage order, or hand in caller-owned buffers and
-    their strides declare the layout (sglang's ``_infer_scale_layout``
-    move). Either way no post-hoc transpose rides the critical path.
+    their strides declare the layout. Either way no post-hoc transpose rides
+    the critical path.
 
     Args:
         x: ``[..., K]`` float activations. Leading dims are flattened to rows.
@@ -193,9 +184,8 @@ def per_token_group_quant(
         out_dtype: ``torch.int8``, or ``torch.uint8`` for fp8-e4m3 bytes (the
             bit-pattern convention every fp8 op in this package uses).
         column_major_scales: Legacy boolean spelling of
-            ``layout=COLUMN_MAJOR`` — store the ``[T, G]`` scale grid with
-            token stride 1. 2D inputs only. Superseded by ``layout``, which
-            also covers TMA-padded grids.
+            ``layout=COLUMN_MAJOR``, 2D inputs only. Superseded by ``layout``,
+            which also covers TMA-padded grids.
         fuse_silu_and_mul: Quantise ``silu(x[:, :K//2]) * x[:, K//2:]`` straight
             from the gate/up buffer, saving the fp16 round trip through HBM a
             separate activation kernel would take before the quantiser.
@@ -206,16 +196,14 @@ def per_token_group_quant(
         output_s: Caller-owned fp32 scale grid ``[..., K/group_size]``; its
             strides declare the layout and are honoured as-is, with a loud
             error on contradicting ``layout``/``column_major_scales``.
-        layout: The ``ScaleLayout`` (``scale_layout.py``) to allocate the
-            scale grid in when ``output_s`` is not given — e.g.
-            ``COLUMN_MAJOR_TMA`` for a TMA-fed operand. ``None`` keeps the
-            historical row-major default.
+        layout: The ``ScaleLayout`` to allocate the scale grid in when
+            ``output_s`` is not given, e.g. ``COLUMN_MAJOR_TMA`` for a TMA-fed
+            operand. ``None`` keeps the row-major default.
 
     Returns:
         ``(q, scales)``: ``q`` shaped like ``x`` (or ``[..., K/2]`` when
         fused) in ``out_dtype``, ``scales`` fp32 shaped ``[..., K/group_size]``
-        in the layout the allocation decided (transposed strides when
-        column-major).
+        in the layout the allocation decided.
     """
     if out_dtype not in (torch.int8, torch.uint8):
         raise ValueError(f"out_dtype must be int8 or uint8 (e4m3 bytes), got {out_dtype}")
@@ -281,13 +269,11 @@ def per_token_group_quant(
     if output_s is not None:
         scales = output_s
     else:
-        # The layout rides on the allocation: create_scale_output hands back
-        # the grid in *resolved*'s storage order — column-major is an
-        # allocated-[G, T] view, so the buffer stays what the kernel wrote
-        # while the shape the caller sees is [T, G] with token stride 1 — and
-        # the kernel fills it through strides it was already carrying. The
-        # grid belongs to the *logical* output (fuse_silu_and_mul halves the
-        # row), so allocate to the output shape, not the fused input's.
+        # create_scale_output hands the grid back in *resolved*'s storage
+        # order -- column-major is an allocated-[G, T] view, so the buffer
+        # stays what the kernel wrote while the caller sees [T, G] with token
+        # stride 1. The grid belongs to the *logical* output
+        # (fuse_silu_and_mul halves the row), so allocate to the output shape.
         scales = create_scale_output((*x.shape[:-1], h), x.device, group_size, resolved)
 
     if t == 0 or g == 0:
@@ -308,12 +294,11 @@ def per_token_group_quant(
 
     # Tile size: _QUANT_TILE elements split as [groups, group_size], capped by
     # however few groups a narrow row actually has. num_warps follows the
-    # element count — 256 elements per warp is the same ratio the per-token
-    # quantisers' 1024/4 uses.
+    # element count — 256 per warp, the same ratio the per-token quantisers'
+    # 1024/4 uses.
     groups_per_prog = max(1, min(g, _QUANT_TILE // group_size))
     # 2D views for the kernel's stride pair: row-major grids flatten their
-    # leading dims (they are contiguous), column-major ones are already 2D,
-    # and a 2D q makes the view a no-op.
+    # leading dims (contiguous), column-major ones are already 2D.
     q_2d = q.view(t, h)
     scales_2d = scales.view(t, g)
     _per_token_group_quant_kernel[(t, triton.cdiv(g, groups_per_prog))](

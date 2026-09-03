@@ -1,14 +1,13 @@
 """Scale-tensor layout descriptors: allocate in the consumer's format up front.
 
 A quantised GEMM does not read its scale grid the way the quantiser happens to
-write it. Every consumer has its own demand -- a Triton block GEMM walks scales
-row-major, a TMA-fed operand (DeepGEMM, cutlass ``fp8_blockwise_scaled_mm``)
-wants them column-major with the token stride padded to a vector-load multiple,
-and a UE8M0 consumer wants four exponent bytes packed per ``int32``. Deciding
-that at *consumption* time means a transpose, a pad and a ``cat`` on the
-critical path of every layer; deciding it at *allocation* time costs nothing,
-because the buffer is empty anyway and ``torch.empty`` of a padded shape is the
-same call as of an exact one.
+write it. Every consumer has its own demand: a Triton block GEMM walks scales
+row-major, while a TMA-fed operand (the DeepGEMM backend, cutlass
+``fp8_blockwise_scaled_mm``) wants them column-major with the token stride
+padded to a vector-load multiple. Deciding that at *consumption* time means a
+transpose and a pad on every layer's critical path; deciding it at
+*allocation* time costs nothing, because the buffer is empty anyway and
+``torch.empty`` of a padded shape is the same call as of an exact one.
 
 Usage:
     s = create_scale_output(x.shape, x.device, 128, COLUMN_MAJOR_TMA)
@@ -33,12 +32,12 @@ class ScaleLayout:
     """The physical layout a scale grid must be allocated in.
 
     Attributes:
-        column_major: Store the ``[T, G]`` grid with token stride 1 -- allocate
+        column_major: Store the ``[T, G]`` grid with token stride 1 — allocate
             ``[G, T]`` and hand back a transposed view. What a TMA consumer
             reads; a row-major Triton GEMM would rather have the other one.
         tma_aligned: Pad the token stride up to :data:`TMA_SCALE_ALIGNMENT`.
             Only meaningful with ``column_major`` (a row-major grid already
-            has its group stride contiguous, so there is nothing to pad) -- the
+            has its group stride contiguous, so there is nothing to pad) — the
             ``__post_init__`` check rejects the combination rather than
             silently ignoring half of it.
 
@@ -105,9 +104,7 @@ def create_scale_output(
         return torch.empty((*x_shape[:-1], num_groups), device=device, dtype=torch.float32)
 
     if len(x_shape) != 2:
-        raise ValueError(
-            f"column-major scales support 2D activations only, got {len(x_shape)}D"
-        )
+        raise ValueError(f"column-major scales support 2D activations only, got {len(x_shape)}D")
     # Pad the *storage* rows, then slice the view back to the real row count:
     # the kernel writes rows [0, rows) while a TMA descriptor can span the
     # padded extent, and the consumer's own pad step finds nothing to do.
@@ -124,10 +121,9 @@ def infer_scale_layout(output_s: torch.Tensor) -> ScaleLayout:
     """Read the layout back off a caller-allocated scale buffer.
 
     The mirror of :func:`create_scale_output`: a caller that allocated its own
-    grid -- from a previous layer's buffer, a CUDA-graph-captured slab, another
-    framework's allocator -- should not have to restate what it did. sglang
-    resolves this the same way in ``_infer_scale_layout``, and it is what lets
-    one quantiser serve consumers with different demands.
+    grid — from a previous layer's buffer, a CUDA-graph-captured slab, another
+    framework's allocator — should not have to restate what it did. That is
+    what lets one quantiser serve consumers with different demands.
 
     Args:
         output_s: ``[T, G]`` fp32 scale grid.

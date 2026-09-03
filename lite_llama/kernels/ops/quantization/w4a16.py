@@ -1,22 +1,20 @@
 """W4A16 GEMM: 4-bit weights (AWQ/GPTQ), fp16/bf16 activations, fp32 accumulation.
 
-AWQ and GPTQ checkpoints pack 8 int4 values into each int32 word along the K
-dimension, with one fp32 scale (and zero point) per group of ``group_size``
-input channels. The kernel unpacks the int4 nibbles, applies the group-wise
-dequantisation, and multiplies by the fp16 activation — all inside the GEMM
-loop, so the weight never exists at fp16 in HBM.
+AWQ and GPTQ checkpoints pack 8 int4 values into each int32 word along K,
+with one fp32 scale (and zero point) per group of ``group_size`` input
+channels. The kernel unpacks the nibbles, applies the group-wise
+dequantisation and multiplies by the fp16 activation inside the GEMM loop, so
+the weight never exists at fp16 in HBM.
 
-v0.6 rewrite, measured on an H100 (N=K=4096, fp16): ``BLOCK_K`` is decoupled
-from ``group_size`` and the unpack follows the :mod:`.nvfp4` idiom — a
-coalesced [BLOCK_N, BLOCK_K//8] word load, a 3-D shift/reshape to nibbles in
-registers, fp32 dequant, ``tl.trans`` into ``tl.dot``. The previous per-group
-loop (``BLOCK_K == group_size == 128``) fetched 64 bytes per output channel
-per iteration — half a 128-byte transaction; ``BLOCK_K = 256`` fills it and
-is worth 1.4-1.6x at decode widths (m=1: 33.9 -> 23.2 us, on par with cuBLAS
-fp16's 23.1; m=64: 49.9 -> 31.1), parity at prefill. ``BLOCK_K = 512`` loses
-to register pressure, so the tune space stops at 256. A fp16 magic-number
-dequant variant measured 9% faster at m=64 but 12% slower at m=1, so there is
-one code path.
+``BLOCK_K`` is decoupled from ``group_size`` and the unpack follows the
+:mod:`.nvfp4` idiom — a coalesced ``[BLOCK_N, BLOCK_K//8]`` word load, a 3-D
+shift/reshape to nibbles in registers, fp32 dequant, ``tl.trans`` into
+``tl.dot``. Measured on an H100 (N=K=4096, fp16): ``BLOCK_K=256`` fills a
+128-byte transaction per output channel where a per-group loop
+(``BLOCK_K == group_size == 128``) fetches half of one, worth 1.4-1.6x at
+decode widths and parity at prefill; 512 loses to register pressure, so the
+tune space stops at 256. An fp16 magic-number dequant variant measured 9%
+faster at m=64 but 12% slower at m=1, so there is one code path.
 
 Packing order (AWQ/GPTQ standard):
     int32 word w contains values for K indices [8*i, 8*i+7]:
@@ -32,6 +30,8 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+
+from ..tile_policy import TileTier, resolve_tiles, tile_tier
 
 _PACK_FACTOR = 8
 
@@ -149,20 +149,53 @@ def _w4a16_matmul_kernel(
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
-def launch_config(m: int) -> dict[str, int]:
+def launch_config(m: int, device_index: int | None = None) -> dict[str, int]:
     """Tile config for ``m`` rows when the autotune store has no entry.
 
-    Measured on an H100. ``BLOCK_N=32`` is what the unpacked ``[BLOCK_N, BLOCK_K]``
-    operand's register budget wants, and ``BLOCK_K=256`` fills a 128-byte
-    transaction per output channel where ``group_size=128`` fills half of one.
-    The switches at 32 and 128 rows are both ``bucket_m`` boundaries, so one store
-    entry never stands in for two heuristic choices.
+    Hopper and above, measured on an H100: ``BLOCK_N=32`` is what the unpacked
+    ``[BLOCK_N, BLOCK_K]`` operand's register budget wants, and ``BLOCK_K=256``
+    fills a 128-byte transaction per output channel where ``group_size=128``
+    fills half of one. The switches at 32 and 128 rows are both ``bucket_m``
+    boundaries, so one store entry never stands in for two heuristic choices.
+
+    Pre-Hopper: **not measured**. The sm90 table's ``BLOCK_K=256`` at four
+    stages wants ~190 KB of shared memory per program; sm86-class parts carry
+    100 KB, so those configs would spill or fail to compile. The branch below
+    halves the k-tile and the pipeline depth (~64 KB) as a conservative
+    default — the intended path for hardware this file was never swept on is
+    the autotune store, whose per-GPU entry takes precedence.
 
     Public because ``benchmarks/kernels/bench_quant_gemm.py --tune`` needs the
-    config it is trying to beat. It used to keep its own copy and guard it by
-    timing both, which cannot work: at one row the same config measures 22-30 us
-    run to run, so the guard reported noise as a divergence.
+    config it is trying to beat.
     """
+    if tile_tier(device_index) is TileTier.PRE_HOPPER:
+        # Conservative pre-Hopper default (unmeasured; autotune overrides).
+        if m <= 32:
+            return {
+                "BLOCK_M": 16,
+                "BLOCK_N": 32,
+                "BLOCK_K": 128,
+                "GROUP_M": 8,
+                "num_warps": 4,
+                "num_stages": 2,
+            }
+        if m <= 128:
+            return {
+                "BLOCK_M": 32,
+                "BLOCK_N": 32,
+                "BLOCK_K": 128,
+                "GROUP_M": 8,
+                "num_warps": 4,
+                "num_stages": 2,
+            }
+        return {
+            "BLOCK_M": 64,
+            "BLOCK_N": 64,
+            "BLOCK_K": 128,
+            "GROUP_M": 8,
+            "num_warps": 4,
+            "num_stages": 2,
+        }
     if m <= 32:
         return {
             "BLOCK_M": 16,
@@ -202,9 +235,9 @@ def w4a16_matmul(
 ) -> torch.Tensor:
     """``x @ dequant(qweight).T (+ bias)`` with int4 weights unpacked in-kernel.
 
-    Uses tl.dot for tensor-core acceleration. The k-tile (``BLOCK_K``) is a
-    multiple of ``group_size`` chosen per M bucket — from the autotune store
-    when an entry exists, else the measured heuristic below.
+    The k-tile (``BLOCK_K``) is a multiple of ``group_size`` chosen per M
+    bucket — from the autotune store when an entry exists, else the measured
+    heuristic below.
 
     Args:
         x: ``[..., K]`` fp16 activations. Leading dims are flattened.
@@ -240,19 +273,24 @@ def w4a16_matmul(
     m = a.shape[0]
     out = torch.empty((m, n), dtype=x.dtype, device=x.device)
 
-    # Autotune lookup or heuristic fallback
-    from lite_llama.kernels.dispatcher.autotune import get_best_config
-
-    config = get_best_config("w4a16_matmul", m=m, n=n, k=k, dtype="int4")
-    if config is None:
-        config = launch_config(m)
+    # Autotune lookup (per-GPU entry) or the device-tiered heuristic.
+    config = resolve_tiles(
+        "w4a16_matmul",
+        m=m,
+        n=n,
+        k=k,
+        dtype_label="int4",
+        heuristic=lambda dev: launch_config(m, dev),
+        device_index=x.device.index,
+    )
 
     block_m = config["BLOCK_M"]
     block_n = config["BLOCK_N"]
     # Store entries written before BLOCK_K existed carry no key; fall back to
     # the measured 256. Whatever the source, the k-tile must cover whole
-    # quantisation groups and divide K evenly — halve until it does. The
-    # group_size fallback always fits because k % group_size == 0 above.
+    # quantisation groups *and* divide K evenly (this kernel does not mask a
+    # ragged k-tail) — halve until both hold. The group_size fallback always
+    # fits because k % group_size == 0 above.
     block_k = config.get("BLOCK_K", 256)
     while block_k > group_size and (block_k % group_size != 0 or k % block_k != 0):
         block_k //= 2
