@@ -493,8 +493,9 @@ def align_only(tokens: int, geo: MoeGeometry, ids: torch.Tensor) -> Callable[[],
     """
     # ``quant_mode`` only selects BLOCK_K, and BLOCK_M is the block size the
     # alignment is asked for, so 0 here is not a claim about the format.
+    # device_index=None: the bench runs on the current device.
     rows_per_expert = tokens * geo.top_k / geo.num_experts
-    block_m = _launch_config(tokens, 0, rows_per_expert)["BLOCK_M"]
+    block_m = _launch_config(tokens, 0, rows_per_expert, None)["BLOCK_M"]
     return lambda: moe_align_block_size(ids, block_m, geo.num_experts)
 
 
@@ -511,7 +512,10 @@ def forced_block_k(block_k: int) -> Iterator[None]:
     """Run ``fused_moe`` with one ``BLOCK_K``, whatever its heuristic would pick.
     """
     original = fused_moe_module._launch_config
-    fused_moe_module._launch_config = lambda n, q, r: {**original(n, q, r), "BLOCK_K": block_k}
+    fused_moe_module._launch_config = lambda n, q, r, d: {
+        **original(n, q, r, d),
+        "BLOCK_K": block_k,
+    }
 
     previous = os.environ.get("LITE_LLAMA_AUTOTUNE")
     os.environ["LITE_LLAMA_AUTOTUNE"] = "0"
@@ -715,7 +719,9 @@ def forced_config(config: dict[str, int]) -> Iterator[None]:
     """
     original = fused_moe_module._launch_config
     previous = os.environ.get("LITE_LLAMA_AUTOTUNE")
-    fused_moe_module._launch_config = lambda n, q, r, c=config: dict(c)
+    # ``d`` absorbs the device_index the launcher now passes; ``c`` stays the
+    # forced config whatever device is asked about.
+    fused_moe_module._launch_config = lambda n, q, r, d=None, c=config: dict(c)
     os.environ["LITE_LLAMA_AUTOTUNE"] = "0"
     try:
         yield
@@ -821,7 +827,7 @@ def tune(
                 # format's tile: _TILE_TABLE is per mode.
                 quant_mode = _TUNE_QUANT_MODE[scheme.key]
                 baseline_config = _launch_config(
-                    group[-1], quant_mode, group[-1] * geo.top_k / geo.num_experts
+                    group[-1], quant_mode, group[-1] * geo.top_k / geo.num_experts, None
                 )
                 with forced_config(baseline_config):
                     references = [call(x, w, i) for x, w, i in inputs]
