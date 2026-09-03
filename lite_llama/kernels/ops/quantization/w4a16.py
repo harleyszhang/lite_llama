@@ -222,6 +222,63 @@ def launch_config(m: int, device_index: int | None = None) -> dict[str, int]:
         "num_warps": 4,
         "num_stages": 3,
     }
+def _launch(
+    a: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    zeros: torch.Tensor,
+    bias: torch.Tensor | None,
+    out: torch.Tensor,
+    m: int,
+    n: int,
+    k: int,
+    config: dict,
+    group_size: int,
+) -> None:
+    """One kernel launch under an explicit tile config.
+
+    Shared by :func:`w4a16_matmul` and the autotune collector, so a searched
+    config is measured on exactly the launch the runtime performs.
+    """
+    block_m, block_n = config["BLOCK_M"], config["BLOCK_N"]
+    # Store entries written before BLOCK_K existed carry no key; fall back to
+    # the measured 256. Whatever the source, the k-tile must cover whole
+    # quantisation groups *and* divide K evenly (this kernel does not mask a
+    # ragged k-tail) — halve until both hold. The group_size fallback always
+    # fits because k % group_size == 0 in :func:`w4a16_matmul`.
+    block_k = config.get("BLOCK_K", 256)
+    while block_k > group_size and (block_k % group_size != 0 or k % block_k != 0):
+        block_k //= 2
+    if block_k % group_size != 0 or k % block_k != 0:
+        block_k = group_size
+    grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+    _w4a16_matmul_kernel[grid](
+        a,
+        qweight,
+        out,
+        scales,
+        zeros,
+        bias,
+        m,
+        n,
+        k,
+        a.stride(0),
+        a.stride(1),
+        qweight.stride(0),
+        qweight.stride(1),
+        out.stride(0),
+        out.stride(1),
+        scales.stride(0),
+        scales.stride(1),
+        GROUP_SIZE=group_size,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=config["GROUP_M"],
+        HAS_BIAS=bias is not None,
+        num_warps=config["num_warps"],
+        num_stages=config["num_stages"],
+    )
 
 
 def w4a16_matmul(
@@ -284,45 +341,5 @@ def w4a16_matmul(
         device_index=x.device.index,
     )
 
-    block_m = config["BLOCK_M"]
-    block_n = config["BLOCK_N"]
-    # Store entries written before BLOCK_K existed carry no key; fall back to
-    # the measured 256. Whatever the source, the k-tile must cover whole
-    # quantisation groups *and* divide K evenly (this kernel does not mask a
-    # ragged k-tail) — halve until both hold. The group_size fallback always
-    # fits because k % group_size == 0 above.
-    block_k = config.get("BLOCK_K", 256)
-    while block_k > group_size and (block_k % group_size != 0 or k % block_k != 0):
-        block_k //= 2
-    if block_k % group_size != 0 or k % block_k != 0:
-        block_k = group_size
-    grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
-
-    _w4a16_matmul_kernel[grid](
-        a,
-        qweight,
-        out,
-        scales,
-        zeros,
-        bias,
-        m,
-        n,
-        k,
-        a.stride(0),
-        a.stride(1),
-        qweight.stride(0),
-        qweight.stride(1),
-        out.stride(0),
-        out.stride(1),
-        scales.stride(0),
-        scales.stride(1),
-        GROUP_SIZE=group_size,
-        BLOCK_M=block_m,
-        BLOCK_N=block_n,
-        BLOCK_K=block_k,
-        GROUP_M=config["GROUP_M"],
-        HAS_BIAS=bias is not None,
-        num_warps=config["num_warps"],
-        num_stages=config["num_stages"],
-    )
+    _launch(a, qweight, scales, zeros, bias, out, m, n, k, config, group_size)
     return out.reshape(*leading, n)

@@ -33,6 +33,7 @@ class AutotuneSearcher:
         self._warmup = warmup
         self._repeat = repeat
         self._gpu: str | None = None
+        self._flush: torch.Tensor | None = None
 
     @property
     def gpu(self) -> str:
@@ -95,8 +96,20 @@ class AutotuneSearcher:
         self._store.put(key, best_config, latency_us=best_latency)
         return best_config
 
+    def _flush_l2(self) -> None:
+        """Evict the L2 cache, the trick ``triton.testing.do_bench`` uses.
+
+        A weight-stationary GEMM reads its weights once per step, not repeatedly
+        from a warm cache, so ranking configs on warm L2 favours tiles that
+        exploit reuse the runtime never gets. One 256 MB write per timed call
+        is enough to evict an A10/H100 L2.
+        """
+        if self._flush is None:
+            self._flush = torch.empty(int(256e6 // 4), dtype=torch.int, device="cuda")
+        self._flush.zero_()
+
     def _benchmark(self, run_fn: Callable[[dict], None], config: dict) -> float:
-        """Time one config: warmup, then repeat and return median in microseconds."""
+        """Time one config on a cold L2: warmup, then repeat, median in µs."""
         # Warmup
         for _ in range(self._warmup):
             run_fn(config)
@@ -107,6 +120,7 @@ class AutotuneSearcher:
         for _ in range(self._repeat):
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
+            self._flush_l2()
             start.record()
             run_fn(config)
             end.record()

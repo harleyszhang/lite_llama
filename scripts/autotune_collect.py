@@ -17,6 +17,10 @@ Usage::
     python scripts/autotune_collect.py \
         --model-dir /data/shared/llm_weights/Qwen3-0.6B \
         --model-dir /data/shared/llm_weights/Qwen2.5-1.5B-Instruct
+
+    # Explicit shapes no model config yields (the benchmark docs' square GEMMs)
+    python scripts/autotune_collect.py --ops w4a16_matmul \
+        --extra-shape 1x4096x4096 --extra-shape 64x4096x4096
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ import argparse
 import json
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -125,15 +130,24 @@ FLASH_ATTN_CONFIGS = [
     for ns in [2, 3, 4, 6]
 ]
 
-W4A16_CONFIGS = [
-    {"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk, "GROUP_M": gm, "num_warps": nw, "num_stages": ns}
-    for bm in [16, 32, 64, 128]
-    for bn in [32, 64, 128]
-    for bk in [128]  # must be >= group_size (typically 128)
-    for gm in [4, 8]
-    for nw in [4, 8]
-    for ns in [2, 3, 4]
-]
+
+def _w4a16_configs(m: int) -> list[dict]:
+    """Candidate tiles for one M, so the search space stays proportional.
+
+    ``BLOCK_M`` never exceeds what the rows can fill (a 128-row tile on a
+    1-row decode wastes 127 rows of every program), and ``num_stages`` starts
+    at 3 — the A10 sweep never picked 2, since two stages leave the packed
+    weight loads unpipelined. ``GROUP_SIZE`` is the kernel's K step, so there
+    is no ``BLOCK_K`` to search.
+    """
+    return [
+        {"BLOCK_M": bm, "BLOCK_N": bn, "GROUP_M": gm, "num_warps": nw, "num_stages": ns}
+        for bm in [b for b in (16, 32, 64, 128) if b <= max(16, 2 * m)]
+        for bn in (32, 64, 128)
+        for gm in (1, 8)
+        for nw in (4, 8)
+        for ns in (3, 4)
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -235,16 +249,59 @@ def _make_flash_attn_runner(seq_len: int, head_dim: int):
     return run_fn
 
 
+def _make_w4a16_runner(m: int, n: int, k: int):
+    """Create a runner for the w4a16 GEMM (int4 weights, fp16 activations).
+
+    Calls the kernel's own ``_launch`` rather than re-deriving the grid, so the
+    config being searched is measured on exactly the launch the runtime makes.
+    """
+    from lite_llama.kernels.ops.quantization.w4a16 import _PACK_FACTOR, _launch
+
+    device = "cuda"
+    group_size = 128
+    a = torch.randn(m, k, dtype=torch.float16, device=device) * 0.1
+    qweight = torch.randint(
+        -(2**31), 2**31 - 1, (n, k // _PACK_FACTOR), dtype=torch.int32, device=device
+    )
+    scales = torch.rand(n, k // group_size, dtype=torch.float32, device=device) * 0.02
+    zeros = torch.randint(0, 16, (n, k // group_size), device=device).to(torch.float32)
+    out = torch.empty(m, n, dtype=torch.float16, device=device)
+
+    def run_fn(config: dict):
+        _launch(a, qweight, scales, zeros, None, out, m, n, k, config, group_size)
+
+    return run_fn
+
+
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
+
+
+def _parse_extra_shapes(specs: list[str]) -> list[tuple[int, int, int]]:
+    """Parse ``MxNxK`` specs into triples, for shapes no model config yields."""
+    shapes = []
+    for spec in specs:
+        parts = spec.lower().split("x")
+        if len(parts) != 3 or not all(p.isdigit() for p in parts):
+            raise ValueError(f"--extra-shape expects MxNxK, got {spec!r}")
+        shapes.append((int(parts[0]), int(parts[1]), int(parts[2])))
+    return shapes
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--model-dir", action="append", required=True, help="Model checkpoint dir(s)")
+    ap.add_argument("--model-dir", action="append", help="Model checkpoint dir(s)")
+    ap.add_argument(
+        "--extra-shape",
+        action="append",
+        default=[],
+        metavar="MxNxK",
+        help="Explicit GEMM shapes to tune as well (e.g. 1x4096x4096), for the "
+        "square shapes the benchmark docs quote that no model config yields",
+    )
     ap.add_argument(
         "--ops",
         nargs="+",
@@ -259,24 +316,38 @@ def main() -> int:
     if not torch.cuda.is_available():
         print("ERROR: CUDA required for autotune collection", file=sys.stderr)
         return 1
+    if not args.model_dir and not args.extra_shape:
+        print("ERROR: pass --model-dir and/or --extra-shape", file=sys.stderr)
+        return 1
 
     gpu_name = normalize_gpu_name(torch.cuda.get_device_name(0))
     print(f"GPU: {gpu_name}")
     print(f"Ops: {args.ops}")
-    print(f"Models: {args.model_dir}")
+    print(f"Models: {args.model_dir or '-'}")
     print()
 
     store = ConfigStore(cache_dir=Path(args.cache_dir) if args.cache_dir else None)
     searcher = AutotuneSearcher(store, warmup=args.warmup, repeat=args.repeat)
 
-    total_searched = 0
-    for model_dir in args.model_dir:
-        model_name = Path(model_dir).name
-        print(f"{'=' * 60}")
-        print(f"Model: {model_name}")
-        print(f"{'=' * 60}")
+    # One shape set per model, plus one for the explicit shapes (GEMM ops only:
+    # flash_attn's triple is (seq, head_dim, head_dim), not a GEMM).
+    shape_sets: list[tuple[str, dict[str, list[tuple[int, int, int, str]]]]] = [
+        (Path(model_dir).name, derive_shapes(model_dir)) for model_dir in args.model_dir or []
+    ]
+    if args.extra_shape:
+        explicit: dict[str, list[tuple[int, int, int, str]]] = {
+            "w4a16_matmul": [
+                (m, n, k, "int4") for m, n, k in _parse_extra_shapes(args.extra_shape)
+            ],
+            "fused_moe": [(m, n, k, "fp16") for m, n, k in _parse_extra_shapes(args.extra_shape)],
+        }
+        shape_sets.append(("explicit", explicit))
 
-        shapes = derive_shapes(model_dir)
+    total_searched = 0
+    for label, shapes in shape_sets:
+        print(f"{'=' * 60}")
+        print(f"Shapes: {label}")
+        print(f"{'=' * 60}")
 
         for op in args.ops:
             op_shapes = shapes.get(op, [])
@@ -286,7 +357,7 @@ def main() -> int:
 
             # Select config space and runner factory
             if op == "fused_moe":
-                configs = FUSED_MOE_CONFIGS
+                configs: list[dict] | Callable[[int], list[dict]] = FUSED_MOE_CONFIGS
                 make_runner = _make_fused_moe_runner
             elif op == "flash_attn_nopad":
                 configs = FLASH_ATTN_CONFIGS
@@ -295,33 +366,29 @@ def main() -> int:
                     return _make_flash_attn_runner(m, n)
 
             elif op == "w4a16_matmul":
-                configs = W4A16_CONFIGS
-                make_runner = None  # TODO: implement after w4a16 rewrite
+                configs = _w4a16_configs  # per-M space: see its docstring
+                make_runner = _make_w4a16_runner
             else:
                 continue
 
-            print(f"\n  [{op}] {len(op_shapes)} shapes x {len(configs)} configs")
+            print(f"\n  [{op}] {len(op_shapes)} shapes")
 
             for m, n, k, dtype in op_shapes:
-                if make_runner is None:
-                    print(
-                        f"    M={m:>4} N={n:>5} K={k:>5} ({dtype}) — SKIPPED (runner not implemented)"
-                    )
-                    continue
-
+                op_configs = configs(m) if callable(configs) else configs
+                print(f"    M={m:>4} N={n:>5} K={k:>5} ({dtype}) x {len(op_configs)} configs")
                 try:
                     run_fn = make_runner(m, n, k)
                     t0 = time.time()
-                    best = searcher.search(op, (m, n, k), dtype, configs, run_fn)
+                    best = searcher.search(op, (m, n, k), dtype, op_configs, run_fn)
                     elapsed = time.time() - t0
                     print(
-                        f"    M={m:>4} N={n:>5} K={k:>5} ({dtype}) → "
-                        f"BLOCK_M={best.get('BLOCK_M', best.get('BLOCK_M_SIZE', '?'))}"
+                        f"      → BLOCK_M={best.get('BLOCK_M', best.get('BLOCK_M_SIZE', '?'))}"
+                        f" BLOCK_N={best.get('BLOCK_N', best.get('BLOCK_N_SIZE', '?'))}"
                         f" [{elapsed:.1f}s]"
                     )
                     total_searched += 1
                 except Exception as e:
-                    print(f"    M={m:>4} N={n:>5} K={k:>5} ({dtype}) — ERROR: {e}")
+                    print(f"      — ERROR: {e}")
 
             # Free GPU memory between ops
             torch.cuda.empty_cache()
