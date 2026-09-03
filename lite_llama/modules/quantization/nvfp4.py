@@ -1,26 +1,23 @@
 """NVFP4 config and method: 4-bit e2m1 weights with two levels of scale.
 
-The format is NVIDIA ModelOpt's ``modelopt_fp4`` / TensorRT-LLM's NVFP4, and the
-two-level scale is what separates it from the int4 configs next door:
+The format is NVIDIA ModelOpt's ``modelopt_fp4`` / TensorRT-LLM's NVFP4:
 
 * ``weight``       ``[N, K // 2]`` uint8 — two e2m1 nibbles per byte, low nibble
   at the even k index;
 * ``weight_scale`` ``[N, K // 16]`` uint8 — one fp8-e4m3 bit pattern per 16
   consecutive k elements;
-* ``weight_global_scale`` one fp32 element — brings the block scales themselves
-  into e4m3's range.
+* ``weight_global_scale`` one fp32 element — brings the block scales into e4m3
+  range.
 
-**Weight-only, and permanently so on this hardware.** sm90 has no fp4 MMA, so
-the activations stay 16-bit and the return is bytes rather than FLOPs: 4.5 bits
-per weight against 16, which shows up as lower decode latency and a smaller
-resident model, not as higher TFLOP/s. See
+Weight-only, permanently so on this hardware: sm90 has no fp4 MMA, so
+activations stay 16-bit and the win is bytes, not FLOPs — lower decode latency
+and a smaller resident model. See
 :mod:`lite_llama.kernels.ops.quantization.nvfp4` for why that is a property of
-the device and not of the kernel.
+the device.
 
-MoE experts are **not** implemented: the fused grouped GEMM would need its own
-two-level unpacking path, which is a separate kernel rather than a flag.
-:meth:`NVFP4Config.get_quant_method` says so rather than silently handing a MoE
-block a linear method it cannot use.
+MoE experts are not implemented (the fused grouped GEMM would need its own
+two-level unpacking kernel), so :meth:`NVFP4Config.get_quant_method` raises
+rather than handing a MoE block a linear method it cannot use.
 """
 
 from __future__ import annotations
@@ -42,9 +39,9 @@ from .parameter import RawParameter
 def _nvfp4_block() -> int:
     """The format's block length, read from the kernel layer on first use.
 
-    Deferred because importing any ``kernels`` submodule registers every spec
-    row as a side effect, and ``tests/test_imports.py`` pins ``lite_llama.modules``
-    to import without touching that registry.
+    Deferred: importing any ``kernels`` submodule registers every spec row as a
+    side effect, which ``tests/test_imports.py`` forbids ``lite_llama.modules``
+    to trigger.
     """
     from ...kernels.ops.quantization import NVFP4_BLOCK
 
@@ -54,8 +51,7 @@ def _nvfp4_block() -> int:
 #: Weight elements per byte.
 _PACK_FACTOR = 2
 
-#: Smallest k-shard that splits neither a byte nor a block scale, i.e.
-#: ``lcm(2, 16)``. See :meth:`NVFP4Config.shard_is_aligned`.
+#: Smallest k-shard splitting neither a byte nor a block scale: ``lcm(2, 16)``.
 _SHARD_GRANULARITY = 16
 
 
@@ -65,10 +61,8 @@ _SHARD_GRANULARITY = 16
 class NVFP4Config(QuantizationConfig):
     """NVFP4 checkpoint/runtime config: e2m1 weights, e4m3 block scales.
 
-    ``group_k`` is 16 and not configurable. Unlike AWQ, where the group size is
-    a checkpoint choice, NVFP4's block length is part of the format — a
-    different block length is a different format, so there is nothing here for
-    ``from_config`` to read out of the checkpoint.
+    ``group_k`` is 16 and not configurable — the block length is part of the
+    format, not a checkpoint choice, so ``from_config`` has nothing to read.
     """
 
     def __init__(self, ignored: tuple[str, ...] = ()) -> None:
@@ -82,16 +76,16 @@ class NVFP4Config(QuantizationConfig):
         return "nvfp4"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
-        # Weight-only: the activation never leaves its own dtype, so both
-        # 16-bit types run through the one kernel.
+        # Weight-only: the activation keeps its own dtype, so both 16-bit types
+        # run through the one kernel.
         return [torch.float16, torch.bfloat16]
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # 89 (Ada) is *not* required by fp4 — nothing here uses an fp8 or fp4
-        # tensor-core instruction. It is the floor the e4m3 block-scale decode
-        # inherits from the shared w8a16 bit trick, and 80 would very likely
-        # work; keeping it at 89 means no untested capability claim ships.
+        # Nothing here uses an fp4/fp8 tensor-core instruction, so 89 is not a
+        # hard requirement; it is the floor the e4m3 block-scale decode inherits
+        # from the shared w8a16 bit trick, kept at 89 to avoid claiming an
+        # untested capability.
         return 89
 
     @classmethod
@@ -118,8 +112,8 @@ class NVFP4Config(QuantizationConfig):
                 "has no two-level unpacking path. Use --quantization fp8 or int4 "
                 f"for MoE models, or add {prefix!r} to modules_to_not_convert."
             )
-        # UnquantizedFusedMoEMethod is only reachable for an *ignored* MoE
-        # prefix, which the branch above deliberately lets through.
+        # UnquantizedFusedMoEMethod is reachable only for an ignored MoE prefix,
+        # which the branch above deliberately lets through.
         return self._dispatch(layer, prefix, NVFP4LinearMethod, UnquantizedFusedMoEMethod)
 
     @property
@@ -129,13 +123,10 @@ class NVFP4Config(QuantizationConfig):
     def shard_is_aligned(self, size: int) -> bool:
         """Whether a TP shard of ``size`` channels keeps whole bytes and blocks.
 
-        Two constraints stack on the k axis, where both the packing and the
-        block scales live: a shard must contain whole bytes (2 elements) and
-        whole block scales (16). Their lcm is 16, so 16 is the granularity —
-        *not* 32. Multiplying the two would reject k=4864, which is exactly the
-        ``down_proj`` shard Qwen3-4B gets under TP2.
-
-        The n axis needs no constraint at all: nothing is packed along it.
+        The k axis carries both the packing (2 elements per byte) and the block
+        scales (16), so the granularity is their lcm — 16, not 32; 32 would
+        reject k=4864, the ``down_proj`` shard Qwen3-4B gets under TP2. The n
+        axis is unconstrained: nothing is packed along it.
         """
         return size % _SHARD_GRANULARITY == 0
 
@@ -154,9 +145,9 @@ class NVFP4LinearMethod(LinearMethodBase):
         layer.weight = RawParameter(
             torch.empty(output_size, input_size // _PACK_FACTOR, dtype=torch.uint8)
         )
-        # uint8 rather than float8_e4m3fn: the kernel bit-shifts these bytes, and
-        # RawParameter exists precisely so the loader does not helpfully cast
-        # them to the activation dtype on the way in.
+        # uint8, not float8_e4m3fn: the kernel bit-shifts these bytes, and
+        # RawParameter keeps the loader from casting them to the activation
+        # dtype on the way in.
         layer.weight_scale = RawParameter(
             torch.empty(*config.scale_shape(output_size, input_size), dtype=torch.uint8)
         )

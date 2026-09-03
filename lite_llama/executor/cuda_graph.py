@@ -1,25 +1,16 @@
 """CUDA Graph capture and replay for the decode phase.
 
-:class:`CUDAGraphManager` captures one graph per (batch, seq-bucket)
-shape via :class:`CUDAGraphRunner`; ``try_replay`` launches the matching
-graph when a decode step fits one, else returns None so eager runs.
+:class:`CUDAGraphManager` captures one graph per (batch, seq-bucket) shape via
+:class:`CUDAGraphRunner`; ``try_replay`` launches the matching graph when a decode
+step fits one, else returns None so eager runs. Lazy mode (O13) captures only a
+seed pair at startup and the rest on first use, so cold start stays seconds-scale;
+a shape whose on-demand capture OOMs is blacklisted and runs eager.
 
-Lazy mode (O13) captures only a seed pair at startup — batch 1 on the
-smallest bucket and the largest batch on the largest bucket — and captures
-the remaining shapes the first time a step actually needs them, so cold
-start stays seconds-scale instead of waiting for the whole grid. A shape
-whose on-demand capture runs out of memory is remembered and never retried;
-those steps run eager.
-
-Under tensor parallelism a captured region also contains the blocks' all-reduce,
-which adds a fourth rule: **every rank must choose the same graph on every step**.
-A rank that runs eager while its peer replays does not return a different answer,
-it stops — the peer waits in a collective nobody issues. Three things make that
-safe here: :func:`~lite_llama.distributed.parallel_state.warmup_collectives`
-before each capture, so NCCL never initialises inside one; a grid fingerprint the
-ranks compare before the graphs go live (:meth:`CUDAGraphManager.grid_fingerprint`);
-and a replay decision that reads nothing but the broadcast ``ModelInput``'s shapes
-(:meth:`CUDAGraphManager._select`).
+Under TP a captured region contains the blocks' all-reduce, so **every rank must
+choose the same graph every step** — a rank running eager while its peer replays
+hangs in a collective nobody issues. Three things make that safe: warmup_collectives
+before each capture (NCCL never initialises inside one), a grid fingerprint compared
+before graphs go live, and a replay decision reading only the broadcast ModelInput.
 
 Usage:
     mgr = CUDAGraphManager(model)
@@ -45,39 +36,30 @@ from .attention_metadata import AttentionMetadata
 
 logger = logging.getLogger(__name__)
 
-# One graph per (batch_size, seq_len_bucket): a graph fixes both the input shapes
-# and ``max_actual_seq_len``, so both axes must be enumerated. More buckets cover
-# more requests but pin more workspace — a few-hundred-token prompt lands in the
-# 512 bucket, anything past the largest bucket falls back to eager.
+# One graph per (batch_size, seq_len_bucket): a graph fixes the input shapes and
+# ``max_actual_seq_len``, so both axes are enumerated. Past the largest bucket a
+# step falls back to eager.
 DEFAULT_BATCH_SIZES: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 128)
 DEFAULT_SEQ_LEN_BUCKETS: tuple[int, ...] = (256, 512, 1024, 2048, 4096)
 
-# ~38 MB per graph measured on a 0.5B fp16 model, rounded up for headroom. The KV
-# profiler withholds this much per graph; the OOM fallback in
-# ``ModelRunner.enable_cuda_graph`` covers models that exceed the estimate.
+# ~38 MB per graph on a 0.5B fp16 model, rounded up; the OOM fallback in
+# ``ModelRunner.enable_cuda_graph`` covers models that exceed it.
 WORKSPACE_BYTES_PER_GRAPH: int = 64 * 1024**2
 
-# Lazy mode seeds the grid with these two shapes (O13): the first serves a
-# single short request immediately, the second keeps a saturated batch with
-# long contexts on the graph path. Everything in between pays ~0.5–1 s once,
-# on the first step that needs the shape.
+# Lazy mode seeds these two shapes (O13): batch 1 on the smallest bucket, largest
+# batch on the largest. In-between shapes pay ~0.5-1 s once, on first use.
 LAZY_SEED_SHAPES: int = 2
 
-# Largest logit difference tolerated between a replayed graph and the eager step
-# it was captured from, when deciding whether to keep graphs under tensor
-# parallelism. Not zero: a graph replays the same kernels but the all-reduce it
-# contains may sum its contributions in a different order than an eager one, and
-# in bf16 that reordering is worth ~1e-3 on a logit. Loose enough not to fail on
-# associativity, tight enough that a rank reading the wrong shard cannot pass.
+# Largest graph-vs-eager logit difference tolerated when keeping graphs under TP.
+# Not zero: a replayed all-reduce may sum in a different order (~1e-3 in bf16).
 TP_GRAPH_PARITY_ATOL: float = 1e-2
 
-# Seed for the synthetic decode step the parity check runs. Drawn on the host so
-# every rank generates the same token ids without a broadcast — comparing two
-# ranks' error bounds only means something if they graded the same step.
+# Seed for the parity check's synthetic step, drawn on the host so every rank
+# generates identical ids without a broadcast.
 _PARITY_SEED: int = 0x5EED
 
-# Opt-in per-step check that every rank picked the same graph. Off by default: it
-# adds a collective to the decode path, which is the path graphs exist to shorten.
+# Opt-in per-step check that every rank picked the same graph; off by default (it
+# adds a collective to the decode path).
 _LOCKSTEP_ENV: str = "LITE_LLAMA_TP_GRAPH_CHECK"
 
 
@@ -85,11 +67,9 @@ def estimate_capture_workspace(max_seq_len: int, *, lazy: bool = False) -> int:
     """Upper bound on the bytes the capture plan will pin.
 
     An upper bound by necessity: the KV profiler runs before ``max_request_num``
-    exists, so every default batch size is assumed to survive clamping. Lazy
-    mode (O13) reserves only the seed pair — graphs captured on demand take
-    their workspace from whatever is free at that moment, and a shape whose
-    capture OOMs simply stays eager rather than dragging the KV pool down for
-    shapes the workload may never produce.
+    exists, so every default batch size is assumed to survive clamping. Lazy mode
+    reserves only the seed pair; on-demand graphs take workspace from what is free,
+    and a shape that OOMs stays eager.
     """
     n_buckets = sum(1 for b in DEFAULT_SEQ_LEN_BUCKETS if b <= max_seq_len)
     graphs = LAZY_SEED_SHAPES if lazy else len(DEFAULT_BATCH_SIZES) * max(n_buckets, 1)
@@ -107,16 +87,16 @@ class _GraphKey:
 class CUDAGraphRunner:
     """One captured decode step for a fixed ``(batch_size, seq_len_bucket)`` pair.
 
-    All tensors the graph reads or writes live inside the runner. Callers push
-    new values in via :meth:`replay` and receive the output logits back.
+    All tensors the graph reads or writes live inside the runner; callers push new
+    values via :meth:`replay` and get the output logits back.
 
     Args:
-        model: The eager :class:`torch.nn.Module` to capture.
-        batch_size: Number of sequences the captured graph serves.
-        seq_len_bucket: Value used for ``max_actual_seq_len`` at capture time;
-            replay is only valid when the current context length is ``<=`` this.
-        kv_buffer: Layer-wise paged KV cache tensors (shared with the executor).
-        b_req_tokens_table: Request-to-cache-row mapping (shared with the executor).
+        model: Eager module to capture.
+        batch_size: Sequences the graph serves.
+        seq_len_bucket: ``max_actual_seq_len`` at capture; replay is valid only
+            when the current context length is ``<=`` this.
+        kv_buffer: Layer-wise paged KV tensors (shared with the executor).
+        b_req_tokens_table: Request-to-cache-row map (shared with the executor).
         device: Torch device string.
     """
 
@@ -156,30 +136,27 @@ class CUDAGraphRunner:
     def capture(self, warmup_metadata: tuple[torch.Tensor, torch.Tensor] | None = None) -> None:
         """Warm up on a side stream, then record the graph on the current stream.
 
-        ``warmup_metadata`` is ``(b_req_idx, cur_select_index)`` from the live
-        step that triggered an on-demand (lazy) capture: the warmup forwards
-        write their throwaway K/V exactly where that step's real pass is about
-        to write, so the replay that immediately follows overwrites the garbage
-        and no other request's rows are touched. ``None`` (capture at startup)
-        keeps the zero buffers — the cache is empty, so rows 0..batch are safe.
+        ``warmup_metadata`` is ``(b_req_idx, cur_select_index)`` from the live step
+        that triggered a lazy capture: the warmup writes throwaway K/V where that
+        step's real pass is about to write, so the replay overwrites it. ``None``
+        (startup capture) keeps the zero buffers (cache empty, rows 0..batch safe).
         """
         if warmup_metadata is not None:
             b_req_idx, cur_select_index = warmup_metadata
-            # Warm up on real work: at zero length stage 1 visits no K/V rows, so any
-            # fault would surface inside the capture rather than in the warmup below.
+            # Warm up on real work: at zero length stage 1 visits no K/V rows, so a
+            # fault would surface inside the capture, not the warmup.
             self.atten_info.b_req_idx.copy_(b_req_idx)
             self.atten_info.cur_select_index.copy_(cur_select_index)
-            # The longest legal length walks every split branch the kernel has,
-            # and writes at a position the real request has not reached yet.
+            # Longest legal length walks every split branch, writes past the real
+            # request's position.
             self.atten_info.b_seq_len.fill_(min(self.seq_len_bucket, self.atten_info.b_req_tokens_table.shape[1] - 1))
         else:
-            # Warm up on real work: at zero length stage 1 visits no K/V rows, so any
-            # fault would surface inside the capture rather than in the warmup below.
+            # Warm up on real work (see above).
             self.atten_info.b_seq_len.fill_(min(self.seq_len_bucket, 32))
 
         # The capture stream must be idle, so warmup runs on its own stream, fenced
-        # both ways. Those passes force Triton JIT, cuBLAS workspaces and allocator
-        # blocks to happen *before* the capture, which cannot allocate.
+        # both ways; it forces Triton JIT, cuBLAS workspaces and allocator blocks
+        # to happen before the capture (which cannot allocate).
         warmup_stream = torch.cuda.Stream()
         warmup_stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(warmup_stream):
@@ -187,11 +164,8 @@ class CUDAGraphRunner:
                 _ = self.model(self.input_ids, self.position_ids, self.atten_info)
         torch.cuda.current_stream().wait_stream(warmup_stream)
 
-        # Under tensor parallelism the model's blocks all-reduce, so the capture
-        # region contains collectives. The warmup above has already issued them,
-        # which is what builds the communicator; this asserts that separately
-        # rather than relying on it, because the failure it prevents — NCCL
-        # initialising inside a capture — presents as a hang rather than an error.
+        # Under TP the capture region contains collectives; assert NCCL is already
+        # initialised (the failure it prevents presents as a hang, not an error).
         warmup_collectives()
 
         self._graph = torch.cuda.CUDAGraph()
@@ -201,11 +175,9 @@ class CUDAGraphRunner:
     def _fill_probe_inputs(self, vocab_size: int) -> None:
         """Load a synthetic but valid decode step into the persistent buffers.
 
-        Seeded on the host, so two TP ranks produce identical token ids with no
-        broadcast. The KV rows are ``arange`` rather than all-zero on purpose: with
-        every sequence pointed at row 0 the batch's writes race each other and the
-        step stops being reproducible, which would make the comparison below fail
-        on the fixture instead of on the graph.
+        Seeded on the host, so two TP ranks produce identical ids with no broadcast.
+        KV rows are ``arange``, not all-zero: pointed at row 0 the batch's writes
+        would race and the step would stop being reproducible.
         """
         generator = torch.Generator().manual_seed(
             _PARITY_SEED + self.batch_size * 100_003 + self.seq_len_bucket
@@ -227,25 +199,20 @@ class CUDAGraphRunner:
         """Largest absolute logit difference between this graph and an eager step.
 
         Both halves run on the same synthetic inputs, so anything beyond floating
-        point reassociation means the graph is not computing what the model
-        computes — a stale pointer, a buffer the capture did not include, a
-        collective that landed on the wrong stream. Under tensor parallelism that
-        is worth checking before the graphs go live, because the same class of bug
-        with a collective in it desynchronises the group and hangs.
-
-        Safe to run at this point in startup only because no request exists yet:
-        both forwards scribble K/V into low cache rows, exactly as the capture
-        warmup already did, and every row is rewritten before it is ever read for
-        real.
+        point reassociation means the graph is not computing what the model does —
+        a stale pointer, an uncaptured buffer, a collective on the wrong stream.
+        Under TP that is worth checking before graphs go live (the same bug with a
+        collective desynchronises the group and hangs). Safe here only because no
+        request exists yet: both forwards scribble low cache rows, as the capture
+        warmup did, and every row is rewritten before it is read for real.
         """
         if self._graph is None or self._output is None:
             raise RuntimeError("capture() must be called before parity_error()")
 
         self._fill_probe_inputs(vocab_size)
         eager = self.model(self.input_ids, self.position_ids, self.atten_info).float().clone()
-        # Replayed directly instead of through :meth:`replay`: the buffers already
-        # hold the probe values, and copying them onto themselves would be the
-        # only thing that call added.
+        # Replayed directly (not via :meth:`replay`): the buffers already hold the
+        # probe values, so a copy onto themselves would add nothing.
         self._graph.replay()
         return (eager - self._output.float()).abs().max().item()
 
@@ -259,15 +226,14 @@ class CUDAGraphRunner:
     ) -> torch.Tensor:
         """Push new inputs into the persistent buffers and replay the graph.
 
-        The caller is responsible for keeping the current ``max_actual_seq_len``
-        no greater than this runner's :attr:`seq_len_bucket`; the executor
-        enforces that via bucket selection.
+        The caller keeps ``max_actual_seq_len`` ``<=`` this runner's
+        :attr:`seq_len_bucket` (the executor enforces it via bucket selection).
         """
         if self._graph is None or self._output is None:
             raise RuntimeError("capture() must be called before replay()")
 
-        # ``.copy_()`` writes into the SAME storage the graph captured, so the
-        # graph's baked pointers keep pointing at valid values.
+        # ``.copy_()`` writes into the SAME storage the graph captured, so its
+        # baked pointers stay valid.
         self.input_ids.copy_(input_ids.view(self.batch_size, 1))
         self.position_ids.copy_(position_ids.view(self.batch_size, 1))
         self.atten_info.cur_select_index.copy_(cur_select_index)
@@ -281,15 +247,11 @@ class CUDAGraphRunner:
 class CUDAGraphManager:
     """Holds one :class:`CUDAGraphRunner` per ``(batch_size, seq_len_bucket)``.
 
-    The manager also captures each layer's ``atten_info.b_req_tokens_table`` update
-    that decode performs *outside* the graph — ``update_kv_index`` writes into a
-    persistent tensor, so it stays out of the recorded region.
-
     Args:
-        model: The eager model to capture.
-        kv_buffer: Layer-wise KV cache tensors owned by the executor.
+        model: Eager model to capture.
+        kv_buffer: Layer-wise KV tensors owned by the executor.
         b_req_tokens_table: Request-to-cache-row map owned by the executor.
-        batch_sizes: Batch sizes to capture; smaller decode batches fall back to eager.
+        batch_sizes: Batch sizes to capture; smaller batches fall back to eager.
         seq_len_buckets: Ascending ``max_actual_seq_len`` ceilings to capture.
         device: Torch device string.
     """
@@ -313,22 +275,17 @@ class CUDAGraphManager:
         self.device = device
         self._lazy = lazy
         self._runners: dict[_GraphKey, CUDAGraphRunner] = {}
-        # Shapes whose on-demand capture already failed (usually OOM): never
-        # retried, those steps run eager instead of paying the attempt again.
+        # Shapes whose on-demand capture failed (usually OOM): never retried.
         self._failed: set[_GraphKey] = set()
-        # Steps served by a replay. Capturing graphs and *using* them are separate
-        # facts: a bucket that never matches leaves the decode path eager while
-        # every graph still sits in memory, which no output difference would
-        # reveal. One increment per step, read by tests and benchmarks.
+        # Steps served by a replay; capturing and *using* graphs are separate facts
+        # (a never-matching bucket leaves decode eager while graphs sit in memory).
         self.replays: int = 0
-        # Worst graph-vs-eager logit difference, filled in by whichever gate ran
-        # the comparison, ``None`` if none did. Recorded rather than re-measured
-        # on demand because the comparison *replays* graphs: under tensor
-        # parallelism a replayed all-reduce has no counterpart once the follower
-        # ranks have entered their serve loop, so a second measurement from the
-        # driver alone deadlocks the group instead of returning a number.
+        # Worst graph-vs-eager logit difference, set by whichever gate ran the
+        # comparison. Recorded, not re-measured on demand: the comparison replays
+        # graphs, and under TP a replayed all-reduce deadlocks once followers are
+        # in their serve loop.
         self.parity_error: float | None = None
-        # Read once: this is consulted on every decode step.
+        # Read once: consulted on every decode step.
         self._check_lockstep = os.environ.get(_LOCKSTEP_ENV) == "1" and get_tensor_model_parallel_world_size() > 1
 
     def capture_all(self) -> None:
@@ -350,10 +307,9 @@ class CUDAGraphManager:
     def capture_seed(self) -> None:
         """Capture only the seed pair; the rest wait for their first use.
 
-        The seeds are batch 1 on the smallest bucket (a single fresh request
-        starts on the graph path immediately) and the largest batch on the
-        largest bucket (a saturated batch with long contexts too). Under load
-        the in-between shapes are captured on demand inside :meth:`try_replay`.
+        Seeds: batch 1 on the smallest bucket (a fresh request starts on the graph
+        path) and the largest batch on the largest bucket. In-between shapes are
+        captured on demand inside :meth:`try_replay`.
         """
         if not self.batch_sizes or not self.seq_len_buckets:
             return
@@ -382,16 +338,15 @@ class CUDAGraphManager:
     ) -> CUDAGraphRunner | None:
         """Capture a missing shape right where a step asked for it (O13).
 
-        The warmup borrows the live step's ``b_req_idx`` and
-        ``cur_select_index`` so its throwaway writes land exactly where the
-        real pass — which replays immediately after — is about to write. A
+        The warmup borrows the live step's ``b_req_idx``/``cur_select_index`` so its
+        throwaway writes land where the real pass (replaying right after) writes. A
         failure (typically OOM) blacklists the shape and this step runs eager.
         """
         if key in self._failed or not self._on_grid(key):
             return None
         try:
-            # The capture stream must be the only work in flight: the pipeline's
-            # readback copies and any pending kernels must land first.
+            # The capture stream must be the only work in flight: pending readback
+            # copies and kernels must land first.
             torch.cuda.synchronize()
             runner = CUDAGraphRunner(
                 self.model,
@@ -425,18 +380,14 @@ class CUDAGraphManager:
             return None
 
     def grid_fingerprint(self) -> int:
-        """A number that is equal on two ranks exactly when their grids are.
+        """A number equal on two ranks exactly when their grids are.
 
-        Compared across ranks before graphs are allowed to serve traffic. Grid
-        agreement matters more than it looks: a rank whose grid is one bucket
-        short will run eager on the step its peer replays, and the peer's
-        graph-captured all-reduce then waits on a collective that is never issued.
-        That is a hang, not a wrong answer, so it has to be excluded up front
-        rather than detected in production.
-
-        ``crc32`` rather than :func:`hash`, which is only guaranteed stable across
-        processes for some types, and offset by one so that a real grid can never
-        collide with the ``0`` a caller uses to mean "I captured nothing".
+        Compared across ranks before graphs serve traffic. Grid agreement matters:
+        a rank one bucket short runs eager while its peer replays, and the peer's
+        captured all-reduce waits on a collective never issued — a hang, not a wrong
+        answer, so it is excluded up front. ``crc32`` (not :func:`hash`, unstable
+        across processes), offset by one so a real grid never collides with the ``0``
+        meaning "captured nothing".
         """
         grid = repr(
             (
@@ -450,13 +401,11 @@ class CUDAGraphManager:
     def max_parity_error(self, vocab_size: int) -> float:
         """Worst :meth:`CUDAGraphRunner.parity_error` over every captured graph.
 
-        Every graph is checked rather than a sample: they differ in batch size and
-        in ``max_actual_seq_len``, which is what selects the FlashDecoding grid, so
-        a fault can live in one bucket and not its neighbours.
-
-        Only safe to call while every rank is calling it — it replays graphs, and a
-        captured all-reduce needs its peers. The result is left in
-        :attr:`parity_error` so later readers do not have to reproduce that window.
+        Every graph is checked, not a sample: they differ in batch size and
+        ``max_actual_seq_len`` (which selects the FlashDecoding grid), so a fault can
+        live in one bucket alone. Only safe while every rank calls it (it replays
+        graphs, and a captured all-reduce needs its peers); the result is left in
+        :attr:`parity_error`.
         """
         self.parity_error = max(
             (runner.parity_error(vocab_size) for runner in self._runners.values()), default=0.0
@@ -466,10 +415,10 @@ class CUDAGraphManager:
     def discard(self) -> None:
         """Drop every captured graph and release its memory.
 
-        Called when a gate rejects the captured set. The graphs hold a private
-        memory pool that is only returned once the last reference goes, and the KV
-        profiler already handed that memory out of its own budget, so leaving it
-        pinned would shrink the cache for a feature that is not being used.
+        Called when a gate rejects the captured set. Graphs hold a private pool
+        returned only when the last reference goes, and the KV profiler already
+        budgeted that memory, so leaving it pinned would shrink the cache for an
+        unused feature.
         """
         self._runners.clear()
         torch.cuda.empty_cache()
@@ -488,12 +437,10 @@ class CUDAGraphManager:
     def pad_to(self, batch_size: int) -> int | None:
         """Smallest captured batch size that can absorb ``batch_size``.
 
-        Continuous batching submits whatever batch the workload produces, which
-        rarely lands on the captured grid. Padding the batch out to a captured
-        size and discarding the filler rows keeps those steps on the graph path;
-        the extra rows cost a little attention work, which is far less than the
-        ~300 kernel launches an eager decode step pays. Returns ``None`` when the
-        batch is larger than anything captured.
+        Continuous batching rarely lands on the captured grid; padding to a captured
+        size and discarding filler rows keeps steps on the graph path (the extra rows
+        cost far less than the ~300 launches an eager step pays). ``None`` when the
+        batch exceeds anything captured.
         """
         for bs in self.batch_sizes:
             if bs >= batch_size:
@@ -509,15 +456,11 @@ class CUDAGraphManager:
         """Run the matching captured graph if one exists, else return ``None``.
 
         Only decode steps (``seq_len == 1``) with a supported batch size and a
-        max-sequence length that fits inside the largest bucket are eligible; the
-        caller must fall back to eager execution when this returns ``None``.
-
-        Under tensor parallelism this decision has to come out the same on every
-        rank, and it does so structurally rather than by agreement: it reads only
-        ``input_ids.shape`` and ``atten_info.max_actual_seq_len``, both of which
-        every rank derives from the one ``ModelInput`` the driver broadcast. Set
-        ``LITE_LLAMA_TP_GRAPH_CHECK=1`` to verify that per step; it costs an extra
-        collective, which is why it is not the default.
+        max-seq length fitting the largest bucket are eligible; the caller falls back
+        to eager on ``None``. Under TP the decision is identical on every rank
+        structurally: it reads only ``input_ids.shape`` and ``max_actual_seq_len``,
+        both derived from the broadcast ``ModelInput``. ``LITE_LLAMA_TP_GRAPH_CHECK=1``
+        verifies that per step (costs a collective, so off by default).
         """
         runner = self._select(input_ids, atten_info)
         if self._check_lockstep:
@@ -538,11 +481,10 @@ class CUDAGraphManager:
     ) -> CUDAGraphRunner | None:
         """The graph this step is eligible for, or ``None`` for the eager path.
 
-        Lazy mode captures a missing shape here instead of skipping it, which
-        keeps the on-demand capture inside the decision every rank computes
-        identically -- the shape is a function of the broadcast ``ModelInput``
-        alone. A capture that fails on one rank only would still split the group,
-        so ``LITE_LLAMA_TP_GRAPH_CHECK=1`` is the check that covers it.
+        Lazy mode captures a missing shape here (not skips it), keeping the on-demand
+        capture inside the decision every rank computes identically (the shape is a
+        function of the broadcast ``ModelInput``). A capture failing on one rank only
+        would split the group, so ``LITE_LLAMA_TP_GRAPH_CHECK=1`` covers it.
         """
         batch_size, seq_len = input_ids.shape
         if seq_len != 1:
@@ -559,11 +501,10 @@ class CUDAGraphManager:
     def _assert_lockstep(self, runner: CUDAGraphRunner | None) -> None:
         """Fail loudly when the ranks of a TP group chose differently.
 
-        The eager fallback counts as a choice: one rank replaying while another
-        runs eager is the mismatch that hangs, so ``None`` gets its own
-        fingerprint rather than being skipped. Raising is the point — this check
-        exists to convert a wedged group into a stack trace, and the collective it
-        performs is issued unconditionally so it cannot itself desynchronise.
+        The eager fallback counts as a choice (one rank replaying while another runs
+        eager is the mismatch that hangs), so ``None`` gets its own fingerprint.
+        Raising is the point: convert a wedged group into a stack trace; the collective
+        is issued unconditionally so it cannot itself desynchronise.
         """
         choice = (
             0

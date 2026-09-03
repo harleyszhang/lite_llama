@@ -26,22 +26,19 @@ def get_dtype_size(dtype: torch.dtype) -> int:
 class MemoryProfiler:
     """Estimates how many KV-cache tokens fit in the remaining GPU memory.
 
-    A short dummy forward pass measures the model's peak activation memory; the
-    leftover budget (``total * utilization - peak``) is divided by the per-token
-    KV size. The already-constructed model supplies every dimension, so no
-    separate dummy-input configuration is needed.
+    A short dummy forward measures peak activation memory; the leftover budget
+    (``total * utilization - peak``) is divided by the per-token KV size. The
+    constructed model supplies every dimension, so no dummy-input config is needed.
 
     Args:
         num_layers: Decoder layer count.
         kv_row: ``(slots, dim)`` of one token's per-layer cache row —
-            ``(2 * kv_heads, head_dim)`` for MHA/GQA (K and V of the heads this
-            rank owns), ``(1, kv_lora_rank + qk_rope_head_dim)`` for MLA, whose
-            latent row has no head axis to shard and is replicated across ranks.
-        gpu_memory_utilization: Fraction of total GPU memory the cache may occupy.
+            ``(2 * kv_heads, head_dim)`` for MHA/GQA, ``(1, kv_lora_rank +
+            qk_rope_head_dim)`` for MLA (latent row, replicated across ranks).
+        gpu_memory_utilization: Fraction of GPU memory the cache may occupy.
         dtype: KV-cache dtype.
         device: Torch device string.
-        reserved_bytes: Extra budget to withhold from the cache (e.g. CUDA graph
-            capture workspace), so a later allocation does not OOM.
+        reserved_bytes: Extra budget to withhold (e.g. CUDA graph workspace).
     """
 
     def __init__(
@@ -93,8 +90,8 @@ class MemoryProfiler:
     def available_kv_blocks(self, model, vocab_size: int) -> int:
         """Return the number of KV-cache tokens that fit in free GPU memory.
 
-        Falls back to a small fixed budget on CPU (where memory profiling APIs do
-        not apply), which keeps unit tests runnable without a GPU.
+        Falls back to a small fixed budget on CPU (profiling APIs do not apply),
+        keeping unit tests runnable without a GPU.
         """
         if not torch.cuda.is_available() or self.device == "cpu":
             logger.warning("CUDA unavailable; using a minimal KV cache for CPU execution")
@@ -136,16 +133,15 @@ class KVCacheManager:
     """Owns the paged KV buffers and hands out cache rows by reference count.
 
     One row per token (``block_size=1``). ``kv_mem_use_state[i]`` is row ``i``'s
-    reference count — free at zero — and :attr:`can_use_mem_size` counts free
-    rows. :meth:`alloc_kvcache_index` picks the cheapest strategy that fits:
-    bump cursor, contiguous-run search, then any scattered rows.
+    refcount (free at zero); :attr:`can_use_mem_size` counts free rows.
+    :meth:`alloc_kvcache_index` picks the cheapest strategy that fits: bump cursor,
+    contiguous-run search, then scattered rows.
 
     Args:
         num_layers: Decoder layer count.
-        kv_row: ``(slots, dim)`` of one token's per-layer cache row, as in
-            :class:`MemoryProfiler`; the model side declares it.
-        gpu_num_blocks: Cache capacity in blocks, either profiled by
-            :class:`MemoryProfiler` or set by the caller.
+        kv_row: ``(slots, dim)`` of one token's per-layer cache row (as in
+            :class:`MemoryProfiler`).
+        gpu_num_blocks: Cache capacity in blocks (profiled or caller-set).
         block_size: Tokens per block; only 1 is implemented.
         dtype: KV-cache dtype.
         device: Torch device string.
@@ -173,10 +169,9 @@ class KVCacheManager:
         self.can_use_mem_size = gpu_num_blocks  # rows currently free
 
         # Watermark: refuse new requests when free blocks drop below this fraction.
-        # Hysteresis: once free space has dipped under the watermark, admission
-        # only resumes after it climbs back above watermark + recovery band — a
-        # single threshold would flap admit/preempt while the level oscillates
-        # around it (O9).
+        # Hysteresis: after a dip under the watermark, admission resumes only above
+        # watermark + recovery band, so a level oscillating around one threshold
+        # cannot flap admit/preempt (O9).
         self._watermark_blocks = int(gpu_num_blocks * watermark)
         self._recover_blocks = int(gpu_num_blocks * hysteresis)
         self._under_pressure = False
@@ -196,11 +191,10 @@ class KVCacheManager:
         self.kv_mem_use_state = torch.zeros(
             self.max_num_tokens, dtype=torch.int32, device=self.device
         )
-        # Callers need int32 row indices; keeping a pre-cast copy lets the
-        # bump-allocator fast path return a view instead of casting per step.
+        # Pre-cast int32 copy so the bump fast path returns a view, not a per-step cast.
         self.kv_mem_pos_indices_int32 = self.kv_mem_pos_indices.to(torch.int32)
-        # Cursor for the append-only fast path, and whether it is still exact
-        # (invalidated by any partial free, restored by ``free_all``).
+        # Append-only cursor, and whether it is still exact (invalidated by a partial
+        # free, restored by ``free_all``).
         self._bump_cursor = 0
         self._bump_is_exact = True
 
@@ -210,13 +204,11 @@ class KVCacheManager:
     def can_admit(self, need_blocks: int) -> bool:
         """Check if a new request requiring *need_blocks* can be admitted.
 
-        Returns False when free capacity after allocation would drop below the
-        watermark, preventing cache pressure from causing eviction cascades.
-        This is a pure read — no allocation happens — but it remembers which
-        side of the watermark the level last sat on: after a dip under the
-        watermark the bar rises by the recovery band until the level has
-        climbed back above it, so a level oscillating around one threshold
-        cannot flap admission on and off (O9 hysteresis).
+        False when free capacity after allocation would drop below the watermark
+        (preventing eviction cascades). A pure read, but it remembers which side of
+        the watermark the level last sat on: after a dip the bar rises by the recovery
+        band until the level climbs back, so an oscillating level cannot flap admission
+        (O9 hysteresis).
         """
         if self._under_pressure:
             if self.can_use_mem_size >= self._watermark_blocks + self._recover_blocks:
@@ -245,9 +237,9 @@ class KVCacheManager:
     ) -> None:
         """Pre-allocate one KV tensor per layer, ``[max_num_tokens, *kv_row]``.
 
-        For MHA/GQA the row is ``(2 * kv_heads, head_dim)`` — K heads first, then
-        V heads, so a decode step writes both with one kernel launch. For MLA it
-        is ``(1, latent_dim)``: K and V share one latent vector, written whole.
+        MHA/GQA row is ``(2 * kv_heads, head_dim)`` (K heads then V, so a decode step
+        writes both in one launch); MLA is ``(1, latent_dim)`` (K and V share one
+        latent vector, written whole).
         """
         # TODO: reshape into [blocks, block_size, ...] to support PagedAttention.
         self.gpu_kv_buffer = [
@@ -273,7 +265,7 @@ class KVCacheManager:
 
     @torch.no_grad()
     def alloc_contiguous_kvcache(self, need_size):
-        """Reserve ``need_size`` *consecutive* free rows, or ``None`` if there is no such run.
+        """Reserve ``need_size`` *consecutive* free rows, or ``None`` if no such run.
 
         Returns:
             ``(select_index, start_index, end_index)``, or ``None``.
@@ -287,13 +279,13 @@ class KVCacheManager:
         can_use_pos_index = torch.nonzero(self.kv_mem_use_state == 0).view(-1)
         N = can_use_pos_index.numel()
         if need_size <= N:
-            # Two views of the free list offset by need_size - 1, so start_indices[j]
-            # and end_indices[j] are the ends of a candidate window. The last valid
-            # start is at N - need_size, and slicing excludes the stop, hence the + 1.
+            # Two views of the free list offset by need_size - 1: start_indices[j] and
+            # end_indices[j] are a candidate window's ends (last valid start is at
+            # N - need_size; slicing excludes the stop, hence + 1).
             start_indices = can_use_pos_index[: N - need_size + 1]
             end_indices = can_use_pos_index[need_size - 1 :]
-            # A window holds consecutive rows exactly when its two ends differ by
-            # need_size - 1; anything larger means a used row sits in between.
+            # A window is consecutive exactly when its ends differ by need_size - 1;
+            # larger means a used row sits between.
             contiguous_blocks = (end_indices - start_indices == need_size - 1).nonzero(
                 as_tuple=True
             )[0]
@@ -311,12 +303,11 @@ class KVCacheManager:
     def alloc_kvcache_index(self, need_size):
         """Reserve ``need_size`` cache rows, preferring a contiguous run.
 
-        Runs on the decode hot path. The general search costs a ``nonzero`` plus
-        two ``.item()`` reads — three device synchronisations that stall the
-        launch pipeline. While the cache is append-only (the state every
-        ``generate()`` starts from, via :meth:`free_all`) the answer is exactly
-        the next ``need_size`` rows, so the bump cursor returns them with no
-        device reads; any partial free falls back to the search.
+        On the decode hot path. The general search costs a ``nonzero`` plus two
+        ``.item()`` reads (three device syncs that stall the pipeline). While the cache
+        is append-only (every ``generate()`` starts here, via :meth:`free_all`) the
+        answer is the next ``need_size`` rows, so the bump cursor returns them with no
+        device reads; a partial free falls back to the search.
         """
         if self._bump_is_exact and self._bump_cursor + need_size <= self.max_num_tokens:
             start = self._bump_cursor
@@ -337,8 +328,8 @@ class KVCacheManager:
     def add_ref(self, token_index: torch.Tensor):
         """Increment the reference count of the given rows.
 
-        Only rows that were free reduce :attr:`can_use_mem_size`; taking a second
-        reference on an already-held row costs no capacity.
+        Only previously-free rows reduce :attr:`can_use_mem_size`; a second reference
+        on an already-held row costs no capacity.
         """
         state = self.kv_mem_use_state[token_index]
         has_used_tokens = torch.count_nonzero(state).item()
@@ -352,12 +343,11 @@ class KVCacheManager:
     def release_ref(self, token_index: torch.Tensor):
         """Decrement the reference count of the given rows, freeing those that reach zero.
 
-        ``token_index`` may name a row more than once — the engine releases prefill
-        and every decode step in one concatenated tensor — so counts are collapsed
-        with ``unique`` first and subtracted in one go.
+        ``token_index`` may name a row more than once (the engine releases prefill and
+        every decode step in one tensor), so counts are collapsed with ``unique`` first.
         """
-        # Freeing rows leaves holes, so the append-only cursor no longer
-        # describes the free list; fall back to searching until ``free_all``.
+        # Freeing leaves holes, so the append-only cursor no longer describes the free
+        # list; fall back to searching until ``free_all``.
         self._bump_is_exact = False
         token_index, counts = token_index.unique(return_counts=True)
         self.kv_mem_use_state[token_index] -= counts
@@ -372,9 +362,9 @@ class KVCacheManager:
         """Hand the first ``num_rows`` rows to an external owner, permanently.
 
         Continuous batching maps each slot onto a fixed contiguous region (see
-        :class:`~lite_llama.executor.slot_batch.SlotBatch`); marking those rows
-        used keeps :attr:`can_use_mem_size` honest, and the bump cursor resumes
-        just past the claimed region so both schemes share one pool.
+        :class:`~lite_llama.executor.slot_batch.SlotBatch`); marking those rows used
+        keeps :attr:`can_use_mem_size` honest, and the bump cursor resumes past the
+        claimed region so both schemes share one pool.
         """
         if num_rows > self.can_use_mem_size:
             raise ValueError(f"cannot claim {num_rows} rows: only {self.can_use_mem_size} are free")

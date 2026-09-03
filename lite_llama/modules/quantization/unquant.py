@@ -51,8 +51,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
 
     def create_weights(self, block: nn.Module) -> dict[str, nn.Parameter]:
         # ``block.dtype`` follows the checkpoint (SparseMoeBlock reads
-        # ``config.dtype``); a stub without one defers to PyTorch's default
-        # dtype, the same auto convention the linear layers use.
+        # ``config.dtype``); a stub without one defers to PyTorch's default.
         dtype = getattr(block, "dtype", None) or torch.get_default_dtype()
         return {
             "gate_up_proj": nn.Parameter(
@@ -108,14 +107,12 @@ class UnquantizedConfig(QuantizationConfig):
         return cls()
 
     def get_quant_method(self, layer: nn.Module, prefix: str = "") -> QuantizeMethodBase | None:
-        # quantizes() is always True here (ignored is empty), so this is a
-        # pure layer-type dispatch; going through _dispatch keeps the shape
-        # of every config's override identical.
+        # ignored is empty, so quantizes() is always True and this is a pure
+        # layer-type dispatch; _dispatch keeps every config's override alike.
         return self._dispatch(layer, prefix, UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
 
     @property
     def storage_dtype(self) -> torch.dtype:
-        # bf16 is the modern training default and lite_llama's undeclared-checkpoint
-        # dtype (see ModelConfig.dtype); an actual checkpoint's type is carried by
-        # ``layer.dtype``, not by this pseudo-config.
+        # bf16 is lite_llama's undeclared-checkpoint dtype (see ModelConfig.dtype);
+        # an actual checkpoint's type is carried by ``layer.dtype``, not here.
         return torch.bfloat16

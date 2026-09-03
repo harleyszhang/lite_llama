@@ -34,12 +34,9 @@ class AttentionMetadata:
         b_seq_len: Current length of each sequence (grows by one per decode step).
         max_actual_seq_len: Longest sequence length seen so far this generation.
         is_prefill: Whether this step is a prefill, set by whoever prepares the
-            metadata (``prefill_alloc_kv_cache`` / ``SlotBatch.begin_prefill`` say
-            ``True``, their decode counterparts say ``False``). The kernels differ
-            between the phases — prefill runs causal attention over fresh K/V with
-            an exp2-scaled softmax, decode gathers history from the paged buffer —
-            and deriving the phase from ``seq_len > 1`` silently misroutes a
-            single-token prompt onto the decode path.
+            metadata. The kernels differ between phases (prefill runs causal attention
+            over fresh K/V, decode gathers history from the paged buffer), and deriving
+            the phase from ``seq_len > 1`` would misroute a single-token prompt to decode.
         b_prefix_len: Chunked prefill only — cached rows preceding each
             sequence's chunk (a resumed chunk or a prefix-cache hit). ``None``
             on every other pass, which is what routes ``context_forward``

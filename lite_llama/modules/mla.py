@@ -1,12 +1,10 @@
 """DeepSeek MLA attention: the latent-cache block shared by V2/V3 models.
 
-:class:`DeepseekV2MLAAttention` is the whole replacement for the standard
-``Attention`` block on DeepSeek families, mirroring vLLM's
-``DeepseekV2MLAAttention``: q (or the ``q_a``/``q_b`` LoRA pair), the fused
-``kv_a_proj_with_mqa``, the kv_a layernorm, ``kv_b_proj`` and a row-parallel
-``o_proj``, composed around the native MLA kernels — prefill up-projects the
-fresh latent chunk by chunk, decode keeps q absorbed and attends the latent
-cache directly.
+:class:`DeepseekV2MLAAttention` replaces the standard ``Attention`` block on DeepSeek
+families (mirroring vLLM's ``DeepseekV2MLAAttention``): q (or the ``q_a``/``q_b`` LoRA pair),
+the fused ``kv_a_proj_with_mqa``, the kv_a layernorm, ``kv_b_proj`` and a row-parallel
+``o_proj``, composed around the native MLA kernels (prefill up-projects the fresh latent
+chunk by chunk, decode keeps q absorbed and attends the latent cache directly).
 
 Usage:
     attn = DeepseekV2MLAAttention(config, quant=None)
@@ -37,9 +35,9 @@ def yarn_get_mscale(scale: float = 1.0, mscale: float = 1.0) -> float:
 def _pair_to_neox(x: torch.Tensor) -> torch.Tensor:
     """Re-pair a rope slice from DeepSeek's adjacent pairs into the kernel's neox pairs.
 
-    DeepSeek rotates ``(x[2k], x[2k+1])``, the shared Triton kernel rotates
-    ``(x[k], x[k + D/2])`` with the same frequency per index. Gathering is
-    exact and far cheaper than a second rope kernel for one 64-wide slice.
+    DeepSeek rotates ``(x[2k], x[2k+1])``, the shared Triton kernel rotates ``(x[k], x[k +
+    D/2])`` with the same frequency per index. Gathering is exact and far cheaper than a
+    second rope kernel for one 64-wide slice.
     """
     half = x.shape[-1] // 2
     return x.view(*x.shape[:-1], half, 2).transpose(-1, -2).reshape(*x.shape)
@@ -54,17 +52,13 @@ def _pair_from_neox(y: torch.Tensor) -> torch.Tensor:
 class DeepseekV2MLAAttention(nn.Module):
     """Multi-head latent attention — the whole replacement for ``Attention``.
 
-    Reference: the DeepSeek-V2 paper (https://arxiv.org/abs/2405.04434);
-    the absorbed decode path plays the role of vLLM's ``MLACommonImpl``.
-    Projections follow HF ``DeepseekV2Attention``: ``q_proj`` (or the
-    ``q_a``/``q_b`` pair when ``q_lora_rank`` is set), the fused
-    ``kv_a_proj_with_mqa``, ``kv_a_layernorm`` over the c_kv half,
-    ``kv_b_proj`` producing per-head ``[k_nope | v]``, and a row-parallel
-    ``o_proj``. RoPE touches only the rope-wide pe slices, so the rotary
-    table is built at that width.
-
-    Tensor parallelism splits along the heads: q and kv_b are column-parallel,
-    o_proj row-parallel; kv_a is replicated because the latent it produces has
+    Reference: the DeepSeek-V2 paper (https://arxiv.org/abs/2405.04434); the absorbed decode
+    path plays the role of vLLM's ``MLACommonImpl``. Projections follow HF
+    ``DeepseekV2Attention``: ``q_proj`` (or the ``q_a``/``q_b`` pair when ``q_lora_rank`` is
+    set), the fused ``kv_a_proj_with_mqa``, ``kv_a_layernorm`` over the c_kv half, ``kv_b_proj``
+    producing per-head ``[k_nope | v]``, and a row-parallel ``o_proj``. RoPE touches only the
+    rope-wide pe slices, so the rotary table is built at that width. TP splits along the heads
+    (q and kv_b column-parallel, o_proj row-parallel); kv_a is replicated because its latent has
     no head axis to shard, so every rank caches it in full.
     """
 
@@ -88,10 +82,9 @@ class DeepseekV2MLAAttention(nn.Module):
                 f"got qk_nope_head_dim={self.qk_nope_head_dim} "
                 f"and v_head_dim={self.v_head_dim}"
             )
-        # Head count is divided here rather than left to ColumnParallelLinear:
-        # a world size that does not divide the heads then fails on the head
-        # count it actually breaks, and the equal output split provably lands
-        # on head boundaries.
+        # Head count is divided here, not left to ColumnParallelLinear: a world size that
+        # does not divide the heads then fails on the count it actually breaks, and the
+        # equal output split provably lands on head boundaries.
         self.num_heads = divide(
             config.num_heads, get_tensor_model_parallel_world_size(), "attention heads"
         )
@@ -129,8 +122,8 @@ class DeepseekV2MLAAttention(nn.Module):
             config.num_heads * self.v_head_dim, self.hidden_size, bias=bias, params_dtype=dtype
         )
 
-        # YaRN: the softmax scale rides the mscale-squared factor; the rope
-        # generator itself only applies the ratio to cos/sin.
+        # YaRN: the softmax scale rides the mscale-squared factor; the rope generator only
+        # applies the ratio to cos/sin.
         rope_parameters = config.rope_parameters
         if rope_parameters.get("rope_type", "default") != "default":
             mscale_all_dim = rope_parameters.get("mscale_all_dim", 0)
@@ -139,9 +132,8 @@ class DeepseekV2MLAAttention(nn.Module):
                 mscale = yarn_get_mscale(factor, float(mscale_all_dim))
                 self.scale = self.scale * mscale * mscale
 
-        # Native rows are not golden-verified yet, so default dispatch refuses
-        # them; naming the backend keeps the physical gates (dtype, layout) and
-        # drops only the golden one.
+        # Native rows are not golden-verified yet, so default dispatch refuses them; naming
+        # the backend keeps the physical gates (dtype, layout) and drops only the golden one.
         self._prefill = dispatch(
             "attention.mla_prefill", dtype=dtype, layout=MLA_LATENT_TAGS, backend="native"
         ).load()
@@ -190,17 +182,17 @@ class DeepseekV2MLAAttention(nn.Module):
         c_kv, k_pe = torch.split(kv_a, (self.kv_lora_rank, self.qk_rope_head_dim), dim=-1)
         c_kv, _ = skip_rmsnorm(c_kv, None, self.kv_a_layernorm_weight, self.rms_norm_eps)
 
-        # RoPE on the pe slices only: q_pe is already [tokens, heads, rope],
-        # k_pe rides along as a single-head tensor. The re-pairing around the
-        # kernel is the contract documented on _pair_to_neox.
+        # RoPE on the pe slices only: q_pe is already [tokens, heads, rope], k_pe rides
+        # along as a single-head tensor. The re-pairing around the kernel is the contract
+        # documented on _pair_to_neox.
         cos, sin = position_embeddings
         q_pe, k_pe = rope_emb_forward(
             _pair_to_neox(q_pe), _pair_to_neox(k_pe).unsqueeze(1), cos, sin
         )
         q_pe, k_pe = _pair_from_neox(q_pe), _pair_from_neox(k_pe.squeeze(1))
 
-        # The cache row is the compressed latent exactly as computed here —
-        # normed c_kv followed by the rotated k_pe, the same pair HF caches.
+        # The cache row is the compressed latent exactly as computed here (normed c_kv
+        # followed by the rotated k_pe, the same pair HF caches).
         latent = torch.cat((c_kv, k_pe), dim=-1)
         atten_info.kv_buffer[layer_index][atten_info.cur_select_index] = latent.unsqueeze(1)
 
@@ -218,9 +210,9 @@ class DeepseekV2MLAAttention(nn.Module):
                 atten_info.max_actual_seq_len,
             )
         else:
-            # Absorb w_uk into q, attend the latent, up-project with w_uv:
-            # head-wide GEMMs against the 576-dim latent row instead of
-            # materialising per-head K/V — the point of the latent cache.
+            # Absorb w_uk into q, attend the latent, up-project with w_uv: head-wide GEMMs
+            # against the 576-dim latent row instead of materialising per-head K/V (the point
+            # of the latent cache).
             q_absorbed = torch.einsum("bhd,hld->bhl", q_nope, self.w_uk)
             q_latent = torch.cat((q_absorbed, q_pe), dim=-1)
             block_table = atten_info.b_req_tokens_table[atten_info.b_req_idx]
@@ -234,7 +226,7 @@ class DeepseekV2MLAAttention(nn.Module):
             )
             out = torch.einsum("bhl,hld->bhd", attended, self.w_uv)
 
-        # reshape, not view: the decode path's einsum output can be
-        # non-contiguous, and the copy is free next to the o_proj GEMM.
+        # reshape, not view: the decode einsum output can be non-contiguous, and the copy is
+        # free next to the o_proj GEMM.
         out = out.reshape(batch, seq_len, self.num_heads * self.v_head_dim)
         return self.o_proj(out)

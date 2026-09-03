@@ -1,15 +1,11 @@
 """Cross-stream overlap: the L1 policy, its stream pool and its timeline.
 
-:class:`OverlapPolicy` (read from ``LITE_LLAMA_OVERLAP``) decides whether
-input uploads run on a copy stream; :class:`StreamPool` stages the async
-uploads — and, in the opposite direction, reads results back into pinned
-host memory — while :class:`Timeline` records regions as timeline evidence.
-
-The module also carries the O3.2 two-batch-overlap *executor primitive*
-(:class:`YieldOperation` + :func:`execute_overlapped`): the stage/yield
-interleaving discipline sglang's ``batch_overlap`` runs its micro-batches on,
-kept here with its own tests until the model's forward is expressed as
-operation streams and can ride it.
+:class:`OverlapPolicy` (``LITE_LLAMA_OVERLAP``) decides whether uploads run on a
+copy stream; :class:`StreamPool` stages async uploads and reads results back into
+pinned host memory; :class:`Timeline` records regions as overlap evidence. Also
+carries the O3.2 two-batch-overlap executor primitive (:class:`YieldOperation` +
+:func:`execute_overlapped`), the stage/yield interleaving sglang's ``batch_overlap``
+uses, kept here until the model's forward is expressed as operation streams.
 
 Usage:
     policy = OverlapPolicy.from_env()
@@ -40,11 +36,10 @@ TIMELINE_ENV = "LITE_LLAMA_OVERLAP_TIMELINE"
 
 @dataclass(frozen=True)
 class OverlapPolicy:
-    """One flag answering for every cross-stream overlap site.
+    """One flag for every cross-stream overlap site.
 
-    ``enabled=False`` collapses every code path back to the inline, single-stream
-    behaviour, which is also the answer when there is no CUDA device at all —
-    the pool is simply never built.
+    ``enabled=False`` collapses every path to inline single-stream behaviour (also
+    the answer with no CUDA device — the pool is never built).
     """
 
     enabled: bool = True
@@ -59,35 +54,25 @@ class OverlapPolicy:
 class StreamPool:
     """The copy stream and the pinned staging rings overlap traffic rides on.
 
-    Staging buffers are pinned host memory reused through freelists. A buffer
-    goes back into rotation only once the event recorded after its last copy
-    reports completion; if nothing free fits, a fresh buffer is allocated — the
-    ring grows to the high-water mark of passes in flight (two for the
-    continuous engine) and stays there. A busy buffer is never force-reused:
-    overwriting bytes a copy engine is still reading is the classic
-    pinned-memory race.
+    Staging buffers are pinned host memory reused through freelists: a buffer
+    re-enters rotation only once the event after its last copy completes, else a
+    fresh one is allocated (the ring grows to the high-water mark of passes in
+    flight). A busy buffer is never force-reused — overwriting bytes a copy engine
+    is reading is the classic pinned-memory race. Two rings share one copy stream,
+    one per direction:
 
-    Two rings share one copy stream and one discipline, one per direction:
-
-    * **Upload** (:meth:`upload_async`): host values go out on H2D, and the
-      compute stream waits on the event before its kernels read them.
-    * **Readback** (:meth:`readback_async`): device results come back on D2H,
-      and the *host* waits on the event — one step later, when it wants the
-      values — before reading the pinned buffer. The copy itself is ordered
-      after the compute stream's queue at issue time, so it observes whatever
-      kernels produced the tensor without any host-side sync. The caller that
-      holds the returned view must finish reading it before the pool is asked
-      for the next readback; the engine's launch/harvest split guarantees that
-      by harvesting step N-1's buffer before launching step N's readback.
+    * **Upload** (:meth:`upload_async`): host values go out on H2D; the compute
+      stream waits on the event before its kernels read them.
+    * **Readback** (:meth:`readback_async`): device results come back on D2H, ordered
+      after the compute queue at issue time; the *host* waits on the event one step
+      later. The caller must finish reading the returned view before the next
+      readback recycles it — the engine's launch/harvest split guarantees that.
 
     Args:
-        device: Device string (``"cuda"`` / ``"cuda:1"``) the streams belong to.
-        policy: The shared switch; a disabled policy makes :meth:`upload_async`
-            fall back to a plain blocking upload and :meth:`readback_async` to
-            a plain blocking ``.cpu()``, both returning no event, so call sites
-            read the same either way.
-        timeline: Where the copy regions are recorded; disabled timelines make
-            the recording a no-op.
+        device: Device string the streams belong to.
+        policy: Shared switch; disabled makes both methods plain blocking copies
+            returning no event, so call sites read the same either way.
+        timeline: Where copy regions are recorded; disabled is a no-op.
     """
 
     def __init__(
@@ -97,10 +82,9 @@ class StreamPool:
         self._policy = policy
         self._timeline = timeline if timeline is not None else Timeline()
         self._copy_stream: torch.cuda.Stream | None = None
-        # (flat pinned buffer, event recording its copy's completion); the event
-        # is None only for a buffer that has never carried a copy, hence free.
-        # One deque per direction: a token upload and a token readback would
-        # otherwise contend for the same buffers at crossed lifetimes.
+        # (flat pinned buffer, event for its copy's completion); event is None only
+        # for a buffer that never carried a copy (hence free). One deque per
+        # direction so uploads and readbacks do not contend at crossed lifetimes.
         self._staging: deque[tuple[torch.Tensor, torch.cuda.Event | None]] = deque()
         self._spill: deque[tuple[torch.Tensor, torch.cuda.Event | None]] = deque()
 
@@ -116,17 +100,13 @@ class StreamPool:
     ) -> tuple[torch.Tensor, torch.cuda.Event | None]:
         """Upload host values and return ``(device tensor, completion event)``.
 
-        With the policy on, the values land in a pinned staging buffer and the
-        H2D copy is issued on the copy stream — this call returns without
-        waiting for it. With the policy off it is exactly the legacy inline
-        upload and the event is ``None``, which :meth:`consume` treats as a
-        no-op. Either way the returned tensor keeps the shape ``values`` had.
-
-        The device tensor is allocated on the copy stream, so a recycled block
-        can only come from a copy that already finished ahead of this one; the
-        compute-stream side of the same race is covered by :meth:`consume`'s
-        ``record_stream``. ``label`` names the timeline region the copy is
-        recorded under.
+        Policy on: values land in a pinned staging buffer and the H2D copy is issued
+        on the copy stream (this returns without waiting). Policy off: the legacy
+        inline upload, event ``None`` (a :meth:`consume` no-op). Either way the tensor
+        keeps ``values``' shape. The device tensor is allocated on the copy stream, so
+        a recycled block comes only from an already-finished copy; the compute-stream
+        race is covered by :meth:`consume`'s ``record_stream``. ``label`` names the
+        timeline region.
         """
         host = torch.as_tensor(values, dtype=dtype)
         flat = host.reshape(-1)
@@ -140,8 +120,7 @@ class StreamPool:
             event = torch.cuda.Event()
             event.record(self.copy_stream)
         device_tensor = device_tensor.view(host.shape)
-        # The fresh event replaces the buffer's old completion marker: the
-        # buffer is busy again until *this* copy lands.
+        # The fresh event replaces the buffer's old marker: busy until this copy lands.
         self._staging.append((staging, event))
         return device_tensor, event
 
@@ -150,39 +129,29 @@ class StreamPool:
     ) -> tuple[torch.Tensor, torch.cuda.Event | None]:
         """Copy device results into pinned host memory; ``(host view, event)``.
 
-        The D2H copy rides the copy stream, ordered after the compute stream's
-        queue *at the moment of issue* — which is exactly the kernels that
-        produced ``device_tensor`` when the caller asks right after a pass. The
-        host does not wait: it reads the returned view later, after
-        ``event.synchronize()``, by which point the copy has long since landed
-        under the next pass's compute. With the policy off this is a plain
-        blocking ``.cpu()`` and the event is ``None`` — a no-CUDA pool returns
-        the tensor itself.
-
-        The returned view aliases a ring buffer. Whoever holds it must be done
-        reading before the pool issues a readback that recycles the buffer;
-        the ring's event check only covers the copy engine, not the host's own
-        reads. The engine's pipeline (harvest N-1 strictly before launch N's
-        readback) is that guarantee.
+        The D2H copy rides the copy stream, ordered after the compute queue at issue
+        time (exactly the kernels that produced ``device_tensor``). The host does not
+        wait: it reads the view later, after ``event.synchronize()``, by which point
+        the copy landed under the next pass. Policy off: a plain blocking ``.cpu()``,
+        event ``None``. The returned view aliases a ring buffer; the holder must finish
+        reading before a readback recycles it (the ring's event check covers only the
+        copy engine) — the engine's harvest-N-1-before-launch-N pipeline guarantees it.
         """
         if not self._policy.enabled:
             return device_tensor.cpu(), None
         flat = device_tensor.reshape(-1)
         pinned = self._acquire(self._spill, flat.dtype, flat.numel())
-        # Grabbed before entering the copy-stream context: inside it, the
-        # "current" stream is the copy stream, and waiting on ourselves would
-        # order nothing.
+        # Grabbed before the copy-stream context: inside it the "current" stream is
+        # the copy stream, and waiting on ourselves would order nothing.
         compute = torch.cuda.current_stream(self._device)
         with torch.cuda.stream(self.copy_stream), self._timeline.region(label, "copy"):
             self.copy_stream.wait_stream(compute)
             pinned[: flat.numel()].copy_(flat, non_blocking=True)
             event = torch.cuda.Event()
             event.record(self.copy_stream)
-            # The source block is read on the copy stream while the caller
-            # may already have dropped its last reference: without this, the
-            # caching allocator can hand the block to the next allocation and
-            # the copy reads whatever that wrote — the mirror image of the
-            # upload path's record_stream in consume().
+            # The source is read on the copy stream while the caller may have dropped
+            # its reference; without this the allocator could recycle the block and
+            # the copy reads garbage — the mirror of consume()'s record_stream.
             flat.record_stream(self.copy_stream)
         self._spill.append((pinned, event))
         return pinned[: flat.numel()].view(device_tensor.shape), event
@@ -190,15 +159,11 @@ class StreamPool:
     def consume(self, event: torch.cuda.Event | None, *tensors: torch.Tensor | None) -> None:
         """Make the current stream wait for an :meth:`upload_async` event.
 
-        The wait is stream-ordered, not host-side: the CPU keeps running and the
-        kernels launched after this call simply cannot start before the copy
-        lands. ``None`` (overlap off) is a no-op.
-
-        The uploaded tensors should be passed along: they are
-        ``record_stream``-ed on this stream, because their blocks belong to the
-        copy stream's allocator pool — without the mark, a tensor freed after
-        its pass could be recycled into the next upload while this stream's
-        kernels are still reading it.
+        Stream-ordered, not host-side: the CPU keeps running and kernels launched
+        after this cannot start before the copy lands. ``None`` (overlap off) is a
+        no-op. Pass the uploaded tensors along: they are ``record_stream``-ed here,
+        since their blocks belong to the copy stream's pool — without the mark a
+        tensor freed after its pass could be recycled while this stream reads it.
         """
         if event is None:
             return
@@ -213,11 +178,9 @@ class StreamPool:
     ) -> torch.Tensor:
         """Find a free buffer of ``ring`` holding ``numel`` elements of ``dtype``.
 
-        "Free" means the event recorded after its last copy has completed.
-        Buffers still busy stay in the ring; a fresh allocation is cheaper than
-        a host-side sync on a copy that has almost certainly finished by the
-        time the next pass asks. Buffers of the wrong dtype or too small are
-        retired rather than kept around.
+        "Free" means the event after its last copy completed. Busy buffers stay in the
+        ring; a fresh allocation is cheaper than a host sync on a copy that has likely
+        finished. Wrong-dtype or too-small buffers are retired.
         """
         for _ in range(len(ring)):
             buffer, event = ring.popleft()
@@ -226,7 +189,7 @@ class StreamPool:
                 continue
             if buffer.dtype == dtype and buffer.numel() >= numel:
                 return buffer
-            # Completed but never useful for this request: drop it.
+            # Completed but unusable for this request: drop it.
         return torch.empty(numel, dtype=dtype, pin_memory=True)
 
     def pending(self) -> int:
@@ -243,9 +206,8 @@ class StreamPool:
 class RegionRecord:
     """One resolved timeline region: a named span of work on one stream.
 
-    ``start_ms``/``end_ms`` are on the timeline's shared device clock, so a copy
-    region and a compute region compare directly — overlap is literally
-    ``a.start_ms < b.end_ms and b.start_ms < a.end_ms``.
+    ``start_ms``/``end_ms`` are on the shared device clock, so copy and compute
+    regions compare directly (overlap is ``a.start < b.end and b.start < a.end``).
     """
 
     name: str
@@ -262,17 +224,14 @@ class RegionRecord:
 class Timeline:
     """CUDA-event recorder for overlap evidence; costs one flag check when off.
 
-    Regions are recorded with events rather than host timestamps because the
-    question a timeline answers — "did the copy region and the compute region
-    actually overlap on the device?" — is a device-side fact. Host clocks can
-    only say when work was *launched*. All events sit on one clock by measuring
-    them against an epoch event recorded when the first region opens; event
-    timestamps share the device's globaltimer, so cross-stream comparison is
-    valid.
+    Events, not host timestamps, because "did the copy and compute regions overlap
+    on the device?" is a device-side fact (host clocks only say when work launched).
+    All events share one clock via an epoch event recorded when the first region
+    opens, so cross-stream comparison is valid.
 
     Args:
-        enabled: Typically from ``LITE_LLAMA_OVERLAP_TIMELINE``; when ``False``
-            :meth:`region` is a near-free context manager.
+        enabled: From ``LITE_LLAMA_OVERLAP_TIMELINE``; ``False`` makes :meth:`region`
+            a near-free context manager.
         device: Device the events are recorded against.
     """
 
@@ -338,10 +297,8 @@ class Timeline:
 class YieldOperation:
     """Stage boundary in an operation stream: where the executor may switch.
 
-    Ops between two yields form one stage — indivisible, run to completion
-    before the other micro-batch resumes. Sglang's ``batch_overlap`` calls the
-    same concept a yield operation; the yields are where micro-batch A's GEMMs
-    overlap micro-batch B sitting inside a communication op.
+    Ops between two yields form one indivisible stage, run to completion before the
+    other micro-batch resumes (sglang's ``batch_overlap`` calls this a yield operation).
     """
 
 
@@ -366,19 +323,14 @@ def execute_overlapped(
 ) -> None:
     """Run two micro-batch operation streams interleaved, stage by stage (O3.2).
 
-    The TBO pattern: while micro-batch A's ops run, micro-batch B sits at its
-    last yield — ideally inside an op the copy engines or NICs handle without
-    SMs — then they swap. ``delta_stages`` is how far the lead stream runs
-    before the trailing one starts (and symmetrically at the tail); ``0``
-    strictly alternates, A first.
-
-    Only the *executor* half of O3.2 lives here, deliberately consumer-free:
-    the interleaving discipline and its tests are fixed now so the day the
-    model's forward is expressed as operation streams reuses them verbatim.
+    The TBO pattern: while A's ops run, B sits at its last yield (ideally inside an op
+    the copy engines or NICs handle without SMs), then they swap. ``delta_stages`` is
+    how far the lead runs before the trailing one starts; ``0`` strictly alternates, A
+    first. Only the executor half of O3.2 lives here, consumer-free, so the day the
+    model's forward is expressed as operation streams reuses it verbatim.
 
     Args:
-        ops_a: Lead stream — zero-arg callables separated by
-            :class:`YieldOperation` markers.
+        ops_a: Lead stream — zero-arg callables separated by :class:`YieldOperation`.
         ops_b: Trailing stream, same shape.
         delta_stages: Stages A runs ahead of B before alternation starts.
 
@@ -396,8 +348,8 @@ def execute_overlapped(
                 op()
         return min(index + count, len(stages))
 
-    # The lead runs ahead, then alternation (A's stage, then B's) while both
-    # have stages left, then whichever stream still owes stages drains.
+    # Lead runs ahead, then alternation (A then B) while both have stages, then
+    # whichever stream still owes stages drains.
     ia = _drain(stages_a, 0, delta_stages)
     ib = 0
     while ia < len(stages_a) and ib < len(stages_b):

@@ -25,6 +25,9 @@ from .base_config import (
 from .parameter import RawParameter
 from .utils import quantize_int4_groupwise
 
+#: int4 values per int32 storage word.
+_PACK_FACTOR = 8
+
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #
@@ -84,7 +87,7 @@ class AWQLinearMethod(LinearMethodBase):
 
     def create_weights(self, layer: nn.Module, input_size: int, output_size: int, **kw) -> None:
         config: AWQConfig = layer.quant  # type: ignore[assignment]
-        packed_k = (input_size + 7) // 8
+        packed_k = (input_size + _PACK_FACTOR - 1) // _PACK_FACTOR
         layer.weight = RawParameter(torch.empty(output_size, packed_k, dtype=torch.int32))
         layer.weight_scale = RawParameter(
             torch.empty(*config.scale_shape(output_size, input_size), dtype=torch.float32)
@@ -129,13 +132,12 @@ class AWQMoEMethod(FusedMoEMethodBase):
         gate_up_k = block.hidden_size
         down_n = block.hidden_size
         down_k = block.moe_intermediate_size
-        pack_factor = 8  # 8 int4 per int32
         num_groups_gu = (gate_up_k + config.group_k - 1) // config.group_k
         num_groups_d = (down_k + config.group_k - 1) // config.group_k
         return {
             "gate_up_proj": RawParameter(
                 torch.empty(
-                    block.num_experts, gate_up_n, gate_up_k // pack_factor, dtype=torch.int32
+                    block.num_experts, gate_up_n, gate_up_k // _PACK_FACTOR, dtype=torch.int32
                 )
             ),
             "gate_up_proj_scale": RawParameter(
@@ -145,7 +147,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
                 torch.empty(block.num_experts, gate_up_n, num_groups_gu, dtype=torch.float32)
             ),
             "down_proj": RawParameter(
-                torch.empty(block.num_experts, down_n, down_k // pack_factor, dtype=torch.int32)
+                torch.empty(block.num_experts, down_n, down_k // _PACK_FACTOR, dtype=torch.int32)
             ),
             "down_proj_scale": RawParameter(
                 torch.empty(block.num_experts, down_n, num_groups_d, dtype=torch.float32)
@@ -159,11 +161,9 @@ class AWQMoEMethod(FusedMoEMethodBase):
         """Repack the int32 word layout into the GEMM kernel's byte layout.
 
         ``create_weights`` allocates the checkpoint's ``[E, N, K//8]`` int32 so
-        the expert loader (and its TP narrow) fills it directly; the fused MoE
-        kernel instead consumes ``[E, N, K//2]`` uint8, two nibbles per byte
-        along K -- vLLM's layout, whose replicated addressing this cannot pay
-        per call. One repack here, on the load device, exactly the role
-        ``awq_marlin_repack`` plays in vLLM's same-named hook.
+        the expert loader (and its TP narrow) fills it directly; the kernel
+        wants ``[E, N, K//2]`` uint8 instead. One repack here, on the load
+        device, exactly the role ``awq_marlin_repack`` plays in vLLM.
         """
         from ...kernels import repack_int4_experts
 

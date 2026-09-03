@@ -42,9 +42,8 @@ def compute_llama3_rope(
 ) -> tuple[torch.Tensor, float]:
     """LLaMA-3 frequency rescaling.
 
-    Wavelengths longer than the original context are divided by ``factor``, short
-    ones are left alone, and the band in between is linearly interpolated so the
-    transition stays smooth.
+    Wavelengths longer than the original context are divided by ``factor``, short ones are
+    left alone, and the band between is linearly interpolated for a smooth transition.
     """
     inv_freq, attention_scaling = compute_default_rope(config, device)
 
@@ -74,13 +73,12 @@ def compute_yarn_rope(
 ) -> tuple[torch.Tensor, float]:
     """YaRN NTK-by-parts rescaling (DeepSeek-V2/V3), element-aligned with HF.
 
-    Unlike LLaMA-3's wavelength rule, the correction range comes from inverting
-    the rotation count over the original context: dimensions that rotate more
-    than ``beta_fast`` times keep their frequency (extrapolation), those below
-    ``beta_slow`` are divided by ``factor`` (interpolation), and a linear ramp
-    blends the band between. The attention scaling follows the paper's mscale
-    rule — DeepSeek-V2-Lite sets ``mscale == mscale_all_dim``, which cancels to
-    exactly 1.0, but the full formula is kept so the V3 spelling works too.
+    Unlike LLaMA-3's wavelength rule, the correction range comes from inverting the
+    rotation count over the original context: dimensions rotating more than ``beta_fast``
+    times keep their frequency (extrapolation), those below ``beta_slow`` are divided by
+    ``factor`` (interpolation), and a linear ramp blends the band between. The attention
+    scaling follows the paper's mscale rule (DeepSeek-V2-Lite sets ``mscale ==
+    mscale_all_dim``, cancelling to 1.0, but the full formula is kept for V3).
     """
     inv_freq, _ = compute_default_rope(config, device)
 
@@ -113,15 +111,15 @@ def compute_yarn_rope(
     low, high = correction_dim(beta_fast), correction_dim(beta_slow)
     if config.get("truncate", True):
         low, high = math.floor(low), math.ceil(high)
-    # Clamped against dim - 1, not dim // 2 - 1: the reference clamps the
-    # *dimension* bound before halving it for the ramp, and a dim//2 clamp
-    # would shift the blend band on small heads.
+    # Clamped against dim - 1, not dim // 2 - 1: the reference clamps the *dimension*
+    # bound before halving it for the ramp; a dim//2 clamp would shift the blend band on
+    # small heads.
     low, high = max(low, 0), min(high, dim - 1)
     if low == high:
         high = low + 0.001  # a singular ramp denominator would NaN the band
 
-    # ramp 0 keeps the frequency (extrapolation), ramp 1 divides it by the
-    # factor (interpolation); the band between blends linearly.
+    # ramp 0 keeps the frequency (extrapolation), ramp 1 divides by the factor
+    # (interpolation); the band between blends linearly.
     ramp = torch.clamp(
         (torch.arange(dim // 2, dtype=torch.float32, device=device) - low) / (high - low),
         0,
@@ -148,16 +146,12 @@ ROPE_INIT_FUNCTIONS: dict[str, Callable[..., tuple[torch.Tensor, float]]] = {
 class RotaryEmbedding(nn.Module):
     """Builds ``(cos, sin)`` for the given ``position_ids``.
 
-    When the flat config carries ``max_seq_len``, the ``(cos, sin)`` rows for
-    every position are precomputed once and each step only gathers rows by
-    position id. The caches are non-persistent buffers allocated at
-    construction, so their addresses never change mid-run — which CUDA-graph
-    replay needs — and they follow the module onto the device with ``.to()``.
-
-    ``config`` is the flat RoPE settings mapping built by
-    :attr:`lite_llama.models.config.ModelConfig.rope_config`, which also
-    absorbs the transformers 4.x/5.x ``rope_scaling`` vs ``rope_parameters``
-    difference.
+    When the config carries ``max_seq_len``, the ``(cos, sin)`` rows for every position
+    are precomputed once and each step only gathers rows by position id. The caches are
+    non-persistent buffers allocated at construction, so their addresses never change
+    mid-run (which CUDA-graph replay needs) and they follow the module via ``.to()``.
+    ``config`` is the flat RoPE mapping from ``ModelConfig.rope_config`` (which absorbs the
+    transformers 4.x/5.x ``rope_scaling`` vs ``rope_parameters`` difference).
     """
 
     def __init__(self, config: Mapping[str, Any], device: torch.device | None = None) -> None:
@@ -175,9 +169,9 @@ class RotaryEmbedding(nn.Module):
         # Non-persistent: derived from the config, so it never belongs in a checkpoint.
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-        # ModelConfig validates max_seq_len <= max_position_embeddings, so every
-        # position id the engine can produce lands inside the caches. A bare
-        # config without the key (unit tests) falls back to per-step computation.
+        # ModelConfig validates max_seq_len <= max_position_embeddings, so every position
+        # id the engine produces lands inside the caches. A bare config without the key
+        # (unit tests) falls back to per-step computation.
         self.max_seq_len = int(config.get("max_seq_len", 0) or 0)
         if self.max_seq_len > 0:
             self._build_caches(device)
@@ -198,8 +192,8 @@ class RotaryEmbedding(nn.Module):
     def _build_caches(self, device: torch.device | None) -> None:
         """Precompute ``[max_seq_len, rotary_dim]`` cos/sin rows, scaling applied."""
         positions = torch.arange(self.max_seq_len, device=device, dtype=torch.float32)
-        # Same outer product as the per-step path, evaluated once per position;
-        # fp32 throughout so the fp16 cast happens where the fallback casts.
+        # Same outer product as the per-step path, evaluated once per position; fp32
+        # throughout so the fp16 cast happens where the fallback casts.
         freqs = torch.outer(positions, self.inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
         self.register_buffer("cos_cache", emb.cos() * self.attention_scaling, persistent=False)
@@ -244,14 +238,11 @@ class RotaryEmbedding(nn.Module):
 class MRotaryEmbedding(RotaryEmbedding):
     """Multimodal RoPE (mrope) with interleaved temporal/height/width sections.
 
-    Qwen3-VL assigns each vision token a 3-component position ``(t, h, w)``
-    and splits the rotary dimensions across those components: ``mrope_section``
-    gives how many frequency pairs each component owns, interleaved as
-    ``T H W T H W ...`` rather than three contiguous blocks, which keeps
-    neighbouring frequencies continuous.
-
-    The output shape is identical to plain RoPE (``[batch, seq_len, rotary_dim]``),
-    so :func:`lite_llama.kernels.ops.rope.rope_emb_forward` is reused unchanged.
+    Qwen3-VL assigns each vision token a 3-component position ``(t, h, w)`` and splits the
+    rotary dimensions across them: ``mrope_section`` gives how many frequency pairs each
+    component owns, interleaved as ``T H W T H W ...`` (not three contiguous blocks) to keep
+    neighbouring frequencies continuous. The output shape matches plain RoPE
+    (``[batch, seq_len, rotary_dim]``), so ``rope_emb_forward`` is reused unchanged.
     """
 
     def __init__(self, config: Mapping[str, Any], device: torch.device | None = None) -> None:
@@ -273,8 +264,8 @@ class MRotaryEmbedding(RotaryEmbedding):
         Returns:
             ``[batch, seq_len, rotary_dim // 2]``.
         """
-        # Start from the temporal component, then overwrite the strided positions
-        # that belong to height and width.
+        # Start from the temporal component, then overwrite the strided positions that
+        # belong to height and width.
         merged = freqs[0].clone()
         for component, offset in enumerate((1, 2), start=1):
             stop = mrope_section[component] * 3

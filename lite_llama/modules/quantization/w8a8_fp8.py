@@ -20,6 +20,8 @@ from .base_config import (
     LinearMethodBase,
     QuantizationConfig,
     QuantizeMethodBase,
+    allocate_expert_weights,
+    allocate_linear_weights,
     run_quant_linear,
 )
 from .parameter import RawParameter
@@ -74,13 +76,7 @@ class W8A8Fp8LinearMethod(LinearMethodBase):
     """fp8-e4m3 weights + per-token fp8-e4m3 activations (no calibration)."""
 
     def create_weights(self, layer: nn.Module, input_size: int, output_size: int, **kw) -> None:
-        config: W8A8Fp8Config = layer.quant  # type: ignore[assignment]
-        layer.weight = RawParameter(
-            torch.empty(output_size, input_size, dtype=config.storage_dtype)
-        )
-        layer.weight_scale_inv = RawParameter(
-            torch.empty(*config.scale_shape(output_size, input_size), dtype=torch.float32)
-        )
+        allocate_linear_weights(layer, input_size, output_size)
 
     def apply(
         self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
@@ -104,40 +100,16 @@ class W8A8Fp8LinearMethod(LinearMethodBase):
 
 
 class W8A8Fp8MoEMethod(FusedMoEMethodBase):
-    """W8A8 fp8 stacked experts: fp8 weights + per-token fp8 activations through grouped GEMM.
+    """W8A8 fp8 stacked experts: fp8 weights + per-token fp8 activations.
 
-    The entry point is what separates this from :class:`~.fp8.Fp8MoEMethod`, whose
-    weights are byte-identical: ``fused_moe_w8a8_fp8`` quantises the activation
-    and runs the fp8 tensor cores, ``fused_moe`` widens the expert tile to bf16
-    and leaves the activation alone. The two methods used to call the same
-    function with the same arguments, which made the ``w8a8_fp8`` name a claim the
-    code did not honour.
+    Weights are byte-identical to :class:`~.fp8.Fp8MoEMethod`'s; only the entry
+    point differs — ``fused_moe_w8a8_fp8`` quantises the activation and runs the
+    fp8 tensor cores, while ``fused_moe`` widens the expert tile to bf16 and
+    leaves the activation alone.
     """
 
     def create_weights(self, block: nn.Module) -> dict[str, nn.Parameter]:
-        config: W8A8Fp8Config = block.quant  # type: ignore[assignment]
-        gate_up_n, gate_up_k = 2 * block.moe_intermediate_size, block.hidden_size
-        down_n, down_k = block.hidden_size, block.moe_intermediate_size
-        return {
-            "gate_up_proj": RawParameter(
-                torch.empty(block.num_experts, gate_up_n, gate_up_k, dtype=config.storage_dtype)
-            ),
-            "gate_up_proj_scale_inv": RawParameter(
-                torch.empty(
-                    block.num_experts,
-                    *config.scale_shape(gate_up_n, gate_up_k),
-                    dtype=torch.float32,
-                )
-            ),
-            "down_proj": RawParameter(
-                torch.empty(block.num_experts, down_n, down_k, dtype=config.storage_dtype)
-            ),
-            "down_proj_scale_inv": RawParameter(
-                torch.empty(
-                    block.num_experts, *config.scale_shape(down_n, down_k), dtype=torch.float32
-                )
-            ),
-        }
+        return allocate_expert_weights(block)
 
     def apply(self, block, x, topk_weights, topk_ids) -> torch.Tensor:
         from ...kernels import fused_moe_w8a8_fp8

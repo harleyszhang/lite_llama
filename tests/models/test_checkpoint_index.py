@@ -24,7 +24,7 @@ from tests.conftest import REPO_ROOT
 #: Scale tables are consumed by the loader, not handed to the model.
 _SCALE_SUFFIX = ".weight_scale_inv"
 
-#: AWQ/GPTQ key renaming (matches the non-tensor part of adapt_int4_checkpoint).
+#: AWQ/GPTQ key renaming (matches the non-tensor part of adapt_packed_checkpoint).
 _INT4_KEY_RENAMES: dict[str, str | None] = {
     ".qweight": ".weight",
     ".qzeros": ".weight_zeros",

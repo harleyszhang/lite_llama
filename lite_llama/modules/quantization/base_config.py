@@ -16,6 +16,8 @@ from typing import Any
 import torch
 from torch import nn
 
+from .parameter import RawParameter
+
 # --------------------------------------------------------------------------- #
 # Method base classes
 # --------------------------------------------------------------------------- #
@@ -38,24 +40,20 @@ class QuantizeMethodBase(ABC):
         raise NotImplementedError()
 
     def quantize_from_fp16(self, layer: nn.Module, config: QuantizationConfig) -> None:
-        """Convert a loaded fp16 weight to the quantised form, in-place.
+        """Quantise a loaded fp16 weight in-place, for the ``--quantization`` path.
 
-        Used by the ``--quantization`` runtime path.
-        Raises NotImplementedError if this scheme requires a pre-quantised
-        checkpoint (e.g. AWQ/GPTQ).
+        Schemes needing a pre-quantised checkpoint (AWQ/GPTQ) leave this raising.
         """
         raise NotImplementedError(
             f"{type(self).__name__} cannot be computed from fp16 weights at load time"
         )
 
     def process_weights_after_loading(self, layer: nn.Module) -> None:
-        """Transform loaded weights once, after every tensor has been filled.
+        """Repack loaded weights once, after every tensor is filled.
 
-        The seam a method whose *kernel* layout differs from the checkpoint's
-        layout needs: the checkpoint bytes and the loader stay untouched, and
-        the repack happens here while the parameters sit on the load device
-        (vLLM's same-named hook, where ``awq_marlin_repack`` lives). The
-        default is nothing to do -- most formats consume what they load.
+        The seam for a method whose kernel layout differs from the checkpoint's
+        (vLLM's same-named hook): the repack happens here, while parameters are
+        still on the load device. Default is nothing to do.
         """
         return None
 
@@ -101,6 +99,47 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ) -> torch.Tensor:
         """Run the routed grouped GEMM over the block's expert weights."""
         raise NotImplementedError()
+
+
+# --------------------------------------------------------------------------- #
+# Weight allocation helpers
+# --------------------------------------------------------------------------- #
+
+
+def allocate_linear_weights(layer: nn.Module, input_size: int, output_size: int) -> None:
+    """Allocate ``[N, K]`` weight and fp32 ``weight_scale_inv`` on *layer*.
+
+    Shared by the methods storing one value per element (fp8, int8,
+    smoothquant); the packed int4/int8 configs allocate their own
+    ``K//pack_factor`` shapes instead.
+    """
+    config: QuantizationConfig = layer.quant  # type: ignore[assignment]
+    layer.weight = RawParameter(torch.empty(output_size, input_size, dtype=config.storage_dtype))
+    layer.weight_scale_inv = RawParameter(
+        torch.empty(*config.scale_shape(output_size, input_size), dtype=torch.float32)
+    )
+
+
+def allocate_expert_weights(block: nn.Module) -> dict[str, nn.Parameter]:
+    """Allocate stacked experts and their fp32 ``*_scale_inv`` grids.
+
+    The :func:`allocate_linear_weights` counterpart for fused MoE, with the
+    same one-value-per-element restriction.
+    """
+    config: QuantizationConfig = block.quant  # type: ignore[assignment]
+    shapes = {
+        "gate_up_proj": (2 * block.moe_intermediate_size, block.hidden_size),
+        "down_proj": (block.hidden_size, block.moe_intermediate_size),
+    }
+    weights: dict[str, nn.Parameter] = {}
+    for name, (n, k) in shapes.items():
+        weights[name] = RawParameter(
+            torch.empty(block.num_experts, n, k, dtype=config.storage_dtype)
+        )
+        weights[f"{name}_scale_inv"] = RawParameter(
+            torch.empty(block.num_experts, *config.scale_shape(n, k), dtype=torch.float32)
+        )
+    return weights
 
 
 # --------------------------------------------------------------------------- #
@@ -198,9 +237,8 @@ class QuantizationConfig(ABC):
     ) -> QuantizeMethodBase:
         """Pick *layer*'s strategy: stacked experts vs plain linear.
 
-        Every config dispatches the same way — only the two method classes
-        differ. A prefix listed in ``ignored`` still gets real tensors, just
-        the fp16 (unquantised) methods.
+        Shared by every config, which only differ in the two method classes.
+        An ignored prefix still gets real tensors, just the fp16 methods.
         """
         from ..moe import SparseMoeBlock
         from .unquant import UnquantizedFusedMoEMethod, UnquantizedLinearMethod
@@ -226,11 +264,9 @@ class QuantizationConfig(ABC):
     def is_packed(self) -> bool:
         """True if the checkpoint packs several values per storage word.
 
-        AWQ/GPTQ in either bit width ship ``[N, K//pack_factor]`` int32 words
-        that no kernel consumes directly, so loading runs them through
-        :func:`lite_llama.modules.quantization.adapt_packed_checkpoint` first
-        — a trigger this property owns, where ``is_int4`` used to stand in
-        before GPTQ ``bits=8`` made the two diverge.
+        Such layouts (``[N, K//pack_factor]`` int32) are consumed by no kernel
+        directly, so loading runs them through
+        :func:`lite_llama.modules.quantization.adapt_packed_checkpoint` first.
         """
         return False
 
@@ -259,18 +295,15 @@ def run_quant_linear(
 ) -> torch.Tensor:
     """Route one quantised (or plain) projection through kernel dispatch.
 
-    The only call site ``LinearMethodBase.apply`` implementations need: the
-    scheme string (a ``BASE_QUANTIZATION_METHODS`` key) becomes a dispatch-key
-    dimension, dtype and shape come from the tensors, and the selected
-    implementation arrives behind the common :class:`LinearOp` signature, so
-    kernel rows are interchangeable without touching any method class.
+    The single call site ``LinearMethodBase.apply`` implementations need: the
+    scheme string is the dispatch key, dtype and shape come from the tensors,
+    and the selected kernel sits behind the common :class:`LinearOp` signature.
     """
     from lite_llama.kernels.dispatcher import dispatch, dtype_label
 
     # For a sub-byte format this ``k`` is the *storage* width, not the logical
-    # one (nvfp4 stores two elements per byte). It only feeds the perf-lookup
-    # key, which needs to be consistent rather than semantic, and a scheme's
-    # keys never mix with another's.
+    # one. It only feeds the perf-lookup key, which needs consistency rather
+    # than semantics, and a scheme's keys never mix with another's.
     n, k = weight.shape[-2:]
     m = x.numel() // x.shape[-1]
     selected = dispatch(
