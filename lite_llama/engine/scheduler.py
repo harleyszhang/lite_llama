@@ -214,9 +214,7 @@ class SchedulerConfig:
                 f"prefix_cache_blocks must be >= 2 or None, got {self.prefix_cache_blocks}"
             )
         if self.decode_window_steps < 0:
-            raise ValueError(
-                f"decode_window_steps must be >= 0, got {self.decode_window_steps}"
-            )
+            raise ValueError(f"decode_window_steps must be >= 0, got {self.decode_window_steps}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -655,9 +653,7 @@ class Scheduler:
         ``prompt_token_ids``, so a replayed registration would hash the *new*
         prompt onto blocks holding the old sequence's K/V.
         """
-        self._pending_blocks = [
-            entry for entry in self._pending_blocks if entry[0] is not request
-        ]
+        self._pending_blocks = [entry for entry in self._pending_blocks if entry[0] is not request]
 
     def _maybe_preempt(self, prefill: list[Request]) -> Request | None:
         """Evict the youngest eligible running request, if the policy allows it.

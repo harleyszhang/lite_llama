@@ -43,8 +43,8 @@ def make_shape_bucket(m: int, n: int, k: int) -> str:
 def normalize_gpu_name(name: str) -> str:
     """Normalise a GPU device name for use as a key component.
 
-    ``torch.cuda.get_device_name()`` returns strings like ``"NVIDIA A10"``
-    which contain spaces; we replace them with underscores for safe use in
+    ``torch.cuda.get_device_name()`` returns names with spaces
+    (``"NVIDIA A10"``), which are replaced so the string is safe in
     filenames and JSON keys.
     """
     return name.strip().replace(" ", "_")
@@ -54,9 +54,9 @@ def normalize_gpu_name(name: str) -> str:
 class TuneKey:
     """Immutable identifier for one autotune entry.
 
-    This is the **v0.5 stable contract** referenced by v0.6's ``perf_key``.
-    Fields must not be renamed or reordered without a version bump in the
-    JSON schema.
+    The stored-config contract: renaming or reordering a field needs a
+    version bump in the JSON schema, or entries written by an older release
+    stop resolving.
 
     Attributes:
         gpu: Normalised GPU name, e.g. ``"NVIDIA_A10"``.

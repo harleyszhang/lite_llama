@@ -283,8 +283,7 @@ def _dp_worker(
     spawning only ``dp_size`` of them hangs forever waiting for ranks nobody
     started. Each cell occupies device ``global_rank``.
 
-    The two roles are no longer mirrors of each other, which is the point of this
-    layout:
+    The two roles differ by design:
 
     * the **leader** (``tp_rank == 0``) owns the replica's scheduler and runs
       :class:`_ReplicaLoop`. It is the only rank that reads the request queue, and

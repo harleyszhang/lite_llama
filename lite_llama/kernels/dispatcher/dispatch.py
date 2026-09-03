@@ -38,9 +38,8 @@ def op_backend_env(op: str) -> str:
     ``LITE_LLAMA_ATTENTION_DECODE_BACKEND``.
 
     Per-op is the granularity that matters in practice: a machine may want
-    flashinfer for attention while linear stays on the native Triton GEMM, and
-    one global switch cannot express that. Inherited from the v0.8 backend
-    picker, which had these keys for its two hardcoded op families.
+    flashinfer for attention while linear stays on the native Triton GEMM,
+    and one global switch cannot express that.
     """
     return f"LITE_LLAMA_{op.upper().replace('.', '_')}_BACKEND"
 
@@ -176,12 +175,12 @@ def dtype_label(dtype: Any) -> str:
 PerfProvider = Callable[[KernelSpec, DispatchKey], "float | None"]
 
 
-#: Pluggable so the benchmark tool can inject the frozen store without the
-#: dispatch tier depending on any storage format. ``None`` = no measurement.
 def _no_measurements(spec: KernelSpec, key: DispatchKey) -> float | None:
     return None
 
 
+#: Pluggable so the benchmark tool can inject the frozen store without the
+#: dispatch tier depending on any storage format. ``None`` = no measurement.
 _perf_provider: PerfProvider = _no_measurements
 
 
@@ -218,10 +217,11 @@ def invalidate_cache(op: str | None = None) -> None:
 def _reject_reason(spec: KernelSpec, key: DispatchKey) -> str | None:
     """Why ``spec`` cannot serve this key, or ``None`` if it can.
 
-    Order mirrors the plan's filter list; each reason is written for explain.
-    Correctness gates (capability/dtype/scheme/shape/layout/available) hold
-    even under a forced backend; only the golden gate yields to an explicit
-    request, because evidence policy is the one thing the user may override.
+    Checked cheapest-first — backend pin, availability, capability, dtype,
+    scheme, shape, layout — and every reason is written for ``explain``.
+    Correctness gates hold even under a forced backend; only the golden gate
+    yields to an explicit request, because evidence policy is the one thing
+    the user may override.
     """
     if key.forced_backend and spec.backend != key.forced_backend:
         return f"backend {spec.backend!r} != forced {key.forced_backend!r}"

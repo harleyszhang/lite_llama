@@ -417,11 +417,7 @@ class _JsonCallScanner:
         return ""
 
     def _take_args(self, char: str) -> str:
-        if (
-            self._args_depth == 0
-            and not self._in_string
-            and char in " \n\r\t"
-        ):
+        if self._args_depth == 0 and not self._in_string and char in " \n\r\t":
             # Whitespace between the colon and the value is structural; once
             # the value opens, every character is emitted verbatim.
             return ""
@@ -503,16 +499,12 @@ class QwenToolParser(ToolParser):
         args, complete, consumed = self._scanner.feed(text)
         if not self._announced and self._scanner.name is not None:
             out.calls.append(
-                ToolCallDelta(
-                    index=self._index, id=_call_id(self._index), name=self._scanner.name
-                )
+                ToolCallDelta(index=self._index, id=_call_id(self._index), name=self._scanner.name)
             )
             self._announced = True
             self._index += 1
             if self._pending_args:
-                out.calls.append(
-                    ToolCallDelta(index=self._index - 1, arguments=self._pending_args)
-                )
+                out.calls.append(ToolCallDelta(index=self._index - 1, arguments=self._pending_args))
                 self._pending_args = ""
         if args:
             if self._announced:

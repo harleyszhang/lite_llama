@@ -119,13 +119,14 @@ class ConfigStore:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         target = self._json_path(op)
         # Atomic: write to a temp file in the same directory, then rename.
+        # fdopen takes ownership of the descriptor, so it is closed on every
+        # exit path and a failed replace only has to clean up the temp file.
         fd, tmp = tempfile.mkstemp(dir=self._cache_dir, suffix=".tmp")
         try:
-            os.write(fd, json.dumps(data, indent=2, ensure_ascii=False).encode())
-            os.close(fd)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=2, ensure_ascii=False))
             os.replace(tmp, target)
         except BaseException:
-            os.close(fd) if not os.get_inheritable(fd) else None
             if os.path.exists(tmp):
                 os.unlink(tmp)
             raise

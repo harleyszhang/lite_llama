@@ -1,8 +1,8 @@
 """FlashInfer attention wrappers: both phases behind the native signatures.
 
-Prefill and decode share one lazily allocated workspace and one wrapper
-cache keyed by shape (cleared via ``_reset_cache``); the functions mirror
-the native kernels' signatures so dispatch can swap them in.
+Prefill and decode share one lazily allocated workspace and keep one wrapper
+per phase (cleared via ``_reset_cache``); the functions mirror the native
+kernels' signatures so dispatch can swap them in.
 
 Usage:
     out = prefill_attention(q, k, v, sm_scale, b_start_loc, b_seq_len,
@@ -15,6 +15,7 @@ from collections.abc import Callable
 
 import torch
 
+#: Workspace FlashInfer's wrappers plan into, allocated on first use.
 _WORKSPACE_BYTES = 128 * 1024 * 1024
 _prefill_wrapper = None
 _decode_wrapper = None
