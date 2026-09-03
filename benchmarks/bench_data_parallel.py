@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -22,42 +22,37 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.common import (
     PROMPTS,
+    TimedRow,
+    add_dp_args,
     expand_prompts,
     free_gpu,
+    measure_dp,
     measure_generate,
+    print_row_table,
+    print_run_header,
     report_agreement,
     require_gpus,
     timestamped_log_path,
     write_json_log,
 )
-from lite_llama import LLM, DataParallelEngine
+from lite_llama import LLM
 from lite_llama.engine.dp_load_balancer import LOAD_BALANCERS
 
 
 @dataclass
-class DPResult:
+class DPResult(TimedRow):
     """One configuration's measurement. ``tps`` is the number DP is judged on."""
 
-    label: str
-    replicas: int
-    batch: int
-    latency_s: float
-    gen_tokens: int
-
-    @property
-    def tps(self) -> float:
-        return self.gen_tokens / self.latency_s if self.latency_s else 0.0
+    label: str = ""
+    replicas: int = 1
+    batch: int = 0
 
     @property
     def tps_per_gpu(self) -> float:
         return self.tps / self.replicas if self.replicas else 0.0
 
     def as_dict(self) -> dict:
-        return {
-            **asdict(self),
-            "tps": round(self.tps, 1),
-            "tps_per_gpu": round(self.tps_per_gpu, 1),
-        }
+        return {**super().as_dict(), "tps_per_gpu": round(self.tps_per_gpu, 1)}
 
 
 def bench_single_process(model, prompts, gen_len, iters, **kw) -> tuple[DPResult, list[str]]:
@@ -70,7 +65,13 @@ def bench_single_process(model, prompts, gen_len, iters, **kw) -> tuple[DPResult
     finally:
         del llm
         free_gpu()
-    return DPResult("LLM (in-process)", 1, len(prompts), latency, tokens), texts
+    return DPResult(
+        latency_s=latency,
+        gen_tokens=tokens,
+        label="LLM (in-process)",
+        replicas=1,
+        batch=len(prompts),
+    ), texts
 
 
 def bench_data_parallel(
@@ -84,41 +85,42 @@ def bench_data_parallel(
     reference row decodes the whole batch at once would attribute a difference in
     concurrency to a difference in parallelism.
     """
-    with DataParallelEngine(
-        model=model,
-        data_parallel_size=replicas,
-        load_balancer=load_balancer,
+    latency, tokens, texts, _ = measure_dp(
+        model,
+        prompts,
+        dp=replicas,
+        gen_len=gen_len,
+        iters=iters,
         max_num_seqs=max_num_seqs,
+        load_balancer=load_balancer,
         **kw,
-    ) as engine:
-        latency, tokens, texts = measure_generate(
-            engine.generate, prompts, gen_len=gen_len, iters=iters, tokenizer=engine.tokenizer
-        )
-    free_gpu()
+    )
     return DPResult(
-        f"DataParallelEngine dp={replicas}", replicas, len(prompts), latency, tokens
+        latency_s=latency,
+        gen_tokens=tokens,
+        label=f"DataParallelEngine dp={replicas}",
+        replicas=replicas,
+        batch=len(prompts),
     ), texts
 
 
 def print_table(results: list[DPResult], baseline: DPResult, scaling: str) -> None:
-    row = "{:<28}{:>9}{:>7}{:>12}{:>12}{:>11}{:>12}"
-    print(f"\n{'─' * 91}")
-    print(row.format("config", "replicas", "batch", "latency (s)", "gen tokens", "TPS", "speedup"))
-    print(f"{'─' * 91}")
-    for r in results:
-        speedup = f"{r.tps / baseline.tps:.2f}x" if baseline.tps else "—"
-        print(
-            row.format(
+    print_row_table(
+        ["config", "replicas", "batch", "latency (s)", "gen tokens", "TPS", "speedup"],
+        [28, 9, 7, 12, 12, 11, 12],
+        [
+            [
                 r.label,
-                r.replicas,
-                r.batch,
+                str(r.replicas),
+                str(r.batch),
                 f"{r.latency_s:.2f}",
-                r.gen_tokens,
+                str(r.gen_tokens),
                 f"{r.tps:.1f}",
-                speedup,
-            )
-        )
-    print(f"{'─' * 91}")
+                f"{r.tps / baseline.tps:.2f}x" if baseline.tps else "—",
+            ]
+            for r in results
+        ],
+    )
     scaled = [r for r in results if r.replicas > 1]
     if not scaled or not baseline.tps:
         return
@@ -140,8 +142,7 @@ def print_table(results: list[DPResult], baseline: DPResult, scaling: str) -> No
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
-    parser.add_argument("--model", default="my_weight/Qwen2.5-0.5B")
-    parser.add_argument("--dp", type=int, default=2, help="Largest replica count (rows for 1..dp)")
+    add_dp_args(parser, dp_help="Largest replica count (rows for 1..dp)")
     parser.add_argument(
         "--batch-size",
         type=int,
@@ -152,23 +153,7 @@ def main() -> None:
     # Taken from the registry rather than spelled out, so a new policy is benchmarkable
     # the moment it is registered.
     parser.add_argument("--load-balancer", default="round_robin", choices=list(LOAD_BALANCERS))
-    parser.add_argument("--gen-len", type=int, default=128)
-    parser.add_argument(
-        "--max-num-seqs",
-        type=int,
-        default=0,
-        help="Replica concurrency ceiling; 0 sizes it to the prompts each replica gets",
-    )
-    parser.add_argument("--iters", type=int, default=2, help="Timed repeats (median reported)")
-    parser.add_argument("--max-seq-len", type=int, default=1024)
-    parser.add_argument(
-        "--max-gpu-num-blocks",
-        type=int,
-        default=None,
-        help="KV cache tokens per replica; profiled when omitted",
-    )
     parser.add_argument("--quantization", default=None, choices=["int8", "int4", "smoothquant"])
-    parser.add_argument("--log-dir", default=None, help="Write a JSON log here")
     args = parser.parse_args()
 
     visible = require_gpus(1)
@@ -189,15 +174,19 @@ def main() -> None:
         total = args.batch_size * replicas if args.scaling == "weak" else args.batch_size
         return expand_prompts(PROMPTS, total)
 
-    print(f"\n{'=' * 91}")
-    print(
-        f"{args.model}  |  {args.scaling} scaling  batch={args.batch_size}"
-        f"{' per replica' if args.scaling == 'weak' else ' total'}  gen_len={args.gen_len}  "
-        f"iters={args.iters}  lb={args.load_balancer}  "
-        f"max_num_seqs={args.max_num_seqs or 'per-replica batch'}"
+    print_run_header(
+        args.model,
+        {
+            "scaling": args.scaling,
+            "batch": f"{args.batch_size}{' per replica' if args.scaling == 'weak' else ' total'}",
+            "gen_len": args.gen_len,
+            "iters": args.iters,
+            "lb": args.load_balancer,
+            "max_num_seqs": args.max_num_seqs or "per-replica batch",
+            "quant": args.quantization or "fp16",
+            "gpus": visible,
+        },
     )
-    print(f"gpu={torch.cuda.get_device_name(0)} x {visible}  quant={args.quantization or 'fp16'}")
-    print(f"{'=' * 91}")
 
     reference, reference_texts = bench_single_process(
         args.model, prompts_for(1), args.gen_len, args.iters, **kw

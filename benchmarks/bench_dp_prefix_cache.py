@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import random
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -22,14 +22,16 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.common import (
-    free_gpu,
-    measure_generate,
+    TimedRow,
+    add_dp_args,
+    measure_dp,
+    print_row_table,
+    print_run_header,
     report_agreement,
     require_gpus,
     timestamped_log_path,
     write_json_log,
 )
-from lite_llama import DataParallelEngine
 from lite_llama.engine.dp_load_balancer import make_load_balancer
 
 #: One sentence of filler, repeated to build a prefix of the requested length. Its
@@ -39,24 +41,15 @@ _FILLER = "Follow every instruction carefully and answer as precisely as you can
 
 
 @dataclass
-class Row:
+class Row(TimedRow):
     """One (cache, policy) configuration's measurement."""
 
-    prefix_cache: bool
-    policy: str
-    latency_s: float
-    gen_tokens: int
+    prefix_cache: bool = False
+    policy: str = ""
 
     @property
     def label(self) -> str:
         return f"cache={'on ' if self.prefix_cache else 'off'} lb={self.policy}"
-
-    @property
-    def tps(self) -> float:
-        return self.gen_tokens / self.latency_s if self.latency_s else 0.0
-
-    def as_dict(self) -> dict:
-        return {**asdict(self), "tps": round(self.tps, 1)}
 
 
 def build_workload(
@@ -128,46 +121,45 @@ def measure(
     """Time one configuration end to end through the DP coordinator.
 
     The engine is rebuilt per row because the prefix cache is created with the
-    scheduler; and it is torn down before the next row so the rows do not contend for
-    KV, which would price the later ones differently from the earlier ones.
+    scheduler (see :func:`measure_dp`).
 
     Returns:
         The measurement, the completions, and the checkpoint's tokenizer — the last so
         the caller can replay the routing decisions on exactly the ids the router saw.
     """
-    with DataParallelEngine(
-        model=model,
-        data_parallel_size=dp,
-        load_balancer=policy,
+    latency, gen_tokens, texts, tokenizer = measure_dp(
+        model,
+        prompts,
+        dp=dp,
+        gen_len=gen_len,
+        iters=iters,
         max_num_seqs=max_num_seqs,
+        load_balancer=policy,
         enable_prefix_cache=prefix_cache,
+        # Warm up on prompts from *outside* the workload, or the warm-up would leave
+        # the measured run's prefixes already cached and every row would report a hit
+        # rate it did not earn.
+        warmup_prompts=["Warm up the replicas."] * dp,
         **kw,
-    ) as engine:
-        tokenizer = engine.tokenizer
-        # Warm up on prompts from *outside* the workload, or the warm-up would leave the
-        # measured run's prefixes already cached and every row would report a hit rate it
-        # did not earn.
-        latency, gen_tokens, texts = measure_generate(
-            engine.generate,
-            prompts,
-            gen_len=gen_len,
-            iters=iters,
-            tokenizer=tokenizer,
-            warmup_prompts=["Warm up the replicas."] * dp,
-        )
-    free_gpu()
-    return Row(prefix_cache, policy, latency, gen_tokens), texts, tokenizer
+    )
+    row = Row(latency_s=latency, gen_tokens=gen_tokens, prefix_cache=prefix_cache, policy=policy)
+    return row, texts, tokenizer
 
 
 def print_table(rows: list[Row], baseline: Row) -> None:
-    fmt = "{:<30}{:>13}{:>13}{:>11}"
-    print(f"\n{'─' * 67}")
-    print(fmt.format("config", "latency (s)", "gen tokens", "speedup"))
-    print(f"{'─' * 67}")
-    for r in rows:
-        speedup = f"{baseline.latency_s / r.latency_s:.2f}x" if r.latency_s else "—"
-        print(fmt.format(r.label, f"{r.latency_s:.3f}", r.gen_tokens, speedup))
-    print(f"{'─' * 67}")
+    print_row_table(
+        ["config", "latency (s)", "gen tokens", "speedup"],
+        [30, 13, 13, 11],
+        [
+            [
+                r.label,
+                f"{r.latency_s:.3f}",
+                str(r.gen_tokens),
+                f"{baseline.latency_s / r.latency_s:.2f}x" if r.latency_s else "—",
+            ]
+            for r in rows
+        ],
+    )
 
     cache_only = next((r for r in rows if r.prefix_cache and r.policy == "round_robin"), None)
     affinity = next((r for r in rows if r.prefix_cache and r.policy == "cache_aware"), None)
@@ -182,8 +174,21 @@ def print_table(rows: list[Row], baseline: Row) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
-    parser.add_argument("--model", default="my_weight/Qwen2.5-0.5B")
-    parser.add_argument("--dp", type=int, default=2, help="Replicas (fixed for every row)")
+    add_dp_args(
+        parser,
+        default_gen_len=4,
+        default_iters=3,
+        default_max_num_seqs=16,
+        default_max_seq_len=2048,
+        default_max_gpu_num_blocks=65536,
+        dp_help="Replicas (fixed for every row)",
+        gen_len_help="Tokens per request; short keeps the run prefill-bound",
+        blocks_help=(
+            "KV tokens per replica; stated rather than profiled, because profiling from a "
+            "one-token forward hands the cache ~90%% of the card and leaves nothing for the "
+            "logits of a wide prefill batch"
+        ),
+    )
     parser.add_argument(
         "--groups",
         type=int,
@@ -194,24 +199,6 @@ def main() -> None:
     parser.add_argument(
         "--prefix-sentences", type=int, default=80, help="Filler sentences in the shared prefix"
     )
-    parser.add_argument(
-        "--gen-len",
-        type=int,
-        default=4,
-        help="Tokens per request; short keeps the run prefill-bound",
-    )
-    parser.add_argument("--iters", type=int, default=3, help="Timed repeats (median reported)")
-    parser.add_argument("--max-num-seqs", type=int, default=16, help="Replica concurrency ceiling")
-    parser.add_argument("--max-seq-len", type=int, default=2048)
-    parser.add_argument(
-        "--max-gpu-num-blocks",
-        type=int,
-        default=65536,
-        help="KV tokens per replica; stated rather than profiled, because profiling from a "
-        "one-token forward hands the cache ~90%% of the card and leaves nothing for the "
-        "logits of a wide prefill batch",
-    )
-    parser.add_argument("--log-dir", default=None, help="Write a JSON log here")
     args = parser.parse_args()
 
     require_gpus(args.dp)
@@ -219,13 +206,17 @@ def main() -> None:
     prompts, group_of = build_workload(args.groups, args.per_group, args.prefix_sentences)
     kw = {"max_seq_len": args.max_seq_len, "max_gpu_num_blocks": args.max_gpu_num_blocks}
 
-    print(f"\n{'=' * 67}")
-    print(
-        f"{args.model}  |  dp={args.dp}  {args.groups} prefix groups x {args.per_group} requests"
-        f"  gen_len={args.gen_len}  iters={args.iters}"
+    print_run_header(
+        args.model,
+        {
+            "dp": args.dp,
+            "workload": f"{args.groups} prefix groups x {args.per_group} requests",
+            "gen_len": args.gen_len,
+            "iters": args.iters,
+            "max_num_seqs": args.max_num_seqs,
+        },
+        width=67,
     )
-    print(f"gpu={torch.cuda.get_device_name(0)}  max_num_seqs={args.max_num_seqs}")
-    print(f"{'=' * 67}")
 
     rows: list[Row] = []
     texts_by_label: list[tuple[str, list[str]]] = []

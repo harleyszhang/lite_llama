@@ -119,9 +119,16 @@ def main() -> None:
         work_quant = Work(moved=tokens * 4096 * 3 + tokens * 32 * 4)
         work_fused = Work(moved=tokens * 8192 * 2 + tokens * 4096 + tokens * 32 * 4)
         for name, fn in QUANT_PROVIDERS.items():
-            rows.append(Row(name, f"{label} quant", bench(lambda fn=fn: fn(x)), work_quant))
+            rows.append(Row(name, f"{label} quant", bench(lambda fn=fn, x=x: fn(x)), work_quant))
         for name, fn in FUSED_PROVIDERS.items():
-            rows.append(Row(name, f"{label} fused", bench(lambda fn=fn: fn(gate_up)), work_fused))
+            rows.append(
+                Row(
+                    name,
+                    f"{label} fused",
+                    bench(lambda fn=fn, gate_up=gate_up: fn(gate_up)),
+                    work_fused,
+                )
+            )
 
     print()
     report(rows)

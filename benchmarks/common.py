@@ -1,9 +1,9 @@
 """Shared benchmark layer: one metrics vocabulary, one timing discipline.
 
-``BenchResult`` plus ``steps_to_result`` define every script's numbers,
-the :class:`Backend` ABC adapts engines into one interface, and the
-helpers (``expand_prompts``, ``sampling_params``) keep workload shapes
-reproducible across scripts.
+``BenchResult`` plus ``steps_to_result`` define every script's numbers, the
+:class:`Backend` ABC adapts engines into one interface, and the helpers
+(``expand_prompts``, ``sampling_params``) keep workload shapes reproducible
+across scripts.
 
 Usage:
     from benchmarks.common import BenchResult, print_table
@@ -24,7 +24,7 @@ from pathlib import Path
 import torch
 
 # --------------------------------------------------------------------------- #
-# 口径:测什么、怎么采样
+# Workload definitions: what to generate, and how to sample
 # --------------------------------------------------------------------------- #
 PROMPTS = [
     "I believe the meaning of life is to find happiness in the simple things. but how to achieve the meaning of life?",
@@ -37,11 +37,12 @@ PROMPTS = [
     "How to learn cnn, please introduce resnet architecture and give code ",
 ]
 
-# 与 lite_llama 采样分支对齐的非 greedy 默认参数。
+#: Non-greedy defaults, matching lite_llama's sampling branch.
 SAMPLE_KW = {"temperature": 0.7, "top_p": 0.8}
 
-#: Greedy,且关掉重复惩罚与提前退出:基准的 token 数不能由"某些行触发、某些行
-#: 不触发"的启发式决定,否则两列数字的分母都不同源。
+#: Greedy, with repetition penalty and early exit off. A benchmark's token count
+#: must not depend on a heuristic that fires for some rows and not others — that
+#: would give the two columns different denominators.
 GREEDY_PARAMS = {
     "temperature": 0.0,
     "top_p": 1.0,
@@ -79,14 +80,14 @@ def gpu_tag() -> str:
 
 
 def sampling_params(max_gen_len: int, greedy: bool = True):
-    """基准口径的 ``SamplingParams``:greedy 走 :data:`GREEDY_PARAMS`,否则 :data:`SAMPLE_KW`。"""
+    """The benchmark's ``SamplingParams``: :data:`GREEDY_PARAMS` or :data:`SAMPLE_KW`."""
     from lite_llama import SamplingParams
 
     return SamplingParams(max_gen_len=max_gen_len, **(GREEDY_PARAMS if greedy else SAMPLE_KW))
 
 
 # --------------------------------------------------------------------------- #
-# 指标值对象
+# Metric value object
 # --------------------------------------------------------------------------- #
 @dataclass
 class BenchResult:
@@ -98,7 +99,7 @@ class BenchResult:
     steps: int
     batch: int
     gen_tokens: int
-    tpot_p50_ms: float = 0.0  # 仅流式逐步打点的后端能给出
+    tpot_p50_ms: float = 0.0  # only backends that time every step can supply this
 
     @property
     def tps(self) -> float:
@@ -124,17 +125,19 @@ def steps_to_result(
     batch: int,
     gen_tokens: int | None = None,
 ) -> BenchResult:
-    """把逐 step 的完成时刻折成一个 :class:`BenchResult`。
+    """Fold per-step completion timestamps into a :class:`BenchResult`.
 
-    TTFT 是第一步结束减去提交时刻,TPOT 是其后所有步间隔的均值——所有逐步推进的
-    后端都是这套算法,写在一处才能保证它们的数字可比。
+    TTFT is the first step's end minus submission time; TPOT is the mean interval
+    of the steps after it. Every step-driven backend goes through this function,
+    which is what makes their numbers comparable.
 
     Args:
-        step_ends: 每步结束时的 ``perf_counter()``。
-        t_start: 提交时刻(应在 ``torch.cuda.synchronize()`` 之后取)。
-        total_s: 整轮墙钟秒数,由调用方在收尾 sync 之后算出。
-        batch: 并发请求数。
-        gen_tokens: 实际产出 token 数;省略时按 lockstep 推进算(每步 batch 个)。
+        step_ends: ``perf_counter()`` at the end of each step.
+        t_start: Submission time (taken after ``torch.cuda.synchronize()``).
+        total_s: Whole-run wall clock, computed by the caller after the final sync.
+        batch: Concurrent request count.
+        gen_tokens: Tokens actually produced; omitted means lockstep advance
+            (``batch`` per step).
     """
     deltas = [b - a for a, b in itertools.pairwise(step_ends)]
     return BenchResult(
@@ -154,38 +157,41 @@ def print_table(results: dict[str, BenchResult]) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 测量策略
+# Measurement strategies
 # --------------------------------------------------------------------------- #
 class Backend(ABC):
-    """一种被测系统的测量策略。
+    """One measured system.
 
-    子类只需回答两件事:同一组 prompt 怎么跑成一个 :class:`BenchResult`,以及怎么
-    拆掉自己。``texts()`` 给精度对照用——同一次测量的产出,不必再跑一遍。
+    A subclass answers two questions: how the same prompt set becomes a
+    :class:`BenchResult`, and how to tear itself down. ``texts()`` serves the
+    accuracy comparisons — the same run's output, so nothing is measured twice.
     """
 
     @abstractmethod
     def measure(self, prompts: list[str], max_gen_len: int, greedy: bool) -> BenchResult:
-        """跑完整个工作负载并返回指标(实现方负责预热到稳态)。"""
+        """Run the whole workload and return its metrics (the implementation warms up)."""
 
     @property
     def runner(self):
-        """本后端的 ``ModelRunner``(显存与 KV 容量从它读);外部对照后端没有。"""
-        raise NotImplementedError(f"{type(self).__name__} 不持有 ModelRunner")
+        """This backend's ``ModelRunner`` (memory and KV capacity come from it)."""
+        raise NotImplementedError(f"{type(self).__name__} holds no ModelRunner")
 
     def texts(self) -> list[str]:
-        """上一次 :meth:`measure` 的完整输出;未产出文本的后端返回空列表。"""
+        """The completions of the last :meth:`measure`; empty for text-less backends."""
         return []
 
     def close(self) -> None:
-        """交还显存。同进程里建第二个后端之前必须调,否则它的 KV 预算profile 成 0。"""
+        """Return the GPU memory. Required before building a second backend in the
+        same process, or its KV budget profiles as zero."""
         free_gpu()
 
 
 class LiteBackend(Backend):
-    """lite_llama 单卡策略:stream 每步回调,直接拆出 TTFT 与稳态 TPOT。
+    """Single-process lite_llama: a stream callback per step splits TTFT from TPOT.
 
-    batch 内所有序列 lockstep 推进,因此 gen_tokens = steps * batch。
-    构造参数原样透传给 TextGenerator(不设默认,避免覆盖其自身的缺省语义)。
+    The batch advances in lockstep, so ``gen_tokens = steps * batch``. Constructor
+    arguments pass straight through to ``TextGenerator`` (no defaults here, so this
+    never overrides its own).
     """
 
     def __init__(self, model_dir: str, use_cuda_graph: bool, **gen_kwargs):
@@ -200,12 +206,12 @@ class LiteBackend(Backend):
 
     @property
     def generator(self):
-        """裸生成器:bench_e2e --verify 需要直接调 generate() 对拍 eager/graph 输出。"""
+        """The bare generator: ``bench_e2e --verify`` calls ``generate()`` directly."""
         return self._gen
 
     @property
     def runner(self):
-        """ModelRunner:显存占用与 KV 池容量都从它读(见 :func:`describe_footprint`)。"""
+        """``ModelRunner``: memory footprint and KV pool capacity are read from it."""
         return self._gen.engine.model_runner
 
     def measure(self, prompts: list[str], max_gen_len: int, greedy: bool) -> BenchResult:
@@ -235,10 +241,10 @@ class LiteBackend(Backend):
 
 
 class EngineBackend(Backend):
-    """连续批处理引擎策略:提交整批后逐 step 打点。
+    """Continuous-batching engine: submit the whole batch, then time each step.
 
-    TP>1 只有这条路能跑:executor 才会把每步的 plan 广播给 follower rank。
-    此时 decode 走 eager——NCCL 集合通信不能进 graph 捕获。
+    The only path that can drive ``tp > 1`` — its executor broadcasts each step's
+    plan to the follower ranks.
     """
 
     def __init__(self, model_dir: str, *, tensor_parallel_size: int = 1, **engine_kwargs):
@@ -255,7 +261,7 @@ class EngineBackend(Backend):
         return self._engine.engine.model_runner
 
     def measure(self, prompts: list[str], max_gen_len: int, greedy: bool) -> BenchResult:
-        self._engine.generate(prompts, sampling_params(8))  # 预热 autotune 与分配器
+        self._engine.generate(prompts, sampling_params(8))  # warm up autotune + allocator
 
         params = sampling_params(max_gen_len, greedy)
         requests = [self._engine.add_request(prompt, params) for prompt in prompts]
@@ -274,7 +280,8 @@ class EngineBackend(Backend):
             t_start=t_start,
             total_s=total,
             batch=len(prompts),
-            # 请求各自 EOS 离场,步数乘 batch 会高估:按每请求实收 token 累加。
+            # Requests leave on their own EOS, so ``steps * batch`` would overcount:
+            # sum the tokens each request actually produced.
             gen_tokens=sum(len(r.output_token_ids) for r in requests),
         )
 
@@ -288,14 +295,16 @@ class EngineBackend(Backend):
 
 
 class VisionBackend(Backend):
-    """多模态测量策略:VisionGenerator 逐请求串行 stream 打点。
+    """Multimodal measurement: ``VisionGenerator`` serves one request at a time.
 
-    lite_llama 的多模态路径逐请求服务(processor 单请求),因此
-    ``--batch`` 语义变为串行请求数:TTFT 取每请求各自的首 token 时延均值,
-    TPOT 取所有请求 decode 步间隔的均值,TPS 为整轮串行循环的聚合吞吐。
-    图像统一 672x672 resize,钉死动态分辨率视觉塔(Qwen3-VL)的视觉 token 数。
-    decode 步照常走 CUDA graph 重放——视觉 token 此刻已在 KV cache 里,
-    捕获与重放的都是纯文本步。
+    lite_llama's multimodal path is serial (the processor takes one request), so
+    ``--batch`` becomes the number of serial requests: TTFT is the mean of each
+    request's first-token latency, TPOT the mean of all decode-step intervals, TPS
+    the aggregate throughput of the whole serial loop. Images are resized to a
+    fixed 672x672, which pins the visual-token count of a dynamic-resolution tower
+    (Qwen3-VL). Decode steps still replay a CUDA graph — the visual tokens are
+    already in the KV cache by then, so what is captured and replayed is a plain
+    text step.
     """
 
     def __init__(self, model_dir: str, use_cuda_graph: bool, image_path: str, **gen_kwargs):
@@ -308,8 +317,9 @@ class VisionBackend(Backend):
         self._gen = VisionGenerator(
             checkpoints_dir=model_dir, use_cuda_graph=use_cuda_graph, **gen_kwargs
         )
-        # llava 要求显式 <image> 标记 + vicuna 轮次;Qwen3-VL 的 preparer
-        # (与 HF 侧 chat template) 自己插入视觉占位符,普通问题直接进。
+        # llava wants an explicit <image> marker plus vicuna turns; Qwen3-VL's
+        # preparer (like HF's chat template) inserts the visual placeholder itself,
+        # so a plain question goes straight in.
         self._is_llava = read_model_type(model_dir) == "llava"
         self._texts: list[str] = []
 
@@ -372,34 +382,34 @@ class VisionBackend(Backend):
 
 
 def checkpoint_dtype(model_dir: str) -> torch.dtype:
-    """读 checkpoint ``config.json`` 声明的 dtype（``torch_dtype``/``dtype`` 字段）。
+    """The dtype the checkpoint's ``config.json`` declares (``torch_dtype``/``dtype``).
 
-    两个引擎都按 config 的 dtype 加载权重，HF 基线也必须如此：对 bf16 checkpoint
-    跑 fp16 的 HF 行，测出的是"换 dtype + 换引擎"的混合效应，不是引擎差距。
-    config 缺该字段时回退 fp16（transformers 自己的历史默认）。
+    Both engines load weights at the config's dtype, so the HF baseline must too:
+    running HF in fp16 against a bf16 checkpoint measures "dtype change + engine
+    change" together, not the engine difference. Falls back to fp16 when the field
+    is absent (transformers' own historical default).
     """
     from transformers import AutoConfig
 
     declared = getattr(AutoConfig.from_pretrained(model_dir), "dtype", None)
-    if isinstance(declared, str):  # 旧版 transformers 返回字符串
+    if isinstance(declared, str):  # older transformers returns a string
         declared = getattr(torch, declared, None)
     return declared if isinstance(declared, torch.dtype) else torch.float16
 
 
 def dtype_tag(dtype: torch.dtype) -> str:
-    """行标签用的 dtype 简写：``torch.bfloat16`` -> ``bf16``。"""
+    """Short dtype name for row labels: ``torch.bfloat16`` -> ``bf16``."""
     return {torch.bfloat16: "bf16", torch.float16: "fp16"}.get(dtype, str(dtype))
 
 
 class HFBackend(Backend):
-    """HF transformers 测量策略:generate 无逐步回调,用两段式拆 TTFT。
+    """HF transformers: ``generate`` has no per-step callback, so TTFT is a separate run.
 
-    权重按 checkpoint config 声明的 dtype 加载（见 :func:`checkpoint_dtype`），
-    与 lite 引擎同精度对比。
-    greedy 时 min_new_tokens == max_gen_len,禁止提前 EOS 退出,
-    保证 batch 恰好跑满 max_gen_len 步(与 lite_llama lockstep 对齐);
-    采样时允许提前 EOS,steps 取 batch 内最长序列的步数,
-    gen_tokens 按非 pad token 实数统计。
+    Weights load at the checkpoint's declared dtype (see :func:`checkpoint_dtype`),
+    the same precision lite_llama uses. Under greedy, ``min_new_tokens ==
+    max_gen_len`` forbids early EOS so the batch runs exactly ``max_gen_len`` steps
+    (matching lite_llama's lockstep); under sampling, early EOS is allowed, ``steps``
+    is the longest sequence's, and ``gen_tokens`` counts non-pad tokens.
     """
 
     def __init__(self, model_dir: str, attn: str = "sdpa"):
@@ -492,20 +502,22 @@ def make_backend(
     max_gpu_num_blocks: int | None = None,
     **engine_kwargs,
 ) -> Backend:
-    """按 checkpoint 与并行度挑测量策略,调用方不必自己分流。
+    """Pick the measurement strategy for a checkpoint and parallelism.
 
-    TP>1 交给 :class:`EngineBackend`(只有连续批处理路径会广播每步的 plan);
-    多模态 checkpoint 交给 :class:`VisionBackend`;其余走 :class:`LiteBackend`。
+    ``tp > 1`` goes to :class:`EngineBackend` (only the continuous-batching path
+    broadcasts each step's plan); a multimodal checkpoint goes to
+    :class:`VisionBackend`; everything else to :class:`LiteBackend`.
 
-    ``max_gpu_num_blocks`` 不转给多模态:视觉 token 让每请求的 KV 需求成为图像
-    分辨率的函数,把文本档位的池子大小照搬过去只会 OOM,交给引擎自己 profile。
+    ``max_gpu_num_blocks`` is not forwarded to the multimodal path: visual tokens
+    make each request's KV demand a function of image resolution, so reusing a text
+    workload's pool size there only OOMs — let the engine profile it.
     """
     from lite_llama.models.config import read_model_type
     from lite_llama.models.registry import ModelRegistry
 
     if ModelRegistry.resolve(read_model_type(model_dir)).is_multimodal:
         if not image_path:
-            raise ValueError(f"{model_dir} 是多模态 checkpoint,需要 image_path")
+            raise ValueError(f"{model_dir} is a multimodal checkpoint and needs image_path")
         return VisionBackend(model_dir, use_cuda_graph, image_path, **engine_kwargs)
     if tensor_parallel_size > 1:
         return EngineBackend(
@@ -551,22 +563,21 @@ def peak_mem_gb() -> float:
 
 
 def describe_footprint(runner, replicas: int = 1) -> tuple[float, int]:
-    """``(权重 GiB, KV 池容量 token)``,从 ``ModelRunner`` 的真实张量读。
+    """``(weight GiB, KV pool capacity in tokens)``, read from ``ModelRunner``'s tensors.
 
-    ``replicas`` 是 TP 的 rank 数:runner 只持有本 rank 的分片,整个副本的权重
-    占用是它的 ``replicas`` 倍。
+    ``replicas`` is the TP rank count: the runner holds only this rank's shard, so
+    a whole replica's weights are ``replicas`` times that.
     """
     weight_bytes = sum(p.numel() * p.element_size() for p in runner.model.parameters())
     kv_tokens = runner.kv_cache_manager.gpu_kv_buffer[0].shape[0]
     return weight_bytes * replicas / (1024**3), kv_tokens
 
 
-def timed_runs(run, iters: int) -> tuple[float, list]:
+def _timed_runs(run, iters: int) -> tuple[float, list]:
     """Median wall time of ``iters`` ``run()`` calls, sync-bounded on both sides.
 
-    Returns the median and every round's result, so callers can aggregate
-    token counts over all iters (median of per-iter counts) exactly as they
-    did before this helper existed.
+    Returns the median and every round's result, so callers can take the median of
+    the per-round token counts.
     """
     latencies: list[float] = []
     results: list = []
@@ -588,19 +599,20 @@ def measure_generate(
     tokenizer,
     warmup_prompts: list[str] | None = None,
 ) -> tuple[float, int, list[str]]:
-    """一次性 ``generate`` 路径的测量:预热、计时 ``iters`` 轮、数输出 token。
+    """Measure a one-shot ``generate`` path: warm up, time ``iters`` rounds, count tokens.
 
     Args:
-        generate: ``(prompts, params) -> [output]``,每个 output 有 ``.text``。
-        warmup_prompts: 预热用的 prompt;默认就用被测 prompts。凡是测缓存命中的
-            脚本必须给一组**工作负载之外**的 prompt,否则预热已经把待测前缀写进
-            缓存,每一行都会报出自己没挣到的命中率。
+        generate: ``(prompts, params) -> [output]``, each output having ``.text``.
+        warmup_prompts: Prompts for the warm-up round; the measured ones by default.
+            A script measuring cache hits must pass prompts from *outside* the
+            workload, or the warm-up has already written the prefixes under test
+            into the cache and every row reports a hit rate it did not earn.
 
     Returns:
-        ``(中位墙钟秒, 中位输出 token 数, 最后一轮的完整文本)``。
+        ``(median wall clock in seconds, median output tokens, last round's texts)``.
     """
     generate(warmup_prompts or prompts, sampling_params(8))
-    median, outputs_per_iter = timed_runs(
+    median, outputs_per_iter = _timed_runs(
         lambda: generate(prompts, sampling_params(gen_len)), iters
     )
     texts_per_iter = [[out.text for out in outputs] for outputs in outputs_per_iter]
@@ -659,3 +671,129 @@ def write_json_log(path: str | Path, config: dict, results) -> None:
     config = {**config, "timestamp": datetime.now().isoformat(timespec="seconds")}
     path.write_text(json.dumps({"config": config, "results": results}, indent=2, default=str))
     print(f"-> {path}")
+
+
+# --------------------------------------------------------------------------- #
+# Data-parallel scaffolding
+#
+# The data-parallel benchmarks share a row shape, a table format, an argument set
+# and a measurement path, so those live here instead of twice.
+# --------------------------------------------------------------------------- #
+@dataclass
+class TimedRow:
+    """One measured configuration: wall time plus the tokens produced in it.
+
+    Every data-parallel row is judged on ``tps``; deriving it here keeps the two
+    DP scripts' tables on one definition instead of two copies of the same formula.
+    """
+
+    latency_s: float
+    gen_tokens: int
+
+    @property
+    def tps(self) -> float:
+        return self.gen_tokens / self.latency_s if self.latency_s else 0.0
+
+    def as_dict(self) -> dict:
+        """The row's fields plus ``tps``, for the JSON log."""
+        return {**asdict(self), "tps": round(self.tps, 1)}
+
+
+def add_dp_args(
+    parser,
+    *,
+    default_model: str = "my_weight/Qwen2.5-0.5B",
+    default_gen_len: int = 128,
+    default_iters: int = 2,
+    default_max_num_seqs: int = 0,
+    default_max_seq_len: int = 1024,
+    default_max_gpu_num_blocks: int | None = None,
+    dp_help: str = "Replica count",
+    gen_len_help: str = "Tokens per request",
+    blocks_help: str = "KV cache tokens per replica; profiled when omitted",
+) -> None:
+    """The knobs every data-parallel benchmark shares; keyword arguments move defaults.
+
+    A workload that wants a different ``gen_len`` or a *stated* KV pool overrides
+    those defaults rather than re-declaring the other six arguments.
+    """
+    parser.add_argument("--model", default=default_model)
+    parser.add_argument("--dp", type=int, default=2, help=dp_help)
+    parser.add_argument("--gen-len", type=int, default=default_gen_len, help=gen_len_help)
+    parser.add_argument(
+        "--iters", type=int, default=default_iters, help="Timed repeats (median reported)"
+    )
+    parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=default_max_num_seqs,
+        help="Replica concurrency ceiling; 0 sizes it to the per-replica batch",
+    )
+    parser.add_argument("--max-seq-len", type=int, default=default_max_seq_len)
+    parser.add_argument(
+        "--max-gpu-num-blocks", type=int, default=default_max_gpu_num_blocks, help=blocks_help
+    )
+    parser.add_argument("--log-dir", default=None, help="Write a JSON log here")
+
+
+def print_run_header(title: str, fields: dict[str, object], *, width: int = 91) -> None:
+    """The banner every run opens with: model, workload knobs, then the device."""
+    print(f"\n{'=' * width}")
+    print(f"{title}  |  " + "  ".join(f"{k}={v}" for k, v in fields.items()))
+    print(f"gpu={torch.cuda.get_device_name(0)} x {torch.cuda.device_count()}")
+    print(f"{'=' * width}")
+
+
+def measure_dp(
+    model: str,
+    prompts: list[str],
+    *,
+    dp: int,
+    gen_len: int,
+    iters: int,
+    max_num_seqs: int,
+    warmup_prompts: list[str] | None = None,
+    **engine_kwargs,
+) -> tuple[float, int, list[str], object]:
+    """Time one workload through the DP coordinator.
+
+    The engine is built and torn down per row: rows sharing a process would contend
+    for KV, which prices the later ones differently from the earlier ones.
+
+    Returns:
+        ``(median latency, median output tokens, last round's texts, tokenizer)`` —
+        the tokenizer lets a caller replay routing decisions on exactly the ids the
+        balancer saw.
+    """
+    from lite_llama import DataParallelEngine
+
+    with DataParallelEngine(
+        model=model, data_parallel_size=dp, max_num_seqs=max_num_seqs, **engine_kwargs
+    ) as engine:
+        tokenizer = engine.tokenizer
+        latency, tokens, texts = measure_generate(
+            engine.generate,
+            prompts,
+            gen_len=gen_len,
+            iters=iters,
+            tokenizer=tokenizer,
+            warmup_prompts=warmup_prompts,
+        )
+    free_gpu()
+    return latency, tokens, texts, tokenizer
+
+
+def print_row_table(headers: list[str], widths: list[int], rows: list[list[str]]) -> None:
+    """Aligned rows between two rules: first column left-aligned, the rest right.
+
+    The caller formats each cell, so a column can hold a number, a ratio or ``—``
+    without this function knowing which.
+    """
+    fmt = "".join(f"{{:<{w}}}" if i == 0 else f"{{:>{w}}}" for i, w in enumerate(widths))
+    rule = "─" * sum(widths)
+    print(f"\n{rule}")
+    print(fmt.format(*headers))
+    print(rule)
+    for row in rows:
+        print(fmt.format(*row))
+    print(rule)
