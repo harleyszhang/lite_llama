@@ -428,6 +428,60 @@ python scripts/golden_tokens.py --save tests/golden/data/Qwen3-30B-A3B-Instruct-
 
 原始日志见 `docs/benchmark_logs/bench_quant_Qwen*_h100_20260903.json`（每份含完整 meta：GPU / torch / triton / **commit** / 命令行，测量状态注记里的各批次代码状态就从这里读）。
 
+#### H100：lite_llama vs vllm（2026-09-03）
+
+对照引擎换成 vllm 0.28.0（V1 engine，piecewise CUDA graph 默认开启）。两端跑同一批 prompt（`bench_e2e.py` 的 PROMPTS 扩到目标 batch）、同为 greedy、同一张 H100；指标口径与上文各表一致（TTFT / TPOT / TPS）。两端 TTFT 的测法相同：离线批量 API 都没有逐 token 回调，所以 TTFT 是单独一轮 1-token 生成（prefill + 首个采样 token），完整轮测总墙钟。greedy 下两端都锁步跑满 `max_gen_len`（lite 的 stop 判据每步生效但 greedy 用例不触发 EOS；vllm 用 `min_tokens=max_gen_len` + `ignore_eos`），每档先 warmup 两轮再计时。
+
+三个比值列的分母都是 **vllm**（vllm / lite_llama，大于 1 即 lite_llama 更快），不是对 HF transformers 的比值，也不是 lite 内部 eager↔graph 的比值：
+
+| 模型 | batch | gen_len | 引擎 | TTFT (ms) | TPOT (ms) | TPS (tok/s) | TTFT 比值 | TPOT 比值 | TPS 比值 |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen2.5-0.5B-Instruct | 8 | 128 | lite_llama (graph) | 13.2 | 1.31 | 5699.2 | 1.55× | 3.21× | 3.08× |
+| Qwen2.5-0.5B-Instruct | 8 | 128 | vllm 0.28.0 | 20.4 | 4.20 | 1850.7 | — | — | — |
+| Qwen2.5-0.5B-Instruct | 16 | 256 | lite_llama (graph) | 14.0 | 1.52 | 10161.6 | 1.27× | 1.23× | 1.23× |
+| Qwen2.5-0.5B-Instruct | 16 | 256 | vllm 0.28.0 | 17.8 | 1.88 | 8235.6 | — | — | — |
+| Qwen3-4B-Thinking-2507 | 8 | 128 | lite_llama (graph) | 21.4 | 4.93 | 1581.3 | 1.18× | 1.35× | 1.34× |
+| Qwen3-4B-Thinking-2507 | 8 | 128 | vllm 0.28.0 | 25.3 | 6.64 | 1178.7 | — | — | — |
+
+读法：
+
+- **decode 领先幅度随 batch 收窄**：0.5B 在 batch 8 上 TPOT 3.21×，batch 16 收窄到 1.23×。batch 8 时 vllm 的每步调度开销（V1 engine 的 Python 侧输入准备与采样管线）在 1.3 ms 量级的 decode 步里占比很高；batch 16 后两端都接近权重带宽下限（0.5B bf16 权重 0.92 GB / 3.35 TB/s ≈ 0.27 ms），差距只剩调度常数。这与上文对 HF 的规律一致——外部引擎的固定开销不随卡型下降，batch 越小它越显眼。
+- **TTFT 比值只有 1.18×～1.55×**：prefill 是 compute-bound 的大 GEMM，两端都走 cuBLAS/tensor core，差距只在调度与 KV 分配上——与对 HF 的 TTFT 结论（1.2×～1.5×）同量级。
+- **4B 档三项比值收敛到 1.18×～1.35×**：模型越大算术时间占比越高，两端都吃满算力，调度差距被摊薄。
+
+#### H100：GSM8K 精度对照（2026-09-03）
+
+精度口径与 [eval_models.md](eval_models.md) 一致：GSM8K test 前 200 题、5-shot、greedy、同一套 stop 标记与判分函数（`tests/evals/gsm8k.py` 的 `extract_answer`——取补全里最后一个整数）。两端 prompt 完全相同（同一个 `build_prompts`），Instruct/Thinking checkpoint 都过 chat template；vllm 侧由 [`benchmarks/bench_gsm8k_vllm.py`](../benchmarks/bench_gsm8k_vllm.py) 生成，复用同一判分。
+
+| 模型 | 题数 | lite_llama | vllm 0.28.0 | 差值 | 无效答案率（两端） |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Qwen2.5-0.5B-Instruct | 200 | 0.3600 | 0.3700 | −0.0100（2 题） | 0.0000 |
+| Qwen3-4B-Thinking-2507（max_gen 512） | 200 | 0.1800 | 0.2150 | −0.0350（7 题） | 0.0000 |
+
+读法：
+
+- **两端精度在噪声带内一致**：0.5B 差 2 题、4B 差 7 题，都在 200 题子集 ±0.03 的抽样噪声里（`tests/evals/configs/*.yaml` 的 tolerance 就是这个量级）。两个引擎的数值路径（bf16 GEMM、fp32 采样 logits）本就只在 ULP 级有差异，greedy 下偶发的 near-tie 翻转经过混沌放大就是几题的出入——这与 [quantization.md](quantization.md) golden prefix 的结论同源。
+- **4B Thinking 两端都低（0.18～0.22）是口径问题，不是引擎问题**：Thinking checkpoint 被调成输出长推理链（think 块），5-shot completion 格式与它的对话格式不匹配，512 token 预算常常不够它走完推理。两端同低恰好证明测的是同一件事；这个 checkpoint 的 GSM8K 数字不要拿去和 Qwen2.5-1.5B-Instruct 的 0.63（A10，见 eval_models.md）比。
+- 0.5B 的 0.36 与 `tests/evals/configs/Qwen2.5-0.5B-full.yaml` 在 A10 上的 0.3594（1319 题）一致——不同设备、不同题数子集，同一精度，说明加载与采样路径没有设备相关的漂移。
+
+复现（`$MZ` = `/mnt/otto-temp/modelzoo_with_full_weights`）：
+
+```bash
+# 性能：同一脚本换 --backend（lite 默认 graph 档）
+python benchmarks/bench_e2e.py --model-dir $MZ/Qwen/Qwen2___5-0___5B-Instruct \
+    --greedy --mode graph --batch 8 --max-gen-len 128 --json out_lite.json
+python benchmarks/bench_e2e.py --model-dir $MZ/Qwen/Qwen2___5-0___5B-Instruct \
+    --backend vllm --greedy --batch 8 --max-gen-len 128 --json out_vllm.json
+# 精度：lite 侧走 tests/evals，vllm 侧走 bench_gsm8k_vllm（同题同判分）
+python -m tests.evals.gsm8k --model-dir $MZ/Qwen/Qwen2___5-0___5B-Instruct \
+    --num-questions 200 --batch-size 32 --chat-template
+python benchmarks/bench_gsm8k_vllm.py --model-dir $MZ/Qwen/Qwen2___5-0___5B-Instruct \
+    --num-questions 200 --chat-template
+```
+
+原始日志见 `docs/benchmark_logs/vllm_compare_20260903/`（性能 6 份 + GSM8K 2 份，每份含完整 meta 与命令行）。
+
+
 ## 三 性能优化历史记录
 
 ### 迭代式优化记录

@@ -493,6 +493,86 @@ class HFBackend(Backend):
         super().close()
 
 
+class VLLMBackend(Backend):
+    """vllm offline ``LLM``: batch API with no per-step callback, so TTFT is a
+    separate one-token run — the same pattern :class:`HFBackend` uses, which is
+    what keeps the two external baselines' TTFT columns comparable.
+
+    Weights load at the checkpoint's declared dtype (the precision lite_llama
+    uses too). vllm's own CUDA-graph capture stays on (its default), matching
+    lite_llama's graph rows. Under greedy, ``min_tokens == max_gen_len`` with
+    ``ignore_eos`` locks every sequence to exactly ``max_gen_len`` steps,
+    mirroring HF's ``min_new_tokens``; under sampling, early EOS is allowed and
+    ``gen_tokens`` counts what each sequence actually produced.
+    """
+
+    def __init__(self, model_dir: str, max_model_len: int = 4096, gpu_util: float = 0.85):
+        from vllm import LLM
+
+        self.dtype = checkpoint_dtype(model_dir)
+        self.llm = LLM(
+            model=model_dir,
+            dtype=self.dtype,
+            max_model_len=max_model_len,
+            gpu_memory_utilization=gpu_util,
+        )
+        self._last_texts: list[str] = []
+
+    def measure(self, prompts: list[str], max_gen_len: int, greedy: bool) -> BenchResult:
+        from vllm import SamplingParams
+
+        base = {"temperature": 0.0} if greedy else {"temperature": 0.7, "top_p": 0.9}
+
+        # Warm up capture/autotune so the measured run is steady state.
+        for _ in range(2):
+            self.llm.generate(
+                prompts, SamplingParams(max_tokens=8, temperature=0.0), use_tqdm=False
+            )
+
+        # TTFT: one-token run — prefill plus the first sampled token.
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        self.llm.generate(prompts, SamplingParams(max_tokens=1, **base), use_tqdm=False)
+        torch.cuda.synchronize()
+        ttft = time.perf_counter() - t0
+
+        # Full run. Greedy locks the batch to exactly max_gen_len steps, the
+        # lockstep the lite_llama rows are measured under.
+        full = SamplingParams(
+            max_tokens=max_gen_len,
+            **base,
+            **({"min_tokens": max_gen_len, "ignore_eos": True} if greedy else {}),
+        )
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        outputs = self.llm.generate(prompts, full, use_tqdm=False)
+        torch.cuda.synchronize()
+        total = time.perf_counter() - t0
+
+        self._last_texts = [o.outputs[0].text for o in outputs]
+        gen_tokens = sum(len(o.outputs[0].token_ids) for o in outputs)
+        steps = max(len(o.outputs[0].token_ids) for o in outputs)
+        return BenchResult(
+            ttft_ms=ttft * 1000,
+            tpot_ms=(total - ttft) / (steps - 1) * 1000 if steps > 1 else 0.0,
+            total_s=total,
+            steps=steps,
+            batch=len(prompts),
+            gen_tokens=gen_tokens,
+        )
+
+    def sample_text(self, limit: int = 120) -> str:
+        return self._last_texts[0][:limit] if self._last_texts else ""
+
+    def close(self) -> None:
+        del self.llm
+        import gc
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        super().close()
+
+
 def make_backend(
     model_dir: str,
     *,

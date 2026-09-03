@@ -1,0 +1,13 @@
+{
+  "engine": "vllm",
+  "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2___5-0___5B-Instruct",
+  "num_questions": 200,
+  "num_shots": 5,
+  "max_gen_len": 256,
+  "chat_template": "True",
+  "accuracy": 0.37,
+  "invalid_rate": 0.0,
+  "latency_s": 1.3613870237022638,
+  "generated_tokens": 39657,
+  "questions_per_second": 146.90899539801998
+}
