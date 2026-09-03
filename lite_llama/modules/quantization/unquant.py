@@ -32,11 +32,11 @@ class UnquantizedLinearMethod(LinearMethodBase):
         layer: nn.Module,
         input_size: int,
         output_size: int,
-        dtype: torch.dtype = torch.bfloat16,
+        params_dtype: torch.dtype,
         **kw,
     ) -> None:
         layer.weight = nn.Parameter(
-            torch.empty(output_size, input_size, dtype=dtype),
+            torch.empty(output_size, input_size, dtype=params_dtype),
             requires_grad=False,
         )
 
@@ -51,8 +51,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
 
     def create_weights(self, block: nn.Module) -> dict[str, nn.Parameter]:
         # ``block.dtype`` follows the checkpoint (SparseMoeBlock reads
-        # ``config.dtype``); bf16 is the fallback for direct instantiation.
-        dtype = getattr(block, "dtype", torch.bfloat16)
+        # ``config.dtype``); a stub without one defers to PyTorch's default
+        # dtype, the same auto convention the linear layers use.
+        dtype = getattr(block, "dtype", None) or torch.get_default_dtype()
         return {
             "gate_up_proj": nn.Parameter(
                 torch.empty(

@@ -92,7 +92,9 @@ class DeepseekV2MLAAttention(nn.Module):
         # a world size that does not divide the heads then fails on the head
         # count it actually breaks, and the equal output split provably lands
         # on head boundaries.
-        self.num_heads = divide(config.num_heads, get_tensor_model_parallel_world_size(), "attention heads")
+        self.num_heads = divide(
+            config.num_heads, get_tensor_model_parallel_world_size(), "attention heads"
+        )
         self.scale = self.qk_head_dim**-0.5
 
         dtype = config.dtype
@@ -100,26 +102,31 @@ class DeepseekV2MLAAttention(nn.Module):
         q_lora_rank = config.q_lora_rank
         if q_lora_rank is None:
             self.q_proj: nn.Module | None = ColumnParallelLinear(
-                self.hidden_size, config.num_heads * self.qk_head_dim, dtype=dtype
+                self.hidden_size, config.num_heads * self.qk_head_dim, params_dtype=dtype
             )
         else:
             self.q_proj = None
-            self.q_a_proj = ReplicatedLinear(self.hidden_size, q_lora_rank, bias=bias, dtype=dtype)
+            self.q_a_proj = ReplicatedLinear(
+                self.hidden_size, q_lora_rank, bias=bias, params_dtype=dtype
+            )
             self.q_a_layernorm_weight = nn.Parameter(torch.ones(q_lora_rank, dtype=dtype))
             self.q_b_proj = ColumnParallelLinear(
-                q_lora_rank, config.num_heads * self.qk_head_dim, dtype=dtype
+                q_lora_rank, config.num_heads * self.qk_head_dim, params_dtype=dtype
             )
         self.kv_a_proj_with_mqa = ReplicatedLinear(
-            self.hidden_size, self.kv_lora_rank + self.qk_rope_head_dim, bias=bias, dtype=dtype
+            self.hidden_size,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+            bias=bias,
+            params_dtype=dtype,
         )
         self.kv_a_layernorm_weight = nn.Parameter(torch.ones(self.kv_lora_rank, dtype=dtype))
         self.kv_b_proj = ColumnParallelLinear(
             self.kv_lora_rank,
             config.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
-            dtype=dtype,
+            params_dtype=dtype,
         )
         self.o_proj = RowParallelLinear(
-            config.num_heads * self.v_head_dim, self.hidden_size, bias=bias, dtype=dtype
+            config.num_heads * self.v_head_dim, self.hidden_size, bias=bias, params_dtype=dtype
         )
 
         # YaRN: the softmax scale rides the mscale-squared factor; the rope

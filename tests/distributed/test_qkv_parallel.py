@@ -48,11 +48,11 @@ class _OneLayerDecoder(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         attn = nn.Module()
-        # fp16, not the bf16 default: ``_numbered``'s labels below are only
+        # fp16, not the auto default: ``_numbered``'s labels below are only
         # exact in an 11-bit mantissa, and this mirrors what an fp16
         # checkpoint's config.dtype passes down the real load path.
         attn.qkv_proj = QKVParallelLinear(
-            HIDDEN, NUM_HEADS, NUM_KV_HEADS, HEAD_DIM, bias=True, dtype=torch.float16
+            HIDDEN, NUM_HEADS, NUM_KV_HEADS, HEAD_DIM, bias=True, params_dtype=torch.float16
         )
         layer = nn.Module()
         layer.self_attn = attn
@@ -228,7 +228,11 @@ def test_the_fused_gemm_answers_what_three_separate_ones_answer(tokens: int):
     """
     hidden, heads, kv_heads, head_dim = 896, 14, 2, 64
     torch.manual_seed(0)
-    proj = QKVParallelLinear(hidden, heads, kv_heads, head_dim, bias=True).cuda()
+    # bf16 explicitly: the assertion's tolerance is one bf16 ulp, so the test
+    # names the precision instead of riding the auto default.
+    proj = QKVParallelLinear(
+        hidden, heads, kv_heads, head_dim, bias=True, params_dtype=torch.bfloat16
+    ).cuda()
     proj.weight.data.normal_(0, 0.05)
     proj.bias.data.normal_(0, 0.1)
     x = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16)

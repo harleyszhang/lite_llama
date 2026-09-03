@@ -28,8 +28,11 @@ class LinearBase(nn.Module):
     Subclasses decide how ``input_size``/``output_size`` are split; the
     :attr:`quant_method` owns the parameters and the multiply — composition,
     not subclassing, because sharding and storage format are orthogonal
-    choices. ``dtype`` is the checkpoint's element type, defaulting to bf16
-    for the undeclared-checkpoint case, and is threaded into
+    choices. ``params_dtype`` follows vLLM's auto convention: the layer
+    prescribes no precision of its own — the model layer passes
+    ``config.dtype`` (which follows the checkpoint's ``torch_dtype``), and
+    only a direct instantiation without one falls back to
+    ``torch.get_default_dtype()``. The resolved type is threaded into
     :meth:`create_weights` so a bf16 checkpoint never allocates fp16.
     """
 
@@ -40,22 +43,24 @@ class LinearBase(nn.Module):
         *,
         bias: bool = False,
         quant: QuantizationConfig | None = None,
-        dtype: torch.dtype = torch.bfloat16,
+        params_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         self.input_size = input_size
         self.output_size = output_size
         self.quant = quant
-        # The checkpoint's element type; the model layer passes ``config.dtype``
-        # (auto: follow config.json), and it is threaded into ``create_weights``
-        # so an unquantised layer allocates in that type rather than in fp16.
-        self.dtype = dtype
+        # The checkpoint's element type. The model layer passes ``config.dtype``
+        # (auto: follow config.json); ``None`` — a direct instantiation — defers
+        # to PyTorch's default dtype rather than prescribing one here.
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
+        self.dtype = params_dtype
         self.quant_method = (
             quant.get_quant_method(self) if quant is not None else UnquantizedLinearMethod()
         )
-        self.quant_method.create_weights(self, input_size, output_size, dtype=dtype)
+        self.quant_method.create_weights(self, input_size, output_size, params_dtype=params_dtype)
         self.bias = (
-            nn.Parameter(torch.empty(output_size, dtype=dtype), requires_grad=False)
+            nn.Parameter(torch.empty(output_size, dtype=params_dtype), requires_grad=False)
             if bias
             else None
         )
@@ -138,13 +143,13 @@ class ColumnParallelLinear(LinearBase):
         *,
         bias: bool = False,
         quant: QuantizationConfig | None = None,
-        dtype: torch.dtype = torch.bfloat16,
+        params_dtype: torch.dtype | None = None,
         what: str = "output features",
     ) -> None:
         world_size = get_tensor_model_parallel_world_size()
         local_out = divide(output_size, world_size, what)
         _check_shard_alignment(quant, local_out, what)
-        super().__init__(input_size, local_out, bias=bias, quant=quant, dtype=dtype)
+        super().__init__(input_size, local_out, bias=bias, quant=quant, params_dtype=params_dtype)
         self.full_output_size = output_size
 
     def _weight_loader(self, param, loaded, shard_id=None):
@@ -195,7 +200,7 @@ class QKVParallelLinear(LinearBase):
         *,
         bias: bool = False,
         quant: QuantizationConfig | None = None,
-        dtype: torch.dtype = torch.bfloat16,
+        params_dtype: torch.dtype | None = None,
     ) -> None:
         world_size = get_tensor_model_parallel_world_size()
         local_heads = divide(num_heads, world_size, "attention heads")
@@ -206,7 +211,9 @@ class QKVParallelLinear(LinearBase):
         # number of scale blocks while the query block alone is not.
         _check_shard_alignment(quant, q_size, "query features")
         _check_shard_alignment(quant, kv_size, "key/value features")
-        super().__init__(hidden_size, q_size + 2 * kv_size, bias=bias, quant=quant, dtype=dtype)
+        super().__init__(
+            hidden_size, q_size + 2 * kv_size, bias=bias, quant=quant, params_dtype=params_dtype
+        )
         self.num_heads = local_heads
         self.num_kv_heads = local_kv_heads
         self.head_dim = head_dim
@@ -274,6 +281,9 @@ class RowParallelLinear(LinearBase):
             a caller can time, batch or defer the collective itself (vLLM's
             ``ParallelLMHead`` uses the same escape hatch).
         what: Name of the dimension being split, for the error message.
+        params_dtype: Storage type of the parameters; ``None`` defers to
+            ``torch.get_default_dtype()`` (vLLM's auto convention — the layer
+            itself prescribes no precision).
     """
 
     def __init__(
@@ -284,7 +294,7 @@ class RowParallelLinear(LinearBase):
         bias: bool = False,
         quant: QuantizationConfig | None = None,
         reduce_results: bool = True,
-        dtype: torch.dtype = torch.bfloat16,
+        params_dtype: torch.dtype | None = None,
         what: str = "input features",
     ) -> None:
         if bias:
@@ -294,7 +304,7 @@ class RowParallelLinear(LinearBase):
         world_size = get_tensor_model_parallel_world_size()
         local_in = divide(input_size, world_size, what)
         _check_shard_alignment(quant, local_in, what)
-        super().__init__(local_in, output_size, quant=quant, dtype=dtype)
+        super().__init__(local_in, output_size, quant=quant, params_dtype=params_dtype)
         self.full_input_size = input_size
         self.reduce_results = reduce_results
 

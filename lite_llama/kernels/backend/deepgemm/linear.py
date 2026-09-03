@@ -14,10 +14,14 @@ import torch
 
 from .quant import nt_block_fp8_from_checkpoint, per_token_group_quant_fp8
 
-# data_ptr -> (w_fp8, w_scales, weight_shape). Entries are tiny (two small
-# tensors per linear layer); the shape check catches a freed-and-reused
-# allocation before it can serve a stale transpose.
-_NT_CACHE: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Size]] = {}
+# data_ptr -> (w_fp8, w_scales, source_weight). Holding the source tensor is
+# what makes the data_ptr key sound: while the reference lives, the caching
+# allocator cannot hand that address to another tensor, so a hit is always
+# this weight's own transpose. A shape check could not promise that — a
+# freed-and-reused allocation of the same shape used to slip through. A
+# reloaded layer builds a fresh tensor, misses the identity check and repacks;
+# the old entry just waits to be overwritten.
+_NT_CACHE: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
 
 def _nt_weight(
@@ -29,10 +33,10 @@ def _nt_weight(
     """Cached NT fp8 form of one linear weight."""
     key = weight.data_ptr()
     hit = _NT_CACHE.get(key)
-    if hit is not None and hit[2] == weight.shape:
+    if hit is not None and hit[2] is weight:
         return hit[0], hit[1]
     w_fp8, w_scales = nt_block_fp8_from_checkpoint(weight, weight_scale, group_n, group_k)
-    _NT_CACHE[key] = (w_fp8, w_scales, weight.shape)
+    _NT_CACHE[key] = (w_fp8, w_scales, weight)
     return w_fp8, w_scales
 
 
