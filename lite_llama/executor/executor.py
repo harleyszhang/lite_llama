@@ -14,7 +14,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import socket
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -32,6 +32,38 @@ _log = get_logger(__name__)
 #: stop signal before it is killed. A follower's remaining work is one forward
 #: pass, so this is generous.
 SHUTDOWN_TIMEOUT_S = 30.0
+
+#: How long a teardown waits for ``destroy_process_group`` before giving up on
+#: it. Eager groups destroy in milliseconds; the wait exists solely for the
+#: graph-captured case, where NCCL's abort can sit in a futex forever.
+DESTROY_DEADLINE_S = 15.0
+
+
+def _destroy_with_deadline(destroy: Callable[[], None], abandon: Callable[[], None]) -> None:
+    """Tear the group down, but never park the caller on a wedged abort.
+
+    ``destroy_process_group`` runs on a daemon thread with a deadline: eager
+    engines (the overwhelmingly common teardown) destroy promptly and notice
+    nothing; a communicator whose collectives were captured into a CUDA graph
+    can block the abort indefinitely — a PyTorch/NCCL interaction that no
+    amount of syncing or re-ordering clears from the outside. On the deadline
+    the grid is abandoned instead: the parallel-state globals reset to a world
+    of one so this process stops speaking for the group, and the wedged
+    communicator dies with the process and its CUDA context.
+    """
+    import threading
+
+    teardown = threading.Thread(target=destroy, daemon=True)
+    teardown.start()
+    teardown.join(DESTROY_DEADLINE_S)
+    if teardown.is_alive():
+        _log.warning(
+            "group teardown did not finish within %.0fs (a graph-captured "
+            "NCCL communicator can wedge its abort); abandoning the group — "
+            "it dies with this process",
+            DESTROY_DEADLINE_S,
+        )
+        abandon()
 
 
 class Executor(ABC):
@@ -67,9 +99,7 @@ class Executor(ABC):
     def shutdown(self) -> None:
         """Release whatever the executor owns beyond this object's lifetime."""
 
-    def readback_async(
-        self, tokens: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.cuda.Event | None]:
+    def readback_async(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.cuda.Event | None]:
         """Stage sampled tokens for the host without waiting for their pass.
 
         The default is the blocking degradation — ``.cpu()`` and no event —
@@ -124,9 +154,7 @@ class UniProcExecutor(Executor):
     def execute(self, model_input: ModelInput) -> tuple[torch.Tensor, PassLogprobs | None]:
         return self._worker.execute(model_input)
 
-    def readback_async(
-        self, tokens: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.cuda.Event | None]:
+    def readback_async(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.cuda.Event | None]:
         return self._worker.readback(tokens)
 
     def timeline_summary(self) -> str:
@@ -185,9 +213,7 @@ class MultiprocExecutor(Executor):
         tensor_model_parallel_broadcast_object_list(model_input)
         return self._worker.execute(model_input)
 
-    def readback_async(
-        self, tokens: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.cuda.Event | None]:
+    def readback_async(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.cuda.Event | None]:
         # Rank 0's copy is the only one that matters: followers discard their
         # tokens exactly as they discard their sampled results.
         return self._worker.readback(tokens)
@@ -215,15 +241,33 @@ class MultiprocExecutor(Executor):
         self._live = False
         if all(process.is_alive() for process in self._followers):
             tensor_model_parallel_broadcast_object_list(None)
+        if self._followers:
+            # Our half of the group goes down BEFORE the reap, not after: the
+            # followers' own teardown only completes when every rank destroys
+            # with them, so a follower whose rank 0 is parked in ``join`` is
+            # stuck inside its destructor waiting for a communicator we are
+            # holding. The deadlock is invisible to an eager run — a plain
+            # communicator tears down without the rendezvous — but one whose
+            # collectives were recorded into a CUDA graph has unfulfilled
+            # device-side state that only the group-wide destroy can release.
+            # Killing that follower then breaks OUR destroy too, which is the
+            # hang this ordering exists to prevent. The barrier lines every
+            # rank up at the destroy itself, because ``ncclCommAbort`` is
+            # collective in some NCCL versions: one rank aborting alone parks
+            # the peer's abort forever.
+            from ..distributed.parallel_state import (
+                abandon_parallel,
+                destroy_parallel,
+                tensor_model_parallel_barrier,
+            )
+
+            tensor_model_parallel_barrier()
+            _destroy_with_deadline(destroy_parallel, abandon_parallel)
         for process in self._followers:
             process.join(timeout=SHUTDOWN_TIMEOUT_S)
             if process.is_alive():
                 _log.warning("tp follower pid %s did not exit; terminating", process.pid)
                 process.terminate()
-        if self._followers:
-            from ..distributed.parallel_state import destroy_parallel
-
-            destroy_parallel()
 
 
 def ensure_followers_alive(followers: Sequence[mp.process.BaseProcess]) -> None:
@@ -344,4 +388,17 @@ def run_follower(
         _log.info("tp rank %d ready on cuda:%d", rank, rank)
         serve_plans(engine, max_num_seqs)
     finally:
-        destroy_parallel()
+        # Meet rank 0 at the destroy before running it: ncclCommAbort is
+        # collective in some NCCL versions, so the ranks have to abort
+        # together — a lone abort leaves the peer parked forever. The deadline
+        # is the belt to that braces: a communicator whose collectives were
+        # captured into a CUDA graph can park the abort itself in a futex
+        # (a PyTorch/NCCL interaction), and a follower that cannot leave its
+        # teardown never exits to be reaped.
+        from ..distributed.parallel_state import (
+            abandon_parallel,
+            tensor_model_parallel_barrier,
+        )
+
+        tensor_model_parallel_barrier()
+        _destroy_with_deadline(destroy_parallel, abandon_parallel)

@@ -109,18 +109,11 @@ def init_parallel(
     world_size = tp_size * dp_size
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", str(master_port))
-    # Decode replays a CUDA graph while prefill stays eager, so captured and
-    # non-captured collectives share one communicator for the life of the process.
-    # NCCL only supports that mix when this is 1 — with it off, a graph-captured
-    # all-reduce and an eager one can end up using the same internal buffers and
-    # the result is corrupt activations or a hang, not an error. 1 is NCCL's own
-    # default; the line is here so the requirement is stated where the group is
-    # built, and ``setdefault`` leaves a deliberate override alone.
     os.environ.setdefault("NCCL_GRAPH_MIXING_SUPPORT", "1")
+
     if not dist.is_initialized():
         dist.init_process_group(backend=backend, rank=global_rank, world_size=world_size)
-    # Every rank must create every group, in the same order, even the ones it is not
-    # a member of: ``new_group`` is itself a collective over the whole world.
+
     for replica in range(dp_size):
         members = list(range(replica * tp_size, (replica + 1) * tp_size))
         group = dist.new_group(members, backend=backend)
@@ -182,6 +175,23 @@ def destroy_parallel() -> None:
     _DP_WORLD_SIZE = 1
 
 
+def abandon_parallel() -> None:
+    """Reset the grid to a world of one without waiting on the process groups.
+
+    For a teardown whose NCCL abort refuses to complete: a communicator whose
+    collectives were captured into a CUDA graph can park ``destroy_process_group``
+    in a futex no rank can wake — a PyTorch/NCCL interaction, not something this
+    module can unstick from inside the call.
+    """
+    global _TP_RANK, _TP_WORLD_SIZE, _TP_GROUP, _TP_CPU_GROUP, _DP_RANK, _DP_WORLD_SIZE
+    _TP_RANK = 0
+    _TP_WORLD_SIZE = 1
+    _TP_GROUP = None
+    _TP_CPU_GROUP = None
+    _DP_RANK = 0
+    _DP_WORLD_SIZE = 1
+
+
 def destroy_tensor_parallel() -> None:
     """Alias of :func:`destroy_parallel`, kept for the existing TP call sites."""
     destroy_parallel()
@@ -228,15 +238,6 @@ def divide(a: int, b: int, what: str = "") -> int:
 
 # --------------------------------------------------------------------------- #
 # Collectives
-#
-# Two families. The TP family carries vLLM's ``tensor_model_parallel_*`` names
-# and always targets the module-state TP group — every existing call site means
-# that group, and the name says so at the call site. The generic family
-# (``reduce_scatter``/``all_to_all``/``send``/``recv``) expresses its domain by
-# ``group`` instead, the ``torch.distributed`` convention, because EP/CP
-# callers will own groups of their own. Each op reports to :class:`CollectiveStats`
-# *after* the world-of-one early return: a no-op collective moves no bytes, so
-# counting it would measure call sites rather than traffic.
 # --------------------------------------------------------------------------- #
 def _payload(tensor: torch.Tensor) -> int:
     """Bytes one rank contributes to a collective over ``tensor``."""
@@ -327,9 +328,7 @@ def reduce_scatter(
     return shard.movedim(0, dim)
 
 
-def all_to_all(
-    tensor: torch.Tensor, *, group: dist.ProcessGroup | None = None
-) -> torch.Tensor:
+def all_to_all(tensor: torch.Tensor, *, group: dist.ProcessGroup | None = None) -> torch.Tensor:
     """Equal-split exchange: slice ``j`` of rank ``i``'s tensor lands on rank ``j``.
 
     The EP token-exchange primitive: with tokens sorted by expert id, one
@@ -345,8 +344,7 @@ def all_to_all(
     world = dist.get_world_size(group)
     if tensor.shape[0] % world != 0:
         raise ValueError(
-            f"all_to_all dim 0 of shape {tuple(tensor.shape)} does not divide across "
-            f"{world} ranks"
+            f"all_to_all dim 0 of shape {tuple(tensor.shape)} does not divide across {world} ranks"
         )
     tensor = tensor.contiguous()
     output = torch.empty_like(tensor)
@@ -366,9 +364,7 @@ def send(tensor: torch.Tensor, dst: int, *, group: dist.ProcessGroup | None = No
     CollectiveStats.record(Collective.SEND, _payload(tensor))
 
 
-def recv(
-    tensor: torch.Tensor, src: int, *, group: dist.ProcessGroup | None = None
-) -> torch.Tensor:
+def recv(tensor: torch.Tensor, src: int, *, group: dist.ProcessGroup | None = None) -> torch.Tensor:
     """Fill ``tensor`` from rank ``src`` *within the group*; pairs with :func:`send`."""
     if _world_of_one(group):
         return tensor
@@ -394,6 +390,21 @@ def tensor_model_parallel_broadcast(tensor: torch.Tensor, src: int = 0) -> torch
     dist.broadcast(tensor, group_src=src, group=_TP_GROUP)
     CollectiveStats.record(Collective.BROADCAST, _payload(tensor))
     return tensor
+
+
+def tensor_model_parallel_barrier() -> None:
+    """Hold every TP rank here until all of them arrive, over the CPU group.
+
+    Exists for teardown: ``ncclCommAbort`` was a collective call in some NCCL
+    versions, so a rank that destroys its communicator while a peer is still
+    working parks that peer inside ``destroy_process_group`` forever. A gloo
+    barrier right before the destroy lines the ranks up so their aborts run
+    back to back — the rendezvous is host-side, so it costs nothing on the
+    device and cannot itself be blocked by whatever the NCCL streams hold.
+    """
+    if _TP_WORLD_SIZE <= 1:
+        return
+    dist.barrier(group=_TP_CPU_GROUP)
 
 
 def tensor_model_parallel_broadcast_object_list(obj: Any = None, src: int = 0) -> Any:
@@ -457,10 +468,6 @@ def tensor_model_parallel_ranks_agree(value: int) -> bool:
     disagree about which graph to replay do not produce different answers — they
     stop, one of them waiting in an all-reduce its peer never issues. A caller can
     therefore branch on this result and know its peers branch with it.
-
-    Both extremes come back from one collective: reducing ``[value, -value]`` with
-    MIN yields ``min`` and ``-max``, which are equal exactly when every rank
-    contributed the same number.
     """
     if _TP_WORLD_SIZE <= 1:
         return True

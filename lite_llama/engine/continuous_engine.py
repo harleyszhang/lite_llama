@@ -306,7 +306,11 @@ class ContinuousBatchingEngine:
         # beats paying one decode-style row per token — the per-token cost
         # that kept prefix-cache hits from lowering TTFT. An fp8 cache stores
         # e4m3 bytes the chunk kernel cannot decode, so those keep extending.
-        kv_fp8 = engine.model_runner.config.kv_cache_torch_dtype == torch.uint8
+        # Read through ``getattr`` so a test double whose model_runner is a
+        # bare namespace (no model behind it, so no cache dtype either) keeps
+        # constructing the engine instead of mimicking runner internals.
+        runner_config = getattr(engine.model_runner, "config", None)
+        kv_fp8 = runner_config is not None and runner_config.kv_cache_torch_dtype == torch.uint8
         fused = os.environ.get(_FUSED_CHUNK_ENV, "1") != "0" and not kv_fp8
 
         self._executor: Executor = executor or UniProcExecutor(

@@ -152,7 +152,7 @@ testpaths = ["tests"]
 # --import-mode=importlib keeps ``tests`` importable as a package so tests can
 # share tests/reference.py and tests/golden/cases.py instead of copy-pasting
 # reference implementations into each file.
-addopts = "-ra --strict-markers --strict-config"
+addopts = "-ra --strict-markers --strict-config --import-mode=importlib"
 markers = [
   "gpu: requires a CUDA device (auto-skipped on CPU-only machines; applied automatically to tests/kernels/)",
   "weights: requires a converted checkpoint (auto-skipped when none is found; override the location with LITE_LLAMA_TEST_MODEL_DIR)",

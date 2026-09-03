@@ -5,7 +5,7 @@ paged buffer, then dispatches prefill (varlen) or decode (paged) to the
 kernel layer using the step's :class:`AttentionMetadata`.
 
 Usage:
-    attn = PagedAttention(num_kv_heads, head_dim, kv_cache_dtype, dtype)
+    attn = PagedAttention(num_kv_heads, head_dim, kv_cache_dtype, params_dtype)
 """
 
 from __future__ import annotations
@@ -27,17 +27,24 @@ class PagedAttention(nn.Module):
     K rows occupy the first half, V rows the second. ``kv_cache_dtype`` of
     ``torch.uint8`` stores fp8-e4m3 bytes; the dequantisation scales come from
     the strategy object that :func:`~lite_llama.modules.quantization.kv_cache.get_kv_cache_method`
-    returns, so write and read cannot disagree about them.
+    returns, so write and read cannot disagree about them. Both dtype
+    arguments follow vLLM's auto convention — ``None`` defers to
+    ``torch.get_default_dtype()`` rather than the layer prescribing a
+    precision of its own; the model layer passes the checkpoint's dtype.
     """
 
     def __init__(
         self,
         num_kv_heads: int,
         head_dim: int,
-        kv_cache_dtype: torch.dtype = torch.bfloat16,
-        dtype: torch.dtype = torch.bfloat16,
+        kv_cache_dtype: torch.dtype | None = None,
+        params_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
+        if kv_cache_dtype is None:
+            kv_cache_dtype = torch.get_default_dtype()
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.scale = 1.0 / math.sqrt(head_dim)
@@ -54,14 +61,26 @@ class PagedAttention(nn.Module):
         # already quantised, so uint8 rows are as legal as bf16 ones. The decode
         # op's scheme key encodes the cache dtype this module writes.
         self._kv_write = dispatch("kv_write", dtype=kv_cache_dtype, layout=PAGED_KV_TAGS).load()
-        self._prefill = dispatch("attention.prefill", dtype=dtype).load()
-        self._chunked = dispatch("attention.chunked_prefill", dtype=dtype).load()
+        self._prefill = dispatch("attention.prefill", dtype=params_dtype).load()
+        self._chunked = dispatch("attention.chunked_prefill", dtype=params_dtype).load()
         self._decode = dispatch(
             "attention.decode",
-            dtype=dtype,
+            dtype=params_dtype,
             scheme="fp8_kv" if kv_cache_dtype == torch.uint8 else "unquantized",
             layout=PAGED_KV_TAGS,
         ).load()
+
+        # K/V halves of this layer's cache row, rebuilt only when the backing
+        # buffer changes. The live buffers are allocated once (the executor owns
+        # them for its lifetime and the CUDA graph shares the same list), so
+        # after the first step the identity check below hits and each decode
+        # step skips two slice-view constructions per layer. Profiling is the
+        # one legitimate buffer swap — its dummy forward runs on scratch rows —
+        # and the check absorbs it. Keeping the source alive alongside the
+        # views is what makes ``is`` safe: the comparison can never see a
+        # recycled address because the cached buffer cannot be freed.
+        self._kv_view_pair: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._kv_view_source: torch.Tensor | None = None
 
     def _write_cache(
         self,
@@ -75,6 +94,23 @@ class PagedAttention(nn.Module):
             xk, xv = self.kv_cache_method.quantize_kv(xk, xv)
 
         self._kv_write(xk, xv, atten_info.cur_select_index, atten_info.kv_buffer[layer_index])
+
+    def _kv_views(self, kv_buffer: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """K and V halves of a layer's cache row, held while the buffer holds.
+
+        The cache layout packs K into the first ``num_kv_heads`` rows and V into
+        the rest; both kernels want the halves as separate tensors, and both
+        call sites used to slice them afresh on every step.
+        """
+        views = self._kv_view_pair
+        if views is None or self._kv_view_source is not kv_buffer:
+            self._kv_view_source = kv_buffer
+            views = (
+                kv_buffer[:, : self.num_kv_heads, :],
+                kv_buffer[:, self.num_kv_heads :, :],
+            )
+            self._kv_view_pair = views
+        return views
 
     def context_forward(
         self,
@@ -100,11 +136,11 @@ class PagedAttention(nn.Module):
         """
         self._write_cache(xk, xv, atten_info, layer_index)
         if atten_info.b_prefix_len is not None:
-            kv_buffer = atten_info.kv_buffer[layer_index]
+            k_cache, v_cache = self._kv_views(atten_info.kv_buffer[layer_index])
             return self._chunked(
                 xq,
-                kv_buffer[:, : self.num_kv_heads, :],
-                kv_buffer[:, self.num_kv_heads :, :],
+                k_cache,
+                v_cache,
                 self.scale,
                 atten_info.b_start_loc,
                 atten_info.b_kv_base,
@@ -136,11 +172,11 @@ class PagedAttention(nn.Module):
             ``[batch, num_heads, head_dim]``.
         """
         self._write_cache(xk, xv, atten_info, layer_index)
-        kv_buffer = atten_info.kv_buffer[layer_index]
+        k_cache, v_cache = self._kv_views(atten_info.kv_buffer[layer_index])
         return self._decode(
             xq,
-            kv_buffer[:, : self.num_kv_heads, :],
-            kv_buffer[:, self.num_kv_heads :, :],
+            k_cache,
+            v_cache,
             self.scale,
             atten_info.b_req_tokens_table,
             atten_info.b_req_idx,
