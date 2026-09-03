@@ -14,36 +14,6 @@ whole reason it beats plain int4 on accuracy at the same bit width:
 
 Reconstruction is ``w = e2m1(nibble) * e4m3(block_scale) * global_scale``.
 
-This is **weight-only**, and on sm90 there is no other option: no fp4 MMA, and
-no fp4 dtype in Triton. What that buys and what it costs, measured on an H100 at
-the Qwen3-4B ``qkv`` shape (``n=6144, k=2560``) rather than predicted:
-
-* **Bytes: 3.56x less weight** than bf16 -- 4 bits per element plus one e4m3
-  byte per 16, so 4.5 bits against 16. This part is arithmetic, not a benchmark.
-* **Latency: about 2x *worse* than bf16 at decode** (~46 us against cuBLAS'
-  ~22 us at ``m=1``), and worse still against ``w8a16`` fp8. The kernel is not
-  bandwidth-bound and cannot be made so: decoding one e2m1 nibble takes ~10
-  integer ops, so 15.7M weight elements cost ~20 us of pure ALU against a 2.4 us
-  HBM floor for the 8.4 MB they occupy. Tiling closed a 2.2x gap (see
-  :func:`_launch_config`); no tiling closes this one.
-
-So the honest reading is that NVFP4 here is a **memory-footprint** format, not a
-speed one: it is what lets a checkpoint or a KV budget fit, and it costs
-throughput to use. A TFLOP/s or GB/s column below the bf16 row is the expected
-result and not a defect. Getting the speed as well needs hardware fp4 (sm100's
-MMA, or at minimum the PTX conversion instructions), which is out of reach from
-Triton on this device.
-
-Two consequences of the 16-element block shape the kernel:
-
-* ``BLOCK_K`` must be a multiple of 16 so a k-tile never straddles a block scale
-  boundary. :func:`nvfp4_matmul` enforces it.
-* Unlike :mod:`.w8a16`, the scale **cannot** be hoisted out of ``tl.dot``: it
-  varies within the k-tile, so it has to be multiplied into the operand. The
-  product is then narrowed back to the activation's dtype before the dot, which
-  is exact — an e2m1 value carries 2 significant bits and an e4m3 scale 4, so
-  their product needs 6, and both fp16 (11) and bf16 (8) hold it.
-
 Usage:
     y = nvfp4_matmul(x, qweight, block_scale, global_scale)
 """
@@ -54,6 +24,7 @@ import torch
 import triton
 import triton.language as tl
 
+from ..tile_policy import TileTier, resolve_tiles, tile_tier
 from .w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
 
 #: Weight elements sharing one block scale. Fixed by the format, not tunable.
@@ -81,18 +52,6 @@ def dequant_e2m1(nibble):
     exponent field ``e - 1 + 127``, mantissa top bit ``m``. ``e == 0`` is the
     subnormal row and does not follow that rule — it encodes ``m * 0.5``, i.e.
     ``{0, 0.5}`` — so it is patched in afterwards rather than computed.
-
-    Assembling the bits beats ``exp2(e - 1) * (1 + m * 0.5)``: no transcendental
-    unit, and the result is exact by construction rather than exact in practice.
-    All 16 encodings round-trip, ``-0`` included (it comes out as ``-0.0``, which
-    contributes nothing to an accumulator).
-
-    A second decoder that assembles fp16 bit patterns instead of fp32 ones (the
-    magnitude index maps to ``(idx + 28) << 9`` for ``idx >= 2``) was written and
-    benchmarked against this one: **bit-identical output** at every shape tried,
-    8% faster at decode and 12% slower at prefill. Not worth a second code path,
-    but the agreement is useful corroboration that this bit surgery is right,
-    from something other than the torch reference.
     """
     exponent = (nibble >> 1) & 0x3
     mantissa = nibble & 0x1
@@ -216,30 +175,52 @@ def _nvfp4_matmul_kernel(
 # --------------------------------------------------------------------------- #
 # Launch configuration
 # --------------------------------------------------------------------------- #
-def _launch_config(num_tokens: int) -> dict:
-    """Tile shape for ``num_tokens`` rows of activations.
+def _launch_config(num_tokens: int, device_index: int | None) -> dict:
+    """Tile shape for ``num_tokens`` rows on this device.
 
-    Measured, not inherited. A sweep of ``BLOCK_M x BLOCK_N x BLOCK_K x GROUP_M x
-    warps x stages`` over the four Qwen3-4B projection shapes, scored on the sum
-    of the four latencies at each token count, produced the table below on an
-    H100. Two of its findings are worth keeping because they are not what
-    :mod:`.w8a16`'s table would have suggested:
+    Hopper and above: measured, not inherited. A sweep of ``BLOCK_M x BLOCK_N
+    x BLOCK_K x GROUP_M x warps x stages`` over the four Qwen3-4B projection
+    shapes, scored on the sum of the four latencies at each token count,
+    produced the sm90 table below on an H100.
 
-    * ``BLOCK_K = 256``, not 128, and by a wide margin at every ``m``. At half a
-      byte per weight element a 128-wide k-tile fetches only 64 bytes per output
-      channel -- half of a 128-byte transaction. 256 fills it. 512 wins nothing
-      further and loses on registers.
-    * ``BLOCK_N = 32`` with 4 warps, where the 8-bit kernels want 128 and 8. The
-      unpacked ``[BLOCK_N, BLOCK_K]`` operand is what constrains this kernel, so
-      the narrow tile that keeps it in registers beats the wide tile that gives
-      the dot more to chew on. Going from the w8a16-shaped guess (N=128, K=128,
-      8 warps) to this table is a **2.2x** improvement at ``m=1``.
-
-    Picking from a table rather than ``autotune.get_best_config`` keeps a store
-    lookup off the decode path, where the whole projection is a few tens of
-    microseconds. ``BLOCK_K`` stays a multiple of :data:`NVFP4_BLOCK` whatever
-    else changes, or a k-tile would straddle a block scale.
+    Pre-Hopper: **not measured** — nvfp4 has only been swept on sm90, and the
+    sm90 table does not even fit sm86-class parts: ``BLOCK_K=256`` with 3
+    stages needs ~110 KB of shared memory per program against A10's 100 KB
+    budget, so Triton would spill or refuse the config outright. The table
+    below is a conservative default for those devices (halved k-tile, two
+    stages, ~25 KB per program) rather than a measured one — the intended
+    path for any hardware this file was never swept on is the autotune
+    store, whose per-GPU entry :func:`~lite_llama.kernels.ops.tile_policy.
+    resolve_tiles` consults before either table.
     """
+    if tile_tier(device_index) is TileTier.PRE_HOPPER:
+        # Conservative pre-Hopper default (unmeasured; autotune overrides).
+        if num_tokens <= 32:
+            return {
+                "BLOCK_M": 16,
+                "BLOCK_N": 64,
+                "BLOCK_K": 128,
+                "GROUP_M": 8,
+                "num_warps": 4,
+                "num_stages": 2,
+            }
+        if num_tokens <= 512:
+            return {
+                "BLOCK_M": 32,
+                "BLOCK_N": 64,
+                "BLOCK_K": 128,
+                "GROUP_M": 8,
+                "num_warps": 4,
+                "num_stages": 2,
+            }
+        return {
+            "BLOCK_M": 64,
+            "BLOCK_N": 64,
+            "BLOCK_K": 128,
+            "GROUP_M": 8,
+            "num_warps": 4,
+            "num_stages": 2,
+        }
     if num_tokens <= 16:
         return {
             "BLOCK_M": 16,
@@ -336,7 +317,20 @@ def nvfp4_matmul(
     m = a.shape[0]
     out = torch.empty((m, n), dtype=x.dtype, device=x.device)
 
-    cfg = _launch_config(m)
+    # Autotune lookup (per-GPU entry) or the device-tiered heuristic, both
+    # behind ``resolve_tiles``. The kernel masks a ragged k-tail, so the only
+    # invariant a tuned BLOCK_K has to keep is the 16-element scale group —
+    # ``block_k_multiple`` converges it.
+    cfg = resolve_tiles(
+        "nvfp4_matmul",
+        m=m,
+        n=n,
+        k=k,
+        dtype_label="nvfp4",
+        heuristic=lambda dev: _launch_config(m, dev),
+        device_index=x.device.index,
+        block_k_multiple=NVFP4_BLOCK,
+    )
     grid = (triton.cdiv(m, cfg["BLOCK_M"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
     _nvfp4_matmul_kernel[grid](
         a,
