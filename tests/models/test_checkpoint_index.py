@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,20 @@ from tests.conftest import REPO_ROOT
 
 #: Scale tables are consumed by the loader, not handed to the model.
 _SCALE_SUFFIX = ".weight_scale_inv"
+
+#: Layers the model never built map to ``None`` on purpose — the MTP/nextn
+#: heads a DeepSeek checkpoint ships past its stack
+#: (``num_nextn_predict_layers``), or the tail an ``hf_overrides`` trim cut
+#: away (``DecoderLayer.translate_weight_key`` documents the drop). Every
+#: other key must still reach a parameter: silently dropping those is
+#: exactly what this file exists to catch.
+_DROPPED_LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.")
+
+
+def _dropped_layer(key: str, config: ModelConfig) -> bool:
+    match = _DROPPED_LAYER_RE.match(key)
+    return match is not None and int(match.group(1)) >= config.num_layers
+
 
 #: AWQ/GPTQ key renaming (matches the non-tensor part of adapt_packed_checkpoint).
 _INT4_KEY_RENAMES: dict[str, str | None] = {
@@ -113,8 +128,12 @@ def test_at_least_one_checkpoint_was_examined():
 
 def test_every_checkpoint_key_reaches_a_parameter(mapping):
     """An unmapped key means weights silently dropped on the floor."""
-    _, translated, params, _ = mapping
-    unmapped = [k for k, name in translated.items() if name is None or name not in params]
+    _, translated, params, config = mapping
+    unmapped = [
+        k
+        for k, name in translated.items()
+        if (name is None or name not in params) and not _dropped_layer(k, config)
+    ]
     assert not unmapped, f"{len(unmapped)} keys map nowhere, e.g. {unmapped[:5]}"
 
 
