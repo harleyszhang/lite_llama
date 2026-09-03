@@ -58,6 +58,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "unpack_int8_experts": (".ops.quantization", "unpack_int8_experts"),
     "w4a16_matmul": (".ops.quantization", "w4a16_matmul"),
     "w8a16_matmul": (".ops.quantization", "w8a16_matmul"),
+    "qk_rmsnorm": (".ops.layernorm.skip_rmsnorm", "qk_rmsnorm"),
     "rope_emb_forward": (".ops.rope.rope_emb", "rope_emb_forward"),
 }
 
@@ -105,6 +106,7 @@ __all__ = [
     "moe_align_block_size",
     "op_backend_env",
     "ops",
+    "qk_rmsnorm",
     "relu",
     "repack_int4_experts",
     "rope_emb_forward",

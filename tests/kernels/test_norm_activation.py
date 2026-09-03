@@ -1,8 +1,9 @@
 """Tests for the fused norm and activation kernels.
 
 ``skip_rmsnorm`` is checked for value, post-add residual and unit-RMS
-invariants; the SwiGLU pair (split and fused) against eager references
-including the zero-gate edge.
+invariants, ``qk_rmsnorm`` for bit-identity against two ``skip_rmsnorm``
+calls; the SwiGLU pair (split and fused) against eager references including
+the zero-gate edge.
 
 Usage:
     pytest tests/kernels/test_norm_activation.py
@@ -13,7 +14,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.kernels import skip_rmsnorm, swiglu_forward, swiglu_forward_fused
+from lite_llama.kernels import qk_rmsnorm, skip_rmsnorm, swiglu_forward, swiglu_forward_fused
 from tests import reference
 
 _RTOL, _ATOL = 2e-2, 2e-2
@@ -89,6 +90,76 @@ def test_skip_rmsnorm_normalises_to_unit_rms():
 
 
 # --------------------------------------------------------------------------- #
+# qk_rmsnorm
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "geometry",
+    [
+        pytest.param((1, 32, 8, 128), id="decode-gqa"),
+        pytest.param((64, 32, 8, 128), id="prefill-gqa"),
+        pytest.param((16, 16, 16, 128), id="mha"),
+        pytest.param((3, 5, 3, 96), id="non-power-of-two"),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_qk_rmsnorm_is_bit_identical_to_two_skip_rmsnorm(geometry, dtype):
+    """One fused launch must reproduce two ``skip_rmsnorm`` calls byte for byte.
+
+    The fusion exists to remove a launch, not to change arithmetic: it keeps
+    ``rms_norm_kernel``'s 1-D tile shape and warp count, so the fp32 variance
+    reduction is bit-identical and no generated token moves. A tolerance-based
+    comparison would pass while silently invalidating every golden baseline, so
+    the assertion is exact equality.
+    """
+    tokens, n_qh, n_kh, head_dim = geometry
+    torch.manual_seed(0)
+    eps = 1e-5
+    q = torch.randn(tokens, n_qh, head_dim, device="cuda", dtype=dtype) * 0.5
+    k = torch.randn(tokens, n_kh, head_dim, device="cuda", dtype=dtype) * 0.5
+    q_weight = torch.randn(head_dim, device="cuda", dtype=dtype) * 0.1 + 1.0
+    k_weight = torch.randn(head_dim, device="cuda", dtype=dtype) * 0.1 + 1.0
+
+    ref_q, _ = skip_rmsnorm(q, None, q_weight, eps)
+    ref_k, _ = skip_rmsnorm(k, None, k_weight, eps)
+    out_q, out_k = qk_rmsnorm(q, k, q_weight, k_weight, eps)
+
+    assert torch.equal(ref_q, out_q)
+    assert torch.equal(ref_k, out_k)
+
+
+def test_qk_rmsnorm_matches_eager_reference():
+    """Also checked against the eager formula, not only against the kernel.
+
+    Comparing two kernels that share a bug would pass; the reference is the
+    independent spelling of RMSNorm.
+    """
+    tokens, n_qh, n_kh, head_dim = 2, 8, 2, 128
+    q = torch.randn(tokens, n_qh, head_dim, device="cuda", dtype=torch.float16)
+    k = torch.randn(tokens, n_kh, head_dim, device="cuda", dtype=torch.float16)
+    q_weight = torch.randn(head_dim, device="cuda", dtype=torch.float16)
+    k_weight = torch.randn(head_dim, device="cuda", dtype=torch.float16)
+
+    out_q, out_k = qk_rmsnorm(q, k, q_weight, k_weight)
+    ref_q, _ = reference.skip_rmsnorm(q.reshape(-1, head_dim), None, q_weight)
+    ref_k, _ = reference.skip_rmsnorm(k.reshape(-1, head_dim), None, k_weight)
+
+    torch.testing.assert_close(
+        out_q.reshape(-1, head_dim).float(), ref_q.float(), rtol=_RTOL, atol=_ATOL
+    )
+    torch.testing.assert_close(
+        out_k.reshape(-1, head_dim).float(), ref_k.float(), rtol=_RTOL, atol=_ATOL
+    )
+
+
+def test_qk_rmsnorm_rejects_mismatched_head_dim():
+    """q and k share one BLOCK_SIZE, so differing head_dim must fail loudly."""
+    q = torch.randn(1, 4, 128, device="cuda", dtype=torch.float16)
+    k = torch.randn(1, 2, 64, device="cuda", dtype=torch.float16)
+    with pytest.raises(ValueError, match="head_dim"):
+        qk_rmsnorm(q, k, torch.ones(128, device="cuda"), torch.ones(64, device="cuda"))
+
+
+# --------------------------------------------------------------------------- #
 # swiglu_forward
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
@@ -149,9 +220,9 @@ def test_swiglu_fused_matches_split_reference(shape):
 def test_swiglu_fused_zero_gate_gives_zero():
     """A zero gate half must annihilate the up half even in the fused layout."""
     inter = 128
-    fused = torch.cat(
-        [torch.zeros(1, 4, inter), torch.randn(1, 4, inter)], dim=-1
-    ).to(device="cuda", dtype=torch.float16)
+    fused = torch.cat([torch.zeros(1, 4, inter), torch.randn(1, 4, inter)], dim=-1).to(
+        device="cuda", dtype=torch.float16
+    )
     out = swiglu_forward_fused(fused)
     assert torch.count_nonzero(out) == 0
 
