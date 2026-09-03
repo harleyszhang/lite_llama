@@ -2,9 +2,13 @@
 
 ### 量化内核性能（W8A16 / W4A16 / SmoothQuant）
 
-以下为量化 Triton 内核在 A10 (24 GB, SM86) 上的 `triton.testing.do_bench` 实测结果。基准为 cuBLAS fp16 `F.linear`；加速来自减半（或减至 1/4）的 HBM 权重读取量。
+两台设备分开记，因为**同一格式在两台机器上可以给出相反的结论**：A10（sm86）的 HBM 约 600 GB/s，decode 档几乎全程在等显存，省下的字节直接兑现；H100（sm90）有 3.35 TB/s，bf16 在中尺寸投影上只占峰值带宽的 43.5%，内核根本没在等显存，反量化的 ALU 开销就是纯增量成本。两节的 shape 也不同（A10 是合成方阵，H100 是 checkpoint 的真实投影），**绝对值不要跨表比较**，只读各表内的相对位置。
 
-#### W8A16 (fp8-e4m3, 128×128 block scales)
+#### A10 (24 GB, SM86)
+
+以下为量化 Triton 内核在 `A10` 上的 `triton.testing.do_bench` 实测结果（2026-08-22 口径、合成 shape）。基准为 cuBLAS fp16 `F.linear`；加速来自减半（或减至 1/4）的 HBM 权重读取量。此后内核经过多轮改动（v0.6 重写、`FP8_CVT` 硬件 `cvt` 分叉、0903 按 H100 扫描重定 tile fallback），**A10 未复测**，绝对值仅供参考，下面的 roofline 判据仍然成立。
+
+##### W8A16 (fp8-e4m3, 128×128 block scales)
 
 | Shape (M×N×K) | fp16 (ms) | w8a16 (ms) | 加速比 | 场景 |
 |---------------|-----------|------------|--------|------|
@@ -14,30 +18,67 @@
 | 64×4096×4096 | 0.091 | 0.055 | **1.64×** | small prefill |
 | 512×4096×4096 | 0.191 | 0.280 | 0.68× | prefill (compute-bound) |
 
-结论：decode 阶段（M≤64）稳定 **1.6–1.7× 加速**；prefill 阶段（M≥512）内核为 compute-bound，fp8 路径无优势（此时应回退到 cuBLAS fp16）。
+判据（roofline）与 H100 矩阵一致，但 **W8A16 这一行的胜负在两台机器上是反的**。decode（M≤64）算术强度低、卡在 HBM 带宽上，W8A16 把权重字节减半直接缩短搬运，在 A10（~600 GB/s）稳定 1.6–1.7×；prefill（M≥512）算术强度高、卡在算力上，W8A16 反量化后走 fp16-rate dot，算力上限就是 cuBLAS fp16 同档，省下的字节不在瓶颈上，于是 0.68×——此时应回退 cuBLAS fp16。同一格式到 H100 上 decode 档反而输（qkv 的 M=1/8/32 为 0.76–0.79×；24 个 decode 测试点里只有 qwen3-4b/gate_up 的两个还赢，1.21–1.22×，见[下文](#h100-80-gb-sm90)）：3.35 TB/s 的带宽让 bf16 只占峰值 43.5%（gate_up 才到 60.9%），内核没在等显存，删字节省不下时间。A10（sm86）没有原生 fp8 GEMM，所以真 W8A8（激活也量化）在这里只能付量化开销、拿不到 MMA 收益；完整的「量化什么时候赢/输」推导见 [quantization.md](quantization.md) 的 roofline 一节与 [quant_matrix_20260901.md](benchmark_logs/quant_matrix_20260901.md) §1.1a。
 
-#### W4A16 (int4, group_size=128)
+##### W4A16 (int4, group_size=128)（初版内核，勿引用）
 
-| Shape (M×N×K) | fp16 (ms) | w4a16 (ms) | 加速比 | 备注 |
+> ⚠️ 数据来源：本表数字来自 2026-08-22 落地的**初版内核**（逐 word load + `tl.static_range(8)` 解 nibble + 外积累加、tile 硬编码、无 autotune），**并非现版内核的实测**。该内核已被 v0.5（`fe85690`，`tl.dot` 重写 + autotune 收集脚本）与 v0.6（合并字加载 + `BLOCK_K=256` + `GROUP_M=8`）重写取代——当时注记里的三项「后续计划」（向量化 unpack、`tl.dot` 替代 outer product、autotuning）全部已完成。因此这些倍数**勿引用**，请以下方 [H100 实测表](#h100-80-gb-sm90)为准：现版内核的 decode 档是 0.35–0.88×（M=1/8 档 0.50–0.88×），不再是这里的 0.11–0.49×。
+> 内存节省与内核版本、设备均无关，仍然有效：30B 模型 int4 权重仅占 ~15 GB（fp16 需 ~61 GB）。
+
+| Shape (M×N×K) | fp16 (ms) | w4a16 (ms) | 加速比 | 场景 |
 |---------------|-----------|------------|--------|------|
-| 1×4096×4096 | 0.086 | 0.176 | 0.49× | 未优化 |
-| 8×4096×4096 | 0.084 | 0.311 | 0.27× | 未优化 |
-| 64×4096×4096 | 0.091 | 0.832 | 0.11× | 未优化 |
+| 1×4096×4096 | 0.086 | 0.176 | 0.49× | decode |
+| 8×4096×4096 | 0.084 | 0.311 | 0.27× | decode batch |
+| 64×4096×4096 | 0.091 | 0.832 | 0.11× | small prefill |
 
-> ⚠️ W4A16 内核当前为功能实现，尚未做 tile 级优化（逐元素 unpack + outer product）。
-> 后续计划：向量化 unpack、`tl.dot` 替代 outer product、autotuning。
-> 内存节省仍然有效：30B 模型 int4 权重仅占 ~15 GB（fp16 需 ~61 GB）。
-
-#### SmoothQuant W8A8 (dynamic per-token)
+##### SmoothQuant W8A8 (dynamic per-token)
 
 | Shape (M×N×K) | fp16 (ms) | smoothquant (ms) | 加速比 | 备注 |
 |---------------|-----------|------------------|--------|------|
 | 8×256×512 | — | ✓ | — | 精度验证通过 |
 | 64×2048×2048 | — | ✓ | — | 精度验证通过 |
 
-精度：相对 fp32 参考的相对误差 < 2%（含激活 + 权重量化双重噪声）。
+精度：相对 fp32 参考的相对误差 < 2%（含激活 + 权重量化双重噪声）。A10 上只做了精度验证（shape 太小，性能读数无意义）；它的性能行就是[下文 H100 矩阵](#h100-80-gb-sm90)的 `int8 W8A8` 列——同一个内核（int8 权重 + 内核内 per-token int8 激活量化）。
+
+#### H100 (80 GB, SM90)
+
+测于 NVIDIA H100 80GB HBM3（3352 GB/s 峰值带宽、989 TFLOP/s dense tensor core），torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7，2026-09-03 口径，数据来自 [`bench_quant_gemm_h100_20260903d.json`](benchmark_logs/bench_quant_gemm_h100_20260903d.json)，以 `LITE_LLAMA_AUTOTUNE=0` 运行——即用户没有调优缓存时拿到的启发式 tile。shape 是两个 checkpoint 的四个真实投影（qwen3-4b：hidden 2560 / intermediate 9728；qwen3-30b-a3b：hidden 2048 / moe_intermediate 768）× 6 个 token 档（1/8/32/128/512/2048）= 48 个测试点 × 6 个 scheme。括号内为相对 bf16 的加速比（bf16 耗时 ÷ 该格式耗时），大于 1 即快于基线。
+
+##### 中尺寸投影：qwen3-4b/qkv（N=6144, K=2560）
+
+| M | bf16 | fp8 W8A16 | fp8 W8A8 | int8 W8A8 | int4 (awq) | nvfp4 |
+|---|---|---|---|---|---|---|
+| 1 | 21.6 µs | 28.2 (0.77×) | 22.0 (0.98×) | **20.2 (1.07×)** | 29.8 (0.72×) | 49.1 (0.44×) |
+| 8 | 21.4 | 27.2 (0.79×) | 22.6 (0.95×) | **20.7 (1.03×)** | 29.4 (0.73×) | 48.7 (0.44×) |
+| 32 | 21.7 | 28.4 (0.76×) | 23.4 (0.93×) | **21.3 (1.02×)** | 38.7 (0.56×) | 50.6 (0.43×) |
+| 128 | 21.5 | 49.6 (0.43×) | 27.3 (0.79×) | 24.1 (0.89×) | 58.2 (0.37×) | 67.9 (0.32×) |
+| 512 | 30.7 | 81.7 (0.38×) | 37.5 (0.82×) | **30.5 (1.01×)** | 137.5 (0.22×) | 219.2 (0.14×) |
+| 2048 | 90.8 | 252.2 (0.36×) | 93.5 (0.97×) | **73.7 (1.23×)** | 512.2 (0.18×) | 728.4 (0.12×) |
+
+##### 最大权重投影：qwen3-4b/gate_up（N=19456, K=2560，bf16 权重 ~100 MB）
+
+| M | bf16 | fp8 W8A16 | fp8 W8A8 | int8 W8A8 | int4 (awq) | nvfp4 |
+|---|---|---|---|---|---|---|
+| 1 | 48.8 | 40.4 (1.21×) | 34.2 (1.43×) | **33.5 (1.46×)** | 61.3 (0.80×) | 117.4 (0.42×) |
+| 8 | 49.0 | 40.0 (1.22×) | 35.0 (1.40×) | **34.1 (1.44×)** | 60.3 (0.81×) | 118.2 (0.41×) |
+| 32 | 50.4 | 57.7 (0.87×) | **36.3 (1.39×)** | 36.7 (1.38×) | 112.4 (0.45×) | 122.8 (0.41×) |
+| 128 | 50.2 | 142.5 (0.35×) | 50.1 (1.00×) | **44.5 (1.13×)** | 168.4 (0.30×) | 187.0 (0.27×) |
+| 512 | 81.7 | 211.5 (0.39×) | 82.1 (0.99×) | **67.7 (1.21×)** | 412.4 (0.20×) | 647.4 (0.13×) |
+| 2048 | 304.1 | 789.8 (0.39×) | 276.5 (1.10×) | **210.5 (1.45×)** | 1560.5 (0.19×) | 2254.2 (0.13×) |
+
+##### 胜负统计与判据
+
+- **48 个测试点里 cuBLAS bf16 在 35 个最快**；剩下 13 个有量化行反超，共 20 个 scheme 胜场（int8 W8A8 13 / fp8 W8A8 5 / fp8 W8A16 2），集中在 gate_up 全部 6 档、qwen3-4b/qkv 的 5 档与 30B 的两个 prefill 测试点。int8 W8A8 在 gate_up 六个档上跑 1.46× / 1.44× / 1.38× / 1.13× / 1.21× / 1.45×——**它的胜场活过了 prefill**。
+- 门槛按格式分：**int8 W8A8 从 bf16 占峰值 HBM ~44% 起就赢**（qkv M=1 实测 43.5% → 1.07×；30B/qkv 的 38.5% 差一点没赢），fp8 W8A8 与 fp8 W8A16 只在最顶端（gate_up 的 60.9%）赢。int8 门槛更低的原因：scale 全在 epilogue，且 imma 没有 `BLOCK_M ≥ 64` 门槛；fp8 行要付 Triton 的 wgmma codegen 加一个每 token 激活量化 pass（JSON 的 `ablation` 行单独隔离了后者）。
+- decode（M≤32）对 bf16 的几何均值差距：int8 W8A8 1.16×、fp8 W8A8 1.29×、**w4a16 1.65×**、w8a16 1.71×、nvfp4 2.83×——这是唯一可能有量化行 outright 赢的区间，因为 M=1 对整张权重矩阵只有 ~2 FLOP/byte，而 H100 的 ridge 在 ~295。int4 的 decode 列要软着读：同一 launch config 在 m=1 的 run-to-run 波动是 22–30 µs。
+- prefill（M≥512）算术强度越过 ridge，cuBLAS 开始真正吃 tensor core（m=2048 各投影 390–766 TFLOP/s，中尺寸投影 ~73% 峰值）。epilogue-scale 修复把 fp8 W8A8 的差距拉到 1.34×、int8 W8A8 到 1.12×（两者 outright 赢 gate_up 与 qkv），weight-only 行仍被解包循环钉死：w4a16 4.45×、w8a16 2.70×、nvfp4 6.58×。
+- **W4A16 现状**（对照上面 A10 那张初版内核表，那张表勿引用）：decode（M≤32）0.35–0.88×（M=1/8 档 0.50–0.88×，M=32 档掉到 0.35–0.86×；最高 30B/down 的 M=8 0.88×）、prefill（M≥512）0.17–0.47×。内核 docstring 记录了同 shape 家族（N=K=4096）的重写前后：m=1 从 33.9 → 23.2 µs（cuBLAS fp16 23.1 µs，即打平）、m=64 从 49.9 → 31.1 µs。它也是五个 dense 量化内核里唯一读 autotune store 的，`--tune` 后 m≥512 还能再快 13–25%。
+- **NVFP4 48 个测试点全输**（包括那 13 个有别的量化行赢的），是结论不是 bug：e2m1 解包每权重元素约 10 条整数运算，比它省下的字节贵一个数量级——读作显存的价格。
+- 与 A10 的关键差异：同一个 W8A16 格式，A10 上 decode 稳定赢 1.6–1.7×，H100 上 24 个 decode 测试点只赢 2 个（都在 gate_up，1.21–1.22×）、qkv 档输到 0.76–0.79×——A10 的 600 GB/s 让 bf16 自己就卡在带宽上，删字节直接省时间；H100 的 bf16 只占峰值 43.5%，内核没在等显存。反过来 H100 有 sm90 的 fp8 `wgmma`（`BLOCK_M ≥ 64` 才发射）与 int8 `imma`（`BLOCK_M=16` 起可用），所以真 W8A8 两行在 H100 才有胜机（int8 decode 赢 6/24、fp8 W8A8 赢 3/24，全在 bf16 带宽占比高的投影），而这两行在 A10（sm86 无原生 fp8 GEMM）上付的是纯开销。
 
 #### 量化算子精度汇总
+
+精度与设备无关（只取决于量化粒度与反量化路径）：
 
 | 量化方案 | 相对误差 (vs fp32) | 权重内存节省 |
 |----------|-------------------|-------------|
@@ -49,19 +90,25 @@
 复现：
 
 ```bash
-# 内核精度测试
-python -m pytest tests/kernels/test_quantization.py -v
+# 内核精度测试（两台设备同一套用例）
+python -m pytest tests/kernels/test_quantization.py tests/kernels/test_w4a16_accuracy.py -v
 
-# 性能基准
+# A10 口径：单点性能基准（合成 shape）
 python -c "
 import torch, triton
-from lite_llama.kernels.quantization import w8a16_matmul
+from lite_llama.kernels.ops.quantization import w8a16_matmul
 M, N, K = 1, 4096, 4096
 x = torch.randn(M, K, device='cuda', dtype=torch.float16)
 qw = torch.randn(N, K, device='cuda').to(torch.float8_e4m3fn).view(torch.uint8)
 sc = torch.ones(32, 32, device='cuda')
 print(triton.testing.do_bench(lambda: w8a16_matmul(x, qw, sc, group_n=128, group_k=128)))
 "
+
+# H100 口径：全格式矩阵（48 个测试点 × 6 scheme，真实投影 shape）
+LITE_LLAMA_AUTOTUNE=0 python benchmarks/kernels/bench_quant_gemm.py \
+    --json docs/benchmark_logs/bench_quant_gemm_h100_20260903d.json
+LITE_LLAMA_AUTOTUNE=0 python benchmarks/kernels/bench_quant_gemm.py --tokens 1 32 2048   # 只测自己服务的宽度
+python benchmarks/kernels/bench_quant_gemm.py --tune --dry-run                          # int4 tile 搜索（唯一读缓存的内核）
 ```
 
 ## 二 模型 e2e benchmark 汇总

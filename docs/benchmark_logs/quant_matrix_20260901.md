@@ -42,6 +42,14 @@
 - **Decode（M ≤ 32）**：原理上受显存限制，但决定排名的不是 `moved`，是反量化速率。int4 在 `qkv` 上追平 bf16（22.2 对 21.7 µs）是两个不同瓶颈相遇——bf16 流 31 MB、占峰值 43%，带宽受限；int4 流 7.9 MB、占 11.9%，解包受限——这个平局换一个形状就不成立。
 - **Prefill（M ≥ 512）**：受算力限制。**量化行在任何测试点都没有赢。**cuBLAS 达到张量核峰值的 73%，Triton 各行被解包循环钉死（int8 慢 1.17× 到 nvfp4 慢 8.5×）。fp8 W8A8 达到峰值的 39%——它是唯一在算术上*可能*赢的格式，但没有赢。
 
+### 1.1a 量化什么时候赢、什么时候输：roofline 判断
+
+上面 48 个测试 case 的胜负不是随机的，判据只有一条：这次 GEMM 卡在带宽还是算力上。
+
+decode（M≤32）算术强度低，时间花在从 HBM 搬权重上，是 bandwidth-bound。量化把权重字节砍半（int8/fp8）或砍到 1/4（int4），直接缩短搬运——但只有 bf16 基线本身在等显存时才兑现。看 bf16 行的带宽占比：赢的测试点全落在占比高的投影（gate_up 60.9%），占比低的（down 10.4%）内核没在等显存，删字节省不下时间，反量化是纯增量成本。本节早先一版用压缩比预测，得出 nvfp4 字节少 3.6× 所以 decode 最快的反向结论，实际它 48 个测试点全部垫底——判据是 bf16 的 %bw，不是压缩比。
+
+prefill（M≥512）算术强度高，是 compute-bound，省字节没用，能不能赢只看量化后的 MMA 吞吐是否高过 bf16。本表（0901/0902 口径）里量化行 prefill 全输：cuBLAS bf16 达张量核峰值 73%，Triton 各行被解包钉死。其中只有真 W8A8（fp8/int8，激活也量化）在算术上*可能*赢——两个操作数都进 tensor core，fp8/int8 MMA 峰值是 bf16 的 2×。fp8 W8A8 此表只到峰值 39%、0.59×，是 Triton fp8 wgmma codegen（0.7–1.05× cuBLAS）加激活量化 pass（5–17%）的编译器层边界；0903 的 epilogue 化把它拉到残余 1.05–1.5×，int8 W8A8 因 imma 无 `BLOCK_M≥64` 门槛、scale 在 epilogue，修复后 prefill 能到 1.58×。W8A16/W4A16 反量化后走 fp16-rate dot，算力上限就是 bf16 同档，prefill 结构性无胜机。完整推导见 [quantization.md](../quantization.md) 的「量化为什么常常比 bf16 慢：roofline 判断」一节。
+
 ### 1.1b `--tune` 找到的 int4 启发式缺陷
 
 五个量化 dense 内核里，**只有 `w4a16_matmul` 会读 `ConfigStore`**；fp8 W8A8、fp8/int8 W8A16 与 NVFP4 无条件计算 launch config，因此 `bench_quant_gemm.py --tune` 对它们的报告是"没有消费者"，而不是写入没人会读的缓存条目。（v0.5 的 changelog 宣称 autotune 覆盖"量化 GEMM"；对 dense 路径而言，那只是五个内核里的一个。）

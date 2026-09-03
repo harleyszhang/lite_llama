@@ -73,7 +73,7 @@ return views
 
 ![e2e A/B TPOT](images/v0111_e2e_tpot_ab.png)
 
-H100 单卡，`bench_e2e.py` 口径（greedy，gen=256，每格两次进程级重复 + 每次两轮 in-process warmup），基线 = 反演两处优化后的同一棵树（A/B 对照，不是跨版本对比）。日志：[`docs/benchmark_logs/optim_ab_h100_20260903.json`](benchmark_logs/optim_ab_h100_20260903.json)。
+H100 单卡，`bench_e2e.py` 口径（greedy，gen=256，每个配置两次进程级重复 + 每次两轮 in-process warmup），基线 = 反演两处优化后的同一棵树（A/B 对照，不是跨版本对比）。日志：[`docs/benchmark_logs/optim_ab_h100_20260903.json`](benchmark_logs/optim_ab_h100_20260903.json)。
 
 | 模型 | 模式 | batch | TPOT（基线） | TPOT（优化后） | 差值 |
 |------|------|-------|------------|---------------|------|
@@ -100,7 +100,7 @@ router tier-4 演进的 e2e A/B（Qwen3-30B-A3B-FP8，同一棵树 monkey-patch 
 434 passed in 53s                    tests/engine/ 带 checkpoint e2e
 ```
 
-已知失败两项，均与本版无关：`test_concatenated_local_logits[2]`（干净 HEAD 同样失败）；`test_dp_perf` 的 1.4× 扩展性断言对 host-bound 的 0.6B eager 不成立（单副本 1.28s vs 双副本并发 1.32s——串行会是 2.56s，副本确实并发，只是 eager TPOT 不随 batch 变化，固定工作量的墙钟 scaling 数学上就是 ~1.0×）。`test_tp_cuda_graph` 的 11 项覆盖 bf16/fp8/nvfp4 × graph × TP=2 的 capture 安装、replay 落格、与 eager 的 logits parity、以及 32 步贪心输出的逐字节一致——是 graph + TP + quant 三特性的交叉验证。
+已知失败两项，均与本版无关：`test_concatenated_local_logits[2]`（干净 HEAD 同样失败）；`test_dp_perf` 的 1.4× 扩展性断言对 host-bound 的 0.6B eager 不成立（单副本 1.28s vs 双副本并发 1.32s——串行会是 2.56s，副本确实并发，只是 eager TPOT 不随 batch 变化，固定工作量的墙钟 scaling 数学上就是 ~1.0×）。`test_tp_cuda_graph` 的 11 项覆盖 bf16/fp8/nvfp4 × graph × TP=2 的 capture 安装、replay 落桶、与 eager 的 logits parity、以及 32 步贪心输出的逐字节一致——是 graph + TP + quant 三特性的交叉验证。
 
 ## 文件清单
 

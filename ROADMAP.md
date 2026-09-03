@@ -503,7 +503,7 @@ vLLM/SGLang 的调度器与执行器是严格 1:1 的 request-response——调�
 
 ## Attention 后端矩阵
 
-地基 2 的 dispatch 在 attention 上的具体展开——后端 × 变体的二维矩阵,每格一份实现,新增后端/变体只加格子不写新类:
+地基 2 的 dispatch 在 attention 上的具体展开——后端 × 变体的二维矩阵,每个组合一份实现,新增后端/变体只加表项不写新类:
 
 | 后端 | prefill | decode | 变体覆盖 | 前置条件 |
 | --- | --- | --- | --- | --- |
@@ -513,7 +513,7 @@ vLLM/SGLang 的调度器与执行器是严格 1:1 的 request-response——调�
 | FlashInfer(external) | ✓ | ✓ | GQA / MLA | 库存在 + capability 过滤 |
 | DSA indexer(自有) | — | ✓ | DSA | MLA 先行 |
 
-对标 vLLM `AttentionBackend` 枚举(FLASH_ATTN / FLASH_ATTN_3 / FLASHINFER / TRITON / MLA 等,按 platform 选默认);差异:vLLM 每平台各写一份适配层,这里 native Triton 是全局保底行,external 后端只在 capability 命中时替换对应格子。
+对标 vLLM `AttentionBackend` 枚举(FLASH_ATTN / FLASH_ATTN_3 / FLASHINFER / TRITON / MLA 等,按 platform 选默认);差异:vLLM 每平台各写一份适配层,这里 native Triton 是全局保底行,external 后端只在 capability 命中时替换对应表项。
 
 ## 统一接口设计
 
