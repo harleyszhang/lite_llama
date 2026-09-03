@@ -125,7 +125,7 @@ method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 > Model Mem 仅指模型权重；KV Capacity 为最大缓存 token 数（分页池占满剩余 GPU 显存）。
 > 基准日志：[`docs/benchmark_logs/`](../docs/benchmark_logs/)
 >
-> 上表是 0.6B 模型在 A10 上的结果。Qwen3-4B 与 Qwen3-30B-A3B 在 2×H100 上的完整矩阵——每种方案 × TP/DP × CUDA graph × KV dtype，离线与在线，附两套精度参照——见 [`quant_matrix_20260901.md`](benchmark_logs/quant_matrix_20260901.md)。它的头条结论（在 H100 的 4B 上没有任何量化方案在速度上胜过 bf16）已被 0903 的 dense GEMM tile 重扫部分推翻：int8 W8A8 现在在 48 个 kernel 级格子中的 12 个上胜过 bf16（见[下文](#dense-量化-gemm-的第三次-tile-重扫h100)），量化矩阵表待重跑后更新。
+> 上表是 0.6B 模型在 A10 上的结果。Qwen3-4B 与 Qwen3-30B-A3B 在 2×H100 上的完整矩阵——每种方案 × TP/DP × CUDA graph × KV dtype，离线与在线，附两套精度参照——见 [`quant_matrix_20260901.md`](benchmark_logs/quant_matrix_20260901.md)。它的头条结论（在 H100 的 4B 上没有任何量化方案在速度上胜过 bf16）已被 0903 的两轮 dense GEMM 修复推翻：int8 W8A8 现在 48 个 kernel 级格子中胜 13 个、fp8 W8A8 胜 5 个、fp8 W8A16 胜 2 个（见[第三次 tile 重扫](#dense-量化-gemm-的第三次-tile-重扫h100)与[第四轮 epilogue 化](#in-loop-scale-的消除epilogue-化与-wgmma-流水线h100-第四轮)），量化矩阵表待重跑后更新。
 
 ### Qwen3-30B-A3B-Instruct-2507-FP8 (MoE, 2×H100)
 
@@ -198,19 +198,19 @@ TP 切分要求每个分片都是 32 的倍数（2 值/字节 × 16 元素 block
 
 sm90 没有 fp4 MMA，Triton 也没有 fp4 dtype，所以它在构造上就是 weight-only：nibble 在寄存器里解包，`tl.dot` 仍以 bf16 运行。省下的是字节数，而在 H100 上字节并不是 decode 的瓶颈。
 
-`qwen3-4b/qkv`（N=6144，K=2560），测于 NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7），数据来自 [`bench_quant_gemm_h100_20260901.json`](benchmark_logs/bench_quant_gemm_h100_20260901.json)（以 `LITE_LLAMA_AUTOTUNE=0` 运行，即用户没有调优缓存时拿到的启发式 tile）：
+`qwen3-4b/qkv`（N=6144，K=2560），测于 NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7），数据来自 [`bench_quant_gemm_h100_20260903d.json`](benchmark_logs/bench_quant_gemm_h100_20260903d.json)（以 `LITE_LLAMA_AUTOTUNE=0` 运行，即用户没有调优缓存时拿到的启发式 tile）：
 
 | M | bf16 | fp8 W8A8 | int4 (awq) | nvfp4 |
 |---|---|---|---|---|
-| 1 | 21.7 µs | 24.0 µs | 22.2 µs | **49.0 µs** |
-| 128 | 21.5 µs | 28.5 µs | 50.6 µs | **68.5 µs** |
-| 2048 | 89.1 µs | 166.1 µs | 334.8 µs | **755.3 µs** |
+| 1 | 21.6 µs | 22.0 µs | 29.8 µs | **49.1 µs** |
+| 128 | 21.5 µs | 27.3 µs | 58.2 µs | **67.9 µs** |
+| 2048 | 90.8 µs | 93.5 µs | 512.2 µs | **728.4 µs** |
 
 同一 H100 环境下 Qwen3-4B-Thinking-2507 的端到端结果（batch 4，64 个新 token，greedy）：权重 2.63 GB，对 bf16 的 7.49 GB；TPOT 13.66 ms，对 bf16 的 4.77 ms。
 
-**请把它读作显存结果，而不是速度结果。** NVFP4 一行搬运的权重字节少 ~3.6×，decode 仍慢 2.3×、prefill 慢 8.5×——解包 nibble、用位运算展开 e2m1、再乘两个 scale 的 ALU 开销，超过了 H100 的 HBM3 省下的时间。NVFP4 适合 checkpoint 别处放不下的场合；放得下时，它就是错误的选择。
+**请把它读作显存结果，而不是速度结果。** NVFP4 一行搬运的权重字节少 ~3.6×，decode 仍慢 2.3×、prefill 慢 8.0×——解包 nibble、用位运算展开 e2m1、再乘两个 scale 的 ALU 开销，超过了 H100 的 HBM3 省下的时间。NVFP4 适合 checkpoint 别处放不下的场合；放得下时，它就是错误的选择。
 
-int4/AWQ 是一个有启发性的对照，但故事不同：它读的权重字节只有四分之一，却在 M=1 时达到**距 cuBLAS 2% 以内**。那是两个不同极限的相遇，而不是同一个极限——bf16 以峰值 HBM 的 43% 流式读取 31 MB，是带宽受限；int4 以 11.9% 读取 7.9 MB，是解包受限——所以这种持平不会转移到更宽的权重上，到 M=2048 差距拉开到 3.8×。而且它只在 `--tune` 找到的那个启发式修复之后才成立；见[下文 w4a16 的 tile 启发式缺陷](#w4a16-中的第二个-tile-启发式缺陷)。
+int4/AWQ 是一个有启发性的对照，但故事不同：它读的权重字节只有四分之一，decode 却落后 bf16 1.4×（29.8 vs 21.6 µs）——它以峰值 HBM 的 ~8% 读取 7.9 MB，是解包受限，而 bf16 以 43% 流式读取 31 MB 是带宽受限，两个不同极限没有相遇；到 M=2048 差距拉开到 5.6×。历史注记：0901 轮曾量得 m=1 22.2 µs（距 cuBLAS 2% 以内），但 w4a16 的 launcher docstring 记录了同一 launch 配置 run-to-run 在 22–30 µs 间波动，且 0902 起的五个独立轮次全部稳定在 29.6–29.9 µs——那次读数落在波动带下缘。`--tune` 找到的启发式修复（`GROUP_M` 分档）仍然是真实的，见[下文 w4a16 的 tile 启发式缺陷](#w4a16-中的第二个-tile-启发式缺陷)。
 
 精度是另一项成本：对 bf16 基线的 greedy prefix 一致率在 Qwen3-4B 上为 0.233，fp8 为 0.617，int8 为 0.822。fp4 的三个尾数状态里有两个是非规格化数（subnormal），而 16 元素的 block 是一个相当粗糙的共享指数单位。
 
@@ -288,6 +288,61 @@ w4a16 的缺陷修完后，剩下三个可改 fallback 的 kernel——`fp8_matm
 （表内数字是 new/old 的时长几何均值，<1 为更快。）新胜场全部来自 int8 W8A8：4b/gate_up 全六档（1.13–1.46×）、4b/qkv 的 m1/m8/m32/m2048（1.02–1.25×）、30b qkv 与 o 的 m2048（1.06×/1.03×）。没有一个此前胜过 bf16 的格子回退。mid 档的取舍如实记录：w8a16 用 30b o 投影 m64 的 -14% 换其余四投影 +2–54%（一层总时间为正）；fp8 W8A8 用 4b/qkv m64 的 -4% 换其余 +11–21%。
 
 nvfp4 与 awq 未动、仍全败（nvfp4 的 Triton 解包在 H100 上结构性劣势，见上文）；int4 的 autotune 消费者地位不变，本轮未重扫。
+
+## in-loop scale 的消除：epilogue 化与 wgmma 流水线（H100 第四轮）
+
+第三次重扫后 fp8 W8A8 的 prefill 仍落后 1.4–2.0×，这轮把原因追到了 kernel 的循环体里。PTX 检查确认 M64 档确实发射了 `wgmma.f32.e4m3.e4m3`（不是被 fallback 到 mma.sync），但吞吐只到 24% 峰值；排除 `tl.trans`（K-major 加载无差别）后，剩余嫌疑只剩循环体内这一行：
+
+```python
+accumulator += tl.dot(a, tl.trans(b)) * b_scale[None, :]
+```
+
+每个 k 步把 wgmma 产出的 `[BLOCK_M, BLOCK_N]` fp32 tile 乘一次 scale 再加回累加器——这个同步的向量乘法插在异步 wgmma 链中间，把流水线串行化了。int8 W8A8（`_smoothquant_matmul`）的 scale 全在 epilogue，同形状下到 52% 峰值，是现成的对照。
+
+**修复**：per-row scale（`group_k >= k`，即 `SINGLE_SCALE`，也是 `w8a8_fp8`/`blockwise_int8` 运行时量化的默认布局）在数学上分配律成立——先累加再整体乘一次与每块乘再累加等价，仅 fp32 舍入顺序不同（全部被现有测试容差覆盖，173 个 kernel 级测试全绿）：
+
+```python
+accumulator = tl.dot(a, tl.trans(b), acc=accumulator)   # 纯累加，wgmma 链端到端异步
+# epilogue:
+result *= b_scale[None, :]
+```
+
+同一改动进 `_w8a16_matmul`。两个配套发现也来自实测而非推断：
+
+- **fallback 必须按 `single_scale` 分叉**。128×128 tile 只有在 epilogue 路径才成立：block-scale（`SINGLE_SCALE=False`，如 Qwen FP8 checkpoint 的 128×128 布局）仍走 in-loop 路径，那个路径下 128 行累加器直接寄存器溢出——中间版曾把 M128 fallback 无条件交给两个路径，bench 里 w8a16 fp8 行（block-scale）因此回退 2.1–2.5×。现在 `_launch_config(num_tokens, single_scale)` 在 prefill 档返回 `BLOCK_M = 128 if single_scale else 64`，fp8 同样分叉。
+- **`acc=` 形式不是全档免费**。w8a16 的 int8 + SINGLE_SCALE 路径（e2e 的 `--quantization int8`，per-channel）在 decode 档实测回退 3–11%：`tl.dot(a, b, acc=)` 在小 M 档编译出的调度比「dot 后乘再加」更差，而 prefill 档提升 6–12%。所以 w8a16 加了 `EPILOGUE_SCALE` 开关，仅 `m > 128` 且 single_scale 时走 epilogue 形式——decode 回退归零，prefill 提升保留。fp8 W8A8 无此现象（decode 档同为改善），不需要开关。
+
+全路径 bench（含激活量化 pass，[`bench_quant_gemm_h100_20260903d.json`](benchmark_logs/bench_quant_gemm_h100_20260903d.json) 对 in-loop 基线 [`..._20260903.json`](benchmark_logs/bench_quant_gemm_h100_20260903.json)；bf16/awq/nvfp4/int8-smoothquant 控制行全 1.00× 持平）:
+
+| scheme | m≤8 geo | m=32–128 geo | m=512 geo | m=2048 geo | 备注 |
+|---|---|---|---|---|---|
+| fp8 W8A8 | 0.990 | 0.968 | 0.897 | **0.738** | 单格最大 1.45×（4b/qkv、30b/o m2048） |
+| fp8 W8A16（block-scale 行） | 1.000 | 1.000 | 1.005 | 1.004 | in-loop 路径未变，控制行 |
+| w8a16 int8 per-channel（SINGLE_SCALE） | — | — | — | 1.06–1.13× | kernel 级 A/B 脚本实测，bench 未覆盖此布局 |
+
+（表内数字是 new/old 时长几何均值，<1 为更快。）至此 48 格上共 20 个 scheme 胜场（int8 13、fp8 W8A8 5、fp8 W8A16 2），落在 17 个格子里——gate_up 全六档、qkv 五档、30b qkv/o 的 m2048 各一；bf16 在其余 31 格上仍是最快行。胜场的带宽门槛分层：int8 W8A8 从 ~44% 的 bf16 带宽占比起赢（qkv m1 1.07×；38.5% 处 0.96× 差一点），fp8 两格式只在 60.9%（gate_up）赢——int8 的 scale 全在 epilogue 且 imma 无 `BLOCK_M >= 64` 门槛，fp8 还驮着 Triton wgmma codegen 与激活量化 pass。
+
+### e2e 验证（第四轮修复的端到端效应）
+
+kernel 级的收益要在 e2e 上兑现。第四轮代码对 modelzoo 全部可跑权重复跑完整矩阵（每模型 × b1/s1024、b32/s512、b8/s2048、b8/s8192 四个 batch/seq 组合，TPOT 比值 new/old，<1 为更快；数据 [`e2e_matrix_20260903c/`](benchmark_logs/e2e_matrix_20260903c/) 对 in-loop 基线 [`e2e_matrix_20260903/`](benchmark_logs/e2e_matrix_20260903/)）：
+
+| 模型 | 走本轮改动路径的行 | 走未动路径的行（控制） | 判读 |
+|---|---|---|---|
+| Qwen2.5-0.5B（dense） | fp8 0.978–0.998、int8 0.999–1.027 | 0.992–1.003 | 持平：1.3 ms 步长 launch 主导，kernel 改善被淹没 |
+| Qwen3-4B（dense） | **fp8 0.963–0.999**、int8 0.999–1.009 | 0.998–1.014 | fp8 b32 +3.7%、b1 +2.3%；int8 无回退（EPILOGUE_SCALE 分档的 e2e 验证） |
+| Qwen3-30B-A3B-FP8（MoE checkpoint） | checkpoint 原生 W8A16（in-loop 路径）0.996–1.002 | bf16/kvfp8 0.948–1.002 | 持平：in-loop 路径本轮未动，此行即控制行 |
+| Qwen3-30B-A3B bf16（MoE runtime 量化） | fp8 0.992–1.001、int8 0.995–0.999 | 0.997–1.000 | 持平：MoE expert GEMM 主导 TPOT，dense 投影占比小 |
+
+三个细节值得单独记录：4B fp8 的 golden prefix 从 0.617 升到 0.686——纯累加与逐步乘加的 fp32 舍入顺序不同，greedy 混沌下方向不定（0.5B fp8 同时从 0.346 降到 0.307），不构成精度承诺；30B-FP8 b8/s8192 的 kvfp8 行 +5.1% 是全矩阵唯一超过 ±2.5% 的控制行，同组合 bf16 行 0.999 排除测量漂移，属 KV 分页池布局的运行间差异；0.5B int8 b8/s2048 的 1.027 与同模型 bf16 控制行的 0.995 同宽，在 launch-bound 噪声带内。
+
+### 剩余缺口的理论定性
+
+epilogue 化之后，还能追的和追不动的分开看：
+
+- **fp8 W8A8 prefill 仍落后 1.05–1.5× 的部分**由两块构成，`ablation: fp8_matmul only` 行可分离：Triton 的 fp8 wgmma 代码生成本身在 0.7–1.05× cuBLAS bf16 之间波动（shape 依赖），激活量化 pass 再加 5–17%。前者是编译器层工作量的边界（cuBLAS 级调优需要 CUTLASS 级手写），不是 kernel 写法问题。
+- **W8A16/W4A16 prefill 结构性落后**：反量化后走 fp16-rate `tl.dot`，理论峰值就是 bf16 同档，还额外付 unpack/widen——除 decode（权重读取减半）外没有赢的可能，Marlin 类完全融合 kernel 是另一条路。
+- **小模型 e2e（0.5B）全方案落后 bf16**：decode 步长 1.3ms 里 GEMM 只占小头，launch 与量化 pass 的固定成本主导——launch-bound，是模型尺寸的结构性结果，不是 kernel 问题。
+- **MoE（30B-A3B）b8 档量化全胜**（int8 +20.4%、smoothquant +17.6%、fp8 +16.0%）：权重读取主导时压缩直接兑现。
 
 ## Tensor 并行 × CUDA Graph
 
