@@ -151,6 +151,74 @@ def steps_to_result(
     )
 
 
+@dataclass
+class RequestRun:
+    """What one :func:`run_requests` call produced.
+
+    Both metric bases live here because benchmarks need different ones: ``step_ends``
+    gives lockstep step intervals (:meth:`result`), each request's own timestamps a
+    latency distribution anchored on ``started`` (the engine uses the same clock).
+    """
+
+    requests: list
+    started: float
+    total_s: float
+    step_ends: list[float]
+
+    @property
+    def gen_tokens(self) -> int:
+        """Tokens produced. Requests leave on their own EOS, so ``steps * batch`` overcounts."""
+        return sum(len(r.output_token_ids) for r in self.requests)
+
+    @property
+    def texts(self) -> list[str]:
+        return [r.text for r in self.requests]
+
+    def ttfts_ms(self) -> list[float]:
+        """Per-request first-token latency in ms, from submission."""
+        return [
+            (r.first_token_time - self.started) * 1000 for r in self.requests if r.first_token_time
+        ]
+
+    def latencies_ms(self) -> list[float]:
+        """Per-request completion latency in ms, from submission."""
+        return [(r.finish_time - self.started) * 1000 for r in self.requests if r.finish_time]
+
+    def result(self, batch: int) -> BenchResult:
+        """The step-interval metrics (TTFT / TPOT), the lockstep basis."""
+        return steps_to_result(
+            self.step_ends,
+            t_start=self.started,
+            total_s=self.total_s,
+            batch=batch,
+            gen_tokens=self.gen_tokens,
+        )
+
+
+def run_requests(engine, prompts: list[str], params) -> RequestRun:
+    """Submit a batch to a continuous-batching engine and step until it drains.
+
+    The one loop every offline benchmark runs; its copies differed only in which
+    numbers they derived afterwards, so the derivation moved here too. The engine is
+    not warmed up — callers do that with their own parameters. ``params`` is one
+    ``SamplingParams`` for the batch, or a sequence aligned with ``prompts`` when each
+    request needs its own.
+    """
+    torch.cuda.synchronize()
+    started = time.perf_counter()
+    per_request = isinstance(params, (list, tuple))
+    requests = [
+        engine.add_request(prompt, params[i] if per_request else params)
+        for i, prompt in enumerate(prompts)
+    ]
+    step_ends: list[float] = []
+    while engine.has_unfinished_requests():
+        engine.step()
+        step_ends.append(time.perf_counter())
+    torch.cuda.synchronize()
+    return RequestRun(requests, started, time.perf_counter() - started, step_ends)
+
+
 def print_table(results: dict[str, BenchResult]) -> None:
     for label, r in results.items():
         print(r.row(label))
@@ -262,28 +330,9 @@ class EngineBackend(Backend):
 
     def measure(self, prompts: list[str], max_gen_len: int, greedy: bool) -> BenchResult:
         self._engine.generate(prompts, sampling_params(8))  # warm up autotune + allocator
-
-        params = sampling_params(max_gen_len, greedy)
-        requests = [self._engine.add_request(prompt, params) for prompt in prompts]
-        torch.cuda.synchronize()
-        t_start = time.perf_counter()
-        step_ends: list[float] = []
-        while self._engine.has_unfinished_requests():
-            self._engine.step()
-            step_ends.append(time.perf_counter())
-        torch.cuda.synchronize()
-        total = time.perf_counter() - t_start
-
-        self._texts = [r.text for r in requests]
-        return steps_to_result(
-            step_ends,
-            t_start=t_start,
-            total_s=total,
-            batch=len(prompts),
-            # Requests leave on their own EOS, so ``steps * batch`` would overcount:
-            # sum the tokens each request actually produced.
-            gen_tokens=sum(len(r.output_token_ids) for r in requests),
-        )
+        run = run_requests(self._engine, prompts, sampling_params(max_gen_len, greedy))
+        self._texts = run.texts
+        return run.result(len(prompts))
 
     def texts(self) -> list[str]:
         return self._texts
@@ -653,12 +702,20 @@ def describe_footprint(runner, replicas: int = 1) -> tuple[float, int]:
     return weight_bytes * replicas / (1024**3), kv_tokens
 
 
-def _timed_runs(run, iters: int) -> tuple[float, list]:
-    """Median wall time of ``iters`` ``run()`` calls, sync-bounded on both sides.
+def footprint_stats(runner) -> dict:
+    """The memory and graph columns every offline benchmark reports per row."""
+    weights_gib, kv_tokens = describe_footprint(runner)
+    manager = runner._graph_manager
+    return {
+        "model_mem_gb": weights_gib,
+        "kv_cache_tokens": kv_tokens,
+        "graph_installed": manager is not None,
+        "graph_replays": None if manager is None else manager.replays,
+    }
 
-    Returns the median and every round's result, so callers can take the median of
-    the per-round token counts.
-    """
+
+def _timed_runs(run, iters: int) -> tuple[float, list]:
+    """Median wall time of ``iters`` ``run()`` calls, sync-bounded on both sides."""
     latencies: list[float] = []
     results: list = []
     for _ in range(iters):

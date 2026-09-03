@@ -27,6 +27,7 @@ from benchmarks.common import (
     count_gen_tokens,
     expand_prompts,
     free_gpu,
+    run_requests,
     sampling_params,
     write_json_log,
 )
@@ -186,21 +187,14 @@ def measure_continuous_batch(
     with continuous_engine(
         model_dir, kv_blocks, max_seq_len, max_num_seqs, warm_prompts=prompts[:2]
     ) as engine:
-        started = time.perf_counter()
-        requests = [
-            engine.add_request(prompt, params)
-            for prompt, params in zip(prompts, params_list, strict=True)
-        ]
-        while engine.has_unfinished_requests():
-            engine.step()
-        elapsed = time.perf_counter() - started
+        run = run_requests(engine, prompts, params_list)
     return Measurement(
         label=label,
-        total_s=elapsed,
-        gen_tokens=sum(len(r.output_token_ids) for r in requests),
+        total_s=run.total_s,
+        gen_tokens=run.gen_tokens,
         requests=len(prompts),
-        ttfts_ms=[(r.first_token_time - started) * 1000 for r in requests if r.first_token_time],
-        latencies_ms=[(r.finish_time - started) * 1000 for r in requests if r.finish_time],
+        ttfts_ms=run.ttfts_ms(),
+        latencies_ms=run.latencies_ms(),
     )
 
 

@@ -56,11 +56,9 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-import itertools
 import json
 import os
 import queue as queue_module
-import statistics
 import sys
 import time
 import traceback
@@ -226,7 +224,7 @@ def _golden_texts(generate, cases, penalties) -> dict[str, list[str]]:
 
 def _measure_lite(payload: dict[str, Any]) -> dict[str, Any]:
     """Stream-timed measurement of one in-process engine (TP included)."""
-    from benchmarks.common import LiteBackend
+    from benchmarks.common import LiteBackend, footprint_stats
     from lite_llama import SamplingParams
 
     spec: RunSpec = payload["spec"]
@@ -238,11 +236,7 @@ def _measure_lite(payload: dict[str, Any]) -> dict[str, Any]:
     prompts = expand_prompts(PROMPTS, payload["batch"])
     speed = backend.measure(prompts, payload["max_gen"], greedy=True)
     torch.cuda.synchronize()
-    peak_gb = torch.cuda.max_memory_allocated() / (1024**3)
-
     generator = backend.generator
-    runner = generator.engine.model_runner
-    manager = runner._graph_manager
     report: dict[str, Any] = {
         "ttft_ms": speed.ttft_ms,
         "tpot_ms": speed.tpot_ms,
@@ -250,13 +244,9 @@ def _measure_lite(payload: dict[str, Any]) -> dict[str, Any]:
         "total_s": speed.total_s,
         "gen_tokens": speed.gen_tokens,
         "batch": speed.batch,
-        "peak_mem_gb": peak_gb,
-        "model_mem_gb": sum(p.numel() * p.element_size() for p in runner.model.parameters())
-        / (1024**3),
-        "kv_cache_tokens": int(runner.kv_cache_manager.gpu_kv_buffer[0].shape[0]),
-        "graph_installed": manager is not None,
-        # Read after the timed run, so this is the count those decodes produced.
-        "graph_replays": None if manager is None else manager.replays,
+        "peak_mem_gb": torch.cuda.max_memory_allocated() / (1024**3),
+        # Read after the timed run, so the replay count is what those decodes produced.
+        **footprint_stats(generator.engine.model_runner),
     }
     report["texts"] = generator.generate(
         prompts, SamplingParams(temperature=0.0, max_gen_len=payload["max_gen"])
@@ -330,6 +320,7 @@ def _measure_cb(payload: dict[str, Any]) -> dict[str, Any]:
     weights and its own allocator peak. The other rank holds a shard of the same
     size, so the figure is per-GPU rather than per-model.
     """
+    from benchmarks.common import footprint_stats, run_requests
     from lite_llama import SamplingParams
     from lite_llama.engine import ContinuousBatchingEngine
 
@@ -351,41 +342,21 @@ def _measure_cb(payload: dict[str, Any]) -> dict[str, Any]:
             generate(prompts, SamplingParams(temperature=0.0, max_gen_len=8))
 
         params = SamplingParams(temperature=0.0, max_gen_len=payload["max_gen"])
-        requests = [engine.add_request(prompt, params) for prompt in prompts]
-        torch.cuda.synchronize()
-        start = time.perf_counter()
-        ttft: float | None = None
-        step_ends: list[float] = []
-        while engine.has_unfinished_requests():
-            engine.step()
-            now = time.perf_counter()
-            if ttft is None:
-                ttft = now - start
-            step_ends.append(now)
-        torch.cuda.synchronize()
-        total = time.perf_counter() - start
-
-        # First interval is the step after prefill, matching LiteBackend's TPOT.
-        deltas = [b - a for a, b in itertools.pairwise(step_ends)]
-        texts = [request.text for request in requests]
+        run = run_requests(engine, prompts, params)
+        speed = run.result(len(prompts))
+        texts = run.texts
         tokenizer = engine.tokenizer
         gen_tokens = sum(len(tokenizer(t, add_special_tokens=False).input_ids) for t in texts)
 
-        runner = engine.engine.model_runner
-        manager = runner._graph_manager
         report: dict[str, Any] = {
-            "ttft_ms": (ttft or 0.0) * 1000,
-            "tpot_ms": (statistics.mean(deltas) * 1000) if deltas else 0.0,
-            "tps": gen_tokens / total if total else 0.0,
-            "total_s": total,
+            "ttft_ms": speed.ttft_ms,
+            "tpot_ms": speed.tpot_ms,
+            "tps": gen_tokens / run.total_s if run.total_s else 0.0,
+            "total_s": run.total_s,
             "gen_tokens": gen_tokens,
             "batch": len(prompts),
             "peak_mem_gb": torch.cuda.max_memory_allocated() / (1024**3),
-            "model_mem_gb": sum(p.numel() * p.element_size() for p in runner.model.parameters())
-            / (1024**3),
-            "kv_cache_tokens": int(runner.kv_cache_manager.gpu_kv_buffer[0].shape[0]),
-            "graph_installed": manager is not None,
-            "graph_replays": None if manager is None else manager.replays,
+            **footprint_stats(engine.engine.model_runner),
             "texts": texts,
             "note": "rank 0 shard" if spec.tp > 1 else "",
         }
