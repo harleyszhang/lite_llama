@@ -74,41 +74,21 @@ class SparseMoeBlock(nn.Module):
         self.gate_weight = nn.Parameter(
             torch.empty(self.num_experts, self.hidden_size, dtype=self.dtype)
         )
-        # fp32 widen of the router weight, cast once on first routing and held
-        # for the module's lifetime. Casting it per step instead would launch
-        # one copy kernel per MoE layer per decode step — pure overhead, since
-        # the weight is frozen after load. ``None`` until the first forward so
-        # a test (or a loader) can still fill ``gate_weight`` afterwards; CUDA
-        # graph capture warms up three eager passes first, so the cached
-        # tensor always exists before a capture records it.
-        self._gate_weight_fp32: torch.Tensor | None = None
-        # ``noaux_tc`` (V2.5+/V3) biases the routing scores before selection.
-        # fp32 to match the widened router logits: the bias is an absolute
-        # additive term and bf16 would round away small-expert differences. The
-        # ``gate_`` prefix keeps the checkpoint key ``mlp.gate.e_score_correction_bias`
-        # folding onto it via the same suffix rule as ``mlp.gate.weight``;
-        # RawParameter so the loader's dtype pass leaves the fp32 alone.
+
         self.gate_e_score_correction_bias: nn.Parameter | None = None
         if self.topk_method == "noaux_tc":
             self.gate_e_score_correction_bias = RawParameter(
                 torch.zeros(self.num_experts, dtype=torch.float32)
             )
-        # Experts live in a ParameterDict so the state-dict keys read
-        # ``mlp.experts.{gate_up_proj,down_proj}``; the storage format is the
-        # quant method's business, not this class's.
+
         self.quant_method = (
             quant.get_quant_method(self) if quant is not None else UnquantizedFusedMoEMethod()
         )
         self.experts = nn.ParameterDict(self.quant_method.create_weights(self))
-        # ParameterDict entries are not direct attributes, so the linear layers'
-        # recurse=False binding does not reach them; bind explicitly. The router
-        # (``gate_weight``) is replicated and keeps the default whole-copy loader.
+
         for param in self.experts.values():
             param.weight_loader = self._expert_loader
-        # DeepSeek-V2 routes top-k *and* runs one dense MLP every token passes
-        # through, ``moe_intermediate_size * n_shared_experts`` wide. It rides
-        # the same quant-aware FusedMLP as the dense layers; purely routed MoEs
-        # (qwen3_moe) leave this ``None``.
+
         self.shared_experts: FusedMLP | None = None
         if config.n_shared_experts > 0:
             self.shared_experts = FusedMLP(
@@ -177,14 +157,20 @@ class SparseMoeBlock(nn.Module):
             ``(weights, ids)``, each ``[tokens, top_k]``; weights in x.dtype.
         """
         # fp32 logits, as DeepSeek's router (explicit ``.float()`` casts) and
-        # qwen3's reference semantics require: a bf16/fp16 GEMM can flip a topk
-        # pick on near-ties, and a wrong expert costs far more than the cast.
-        # The gate weight stays stored in the model dtype (parity tests read it
-        # as the model's dtype); only the GEMM widens, through the one-time
-        # cache above.
-        if self._gate_weight_fp32 is None:
-            self._gate_weight_fp32 = self.gate_weight.detach().float()
-        router_logits = F.linear(x.float(), self._gate_weight_fp32)
+        # qwen3's reference semantics require: a bf16/fp16 output can flip a
+        # topk pick on near-ties, and a wrong expert costs far more than the
+        # precision. The gate weight stays in the model dtype (parity tests
+        # read it that way) — widening it would only add a copy kernel per
+        # step, not precision, because a bf16 x bf16 tensor-core GEMM already
+        # accumulates in fp32. torch.mm's out_dtype epilogue emits the fp32
+        # logits straight from that GEMM, so no weight copy rides the critical
+        # path (vllm's router GateLinear takes the same tier-4 path). out_dtype
+        # is a CUDA-only epilogue, so CPU keeps the fp32 linear.
+        if self.gate_weight.dtype in (torch.bfloat16, torch.float16) and self.gate_weight.is_cuda:
+            x_gemm = x if x.dtype == self.gate_weight.dtype else x.to(self.gate_weight.dtype)
+            router_logits = torch.mm(x_gemm, self.gate_weight.t(), out_dtype=torch.float32)
+        else:
+            router_logits = F.linear(x.float(), self.gate_weight.float())
         if self.topk_method in ("noaux_tc", "group_limited_greedy"):
             weights, ids = grouped_topk(
                 router_logits,

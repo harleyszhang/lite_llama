@@ -10,7 +10,8 @@
     "optimizations": {
       "A": "SparseMoeBlock._route caches a one-time fp32 widen of gate_weight (was: per-layer per-step .float() cast kernel)",
       "B": "PagedAttention caches K/V half-views keyed on buffer identity (was: two slice constructions per layer per step)"
-    }
+    },
+    "superseded_2026_09_03": "Optimization A has since moved to the vllm tier-4 router path: torch.mm(x, gate_weight.T, out_dtype=fp32), a single bf16 tensor-core GEMM with fp32 accumulate/output, dropping both the fp32 weight copy and the per-step x.float() widen. The rows below measured the fp32-widen-cache version at v0.11.1 and are left unchanged; the operator-level tier-4-vs-fp32-SGEMM speedup (2.2-2.6x decode, up to 7.2x prefill, geomean 3.23x, H100) is in router_gemm_tier4_h100_20260903.json. The rigorous e2e A/B (tier-4 vs fp32-cache, 2 process-level repeats, Qwen3-30B-A3B-FP8, H100) is in router_ab_h100_20260903.json: graph TPOT -2.6% / TPS +2.7% (both repeats agree), eager within run-to-run noise (~0.7%)."
   },
   "rows": [
     {
