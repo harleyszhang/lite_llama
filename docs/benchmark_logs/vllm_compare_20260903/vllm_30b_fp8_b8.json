@@ -1,0 +1,28 @@
+{
+  "config": {
+    "max_gen_len": 128,
+    "batch": 8,
+    "json": "/tmp/vllm_30b_fp8_b8.json",
+    "greedy": true,
+    "mode": "both",
+    "backend": "vllm",
+    "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8",
+    "attn": "sdpa",
+    "verify": false,
+    "max_gpu_num_blocks": 40960,
+    "image": "examples/assets/vision_bench.jpg",
+    "timestamp": "2026-09-03T20:23:51"
+  },
+  "results": {
+    "vllm": {
+      "ttft_ms": 47.11650684475899,
+      "tpot_ms": 6.758491735993408,
+      "total_s": 0.9054449573159218,
+      "steps": 128,
+      "batch": 8,
+      "gen_tokens": 1024,
+      "tpot_p50_ms": 0.0,
+      "tps": 1130.9356706072115
+    }
+  }
+}

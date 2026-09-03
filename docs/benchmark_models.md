@@ -430,7 +430,12 @@ python scripts/golden_tokens.py --save tests/golden/data/Qwen3-30B-A3B-Instruct-
 
 #### H100：lite_llama vs vllm（2026-09-03）
 
-对照引擎换成 vllm 0.28.0（V1 engine，piecewise CUDA graph 默认开启）。两端跑同一批 prompt（`bench_e2e.py` 的 PROMPTS 扩到目标 batch）、同为 greedy、同一张 H100；指标口径与上文各表一致（TTFT / TPOT / TPS）。两端 TTFT 的测法相同：离线批量 API 都没有逐 token 回调，所以 TTFT 是单独一轮 1-token 生成（prefill + 首个采样 token），完整轮测总墙钟。greedy 下两端都锁步跑满 `max_gen_len`（lite 的 stop 判据每步生效但 greedy 用例不触发 EOS；vllm 用 `min_tokens=max_gen_len` + `ignore_eos`），每档先 warmup 两轮再计时。
+**测试环境**：单张 NVIDIA H100 80GB HBM3（sm90，3.35 TB/s / 989 TFLOP/s dense tc），torch 2.13.0+cu130 / triton 3.7.1 / Python 3.14。两端框架与优化参数：
+
+- **lite_llama**（本仓库 commit）：TextGenerator，CUDA graph 捕获默认开启（batch 桶 1～128 × seq 桶 256～2048），KV bump 分配器，GPU 常驻 stop 判据（每 8 步轮询），权重按 checkpoint 声明 dtype 加载（bf16 / fp8-e4m3）。
+- **vllm 0.28.0**：V1 engine，以下优化参数全部为默认开启状态（逐项从 `vllm_config` 验证，非假设）：`enforce_eager=False`、`cudagraph_mode=FULL_AND_PIECEWISE`、`enable_prefix_caching=True`、`enable_chunked_prefill=True`、`compilation mode=3`（torch.compile + inductor）。`VLLMBackend` 只显式传 model / dtype / max_model_len=2048 / gpu_memory_utilization=0.85，其余保持默认。
+- **推理负载**：`bench_e2e.py` 的 PROMPTS 扩到 batch 8（四条不同长度提示词各重复两次），greedy，`max_gen_len=128`，两端锁步跑满 128 步（lite 的 stop 判据不触发 EOS；vllm 用 `min_tokens=128` + `ignore_eos`），每档 warmup 两轮后计时。
+- **量化路径差异要单独说明**：30B FP8 checkpoint 两端跑的不是同一种 GEMM——lite_llama 走 W8A16（fp8-e4m3 权重 + 128×128 block scales，内核内反量化后 bf16 dot）；vllm 自动检测 `quantization=fp8` 走 W8A8（激活也量化，fp8 tensor core MMA）。这不是引擎调度差异，是数值路径差异，下表 FP8 行的比值要带着这个前提读。
 
 三个比值列的分母都是 **vllm**（vllm / lite_llama，大于 1 即 lite_llama 更快），不是对 HF transformers 的比值，也不是 lite 内部 eager↔graph 的比值：
 
@@ -442,12 +447,23 @@ python scripts/golden_tokens.py --save tests/golden/data/Qwen3-30B-A3B-Instruct-
 | Qwen2.5-0.5B-Instruct | 16 | 256 | vllm 0.28.0 | 17.8 | 1.88 | 8235.6 | — | — | — |
 | Qwen3-4B-Thinking-2507 | 8 | 128 | lite_llama (graph) | 21.4 | 4.93 | 1581.3 | 1.18× | 1.35× | 1.34× |
 | Qwen3-4B-Thinking-2507 | 8 | 128 | vllm 0.28.0 | 25.3 | 6.64 | 1178.7 | — | — | — |
+| Qwen3-30B-A3B-Instruct-2507（MoE，bf16） | 8 | 128 | lite_llama (graph) | 44.3 | 11.02 | 708.8 | 1.17× | **0.86×** | **0.87×** |
+| Qwen3-30B-A3B-Instruct-2507（MoE，bf16） | 8 | 128 | vllm 0.28.0 | 51.6 | 9.51 | 813.2 | — | — | — |
+| Qwen3-30B-A3B-Instruct-2507-FP8（MoE） | 8 | 128 | lite_llama (graph，W8A16) | 48.6 | 10.25 | 758.1 | 0.97× | **0.66×** | **0.67×** |
+| Qwen3-30B-A3B-Instruct-2507-FP8（MoE） | 8 | 128 | vllm 0.28.0（W8A8） | 47.1 | 6.76 | 1130.9 | — | — | — |
 
 读法：
 
-- **decode 领先幅度随 batch 收窄**：0.5B 在 batch 8 上 TPOT 3.21×，batch 16 收窄到 1.23×。batch 8 时 vllm 的每步调度开销（V1 engine 的 Python 侧输入准备与采样管线）在 1.3 ms 量级的 decode 步里占比很高；batch 16 后两端都接近权重带宽下限（0.5B bf16 权重 0.92 GB / 3.35 TB/s ≈ 0.27 ms），差距只剩调度常数。这与上文对 HF 的规律一致——外部引擎的固定开销不随卡型下降，batch 越小它越显眼。
-- **TTFT 比值只有 1.18×～1.55×**：prefill 是 compute-bound 的大 GEMM，两端都走 cuBLAS/tensor core，差距只在调度与 KV 分配上——与对 HF 的 TTFT 结论（1.2×～1.5×）同量级。
-- **4B 档三项比值收敛到 1.18×～1.35×**：模型越大算术时间占比越高，两端都吃满算力，调度差距被摊薄。
+- **dense 小模型上 lite_llama 的 decode 领先，幅度随 batch 与模型规模收窄**：0.5B 在 batch 8 上 TPOT 3.21×，batch 16 收窄到 1.23×；4B 档 1.35×。原因是 host 侧：lite 的 decode 步是整张 CUDA graph 重放，每步 host 开销接近零（KV bump 分配器、GPU 常驻 stop 判据每 8 步才轮询一次）；vllm V1 的每步仍有 Python 侧输入准备与采样管线，在 1.3～5 ms 量级的 decode 步里占比高。batch 16 后两端都接近权重带宽下限（0.5B bf16 权重 0.92 GB / 3.35 TB/s ≈ 0.27 ms），差距只剩调度常数。
+- **MoE 30B 上 vllm 的 decode 反超（TPOT 0.86×，FP8 档 0.66×）**，这个结果如实记录：MoE decode 是专家权重读取主导（top-8 × 128 专家，激活 ~3B），步长 9～11 ms，host 调度开销占比已经很低——lite 的 host 侧优势在这里换不到东西，拼的是专家 GEMM 内核本身。vllm 的 fused_moe 路径经过多年生产打磨（含对齐良好的 tile 表与对齐内核），lite 的自研 fused_moe 在这个几何（E=128，i=768，每专家行数少）上还有差距。
+- **FP8 档的 0.66× 主要是数值路径差异，不是调度差异**：vllm 把 checkpoint 的 fp8 跑成 W8A8（激活也量化，fp8 MMA，权重字节减半）；lite 的 fp8 checkpoint 路径是 W8A16（反量化后 bf16 dot，只省权重字节不省算力）。两端跑的根本不是同一种 GEMM，比值里混着量化方案的差异。若要公平对比引擎本身，应当用 bf16 行（0.86×）；若要对比 fp8 部署体验，则 vllm 的 W8A8 路径确实更快——这是 lite 的 fp8 MoE 路径值得跟进的方向（真 W8A8 fp8 grouped GEMM，仓库已有 dense 侧的 `fused_moe_w8a8_fp8` 内核，MoE 侧接入是下一步）。
+- **TTFT 两端互有胜负（0.97×～1.55×）**：prefill 是 compute-bound 的大 GEMM，两端都走 tensor core，差距只在调度与 KV 分配上；30B FP8 档 vllm 略优（0.97×）与它的 chunked prefill + fp8 GEMM 有关。
+
+**为什么 lite_llama 在 dense 小模型上更快、在 MoE 大模型上更慢**，归结为两条正交的主线：
+
+1. **host 侧每步开销**（lite 的优势项）：decode 步长越短，每步的 Python 侧成本（输入准备、KV 分配、stop 判定、采样）占比越高。lite 把这些全部压进 graph 重放 + GPU 常驻判据，每步 host 成本接近零；vllm V1 的通用调度器保留了灵活性（连续批处理、多 LoRA、结构化输出），每步付出相应的 Python 成本。这项优势在 0.5B（步长 1.3 ms）上值 3.2×，在 30B（步长 10 ms）上几乎归零。
+2. **专家 GEMM 内核成熟度**（vllm 的优势项）：MoE decode 的瓶颈在专家权重搬运与 grouped GEMM 效率。vllm 的 fused_moe 在生产环境里迭代多年，tile 选择、对齐、fp8/int8 W8A8 路径都经过大规模打磨；lite 的 fused_moe 在 H100 上重定过 tile 表（见上文量化矩阵），但 E=128 的小专家几何（i=768，每专家行数少）仍是它的弱项。FP8 档再叠加数值路径差异（W8A16 vs W8A8），差距放大到 0.66×。
+
 
 #### H100：GSM8K 精度对照（2026-09-03）
 
@@ -472,6 +488,15 @@ python benchmarks/bench_e2e.py --model-dir $MZ/Qwen/Qwen2___5-0___5B-Instruct \
     --greedy --mode graph --batch 8 --max-gen-len 128 --json out_lite.json
 python benchmarks/bench_e2e.py --model-dir $MZ/Qwen/Qwen2___5-0___5B-Instruct \
     --backend vllm --greedy --batch 8 --max-gen-len 128 --json out_vllm.json
+# 30B MoE 两个 checkpoint（bf16 与 FP8，同样两端各跑一轮）：
+python benchmarks/bench_e2e.py --model-dir $MZ/Qwen/Qwen3-30B-A3B-Instruct-2507 \
+    --greedy --mode graph --batch 8 --max-gen-len 128 --json out_lite_30b.json
+python benchmarks/bench_e2e.py --model-dir $MZ/Qwen/Qwen3-30B-A3B-Instruct-2507 \
+    --backend vllm --greedy --batch 8 --max-gen-len 128 --json out_vllm_30b.json
+python benchmarks/bench_e2e.py --model-dir $MZ/Qwen3-30B-A3B-Instruct-2507-FP8 \
+    --greedy --mode graph --batch 8 --max-gen-len 128 --json out_lite_30b_fp8.json
+python benchmarks/bench_e2e.py --model-dir $MZ/Qwen3-30B-A3B-Instruct-2507-FP8 \
+    --backend vllm --greedy --batch 8 --max-gen-len 128 --json out_vllm_30b_fp8.json
 # 精度：lite 侧走 tests/evals，vllm 侧走 bench_gsm8k_vllm（同题同判分）
 python -m tests.evals.gsm8k --model-dir $MZ/Qwen/Qwen2___5-0___5B-Instruct \
     --num-questions 200 --batch-size 32 --chat-template
@@ -479,7 +504,7 @@ python benchmarks/bench_gsm8k_vllm.py --model-dir $MZ/Qwen/Qwen2___5-0___5B-Inst
     --num-questions 200 --chat-template
 ```
 
-原始日志见 `docs/benchmark_logs/vllm_compare_20260903/`（性能 6 份 + GSM8K 2 份，每份含完整 meta 与命令行）。
+原始日志见 `docs/benchmark_logs/vllm_compare_20260903/`（性能 10 份 + GSM8K 2 份，每份含完整 meta 与命令行）。
 
 
 ## 三 性能优化历史记录
