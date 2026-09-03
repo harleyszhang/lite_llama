@@ -10,30 +10,14 @@ Usage:
 
 from __future__ import annotations
 
-import functools
-
 import torch
 import triton
 import triton.language as tl
 
+from ..tile_policy import TileTier, has_native_fp8, resolve_tiles, tile_tier
+
 #: Exponent correction of the e4m3 -> fp16 bit trick, see :func:`dequant_fp8e4m3`.
 FP8_E4M3_BIT_TRICK_SCALE = 256.0
-
-
-@functools.cache
-def sm_version(device_index: int | None) -> tuple[int, int]:
-    """Compute capability of ``device_index`` (current device when ``None``).
-
-    Cached because the query is not free and the dense launchers consult it
-    on every call to pick their tile table.
-    """
-    return torch.cuda.get_device_capability(device_index)
-
-
-@functools.cache
-def has_native_fp8(device_index: int | None) -> bool:
-    """Whether this device has the fp8 MMA (sm89+)."""
-    return sm_version(device_index) >= (8, 9)
 
 
 #: Block size of the fine-grained FP8 format used by Qwen FP8 checkpoints.
@@ -142,15 +126,13 @@ def _w8a16_matmul_kernel(
         k_rem = K - k * BLOCK_K
         a = tl.load(a_ptrs, mask=offs_k[None, :] < k_rem, other=0.0)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < k_rem, other=0)
-        # IS_FP8 is constexpr: Triton emits two specialised kernels, no branch.
-        # Either way the tile lands straight in the activation's dtype (fp16 or
-        # bf16): e4m3 values are exact in fp16 and the fp16 -> bf16 hop rounds
-        # at 2^-8, an order below the 2^-4 the 8-bit weight itself carries;
-        # int8 values are exact in both 16-bit dtypes.
-        # sm89+ widens e4m3 with one hardware cvt per element; the bit trick
-        # below needs five integer instructions per element and a 256x
-        # correction folded into DEQUANT_SCALE by the launcher -- the cvt needs
-        # no correction and no pre-sm89 care here, it is guarded by FP8_CVT.
+        # IS_FP8 is constexpr, so Triton emits two specialised kernels with no
+        # branch. Either way the tile lands in the activation's dtype: e4m3 is
+        # exact in fp16 (and the fp16 -> bf16 hop rounds at 2^-8, an order below
+        # the 8-bit weight's own 2^-4), int8 is exact in both. sm89+ widens
+        # e4m3 with one hardware cvt per element; the bit trick needs five
+        # integer instructions plus the 256x correction folded into
+        # DEQUANT_SCALE by the launcher.
         if IS_FP8:
             if FP8_CVT:
                 b = b.to(tl.float8e4nv, bitcast=True).to(a.dtype)
@@ -167,13 +149,10 @@ def _w8a16_matmul_kernel(
         if SINGLE_SCALE:
             if EPILOGUE_SCALE:
                 # In-place accumulation (``acc=``): the per-row scale distributes
-                # over the sum, so one multiply in the epilogue is the same
-                # arithmetic -- and it unlocks the 128x128 tile, where the
-                # per-step multiply otherwise wrecks the pipeline (2-3x, see
-                # the sweep behind the current _launch_config). Only taken at
-                # prefill bandwidth where that tile wins: at decode the ``acc=``
-                # form costs int8 weights 3-11% (measured), so the launcher
-                # keeps the in-loop multiply there.
+                # over the sum, so one epilogue multiply is the same arithmetic
+                # and unlocks the 128x128 tile, where the per-step multiply
+                # otherwise wrecks the pipeline (2-3x). Decode keeps the in-loop
+                # form instead -- ``acc=`` costs int8 weights 3-11% there.
                 accumulator = tl.dot(a, b, acc=accumulator)
             else:
                 accumulator += tl.dot(a, b) * scale[None, :]
@@ -204,38 +183,33 @@ def _launch_config(
 ) -> dict:
     """Tile shape for ``num_tokens`` rows on this device and weight dtype.
 
-    The row count is only one of the inputs; each of the others is forked on
-    measured evidence, and the one dimension the data rejects is noted too:
+    Each input besides the row count is forked on measured evidence, and the
+    one dimension the data rejects is noted too:
 
     - **Device**: the sm90 tables were swept on an H100 (132 SMs, where
-      narrow N tiles fill the grid); pre-Hopper devices keep the A10-era
-      table that the sm90 sweep replaced -- it was measured on that
-      hardware. ``sm_version`` is the gate.
+      narrow N tiles fill the grid); pre-Hopper keeps the A10-era table the
+      sm90 sweep replaced, measured on that hardware. ``sm_version`` gates.
     - **Weight dtype**: int8 with per-row scales (``single_scale`` + int8,
-      the runtime ``int8`` scheme) takes its own table. The fp8 numbers do
-      *not* carry over: re-swept on the same five projections with the same
+      the runtime ``int8`` scheme) takes its own table -- the fp8 numbers do
+      *not* carry over. Re-swept on the same five projections with the same
       EPILOGUE_SCALE bands, the fp8 tile costs int8 up to 57% at decode (geo
-      1.30, worst 1.572) -- the fp8 band's ``BLOCK_N=128`` (kept for the
-      N=19456 gate_up projection) is simply the wrong width for int8, which
-      wants 64 everywhere and ``BLOCK_M=256`` at m=2048 (the 128-row tile
-      is up to 31% slower there). int8 *block-scale* (GPTQ ``bits=8``)
-      keeps the fp8 table: it shares the in-loop path and its zero-point
-      load has no sweep of its own.
-    - **Shape**: no fork. The five projections (N=1536..19456) split
-      narrow/wide were re-analysed per band: the geomean-best tile of the
-      two groups is the same config everywhere (fp8 W8A8, w8a8) or within
-      noise (w8a16), so ``n`` is deliberately not an input.
+      1.30): its ``BLOCK_N=128``, kept for the N=19456 gate_up projection, is
+      the wrong width for int8, which wants 64 everywhere and ``BLOCK_M=256``
+      at m=2048 (the 128-row tile is up to 31% slower there). int8
+      *block-scale* (GPTQ ``bits=8``) keeps the fp8 table: it shares the
+      in-loop path and has no sweep of its own.
+    - **Shape**: no fork. Split narrow/wide and re-analysed per band, the two
+      groups pick the same geomean-best tile everywhere, so ``n`` is
+      deliberately not an input.
 
-    The sm90 fp8 bands: decode keeps ``BLOCK_N=128`` — the N=19456 gate_up
-    projection regresses 38% on ``BLOCK_N=64`` — and gains from deeper
-    pipelining (``s=5``); mid trades 14% on the narrow 30B o projection for
-    2-54% on the rest. Prefill forks on ``single_scale``: the
-    epilogue-scale kernel takes the compute-shaped 128x128 tile (the per-k
-    scale multiply used to make it 2-3x slower), while the block-scale
-    path still pays that multiply every k step and must stay at 64 rows of
-    accumulator or spill registers.
+    The sm90 fp8 bands: decode keeps ``BLOCK_N=128`` -- the N=19456 gate_up
+    projection regresses 38% on 64 -- and gains from deeper pipelining
+    (``s=5``). Prefill forks on ``single_scale``: the epilogue-scale kernel
+    takes the compute-shaped 128x128 tile (the per-k multiply used to make it
+    2-3x slower), while the block-scale path still pays that multiply every k
+    step and must stay at 64 rows of accumulator or spill registers.
     """
-    if sm_version(device_index) < (9, 0):
+    if tile_tier(device_index) is TileTier.PRE_HOPPER:
         # A10-era table (sm86, measured, dtype-agnostic): the H100 SM count
         # rewards wider grids, not the fatter tiles this table uses.
         if num_tokens <= 32:
@@ -389,18 +363,31 @@ def w8a16_matmul(
     m = a.shape[0]
     out = torch.empty((m, n), dtype=x.dtype, device=x.device)
 
-    # hardware cvt (one instruction, no 256x correction), older devices keep the
-    # bit trick -- same split as the fused MoE kernel.
+    # sm89+ widens fp8 with the hardware cvt (one instruction, no 256x
+    # correction); older devices keep the bit trick.
     fp8_cvt = is_fp8 and has_native_fp8(x.device.index)
     # per-row scales (group_k >= k): the scale's k address never moves, so the
-    # kernel can hoist its load out of the k loop.
+    # kernel hoists its load out of the k loop.
     single_scale = group_k >= k
-    cfg = _launch_config(m, single_scale, is_fp8, x.device.index)
-    # epilogue-scale accumulation only where the sm90 tile table is in play:
-    # the in-loop multiply is faster at decode for int8 weights (3-11%
-    # measured), and pre-Hopper devices keep the in-loop form their A10
-    # table was measured with.
-    epilogue_scale = single_scale and m > 128 and sm_version(x.device.index) >= (9, 0)
+    # Autotune lookup (per-GPU entry) or the device-tiered heuristic, both
+    # behind ``resolve_tiles``. The label names both forks the heuristic
+    # tiers on — weight format and scale layout — so a tuned entry only ever
+    # replays the path it measured.
+    cfg = resolve_tiles(
+        "w8a16_matmul",
+        m=m,
+        n=n,
+        k=k,
+        dtype_label=f"{'fp8' if is_fp8 else 'int8'}_{'single' if single_scale else 'block'}",
+        heuristic=lambda dev: _launch_config(m, single_scale, is_fp8, dev),
+        device_index=x.device.index,
+    )
+    # epilogue-scale accumulation only where the sm90 table is in play: the
+    # in-loop multiply is faster at decode for int8 weights (3-11% measured),
+    # and pre-Hopper keeps the in-loop form its A10 table was measured with.
+    epilogue_scale = (
+        single_scale and m > 128 and tile_tier(x.device.index) is TileTier.HOPPER_UP
+    )
     grid = (triton.cdiv(m, cfg["BLOCK_M"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
     _w8a16_matmul_kernel[grid](
         a,

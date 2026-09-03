@@ -2,11 +2,10 @@
 
 GPTQ ``bits=8`` checkpoints (and ``quantize_int8_groupwise_asym``) pack four
 int8 values per ``int32`` word along K; every kernel here — the fused MoE
-grouped GEMM's int8 mode, the dense ``w8a16_matmul`` — consumes one ``int8``
-byte per element instead. Stacked expert weights cross this bridge once at
-load, in :meth:`~lite_llama.modules.quantization.base_config.QuantizeMethodBase.process_weights_after_loading`,
-the same seam ``repack_int4_experts`` occupies for int4: the kernel's layout is
-the kernel's business, and the checkpoint bytes are not rewritten to match.
+grouped GEMM's int8 mode and the dense ``w8a16_matmul`` — consumes one ``int8``
+byte per element instead, so stacked expert weights cross this bridge once at
+load, in
+:meth:`~lite_llama.modules.quantization.base_config.QuantizeMethodBase.process_weights_after_loading`.
 
 Usage:
     kernel_w = unpack_int8_experts(checkpoint_w)  # [E, N, K//4] -> [E, N, K]
@@ -49,11 +48,9 @@ def _int8_unpack_kernel(
 
     offs_byte = offs[:, None] * 4 + tl.arange(0, 4)[None, :]
     # uint8 first, then the bit-preserving hop to int8: a plain ``.to(tl.int8)``
-    # on the 0..255 lane would be the same truncation, but spelling the bitcast
-    # keeps the "value in, same bit pattern out" contract obvious.
-    tl.store(
-        dst_ptr + offs_byte, out.to(tl.uint8).to(tl.int8, bitcast=True), mask=mask[:, None]
-    )
+    # on the 0..255 lane truncates identically, but spelling the bitcast keeps
+    # the "value in, same bit pattern out" contract obvious.
+    tl.store(dst_ptr + offs_byte, out.to(tl.uint8).to(tl.int8, bitcast=True), mask=mask[:, None])
 
 
 def unpack_int8_experts(packed: torch.Tensor) -> torch.Tensor:

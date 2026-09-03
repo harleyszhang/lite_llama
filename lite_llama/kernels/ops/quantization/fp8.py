@@ -15,10 +15,11 @@ import torch
 import triton
 import triton.language as tl
 
-from .w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3, sm_version
-from .w8a16 import (
-    has_native_fp8 as has_native_fp8,  # re-exported: MoE launcher imports it from here
+from ..tile_policy import TileTier, resolve_tiles, tile_tier
+from ..tile_policy import (
+    has_native_fp8 as has_native_fp8,  # re-exported: activation.py imports it from here
 )
+from .w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
 
 #: Exponent correction when *both* operands went through the e4m3 -> bf16 bit
 #: trick: each is short a factor of 256, so the product is short 256**2.
@@ -77,15 +78,13 @@ def _quantize_fp8_per_token_kernel(
         mask = offs < K
         x = tl.load(x_row + offs, mask=mask, other=0.0).to(tl.float32)
         q = x / scale
-        # The bytes match the torch quantiser everywhere except on an exact tie
-        # (a quotient of 84.0, halfway between the e4m3 codes 80 and 88): the
-        # hardware cvt takes it the other way from torch's software cast — one
-        # code, about one element in 30k. Not slack in ``/``: forcing correctly
-        # rounded division (``tl.fdiv(..., ieee_rounding=True)``) changed zero
-        # bytes and zero microseconds, so the tie is genuine.
+        # Bytes match the torch quantiser except on an exact tie (a quotient
+        # of 84.0, halfway between the e4m3 codes 80 and 88): the hardware cvt
+        # takes it the other way from torch's software cast -- one code, about
+        # one element in 30k, and ``ieee_rounding=True`` changed zero bytes, so
+        # the tie is genuine rather than slack in ``/``.
         # ``test_fp8_quantize_per_token_matches_torch_helper`` gates that bound.
-        #
-        # amax/FP8_MAX makes the clamp a no-op mathematically; it stays as the
+        # The clamp is a no-op by construction (amax/FP8_MAX) and stays as the
         # guard against a non-finite input turning into a NaN byte pattern.
         q = tl.minimum(tl.maximum(q, -FP8_MAX), FP8_MAX)
         tl.store(q_row + offs, q.to(tl.float8e4nv).to(tl.uint8, bitcast=True), mask=mask)
@@ -94,19 +93,16 @@ def _quantize_fp8_per_token_kernel(
 def fp8_quantize_per_token(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantise activations to e4m3 bytes, one scale per row, in one launch.
 
-    The torch spelling of this (``modules.quantization.utils.quantize_fp8_per_token``)
-    is a chain of about eight elementwise ops, and at decode shapes the chain's
-    launch overhead *is* the cost: measured at a shape-independent 45-55 us on an
-    H100, against a 20-32 us fp8 GEMM. That made the whole ``w8a8_fp8`` scheme
-    slower than bf16 cuBLAS at ``m=1`` for reasons that had nothing to do with
-    fp8. One kernel removes it (see ``benchmarks/kernels/bench_quant_gemm.py``,
-    whose ``ablation: fp8_matmul only`` row is where that decomposition came
-    from).
+    The torch spelling (``modules.quantization.utils.quantize_fp8_per_token``)
+    is a chain of about eight elementwise ops whose launch overhead *is* the
+    cost at decode shapes: 45-55 us against a 20-32 us fp8 GEMM, which made
+    ``w8a8_fp8`` slower than bf16 cuBLAS at ``m=1`` for reasons that had
+    nothing to do with fp8. This kernel removes it (the decomposition came
+    from ``bench_quant_gemm.py``'s ``ablation: fp8_matmul only`` row).
 
-    Contract-identical to the torch helper, so either can serve the other's
-    callers (bytes agree except on exact e4m3 ties, see the kernel), and no host
-    synchronisation anywhere — a MoE layer holding this on its critical path must
-    stay capturable into a CUDA graph.
+    Contract-identical to the torch helper — bytes agree except on exact e4m3
+    ties, see the kernel — and no host synchronisation, so a MoE layer holding
+    it on its critical path stays CUDA-graph capturable.
 
     Args:
         x: ``[..., K]`` float activations. Leading dims are flattened to rows.
@@ -210,9 +206,9 @@ def _fp8_matmul_kernel(
     # in-register: the fp8 MMA wants its second operand K-major.
     b_ptrs = b_ptr + offs_bn[:, None] * stride_bn + offs_k[None, :] * stride_bk
     b_scale_ptrs = b_scale_ptr + (offs_bn // GROUP_N) * stride_bsn
-    # One scale per weight row (per-channel quantisation, the scheme's default):
-    # its k address never moves, so load it before the loop and keep the loop
-    # body down to fp8 tiles and dots -- and let the dot accumulate in-place.
+    # One scale per weight row (per-channel quantisation, the scheme's
+    # default): its k address never moves, so load it before the loop and keep
+    # the loop body down to fp8 tiles and dots.
     if SINGLE_SCALE:
         b_scale = tl.load(b_scale_ptrs)
 
@@ -232,12 +228,11 @@ def _fp8_matmul_kernel(
             b = dequant_fp8e4m3(b)
         if SINGLE_SCALE:
             # ``D = A*B + D`` keeps the wgmma chain asynchronous end to end;
-            # multiplying the [BLOCK_M, BLOCK_N] fp32 product by the scale
-            # every k step serialises it (3-4x at prefill shapes, measured in
-            # the sweep behind the current _launch_config). The per-row scale
-            # distributes over the sum, so applying it once in the epilogue is
-            # the same arithmetic -- up to fp32 rounding order, which the unit
-            # tests' tolerances cover.
+            # multiplying the fp32 product by the scale every k step serialises
+            # it (3-4x at prefill shapes, measured). The per-row scale
+            # distributes over the sum, so one multiply in the epilogue is the
+            # same arithmetic up to fp32 rounding order, which the unit tests'
+            # tolerances cover.
             accumulator = tl.dot(a, tl.trans(b), acc=accumulator)
         else:
             b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
@@ -266,22 +261,17 @@ def _launch_config(num_tokens: int, single_scale: bool, device_index: int | None
     """Tile shape for ``num_tokens`` rows on this device.
 
     Swept over the five dense projections of both test models on an H100
-    (the ``bench_quant_gemm.py`` shape set). Decode stays ``BLOCK_N=64``
-    (it fills the grid when M supplies no parallelism). The bands with real
-    arithmetic fork on ``single_scale``: the epilogue-scale kernel prefers
-    the wider tile now that ``acc=`` accumulation keeps the wgmma chain
-    asynchronous, while the block-scale path still pays the per-k multiply
-    and keeps the leaner 64-row accumulator. Each band's entry is the
-    geomean-best config over the five shapes at that ``num_tokens``; the
-    mid band trades 1.4 us on the 4B qkv projection for 11-21% on the other
-    four.
-
-    Pre-Hopper devices (``sm_version`` gate) keep the A10-era table the
-    sm90 sweep replaced, measured on that hardware; weight shape (N) is
-    not an input -- narrow/wide projection groups pick the same
-    geomean-best tile in every band.
+    (the ``bench_quant_gemm.py`` shape set); each band's entry is the
+    geomean-best config over those five shapes. Decode stays ``BLOCK_N=64``
+    because it fills the grid when M supplies no parallelism, and the bands
+    with real arithmetic fork on ``single_scale``: the epilogue-scale kernel
+    takes the wider tile now that ``acc=`` keeps the wgmma chain asynchronous,
+    while the block-scale path still pays the per-k multiply and keeps the
+    leaner 64-row accumulator. Pre-Hopper keeps the A10-era table the sm90
+    sweep replaced; ``n`` is not an input, because narrow/wide projection
+    groups pick the same geomean-best tile.
     """
-    if sm_version(device_index) < (9, 0):
+    if tile_tier(device_index) is TileTier.PRE_HOPPER:
         # A10-era table (sm86, measured): one tile set, no single_scale
         # fork -- the block-scale/per-row paths had not diverged yet.
         if num_tokens <= 32:
@@ -397,7 +387,19 @@ def fp8_matmul(
     # so the kernel can hoist its load out of the k loop.
     single_scale = group_k >= k
 
-    cfg = _launch_config(m, single_scale, qx.device.index)
+    # Autotune lookup (per-GPU entry) or the device-tiered heuristic, both
+    # behind ``resolve_tiles``. The dtype label carries the scale layout
+    # because the two paths fork on tile shape in the heuristic and compile
+    # different epilogues — one entry must never stand in for the other.
+    cfg = resolve_tiles(
+        "fp8_matmul",
+        m=m,
+        n=n,
+        k=k,
+        dtype_label="fp8_single" if single_scale else "fp8_block",
+        heuristic=lambda dev: _launch_config(m, single_scale, dev),
+        device_index=qx.device.index,
+    )
     grid = (triton.cdiv(m, cfg["BLOCK_M"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
     _fp8_matmul_kernel[grid](
         a,

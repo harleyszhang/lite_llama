@@ -1,20 +1,18 @@
 """One-time int4 weight preprocessing: int32 words to byte pairs.
 
 The fused MoE kernel's int4 mode consumes two nibbles per ``uint8`` byte along
-K — vLLM's layout. A ``[BLOCK_K, BLOCK_N]`` byte tile then loads with each byte
-repeated in its two nibble rows (a 2x repeat L1 absorbs), and the in-loop
-unpack is one shift-and-mask per element with no 3-D expand and no
-``tl.reshape``. Checkpoints (and ``quantize_int4_groupwise``) ship eight
-nibbles per int32 word instead, so stacked expert weights cross this bridge
-once at load — the same role ``awq_marlin_repack`` plays in vLLM: the kernel's
-layout is the kernel's business, and the checkpoint bytes are not rewritten to
-match.
+K (vLLM's layout): a byte tile then loads with each byte repeated in its two
+nibble rows — a 2x repeat L1 absorbs — and the in-loop unpack is one
+shift-and-mask per element, with no 3-D expand and no ``tl.reshape``.
+Checkpoints (and ``quantize_int4_groupwise``) ship eight nibbles per int32
+word instead, so stacked expert weights cross this bridge once at load, the
+same role ``awq_marlin_repack`` plays in vLLM.
 
-Why not stay on the 8-nibbles-per-word format with the same replicated
-addressing? Measured on an H100 at the Qwen3-30B-A3B geometry, t4096: ~10x
-slower (18109 us against 1916). The replicated int32 tile is [BLOCK_K, BLOCK_N]
-int32 — 64 KB per pipeline stage where the byte tile needs 16 KB — and every
-word is fetched 8x instead of 2x. The failure is the format, not the idiom.
+Staying on the word format is not an option: measured on an H100 at the
+Qwen3-30B-A3B geometry, t4096, the replicated int32 tile is ~10x slower
+(18109 us against 1916) — 64 KB per pipeline stage where the byte tile needs
+16 KB, and every word fetched 8x instead of 2x. The failure is the format,
+not the idiom.
 
 Usage:
     kernel_w = repack_int4_experts(checkpoint_w)  # [E, N, K//8] -> [E, N, K//2]
@@ -64,8 +62,8 @@ def repack_int4_experts(packed: torch.Tensor) -> torch.Tensor:
     A pure layout change: every nibble keeps its value and its K index, so the
     dequantisation arithmetic — group scales, zero points — is untouched and
     kernel outputs stay bit-identical. Leading dims are preserved, so the same
-    op serves stacked MoE experts ``[E, N, K//8]`` and would serve a dense
-    ``[N, K//8]`` weight.
+    op serves stacked MoE experts ``[E, N, K//8]`` and a dense ``[N, K//8]``
+    weight.
 
     Args:
         packed: int32 tensor whose last dim packs 8 int4 values per word
