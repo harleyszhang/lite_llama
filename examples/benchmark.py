@@ -97,8 +97,9 @@ def bench_lite_llama(
 
     ``tensor_parallel_size`` above 1 routes through the continuous-batching
     engine: it is the only path whose executor broadcasts each step's plan to
-    follower ranks, which is what a sharded forward needs. Decode then runs
-    eager (NCCL collectives cannot live inside a captured graph).
+    follower ranks, which is what a sharded forward needs. Decode keeps its
+    CUDA graphs there: every rank replays the same captured grid in
+    lockstep, NCCL all-reduce included.
     """
     greedy = dict(temperature=0.0, top_p=1.0, repetition_penalty=1.0, stop_on_repeat=False)
 
@@ -308,10 +309,10 @@ def main() -> None:
     parser.add_argument(
         "--tensor-parallel-size", type=int, default=1,
         help="GPUs to split the lite_llama replica's weights over (e.g. 2 to fit "
-             "an 8B bf16 checkpoint's b16 budget on two 22 GiB cards). Decode "
-             "runs eager under TP: the sharded layers' NCCL all-reduce cannot be "
-             "captured inside a CUDA graph. The transformers baseline then uses "
-             "device_map=auto over the same GPUs",
+             "an 8B bf16 checkpoint's b16 budget on two 22 GiB cards). Decode keeps "
+             "its CUDA graphs under TP: every rank replays the same captured grid "
+             "in lockstep, NCCL all-reduce included. The transformers baseline then "
+             "uses device_map=auto over the same GPUs",
     )
     parser.add_argument("--log-dir", default="docs/benchmark_logs")
     args = parser.parse_args()
