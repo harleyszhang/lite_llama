@@ -53,10 +53,13 @@ _QUANT_FP8 = 1
 _QUANT_INT8 = 2
 _QUANT_INT4 = 3
 _QUANT_MXFP4 = 4
+_QUANT_FP8_A8 = 5
+_QUANT_INT8_A8 = 6
 
 #: k-tile of the quantised path: one byte per weight element, k-contiguous, so a
 #: 128-wide tile is one full memory transaction per output channel.
 _QUANT_BLOCK_K = 128
+_FP8_BIT_TRICK_SCALE_SQ = FP8_E4M3_BIT_TRICK_SCALE * FP8_E4M3_BIT_TRICK_SCALE
 
 #: How many k elements mode 4 may accumulate inside Hopper's fp8 ``wgmma`` before
 #: the partial sum is promoted into a real fp32 accumulator. The instruction's
@@ -388,7 +391,7 @@ def _fused_moe_kernel(
             b_ptr
             + off_experts * stride_be
             + offs_bn[None, :] * stride_bn
-            + offs_kh[:, None] * stride_bk
+            + offs_k_words[:, None] * stride_bk
         )
     else:
         b_ptrs = (
@@ -730,7 +733,7 @@ def _launch_config(
         "BLOCK_N": block_n,
         "BLOCK_K": _QUANT_BLOCK_K,
         "GROUP_M": 8,
-        "num_warps": num_warps,
+        "num_warps": 4,
         "num_stages": 3,
     }
 
@@ -765,6 +768,20 @@ def _invoke_moe_gemm(
     em = sorted_token_ids.numel()
     num_slots = c.shape[0]
     n, k = b.shape[1], b.shape[2]
+    # Only the A8 mode puts A through the tensor cores as fp8, so only it cares
+    # which of the two widenings the kernel compiles; the weight-only modes
+    # always take the bit trick and always pay its single correction factor.
+    native_fp8 = quant_mode == _QUANT_FP8_A8 and has_native_fp8(a.device.index)
+    # Mode 1's widening has its own capability split: sm89+ converts e4m3 with a
+    # hardware cvt (one instruction, no 256x correction), older devices keep the
+    # bit trick and its DEQUANT_SCALE.
+    fp8_cvt = quant_mode == _QUANT_FP8 and has_native_fp8(a.device.index)
+    if quant_mode == _QUANT_FP8_A8:
+        dequant_scale = 1.0 if native_fp8 else _FP8_BIT_TRICK_SCALE_SQ
+    elif quant_mode == _QUANT_FP8:
+        dequant_scale = 1.0 if fp8_cvt else FP8_E4M3_BIT_TRICK_SCALE
+    else:
+        dequant_scale = 1.0
     # For INT4/MXFP4 mode, K in the tensor is K_logical // 8 (packed), but we pass K_logical.
     k_logical = (
         k * _INT4_PACK_FACTOR if quant_mode in (_QUANT_INT4, _QUANT_MXFP4) else k
@@ -1159,6 +1176,7 @@ def fused_moe(
     group_k: int = 0,
     swiglu_limit: float = float("inf"),
     mxfp4: bool = False,
+    down_overlap_args=None,
 ) -> torch.Tensor:
     """Run the routed-expert FFN: ``sum_k w_k * (silu(x @ W1g.T) * (x @ W1u.T)) @ W2.T``.
 
@@ -1265,19 +1283,43 @@ def fused_moe(
     # top_k=1 (vLLM does the same: the second invocation passes ``1``), turning
     # ``offs_token // top_k`` into the identity on slot indices.
     expanded = torch.empty((num_tokens * top_k, hidden), device=device, dtype=dtype)
-    _invoke_moe_gemm(
-        act,
-        w2,
-        topk_weights,
-        topk_ids,
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
-        w1_zeros=w1_zeros,
-        w2_zeros=w2_zeros,
-        group_n=group_n,
-        group_k=group_k,
-        act_quant=None,
-    )
+    # With overlap args the down projection is split into row chunks and each
+    # chunk's landing is published with an event, so the combine exchange can
+    # start on chunk 0 while the rest are still computing. GEMM2 runs with
+    # top_k=1, which makes sorted_ids the identity on slot indices, so slicing
+    # the activation rows is safe -- each chunk still addresses its own slots.
+    chunks = getattr(down_overlap_args, "chunks", None)
+    events = getattr(down_overlap_args, "events", None)
+    if chunks and events and len(chunks) > 1:
+        for (start, stop), event in zip(chunks, events, strict=True):
+            _invoke_moe_gemm(
+                act[start:stop],
+                w2,
+                topk_weights,
+                topk_ids,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                w1_zeros=w1_zeros,
+                w2_zeros=w2_zeros,
+                group_n=group_n,
+                group_k=group_k,
+                act_quant=None,
+            )
+            event.record()
+    else:
+        _invoke_moe_gemm(
+            act,
+            w2,
+            topk_weights,
+            topk_ids,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_zeros=w1_zeros,
+            w2_zeros=w2_zeros,
+            group_n=group_n,
+            group_k=group_k,
+            act_quant=None,
+        )
 
 
 def fused_moe_w8a8_fp8(

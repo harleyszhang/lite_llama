@@ -137,7 +137,98 @@ class SboFlags:
     """
 
     @staticmethod
+    def enable_combine_down_gemm_overlap(rows: int) -> bool:
+        """Combine exchange overlapping the down GEMM, chunk by chunk."""
+        policy = sbo_policy()
+        return policy.enabled and rows >= policy.min_rows
+
+    @staticmethod
     def enable_dispatch_shared_overlap(rows: int) -> bool:
         """Dispatch exchange overlapping the shared MLP on one stream."""
         policy = sbo_policy()
         return policy.enabled and rows >= policy.min_rows
+
+
+@dataclass
+class DownGemmOverlapArgs:
+    """What the down GEMM needs to publish its progress chunk by chunk.
+
+    sglang publishes per *tile* from inside the kernel (its cutedsl / deep_gemm
+    backends take ``num_sms`` and raise a flag per tile). This fused_moe is a
+    Triton grouped GEMM with no SM-budget knob, so the same idea is applied one
+    level up: the down projection is split into row chunks, each chunk is a
+    separate launch, and an event is recorded when it lands. The consumer waits
+    on chunk *i*'s event instead of the whole GEMM's, so the combine exchange
+    starts while the remaining chunks are still computing.
+
+    Attributes:
+        chunks: Row spans ``[(start, stop), ...]`` the down GEMM is split into.
+        events: One event per chunk, recorded on the compute stream when that
+            chunk's launch lands.
+        stream: The compute stream the chunks run on.
+    """
+
+    chunks: list[tuple[int, int]]
+    events: list[torch.cuda.Event]
+    stream: torch.cuda.Stream
+
+
+@dataclass
+class CombineOverlapArgs:
+    """What the combine side needs to consume the down GEMM chunk by chunk.
+
+    Attributes:
+        overlap: Whether to wait per chunk rather than for the whole GEMM.
+        down_args: The producer's chunks and events.
+        stream: The stream the exchange is posted on.
+    """
+
+    overlap: bool
+    down_args: DownGemmOverlapArgs | None
+    stream: torch.cuda.Stream
+
+
+def chunk_rows_for(rows: int, num_sms: int, min_chunk: int = 256) -> list[tuple[int, int]]:
+    """Split ``rows`` into spans worth publishing separately.
+
+    Each chunk is a separate kernel launch, so splitting too finely pays launch
+    overhead for no overlap gain — the floor keeps chunks large enough that the
+    launch cost is small next to the GEMM itself. The chunk count is bounded by
+    the SM budget because a chunk that cannot fill the SMs it is given does not
+    overlap anything.
+    """
+    if rows <= 0:
+        return []
+    count = max(1, min(num_sms // 8, rows // min_chunk))
+    count = max(1, min(count, 4))
+    base, extra = divmod(rows, count)
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for i in range(count):
+        stop = start + base + (1 if i < extra else 0)
+        spans.append((start, stop))
+        start = stop
+    return spans
+
+
+def compute_overlap_args(
+    rows: int, device: str | torch.device, *, num_sms: int | None = None
+) -> tuple[CombineOverlapArgs | None, DownGemmOverlapArgs | None]:
+    """Size the chunked down-GEMM / combine overlap for one MoE layer.
+
+    Returns ``(None, None)`` when SBO is off or the layer is too small to split.
+    """
+    if not SboFlags.enable_combine_down_gemm_overlap(rows):
+        return None, None
+    if num_sms is None:
+        num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    chunks = chunk_rows_for(rows, num_sms)
+    if len(chunks) < 2:
+        return None, None
+    stream = sbo_alt_stream(device)
+    down_args = DownGemmOverlapArgs(
+        chunks=chunks,
+        events=[torch.cuda.Event() for _ in chunks],
+        stream=stream,
+    )
+    return CombineOverlapArgs(overlap=True, down_args=down_args, stream=stream), down_args

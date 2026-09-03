@@ -264,6 +264,83 @@ PYTHONPATH=. /home/honggao/projects/.venv/bin/python examples/benchmark.py \
     --vllm-gpu-mem-util 0.7
 ```
 
+### DeepSeek-V4-Flash-6layers（DSpark weight-only fp8/MXFP4，TP2，仅 lite_llama 实测）
+
+DeepSeek-V4-Flash 官方剪裁的真实权重 checkpoint（22 GB，DSpark 推理格式，非随机初始化），6 层覆盖 V4-Flash 的全部前向算子：层 0-5 的 attention 按 compress_ratios `[0,0,4,128,4,128]` 排布为 SWA、SWA、CSA、HCA、CSA、HCA（滑动窗、压缩注意力、带 hyper-connection 的注意力各两种），`num_hash_layers=3` 使前 3 层 MoE 走 hash 路由（tid2eid 查表）、后 3 层走 score 路由（含 e_score_correction_bias）。量化全部是 weight-only：线性层 fp8 e4m3 权重 + 128×128 e8m0 block scale（`w8a16` kernel 内 dequant），专家权重 MXFP4 e2m1（byte-packed，偶数 K 低 nibble）+ 32 通道 e8m0 scale（`fused_moe` kernel 内解码），运行时激活保持 bf16。22 GB 权重单卡放不下，TP2 每卡 13.74 GiB。
+
+**vLLM 在本机 A10（SM86）上无法服务 DeepseekV4，任意层数都不行**，证据链：
+
+- V4 的两条 attention 后端（FlashMLA / FlashInfer）都经 `DeepseekV4Indexer` → `SparseAttnIndexer`，其 `__init__`（`vllm/model_executor/layers/sparse_attn_indexer.py:778`）在 CUDA 平台上 `not has_deep_gemm()` 即 raise，无 fallback——indexer 的 `fp8_fp4_paged_mqa_logits` 是 DeepGEMM kernel 直包；
+- `vllm/platforms/cuda.py::support_deep_gemm` 白名单只有 SM90 / SM100 家族 / SM120 家族，DeepGEMM 的 cmake 架构集合（9.0a / 10.0x / 12.0x）与 SM86 交集为空——这是 kernel 支持矩阵限制，不是层数或配置问题（剪到 4 层、改 `num_hidden_layers` 都绕不开 indexer）；
+- 源码仓 vendored 的 `deep_gemm._C` 扩展还是旧 torch ABI 编译（引用 torch 2.13 已删除的 `materialize_cow_storage` 符号），pypi `deep_gemm` 1.0.0 sdist 本机构建亦失败（缺 cutlass 子模块）。
+
+V3 不受影响（MLA 有 Triton 路径，不依赖 DeepGEMM）。因此 V4 的性能对比只有 lite_llama 的实测数字（TP2）。transformers 也拿不出性能数字：HF 加载器不认 DSpark 命名的权重（精度对比时是在内存里逐 key 转换的），且 fp32 CPU 口径与 GPU 吞吐不可比。精度对比的参考实现用 transformers 5.15 的 eager `DeepseekV4ForCausalLM`（下节）。
+
+bench 口径与上表一致（batch=8、gen_len=128、iters=2、bf16 激活、贪心、TP2 双卡），decode 走 eager（`--no-cuda-graph`：V4 每层滑窗/压缩器状态是 Python 侧张量重绑定，CUDA graph 只重放 kernel 不重放属性绑定，捕获即失效）：
+
+| 模型 | 层数（attn 排布） | 并行 | 引擎 | TTFT (s) | TPOT (ms) | TGS (tok/s) |
+| --- | --- | --- | --- | ---: | ---: | ---: |
+| DeepSeek-V4-Flash-6layers | 6（SWA×2+CSA×2+HCA×2，3 hash-MoE+3 score-MoE） | TP2 | lite_llama | 0.1333 | 52.520 | 150.59 |
+
+V4-Flash 每层都是 256 专家 top-6 路由的 MoE（moe_intermediate 2048、hidden 4096），且 CSA/HCA 层每步还要维护 indexer（index_topk 512）与 compressor 的前缀状态——单层算子密度远高于 V2/V3 的 MoE 层；eager decode 下 6 层的逐层 Python 开销叠加，TPOT 52.5 ms 与 V2-Lite 27 层 eager 时期的 61.9 ms 同量级，主要构成是每层的路由、专家 GEMM（fp8/MXFP4 weight-only dequant）与滑窗状态维护。这是 V4 在 lite_llama 的首次端到端吞吐记录，优化（graph 兼容的滑窗状态重构）留待后续。
+
+复现（日志：`docs/benchmark_logs/bench_DeepSeek-V4-Flash-6layers_b8_g128_tp2_20260904_045910.json`）：
+
+```bash
+# V4 TP2（lite_llama venv；--no-cuda-graph：V4 的滑窗缓存每步重绑 Python 侧张量，
+# graph 回放不了属性重绑定，decode 走 eager）：
+PYTHONPATH=. /home/honggao/projects/lite_llama/.venv/bin/python examples/benchmark.py \
+  --model /data/shared/llm_weights/DeepSeek-V4-Flash-6layers \
+  --batch-size 8 --gen-len 128 --iters 2 --engine lite_llama \
+  --tensor-parallel-size 2 --hf-dtype bf16 --no-cuda-graph
+```
+
+### 精度差异：V3-4layers 三方对比 & V4-Flash-6layers（lite_llama vs transformers）
+
+两套精度口径都回答同一问题：lite_llama 的模型结构与参考实现（transformers / vLLM）是否逐 token 等价。指标：贪心序列逐步 token 一致率（agreement，@n 表示首分歧步）、prefill 逐位置 top-1 一致率、逐步 top-5 id 一致率。
+
+**V3-4layers 三方**（真实文本 prompt 三种长度、贪心 32 步；lite_llama 与 transformers 单卡 bf16，vLLM TP1 bf16 源码仓 venv，同 golden 门 override；日志：`benchmarks/logs/accuracy_v3_parity_20260904_034741.json`、`accuracy_v3_vllm_20260904_043841.json`）：
+
+| prompt 长度 | prefill 逐位置 top1（lite~HF） | lite~HF | lite~vLLM | vLLM~HF |
+| ---: | ---: | ---: | ---: | ---: |
+| 16 | 1.000 | 0.469 @13 | 0.281 @8 | 0.250 @8 |
+| 130 | 0.992 | 32/32 全对 | 32/32 全对 | 32/32 全对 |
+| 514 | 0.971 | 0.219 @7 | 0.219 @7 | 32/32 全对 |
+
+分叉步的逐 top5 解剖（`benchmarks/analysis_v3_three_way.py`）说明残部分歧是 bf16 数值噪声而非结构差异：
+
+- seq 130 三方 32 步完全一致（含 MoE 层完整路由）——路由与 MLA 路径结构等价的直接证据；
+- seq 16 的两处分叉步上，vLLM 自己的 top1 与 top2 logprob 完全相等（step 8：17117 与 48301 均 -3.1553；step 13：260 与 10466 均 -1.1548），三方各自的选择就是平局 tie-break 差异；
+- seq 514 是 lite_llama 在第 7 步分叉（vLLM 与 HF 一致选 7294，双方 margin 0.25；lite_llama 选 6791）。该 prompt 是 130-token 文本重复 4 次，prefill logits 的 max_abs_diff（14.06，vs 短 prompt 的 0.25/0.5）集中在长序列后段：4 层浅模型输出分布温和、MLA 吸收路径的 bf16 噪声随 prefill 长度累积，MoE top-2 专家的边界 token 翻转后被贪心序列放大。
+
+**V4-Flash-6layers**（lite_llama bf16 TP2 vs transformers fp32 CPU 参考；输入为同种子随机 token id、三种 prefill 长度、贪心 32 步，两边共享同一确定性序列，排除分词差异噪声；日志：`benchmarks/logs/accuracy_v4_lite_20260904_042455.json`、`accuracy_v4_hf_20260904_043200.json`）。参考实现将 DSpark 权重在内存中转换为 HF 命名并 dequant（fp8 块、MXFP4 nibble 解包）后以 fp32 计算，是最强 oracle：
+
+| prompt 长度 | greedy 一致 | top-5 id 一致率 | shared logprob max-drift |
+| ---: | ---: | ---: | ---: |
+| 64 | 30/32（首分歧 @30） | 0.950 | 0.279 |
+| 256 | 32/32 全对 | 0.981 | 0.486 |
+| 1024 | 12/32（首分歧 @12） | 0.406 | 4.568 |
+
+分叉解剖（`benchmarks/analysis_v4_divergence.py`）：96 步里真正独立的分歧只有 2 处，其余全部是首分歧后上下文分叉的雪崩——
+
+- seq 1024 step 12：lite_llama 的 top1/top2 logprob 完全相等（margin 0.0000，argmax tie-break 取了索引小的 token），HF 侧 margin 仅 0.0709，且 HF 选的 token 就是 lite_llama 分布的 rank-1；
+- seq 64 step 30：双方 margin 0.125 / 0.037，互相落在对方 top-2，logprob 差 0.04；
+- 即所有独立分歧都发生在 margin < 0.13 的近平局步、对方选择都在自己 top-2 内。bf16 权重 + bf16 计算相对 fp32 参考的数值差在这个量级属预期，非结构差异；256-token prefill 下 32 步全对进一步排除了路由 / attention / 量化路径的结构性偏差。
+
+复现：
+
+```bash
+# V3 三方（前两臂 lite_llama venv 单卡；vLLM 臂在 vllm 源码仓 venv）：
+python benchmarks/accuracy_v3_parity.py
+/home/honggao/projects/open_source/vllm/.venv/bin/python benchmarks/accuracy_v3_vllm.py
+python benchmarks/analysis_v3_three_way.py benchmarks/logs/accuracy_v3_parity_<ts>.json benchmarks/logs/accuracy_v3_vllm_<ts>.json
+# V4 精度对比（lite_llama TP2 双卡；transformers 跑在 CPU，需 ~200 GB 内存做 fp32 转换）：
+python benchmarks/accuracy_v4_parity.py --arm lite
+python benchmarks/accuracy_v4_parity.py --arm hf
+python benchmarks/accuracy_v4_parity.py --compare benchmarks/logs/accuracy_v4_lite_<ts>.json benchmarks/logs/accuracy_v4_hf_<ts>.json
+python benchmarks/analysis_v4_divergence.py benchmarks/logs/accuracy_v4_lite_<ts>.json benchmarks/logs/accuracy_v4_hf_<ts>.json
+```
+
 ## 三 性能优化历史记录
 
 ### 迭代式优化记录

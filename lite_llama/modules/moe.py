@@ -461,9 +461,18 @@ class SparseMoeBlock(nn.Module):
         return out.reshape(*(ctx.leading_shape or ()), self.hidden_size)
 
     def _run_experts(
-        self, local_x: torch.Tensor, local_ids: torch.Tensor, local_weights: torch.Tensor
+        self,
+        local_x: torch.Tensor,
+        local_ids: torch.Tensor,
+        local_weights: torch.Tensor,
+        down_overlap_args=None,
     ) -> torch.Tensor:
-        """The local grouped GEMM; EP is unquantised-only (enforced in init)."""
+        """The local grouped GEMM; EP is unquantised-only (enforced in init).
+
+        ``down_overlap_args`` splits the down projection into row chunks and
+        publishes an event per chunk, so the combine exchange can be posted
+        against chunk 0 while the remaining chunks are still computing.
+        """
         from ..kernels import fused_moe
 
         return fused_moe(
@@ -472,6 +481,7 @@ class SparseMoeBlock(nn.Module):
             self.experts["down_proj"],
             local_weights,
             local_ids,
+            down_overlap_args=down_overlap_args,
         )
 
     @torch.no_grad()
