@@ -293,3 +293,62 @@ def test_pipeline_harvests_both_passes_of_a_mixed_step():
     assert second.output_token_ids[0] == 22
     assert first.pending_tokens == 0
     assert second.pending_tokens == 0
+
+
+class _RecyclingExecutor(_ScriptedExecutor):
+    """A readback whose views alias one recycled buffer, like the real pool.
+
+    The StreamPool hands back a *view* of a pinned buffer it reuses once the
+    buffer's copy event has completed — which, by harvest time, it long has.
+    So issuing readback N overwrites the storage readback N-1 returned, and
+    whoever still holds that view sees the new tokens. An engine that issues
+    this step's readback before harvesting the previous step's tokens reads
+    t1 where it looked for t0.
+    """
+
+    def __init__(self, rows: list[list[int]]) -> None:
+        super().__init__(rows)
+        import torch
+
+        self._buffer = torch.zeros(max(len(r) for r in rows), dtype=torch.long)
+
+    def readback_async(self, tokens):
+        self.readbacks += 1
+        self._buffer[: tokens.numel()].copy_(tokens)
+        return self._buffer[: tokens.numel()], None
+
+
+def test_pipeline_harvests_before_the_next_readback_overwrites():
+    """The previous step's buffer must be read before this step's readback.
+
+    The recycling executor is the real pool's aliasing semantics in miniature:
+    the guard is ordering, so the drain must harvest step N-1's tokens before
+    it issues step N's readback. Regression test for a bug where the launch
+    block ran its readbacks first, and every request's stream came out
+    shifted one token late — the first token lost, each later token replaced
+    by its successor.
+    """
+
+    def run(pipeline: bool) -> ContinuousBatchingEngine:
+        fake = SimpleNamespace(
+            model_runner=SimpleNamespace(spec=SimpleNamespace(is_multimodal=False)),
+            device="cpu",
+            tokenizer=_FakeTokenizer(),
+            stop_token_ids={_EOS},
+            max_seq_len=64,
+        )
+        executor = _RecyclingExecutor([[_WORD + i] for i in range(5)] + [[_EOS]])
+        engine = ContinuousBatchingEngine(
+            fake,
+            SchedulerConfig(max_seq_len=64, max_num_seqs=4),
+            executor=executor,
+            pipeline=pipeline,
+        )
+        request = engine.add_request("hi")
+        _drain(engine)
+        engine.shutdown()
+        return request
+
+    pipelined, synchronous = run(True), run(False)
+    assert pipelined.output_token_ids == synchronous.output_token_ids
+    assert pipelined.output_token_ids[0] == _WORD  # t0 survived the recycling

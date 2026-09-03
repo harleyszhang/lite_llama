@@ -738,25 +738,22 @@ class ContinuousBatchingEngine:
         # reads are always one forward old.
         previous = self._inflight.popleft() if self._inflight else None
 
-        if work:
-            # Launch only: no token is read back here. The readback rides the
-            # executor's copy stream behind the pass that produced it, and its
-            # event is honoured one step later.
-            launched: list[
-                tuple[_Work, torch.Tensor, torch.cuda.Event | None, PassLogprobs | None]
-            ] = []
-            for work_item in work:
-                tokens, logprobs = self._executor.execute(work_item.plan)
-                host, event = self._executor.readback_async(tokens)
-                launched.append((work_item, host, event, logprobs))
-            # Optimistic advance: every request this step samples for owes one
-            # token the host has not harvested; the next plan adds it back.
-            for work_item, *_ in launched:
-                for request in work_item.requests:
-                    request.pending_tokens += 1
-            self._inflight.append(launched)
+        # Launch only: no token is read back here. The readback rides the
+        # executor's copy stream behind the pass that produced it, and its
+        # event is honoured one step later.
+        staged: list[tuple[_Work, torch.Tensor, PassLogprobs | None]] = []
+        for work_item in work:
+            tokens, logprobs = self._executor.execute(work_item.plan)
+            staged.append((work_item, tokens, logprobs))
 
         advanced: list[Request] = []
+        # Harvest the previous step's tokens *before* this step's readbacks
+        # are issued. A readback recycles whichever pinned buffer's copy
+        # event has completed, and the previous step's completed long ago —
+        # read after the new readback, its view would already hold this
+        # step's tokens (the pool's "harvest N-1 strictly before launch N's
+        # readback" contract). The executes above queued this step's
+        # kernels, so the host still harvests while the GPU runs.
         if previous is not None:
             for work_item, host, event, logprobs in previous:
                 if logprobs is not None and any(logprobs.prompt):
@@ -787,6 +784,20 @@ class ContinuousBatchingEngine:
                         continue
                     emitted.append((request, token, record))
                 advanced += self._harvest(emitted)
+
+        if staged:
+            launched: list[
+                tuple[_Work, torch.Tensor, torch.cuda.Event | None, PassLogprobs | None]
+            ] = []
+            for work_item, tokens, logprobs in staged:
+                host, event = self._executor.readback_async(tokens)
+                launched.append((work_item, host, event, logprobs))
+            # Optimistic advance: every request this step samples for owes one
+            # token the host has not harvested; the next plan adds it back.
+            for work_item, *_ in launched:
+                for request in work_item.requests:
+                    request.pending_tokens += 1
+            self._inflight.append(launched)
         # Counter properties, not len(running): those copy the lists.
         self.metrics.observe_load(self.scheduler.num_running, self.scheduler.num_waiting)
         return advanced
