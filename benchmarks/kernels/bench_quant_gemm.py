@@ -4,21 +4,27 @@ The projection GEMM is where a quantised checkpoint either pays off or does not.
 On this H100 the measured answer is blunter than the theory, so read the headline
 first and the regimes second:
 
-**cuBLAS bf16 is the fastest row in 31 of the 48 cells.** The 20 scheme-wins on
-the remaining 17 (several cells carry two schemes) split int8 W8A8 13 / fp8 W8A8
-5 / fp8 W8A16 2, and they concentrate on ``qwen3-4b/gate_up`` (N=19456, K=2560 —
-100 MB in bf16, the largest weight here, all six M bands), ``qwen3-4b/qkv`` (five
-bands) and the two 30B prefill cells. On gate_up int8 W8A8 runs 1.46x / 1.44x /
-1.38x / 1.13x / 1.21x / 1.45x at M=1/8/32/128/512/2048 — the win survives prefill.
+**cuBLAS bf16 is the fastest row in 35 of the 48 cells.** The 20 scheme-wins on
+the remaining 13 (two cells carry three schemes, three carry two) split int8 W8A8
+13 / fp8 W8A8 5 / fp8 W8A16 2, and they concentrate on ``qwen3-4b/gate_up``
+(N=19456, K=2560 — 100 MB in bf16, the largest weight here, all six M bands),
+``qwen3-4b/qkv`` (five bands) and the two 30B prefill cells. On gate_up int8 W8A8
+runs 1.46x / 1.44x / 1.38x / 1.13x / 1.21x / 1.45x at M=1/8/32/128/512/2048 — the
+win survives prefill. These counts are a snapshot of the
+``bench_quant_gemm_h100_20260903d`` round; a run prints them recomputed from its
+own rows (:func:`_win_summary`), so the prose going stale shows up as a mismatch
+against the table instead of being believed.
 
 The wins still follow bf16's memory pressure, but the threshold is per-scheme now:
 **int8 W8A8 wins from ~44% of peak HBM upward** (``qkv`` m=1 at 1.07x; a near
 miss at 38.5%), while fp8 W8A8 and fp8 W8A16 only win at the top of the range
-(60.9%, gate_up). At M=1 the bf16 row's share of peak HBM ranges from 10.5%
-(``qwen3-30b-a3b/down``, a 3 MB weight) to 60.9%. The reason int8's bar is lower:
-its scales live entirely in the epilogue and imma has no ``BLOCK_M >= 64``
-threshold, while the fp8 row pays Triton's wgmma codegen plus a per-token
-activation-quantise pass (the ``ablation`` row isolates the kernel alone).
+(60.9%, gate_up). That rule covers the decode bands; the two 30B prefill wins
+come from int8's imma rate rather than from bytes. At M=1 the bf16 row's share
+of peak HBM ranges from 10.5% (``qwen3-30b-a3b/down``, a 3 MB weight) to 60.9%.
+The reason int8's bar is lower: its scales live entirely in the epilogue and imma
+has no ``BLOCK_M >= 64`` threshold, while the fp8 row pays Triton's wgmma codegen
+plus a per-token activation-quantise pass (the ``ablation`` row isolates the
+kernel alone).
 
 On a mid-sized projection (``qwen3-4b/qkv``, N=6144, K=2560) the margins at ``m=1``
 are 21.6 us for bf16 against 20.2 for int8 (the win), 22.0 for fp8 W8A8, 28.2 for
@@ -38,13 +44,14 @@ The two regimes then explain how the *gap* moves, not who wins:
     measures 22-30 us run to run at m=1, so treat that column's ordering as soft.
 ``M >= 512`` (prefill)
     Intensity clears the ridge and cuBLAS starts using the tensor cores properly
-    (723 TFLOP/s at ``m=2048``, 73% of peak). The epilogue-scale fix pulled fp8
-    W8A8 back to a 1.35x geomean gap (from 2x+) and int8 W8A8 to 1.12x — winning
-    gate_up and qkv outright — while the weight-only rows stay pinned by their
-    unpack loops: 2.70x for ``w8a16`` up to 6.58x for ``nvfp4``. What remains for
-    fp8 W8A8 is Triton's fp8 wgmma codegen (0.7-1.05x cuBLAS, shape-dependent)
-    plus the activation-quantise pass — a compiler-work boundary, not a
-    kernel-writing one.
+    (390-766 TFLOP/s at ``m=2048`` depending on the projection, 77% of peak on
+    ``qwen3-4b/down``). The epilogue-scale fix pulled fp8 W8A8 back to a 1.34x
+    geomean gap (from 2x+) and int8 W8A8 to 1.12x — int8 wins gate_up and qkv
+    outright, fp8 W8A8 only gate_up — while the weight-only rows stay pinned by
+    their unpack loops: 2.70x for ``w8a16``, 4.45x for ``w4a16``, 6.58x for
+    ``nvfp4``. What remains for fp8 W8A8 is Triton's fp8 wgmma codegen (0.61-1.09x
+    cuBLAS at m>=512, shape-dependent) plus the activation-quantise pass — a
+    compiler-work boundary, not a kernel-writing one.
 
 What each row measures:
 
@@ -64,14 +71,15 @@ What each row measures:
     AWQ/GPTQ packed int4, bf16 activation. A quarter of the weight bytes, and
     the most unpacking work per byte — a 1.65x decode geomean against cuBLAS.
     See :func:`tune`: the heuristic was using ``GROUP_M=1`` below 32 rows, and
-    fixing that took 20-44% off all eight decode keys. This is the only row in
-    the table whose kernel consults the autotune store, so it is the only one a
+    fixing that won every ``m <= 32`` store key — the per-key gains are tabulated
+    in ``docs/benchmark_logs/quant_matrix_20260901.md`` §1.1b. This is the only row
+    in the table whose kernel consults the autotune store, so it is the only one a
     tuning run can improve.
 ``native/linear_nvfp4``
     NVFP4: e2m1 weight, an fp8-e4m3 scale every 16 elements, one fp32 scale per
     tensor. 4.5 bits per weight, so 3.56x fewer weight bytes than bf16 — and a
     bf16 MMA regardless, because sm90 has no fp4 tensor core. This row is
-    **slower than bf16 in all 48 cells**, including the 17 where some other
+    **slower than bf16 in all 48 cells**, including the 13 where some other
     quantised row wins, and that is the finding, not a bug: the e2m1 unpack costs ~10
     integer ops per weight element, which is an order of magnitude more time than
     the bytes it saves. Read it as the price of the footprint, and see
@@ -346,13 +354,7 @@ SCHEMES: tuple[Scheme, ...] = (
     Scheme("nvfp4", "native/linear_nvfp4", _build_nvfp4, 4, 1e-2, 1e-2),
 )
 
-
-# --------------------------------------------------------------------------- #
-# Ablation: the fp8 GEMM without its activation quantiser
-# --------------------------------------------------------------------------- #
-#: Label for the ablation row. Not a ``KernelSpec.name`` — nothing dispatches to
-#: it — and the ``ablation:`` prefix says so, so the table stays readable as
-#: "rows that name registry entries, plus one that explicitly does not".
+#: Label for the ablation row — not a ``KernelSpec.name``, nothing dispatches to it.
 _ABLATION_FP8 = "ablation: fp8_matmul only"
 
 
@@ -739,6 +741,43 @@ def measure(geometries: tuple[Geometry, ...], tokens: tuple[int, ...]) -> list[R
     return rows
 
 
+def _win_summary(rows: list[Row]) -> str:
+    """Count who beats cuBLAS bf16 in *this* run instead of quoting the docstring.
+
+    The docstring's headline is a snapshot of one recorded round; it drifts when
+    the kernels move, and a stale count still reads like a finding. These numbers
+    come from the rows just measured, so prose and table disagree loudly rather
+    than silently. The ablation row is excluded: it isolates one kernel and is
+    not a scheme anyone can deploy.
+    """
+    # Row labels are ``"{impl} [{key}]"`` (see :func:`measure`), not the bare
+    # impl, so the baseline has to be rebuilt the same way.
+    ref = next(s for s in SCHEMES if s.key == "unquantized")
+    baseline = f"{ref.impl} [{ref.key}]"
+    by_case: dict[str, dict[str, float]] = {}
+    for r in rows:
+        if r.impl != _ABLATION_FP8:
+            by_case.setdefault(r.case, {})[r.impl] = r.us
+
+    wins: dict[str, int] = {}
+    fastest = 0
+    for impls in by_case.values():
+        beaten = [i for i, us in impls.items() if i != baseline and us < impls[baseline]]
+        if not beaten:
+            fastest += 1
+        for i in beaten:
+            wins[i] = wins.get(i, 0) + 1
+
+    split = ", ".join(
+        f"{i.split('[')[-1].rstrip(']')} {wins[i]}"
+        for i in sorted(wins, key=lambda k: wins[k], reverse=True)
+    )
+    return (
+        f"cuBLAS bf16 ({baseline}) is fastest in {fastest} of {len(by_case)} cells;\n"
+        f"{sum(wins.values())} scheme-wins on the other {len(by_case) - fastest} ({split})."
+    )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -816,33 +855,34 @@ def main() -> None:
     rows = measure(geometries, tuple(args.tokens))
     report(rows)
     print(
-        "\nHeadline: cuBLAS bf16 (native/linear_torch) is fastest in 28 of 48 cells;\n"
-        "the other twenty are int8 W8A8 (13), fp8 W8A8 (5) and fp8 W8A16 (2).\n"
+        f"\nHeadline: {_win_summary(rows)}\n"
         "qwen3-4b/gate_up (N=19456, K=2560, 100 MB in bf16) is quantisation's\n"
-        "home ground at every M: int8 1.46x / 1.43x / 1.38x / 1.13x / 1.21x /\n"
-        "1.44x and fp8 W8A8 1.43x / 1.39x / 1.39x / 1.00x / 0.99x / 1.09x at\n"
-        "M=1/8/32/128/512/2048 (fp8 W8A16 wins m1/m8 at 1.19x/1.22x). int8 also\n"
-        "takes 4b/qkv at 1.08x/1.03x/1.02x/1.01x/1.24x (m=1/8/32/512/2048) and\n"
-        "30b-a3b qkv + o at m=2048 (1.06x / 1.01x).\n"
+        "home ground at every M: int8 1.46x / 1.44x / 1.38x / 1.13x / 1.21x /\n"
+        "1.45x and fp8 W8A8 1.43x / 1.40x / 1.39x / 1.00x / 0.99x / 1.10x at\n"
+        "M=1/8/32/128/512/2048 (fp8 W8A16 wins m1/m8 at 1.21x/1.22x). int8 also\n"
+        "takes 4b/qkv at 1.07x/1.03x/1.02x/1.01x/1.23x (m=1/8/32/512/2048) and\n"
+        "30b-a3b qkv + o at m=2048 (1.07x / 1.02x).\n"
         "\nThe rule behind that: quantisation wins where bf16 is genuinely\n"
         "bandwidth-bound and nowhere else. At M=1 the bf16 row's share of peak HBM\n"
-        "spans 10.4% (30b-a3b/down, a 3 MB weight) to 60.9% (4b/gate_up), and the\n"
+        "spans 10.5% (30b-a3b/down, a 3 MB weight) to 60.9% (4b/gate_up), and the\n"
         "wins sit at the top of that range. Predict from the bf16 %bw column, not\n"
         "from the compression ratio.\n"
-        "\nOn a mid-sized projection (4b/qkv) at m=1: bf16 21.6 us, int8 20.1, fp8\n"
-        "W8A8 22.0, fp8 W8A16 28.2, int4 29.6, nvfp4 48.9. At m=2048: int8 73.6 /\n"
-        "bf16 91.0 / fp8 W8A8 95.7 / fp8 W8A16 252.1 / int4 509.9 / nvfp4 725.8.\n"
-        "Read those as the throughput price of a smaller checkpoint. Where int4\n"
-        "reaches parity it is two limits meeting, not one: bf16 streams 31 MB at\n"
-        "43% of peak, int4 streams 7.9 MB at 11.9% and is unpack-bound. Do not\n"
-        "carry the parity to another shape.\n"
+        "\nOn a mid-sized projection (4b/qkv) at m=1: bf16 21.6 us, int8 20.2, fp8\n"
+        "W8A8 22.0, fp8 W8A16 28.2, int4 29.8, nvfp4 49.1. At m=2048: int8 73.7 /\n"
+        "bf16 90.8 / fp8 W8A8 93.5 / fp8 W8A16 252.2 / int4 512.2 / nvfp4 728.4.\n"
+        "Read those as the throughput price of a smaller checkpoint. int4 never\n"
+        "reaches parity on this shape (0.72x at m=1) -- the two limits do not meet:\n"
+        "bf16 streams 31 MB at 43% of peak, int4 streams 8.9 MB at 9% and is\n"
+        "unpack-bound. One earlier round read 22.2 us at m=1, i.e. parity; that\n"
+        "sits at the bottom of this config's 22-30 us run-to-run band, so read it\n"
+        "as noise, not as a shape where the limits meet.\n"
         "\nAt m>=512 the W4A16 rows stay pinned by their unpack loops (5.6x for int4,\n"
-        "8.2x for nvfp4 on 4b/qkv) and the fp8 W8A16 row is structurally behind\n"
+        "8.0x for nvfp4 on 4b/qkv) and the fp8 W8A16 row is structurally behind\n"
         "(fp16-rate dot plus in-kernel widening vs cuBLAS bf16); the W8A8 rows\n"
         "pay a per-token activation quantise pass that linear_work() does not\n"
         "count, so their GB/s is a lower bound. fp8 W8A8's remaining prefill gap\n"
         "is the Triton fp8 wgmma codegen: its matmul-only ablation sits at\n"
-        "0.7-1.05x of cuBLAS bf16 depending on shape.\n"
+        "0.61-1.09x of cuBLAS bf16 at m>=512 depending on shape.\n"
         "\nOnly the int4 row reads the autotune store. Run --tune to fill it (13-25%\n"
         "at m>=512), or LITE_LLAMA_AUTOTUNE=0 to measure the heuristic a user gets\n"
         "without a cache."
