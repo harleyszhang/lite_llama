@@ -35,16 +35,16 @@ from benchmarks.common import (
 )
 from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
 from lite_llama.engine.sampler import SamplingParams
-from lite_llama.observe import METRICS_ENV, EngineMetrics, Tracer
+from lite_llama.tools.observability import METRICS_ENV, EngineMetrics, Tracer
 
 CKPT = "my_weight/Qwen3-0.6B"
 
-_TOP_K = 5  # 报几个备选;topk 的宽度对耗时的影响远小于"报不报"
+_TOP_K = 5  # how many alternatives to report; the width matters far less than reporting at all
 
 
 @dataclass(frozen=True)
 class Variant:
-    """一个被测配置:采样参数上的开关 + 引擎侧的观测对象。"""
+    """One configuration under test: a sampling-parameter switch plus engine-side observers."""
 
     label: str
     logprobs: int | None = None
@@ -61,7 +61,8 @@ class Variant:
         )
 
 
-#: 顺序有意:基线在头尾各一次,中间每行只相对基线多开一个东西。
+#: The order is deliberate: a baseline opens and closes the list, and every row in
+#: between turns on exactly one thing relative to it.
 VARIANTS = (
     Variant("baseline"),
     Variant("metrics", metrics=True),
@@ -74,11 +75,12 @@ VARIANTS = (
 
 
 def build_metrics(enabled: bool) -> EngineMetrics:
-    """关/开一份 metrics。
+    """Build a metrics object, on or off.
 
-    必须走 ``from_env``:``EngineMetrics(enabled=False)`` 只是把标志位置掉,真正
-    换成空仪表(即"一次属性查找 + 一个空方法")是 ``from_env`` 做的,直接构造
-    出来的关闭态仍然在落桶,量出来的就不是关掉的样子。
+    It must go through ``from_env``: ``EngineMetrics(enabled=False)`` only clears the
+    flag, while ``from_env`` is what substitutes the no-op instruments (one attribute
+    lookup plus an empty method). A directly constructed "off" object still records
+    into buckets, so measuring it would not measure the off state.
     """
     previous = os.environ.get(METRICS_ENV)
     os.environ[METRICS_ENV] = "1" if enabled else "0"
@@ -92,11 +94,12 @@ def build_metrics(enabled: bool) -> EngineMetrics:
 
 
 def build_tracer(enabled: bool) -> Tracer:
-    """开启态导到内存,不走网络。
+    """Enabled state exports in memory, not over the network.
 
-    要量的是 span 创建与属性写入压在步循环上的成本;真实部署里导出由
-    ``BatchSpanProcessor`` 的后台线程做,collector 的往返不该记到 TTFT 上。
-    换成内存 exporter 后这条路径与线上完全同构,只是终点不同。
+    What is measured is the cost span creation and attribute writes put on the step
+    loop; in a real deployment ``BatchSpanProcessor``'s background thread does the
+    export, so a collector round trip must not be charged to TTFT. With an in-memory
+    exporter the path is structurally identical to production, only the sink differs.
     """
     if not enabled:
         return Tracer()
@@ -107,7 +110,7 @@ def build_tracer(enabled: bool) -> Tracer:
             InMemorySpanExporter,
         )
     except ModuleNotFoundError:
-        print("opentelemetry SDK 未安装,trace 行退化为 no-op(等同 baseline)")
+        print("opentelemetry SDK not installed; the trace row degrades to a no-op (= baseline)")
         return Tracer()
 
     provider = TracerProvider()
@@ -116,7 +119,7 @@ def build_tracer(enabled: bool) -> Tracer:
 
 
 def measure(engine, prompts: list[str], params: SamplingParams) -> BenchResult:
-    """整批提交后逐 step 打点,口径同 EngineBackend。"""
+    """Submit the whole batch then time each step, the same discipline as EngineBackend."""
     requests = [engine.add_request(prompt, params) for prompt in prompts]
     torch.cuda.synchronize()
     t_start = time.perf_counter()
@@ -138,10 +141,11 @@ def measure(engine, prompts: list[str], params: SamplingParams) -> BenchResult:
 def run_variant(
     engine, variant: Variant, prompts: list[str], max_gen_len: int, iters: int
 ) -> BenchResult:
-    """装好这个配置,预热到稳态,取 iters 轮里 TPS 的中位那轮。
+    """Install this configuration, warm up to steady state, take the median TPS of ``iters``.
 
-    预热要用配置本身的参数:第一次带 logprobs 的步会现编 topk kernel,把它算进
-    测量就等于把编译时间报成 logprobs 的开销。
+    The warm-up must use the variant's own parameters: the first step carrying logprobs
+    compiles the topk kernel, and counting that in the measurement would report compile
+    time as logprobs overhead.
     """
     engine.metrics = build_metrics(variant.metrics)
     engine.tracer = build_tracer(variant.trace)
@@ -153,20 +157,21 @@ def run_variant(
 
 
 def report(results: dict[str, BenchResult]) -> dict[str, float]:
-    """相对基线的代价,连同噪声下限一起印——小于噪声的差值不作数。"""
+    """Print each variant's cost against the baseline, with the noise floor — sub-noise
+    differences do not count."""
     baselines = [r.tps for label, r in results.items() if label.startswith("baseline")]
     reference = statistics.mean(baselines)
     noise = (max(baselines) - min(baselines)) / reference if len(baselines) > 1 else 0.0
 
-    print(f"\nbaseline TPS {reference:.1f} tok/s, 两次自差 {noise * 100:.1f}% (噪声下限)")
+    print(f"\nbaseline TPS {reference:.1f} tok/s, self-difference {noise * 100:.1f}% (noise floor)")
     costs: dict[str, float] = {}
     for label, result in results.items():
         cost = 1.0 - result.tps / reference
         costs[label] = cost
         if label.startswith("baseline"):
             continue
-        verdict = "低于噪声" if abs(cost) <= noise else f"{cost * 100:+.1f}%"
-        print(f"{label:22s} 吞吐代价 {cost * 100:+6.1f}% -> {verdict}")
+        verdict = "within noise" if abs(cost) <= noise else f"{cost * 100:+.1f}%"
+        print(f"{label:22s} throughput cost {cost * 100:+6.1f}% -> {verdict}")
     return {"baseline_tps": reference, "noise": noise, **costs}
 
 
@@ -178,7 +183,9 @@ def main() -> int:
     ap.add_argument("--max-seq-len", type=int, default=1024)
     ap.add_argument("--max-num-seqs", type=int, default=16)
     ap.add_argument("--kv-blocks", type=int, default=40960)
-    ap.add_argument("--iters", type=int, default=3, help="每个配置测几轮,取 TPS 中位")
+    ap.add_argument(
+        "--iters", type=int, default=3, help="Rounds per configuration; the median TPS is reported"
+    )
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
 

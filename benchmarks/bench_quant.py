@@ -603,8 +603,8 @@ def benchmark_model(
 
     rows: list[Row] = []
     hf_texts: list[str] | None = None
-    # HF 基线与 lite 各行一样跟随 checkpoint 自身的 dtype；标签里带上，
-    # 免得两次运行在不同精度间静默换挡。
+    # The HF baseline follows the checkpoint's own dtype like every lite row does; the
+    # tag carries it, so two runs cannot silently switch precision.
     hf_tag = dtype_tag(checkpoint_dtype(model_dir))
     if not skip_hf:
         print(f"\n=== {model_name} — HF {hf_tag} baseline ===")

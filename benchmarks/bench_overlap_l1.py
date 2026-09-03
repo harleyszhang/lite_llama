@@ -30,7 +30,8 @@ from benchmarks.common import (
 
 CKPT = "my_weight/Qwen2.5-1.5B-Instruct"
 
-#: 重叠开关由 ModelWorker 在建引擎时从环境读取;两个 arm 唯一的差别就是它。
+#: The overlap switch is read from the environment by ModelWorker when the engine is
+#: built; it is the only difference between the two arms.
 OVERLAP_ENV = "LITE_LLAMA_OVERLAP"
 TIMELINE_ENV = "LITE_LLAMA_OVERLAP_TIMELINE"
 
@@ -42,9 +43,10 @@ def measure(
     overlap: bool,
     max_num_batched_tokens: int,
 ) -> float:
-    """跑完整个工作负载,返回墙钟秒数;两个 arm 只差 overlap 开关。"""
+    """Run the whole workload and return wall-clock seconds; the arms differ only in overlap."""
     os.environ[OVERLAP_ENV] = "1" if overlap else "0"
-    # 开关在建引擎时从环境读取,所以引擎必须在 os.environ 落定之后才导入。
+    # The switch is read when the engine is built, so the engine must be imported only
+    # after os.environ is settled.
     from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
 
     engine = ContinuousBatchingEngine.from_pretrained(
@@ -56,7 +58,7 @@ def measure(
     )
     params = sampling_params(max_gen_len)
     try:
-        engine.generate(prompts[:2], sampling_params(8))  # 预热
+        engine.generate(prompts[:2], sampling_params(8))  # warm-up
         torch.cuda.synchronize()
         started = time.perf_counter()
         engine.generate(prompts, params)
@@ -69,7 +71,8 @@ def measure(
 
 
 def timeline_evidence(model_dir: str, prompts: list[str], max_num_batched_tokens: int) -> str:
-    """开 timeline 跑一小轮,返回 copy/compute region 表(重叠成立的直接证据)。"""
+    """Run one short round with the timeline on, returning the copy/compute region table
+    (direct evidence that the overlap happens)."""
     os.environ[OVERLAP_ENV] = "1"
     os.environ[TIMELINE_ENV] = "1"
     from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
@@ -92,10 +95,12 @@ def timeline_evidence(model_dir: str, prompts: list[str], max_num_batched_tokens
 
 
 def long_prompts(batch: int) -> list[str]:
-    """把基础 prompt 拉长到几百 token,让 prefill 分多个 chunk、与 decode 交错。
+    """Stretch the base prompts to a few hundred tokens so prefill splits into several
+    chunks and interleaves with decode.
 
-    短 prompt 一步就 prefill 完,整轮几乎全是纯 decode 步,没有可重叠的 pass;
-    长短不一的长 prompt(逐条错开 chunk 边界)才能让混合步占住工作负载的中段。
+    A short prompt prefills in one step, leaving the run almost entirely pure decode
+    steps with no pass to overlap; long prompts of differing lengths (each offsetting
+    its chunk boundary) are what put mixed steps in the middle of the workload.
     """
     base = expand_prompts(PROMPTS, batch)
     return [" ".join([prompt] * (18 + 6 * (i % 5))) for i, prompt in enumerate(base)]
@@ -104,16 +109,23 @@ def long_prompts(batch: int) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", default=CKPT)
-    ap.add_argument("--batch", type=int, default=16, help="请求数;长短不齐的长 prompt 产生混合步")
+    ap.add_argument(
+        "--batch", type=int, default=16, help="Requests; uneven long prompts create mixed steps"
+    )
     ap.add_argument("--max-gen-len", type=int, default=64)
     ap.add_argument(
         "--max-num-batched-tokens",
         type=int,
         default=512,
-        help="单步 token 预算;小于单条长 prompt 才会切 chunk,制造 prefill/decode 混合步",
+        help="Per-step token budget; below one long prompt's length it splits chunks, "
+        "creating prefill/decode mixed steps",
     )
-    ap.add_argument("--repeat", type=int, default=3, help="每个 arm 重复次数,报最好的一次")
-    ap.add_argument("--timeline", action="store_true", help="额外跑一轮 timeline 证据")
+    ap.add_argument(
+        "--repeat", type=int, default=3, help="Repeats per arm; the best one is reported"
+    )
+    ap.add_argument(
+        "--timeline", action="store_true", help="Also run one round of timeline evidence"
+    )
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
 
@@ -133,7 +145,7 @@ def main() -> int:
 
     evidence = ""
     if args.timeline:
-        print("\n=== timeline: copy 流与 compute 流的 region ===")
+        print("\n=== timeline: copy-stream vs compute-stream regions ===")
         evidence = timeline_evidence(args.model_dir, prompts, args.max_num_batched_tokens)
         print(evidence)
 
