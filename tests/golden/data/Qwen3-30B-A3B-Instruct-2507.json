@@ -1,44 +1,44 @@
 {
  "single": [
-  " a topic of great interest and debate. As AI continues to advance, it is expected to have a significant impact on various industries and aspects of our lives. Some experts predict that AI will revolutionize healthcare, transportation, and education, making processes"
+  " a topic of great interest and debate. Some experts believe that AI will continue to advance rapidly, while others are more cautious. The future of AI is likely to be shaped by a combination of technological advancements, ethical considerations, and societal needs."
  ],
  "single_rp1.1": [
-  " a topic of great interest and debate. As AI continues to advance, it is expected to have significant impacts on various industries and aspects of society. One major area where AI will play a crucial role is in healthcare. With the ability to analyze"
+  " a topic of great interest and debate. Some experts believe that AI will continue to advance rapidly, while others are more cautious about its potential. One major concern is the possibility of job displacement due to automation. As machines become better at performing tasks"
  ],
  "batch_uniform": [
-  " I am a beginner and I want to learn python from scratch. I have no prior programming experience. I want to learn python for data science and machine learning.",
-  " I am a beginner and I want to learn c++ from scratch. I have no prior programming experience. I want to learn c++ in a structured way."
+  " I am a beginner and I want to learn python from scratch. I have no programming experience. I want to learn python for data science. I want to learn",
+  " I have a basic knowledge of programming and I want to learn c++ from scratch. I have a basic knowledge of programming and I want to learn c++ from"
  ],
  "batch_uniform_rp1.1": [
   " I am a beginner and want to learn python from scratch. Can you guide me through the process?\n\nAbsolutely! Learning Python from scratch is a great choice — it",
-  " I am a beginner and want to learn c++ from scratch. What are the best resources, books, websites, and courses?\n\nWe are going to create a"
+  " I have a basic knowledge of programming and want to learn c++ from scratch. What are the best resources, books, online courses, and practice platforms?\n\nWe"
  ],
  "batch_mixed": [
   " can you help me with a project? I need to create a 30 second video for a new product launch. The product is a smart water bottle that",
-  " its legacy continues to influence modern society. The Roman Empire, which began in 27 BCE with the rise of Augustus, was a vast and powerful state"
+  " its influence on the world is profound. The Roman Empire, which began in 27 BCE with the rise of Augustus, was a vast and powerful state"
  ],
  "batch_mixed_rp1.1": [
   " can you help me with a project? I need to create an AI agent that can analyze and summarize text. The goal is to extract key information from long documents",
-  " its legacy continues to influence modern society. The Roman Empire, which began in 27 BCE with the rise of Augustus Caesar, was a vast and powerful"
+  " its influence on the world is profound. The Roman Empire, which began in 27 BCE with Augustus becoming the first emperor, was a vast and powerful"
  ],
  "batch8": [
   " to live a life of purpose and meaning, to contribute to something greater than oneself, and to leave a positive impact on the world. This can be achieved through",
   " and it is widely used in many computer vision tasks. In this paper, we propose a new method to improve the performance of VGG by introducing a new attention",
   " The American Civil War was a major conflict in the United States that took place from 1861 to 1865. It was fought between",
   " The first President of the United States was George Washington. He served from April 30, 1789, to March 4, 1",
-  " I am a beginner\n\nWe are going to start from the very basics of C++ for a complete beginner.\n We'll cover:\n 1. Setting up a",
+  " I am a beginner\n\nWe are going to start with the basics of C++ for a complete beginner.\n We'll cover:\n 1. Setting up a development",
   " I am a beginner.\n\nWe are going to create a beginner-friendly guide to learning Python with code examples.\n The guide will cover:\n 1. Setting up Python",
-  ", attention mechanism, and other related concepts in a simple way\n\nAbsolutely! Let's break down **how to learn about Large Language Models (LLMs)** in",
+  " architecture and its components in detail\n\nWe are going to learn about LLMs (Large Language Models) with a focus on the Transformer architecture, which is the",
   ", densenet, and efficientnet\n\nWe are going to learn about Convolutional Neural Networks (CNNs) and then dive into three important architectures:"
  ],
  "batch8_rp1.1": [
-  " to live a life of purpose and meaning, where one's actions contribute positively to the world. This can be achieved through personal growth, relationships, service to others",
+  " to live a life of purpose and meaning, where one contributes positively to the world. This can be achieved through personal growth, relationships, creativity, and service to",
   " and it is widely used in many computer vision tasks. In this paper, we propose a new method to improve the performance of VGG by introducing an attention mechanism",
   " The American Civil War was a major conflict in the United States that took place from 1861 to 1865. It was fought between",
   " The first President of the United States was George Washington. He served from April 30, 1789, to March 4, 1",
-  " I am a beginner\n\nWe are going to start from the very basics of C++ for a complete beginner.\n We'll cover:\n 1. Setting up your",
+  " I am a beginner\n\nWe are going to start with the basics of C++ for beginners.\n We'll cover:\n 1. Setting up your environment\n ",
   " I am a beginner.\n\nWe are going to create a step-by-step guide for beginners to learn Python, including code examples.\n The goal is to start from the",
-  ", attention mechanism and other related knowledge\n\nWe are going to learn about LLMs (Large Language Models) by first understanding the foundational concepts: \n1.",
+  " architecture and its components in detail\n\nWe are going to learn about LLMs (Large Language Models) with a focus on the Transformer architecture, which is the",
   ", densenet and other models\n\nWe are going to learn about Convolutional Neural Networks (CNNs) with a focus on ResNet, DenseNet"
  ]
 }
