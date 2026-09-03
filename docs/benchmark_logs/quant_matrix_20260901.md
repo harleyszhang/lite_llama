@@ -207,7 +207,7 @@ batch 4、生成 32 token、`--max-seq-len 2048`。该 checkpoint 没有 golden 
 | 事项 | 状态 |
 |---|---|
 | `M_MOE_INT4`（Qwen3-30B-A3B Int4 W4A16） | `quantization/__init__.py:105` 处 `ValueError: unsupported quant_method 'compressed-tensors'`。该 checkpoint 使用 compressed-tensors 序列化，这里没有对应的读取器；补一个超出本次范围。所有矩阵均排除，Phase 0 已记录。 |
-| fp4 张量核（A4）GEMM | 未尝试。sm90 没有 fp4 MMA，Triton 也没有 fp4 dtype。NVFP4 是 weight-only：买到的是字节，不是算术。 |
+| fp4 张量核（A4）GEMM | 未尝试。sm90 没有 fp4 硬件 MMA；Triton 的 `tl.dot_scaled`（microscaling，支持 uint8 打包 fp4）在 sm90 走软件模拟（upcast bf16），无 fp4 MMA 收益，原生支持要到 Blackwell（sm100）。NVFP4 是 weight-only：买到的是字节，不是算术。 |
 | NVFP4 MoE 专家 | 未实现；`NVFP4Config.get_quant_method` 在 MoE 层上直接抛错，而不是静默回退。 |
 | `deepgemm/fp8_gemm_nt` 与 flashinfer 各行 | 仍是 `GoldenRecord(verified=False)`。两个库都未安装；行已注册、被过滤掉，`explain()` 里可见。 |
 | `tests/kernels/test_w4a16_accuracy.py::[w4a16_problem2]` | 在干净的 `HEAD` 上**曾是**失败；本次修复，改的是测试而非内核。用例是 M16/N1024/K2048，最大输出达 `abs(ref) = 139.8`，fp16 的一个 ULP 已是 0.125——平铺的 `max_diff < 0.1` 上限要求了超过可表示精度的准确度。实测 `max_diff` 恰为 0.1250，即一次舍入步，且在新旧 tile 下*完全相同*（强制两种配置核对过），所以从来不是 tile 或内核缺陷。上限现改为 `max(0.1, 2 * abs(ref).max() * 2**-10)`，即输出自身量级下的 2 个 fp16 ULP。4 个形状全部通过；另外 3 个在两种上限下本来就通过。 |

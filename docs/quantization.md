@@ -196,7 +196,7 @@ TP 切分要求每个分片都是 32 的倍数（2 值/字节 × 16 元素 block
 
 ### 成本与收益
 
-sm90 没有 fp4 MMA，Triton 也没有 fp4 dtype，所以它在构造上就是 weight-only：nibble 在寄存器里解包，`tl.dot` 仍以 bf16 运行。省下的是字节数，而在 H100 上字节并不是 decode 的瓶颈。
+sm90（H100）没有 fp4 张量核 MMA，所以它在构造上就是 weight-only：nibble 在寄存器里解包，`tl.dot` 仍以 bf16 运行。Triton 确有 `tl.dot_scaled`（microscaling API，操作数可为 uint8 打包的 fp4），但在没有原生 microscaling 硬件的架构（含 sm90）上它走软件模拟——先把 fp4 upcast 成 bf16 再 dot，与本内核的解包路径等价，拿不到 fp4 MMA 收益；原生 fp4 MMA 要到 Blackwell（sm100）。省下的是字节数，而在 H100 上字节并不是 decode 的瓶颈。
 
 `qwen3-4b/qkv`（N=6144，K=2560），测于 NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7），数据来自 [`bench_quant_gemm_h100_20260903d.json`](benchmark_logs/bench_quant_gemm_h100_20260903d.json)（以 `LITE_LLAMA_AUTOTUNE=0` 运行，即用户没有调优缓存时拿到的启发式 tile）：
 
