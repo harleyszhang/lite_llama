@@ -106,3 +106,18 @@ chat 模板对 instruct 模型的影响单列（Qwen2.5-1.5B-Instruct / 200 题�
 配置里点名的 checkpoint 不存在时用例自己 skip 并说明原因，所以 `models-all.txt` 在任何机器上都能直接跑。
 
 补齐权重后新增一个 YAML、把文件名写进 `models-all.txt` 即可，无需改测试代码。
+
+## 其他数据集：HotpotQA / HellaSwag
+
+GSM8K 之外，[`examples/eval_accuracy.py`](../examples/eval_accuracy.py) 跑阅读理解类数据集：HotpotQA 出 exact match / F1，HellaSwag 出多选准确率。数据集类型从文件名识别（`hotpot*` / `hellaswag*`），原始文件需自备——仓库不打包这两个数据集，也没有提交阈值，所以它是**只出数的脚本**，不参与 `make test-eval` 的回归判定。
+
+```bash
+python examples/eval_accuracy.py \
+    --dataset /path_to/hotpot_dev_distractor_v1.json \
+    --model /path_to/Llama-3.2-3B-Instruct \
+    --batch 10 --max-gen-len 1900
+```
+
+与 GSM8K 口径的两点差异：解码用采样（temperature 0.7 / top_p 0.8）而非 greedy，同一 checkpoint 重复跑不保证逐字节相同；`--max-gen-len` 默认 1900，给推理链留长度，评分只取答案。
+
+运行前提：`examples/evaluator/datasets.py` 依赖 `sentence_transformers`（不在 lite_llama 自身的 requirement 里），需先 `pip install sentence_transformers`。该导入是按数据集按需发生的，所以没装时 `--help` 仍可用，报错只在真正跑数据集时出现。
