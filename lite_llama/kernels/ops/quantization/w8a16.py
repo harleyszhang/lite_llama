@@ -85,6 +85,7 @@ def _w8a16_matmul_kernel(
     DEQUANT_SCALE: tl.constexpr,
     FP8_CVT: tl.constexpr,
     SINGLE_SCALE: tl.constexpr,
+    EPILOGUE_SCALE: tl.constexpr,
 ):
     """One ``[BLOCK_M, BLOCK_N]`` tile of ``C = A @ dequant(B).T``.
 
@@ -154,13 +155,28 @@ def _w8a16_matmul_kernel(
             b = (b.to(tl.float32) - zero[None, :]).to(a.dtype)
         else:
             b = b.to(a.dtype)
-        if not SINGLE_SCALE:
+        if SINGLE_SCALE:
+            if EPILOGUE_SCALE:
+                # In-place accumulation (``acc=``): the per-row scale distributes
+                # over the sum, so one multiply in the epilogue is the same
+                # arithmetic -- and it unlocks the 128x128 tile, where the
+                # per-step multiply otherwise wrecks the pipeline (2-3x, see
+                # the sweep behind the current _launch_config). Only taken at
+                # prefill bandwidth where that tile wins: at decode the ``acc=``
+                # form costs int8 weights 3-11% (measured), so the launcher
+                # keeps the in-loop multiply there.
+                accumulator = tl.dot(a, b, acc=accumulator)
+            else:
+                accumulator += tl.dot(a, b) * scale[None, :]
+        else:
             scale = tl.load(scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_sk)
-        accumulator += tl.dot(a, b) * scale[None, :]
+            accumulator += tl.dot(a, b) * scale[None, :]
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
 
     accumulator *= DEQUANT_SCALE
+    if SINGLE_SCALE and EPILOGUE_SCALE:
+        accumulator *= scale[None, :]
     if HAS_BIAS:
         accumulator += tl.load(bias_ptr + offs_bn, mask=offs_bn < N, other=0.0)[None, :]
 
@@ -174,18 +190,21 @@ def _w8a16_matmul_kernel(
 # --------------------------------------------------------------------------- #
 # Launch configuration
 # --------------------------------------------------------------------------- #
-def _launch_config(num_tokens: int) -> dict:
+def _launch_config(num_tokens: int, single_scale: bool) -> dict:
     """Tile shape for ``num_tokens`` rows of activations.
 
     Swept over the five dense projections of both test models on an H100
     (the ``bench_quant_gemm.py`` shape set, fp8 weights; int8 weights share
     the kernel's load/dot structure so the geometry carries over). Decode
-    keeps ``BLOCK_N`` 128 -- the N=19456 gate_up projection regresses 38%
-    on ``BLOCK_N=64`` -- and gains from deeper pipelining (``s=5``); mid
-    trades 14% on the narrow 30B o projection for 2-54% on the rest;
-    prefill wants a compute-shaped ``BLOCK_M``. The A10 numbers of the old
-    default do not transfer: H100 SM count rewards wider grids, not fatter
-    tiles.
+    keeps ``BLOCK_N=128`` — the N=19456 gate_up projection regresses 38% on
+    ``BLOCK_N=64`` — and gains from deeper pipelining (``s=5``); mid trades
+    14% on the narrow 30B o projection for 2-54% on the rest. Prefill
+    forks on ``single_scale``: the epilogue-scale kernel takes the
+    compute-shaped 128x128 tile (the per-k scale multiply used to make it
+    2-3x slower), while the block-scale path still pays that multiply every
+    k step and must stay at 64 rows of accumulator or spill registers.
+    The A10 numbers of the old default do not transfer: H100 SM count
+    rewards wider grids, not fatter tiles.
     """
     if num_tokens <= 32:
         return {
@@ -206,7 +225,7 @@ def _launch_config(num_tokens: int) -> dict:
             "num_stages": 4,
         }
     return {
-        "BLOCK_M": 64,
+        "BLOCK_M": 128 if single_scale else 64,
         "BLOCK_N": 128,
         "BLOCK_K": 128,
         "GROUP_M": 8,
@@ -283,7 +302,10 @@ def w8a16_matmul(
     # per-row scales (group_k >= k): the scale's k address never moves, so the
     # kernel can hoist its load out of the k loop.
     single_scale = group_k >= k
-    cfg = _launch_config(m)
+    cfg = _launch_config(m, single_scale)
+    # epilogue-scale accumulation only where the 128x128 tile is in play: the
+    # in-loop multiply is faster at decode for int8 weights (3-11% measured)
+    epilogue_scale = single_scale and m > 128
     grid = (triton.cdiv(m, cfg["BLOCK_M"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
     _w8a16_matmul_kernel[grid](
         a,
@@ -311,6 +333,7 @@ def w8a16_matmul(
         DEQUANT_SCALE=1.0 if fp8_cvt else (FP8_E4M3_BIT_TRICK_SCALE if is_fp8 else 1.0),
         FP8_CVT=fp8_cvt,
         SINGLE_SCALE=single_scale,
+        EPILOGUE_SCALE=epilogue_scale,
         **cfg,
     )
     return out.reshape(*leading, n)

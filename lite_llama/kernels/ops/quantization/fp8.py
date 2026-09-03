@@ -212,7 +212,7 @@ def _fp8_matmul_kernel(
     b_scale_ptrs = b_scale_ptr + (offs_bn // GROUP_N) * stride_bsn
     # One scale per weight row (per-channel quantisation, the scheme's default):
     # its k address never moves, so load it before the loop and keep the loop
-    # body down to fp8 tiles and dots.
+    # body down to fp8 tiles and dots -- and let the dot accumulate in-place.
     if SINGLE_SCALE:
         b_scale = tl.load(b_scale_ptrs)
 
@@ -230,14 +230,25 @@ def _fp8_matmul_kernel(
         else:
             a = dequant_fp8e4m3(a)
             b = dequant_fp8e4m3(b)
-        if not SINGLE_SCALE:
+        if SINGLE_SCALE:
+            # ``D = A*B + D`` keeps the wgmma chain asynchronous end to end;
+            # multiplying the [BLOCK_M, BLOCK_N] fp32 product by the scale
+            # every k step serialises it (3-4x at prefill shapes, measured in
+            # the sweep behind the current _launch_config). The per-row scale
+            # distributes over the sum, so applying it once in the epilogue is
+            # the same arithmetic -- up to fp32 rounding order, which the unit
+            # tests' tolerances cover.
+            accumulator = tl.dot(a, tl.trans(b), acc=accumulator)
+        else:
             b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
-        accumulator += tl.dot(a, tl.trans(b)) * b_scale[None, :]
+            accumulator += tl.dot(a, tl.trans(b)) * b_scale[None, :]
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
 
     a_scale = tl.load(a_scale_ptr + offs_am)
     result = accumulator * (DEQUANT_SCALE * a_scale[:, None])
+    if SINGLE_SCALE:
+        result *= b_scale[None, :]
     if HAS_BIAS:
         result += tl.load(bias_ptr + offs_bn, mask=offs_bn < N, other=0.0)[None, :]
 
@@ -251,17 +262,19 @@ def _fp8_matmul_kernel(
 # --------------------------------------------------------------------------- #
 # Launch configuration
 # --------------------------------------------------------------------------- #
-def _launch_config(num_tokens: int) -> dict:
+def _launch_config(num_tokens: int, single_scale: bool) -> dict:
     """Tile shape for ``num_tokens`` rows of activations.
 
     Swept over the five dense projections of both test models on an H100
-    (the ``bench_quant_gemm.py`` shape set). The bias of the old default —
-    ``BLOCK_N`` 128/256 — is grid starvation: at ``N=6144`` a 256-wide N tile
-    yields 24 column blocks against 132 SMs. ``BLOCK_N=64`` fills the device
-    at every weight shape, which is why it wins everywhere below prefill.
-    Each band's entry is the fastest config that never loses to any other
-    tested shape at that ``num_tokens`` band; the mid band trades 1.4 us on
-    the 4B qkv projection for 11-21% on the other four.
+    (the ``bench_quant_gemm.py`` shape set). Decode stays ``BLOCK_N=64``
+    (it fills the grid when M supplies no parallelism). The bands with real
+    arithmetic fork on ``single_scale``: the epilogue-scale kernel prefers
+    the wider tile now that ``acc=`` accumulation keeps the wgmma chain
+    asynchronous, while the block-scale path still pays the per-k multiply
+    and keeps the leaner 64-row accumulator. Each band's entry is the
+    geomean-best config over the five shapes at that ``num_tokens``; the
+    mid band trades 1.4 us on the 4B qkv projection for 11-21% on the other
+    four.
     """
     if num_tokens <= 32:
         return {
@@ -275,14 +288,14 @@ def _launch_config(num_tokens: int) -> dict:
     if num_tokens <= 128:
         return {
             "BLOCK_M": 32,
-            "BLOCK_N": 64,
+            "BLOCK_N": 128 if single_scale else 64,
             "BLOCK_K": 128,
             "GROUP_M": 8,
             "num_warps": 4,
-            "num_stages": 3,
+            "num_stages": 4 if single_scale else 3,
         }
     return {
-        "BLOCK_M": 64,
+        "BLOCK_M": 128 if single_scale else 64,
         "BLOCK_N": 128,
         "BLOCK_K": 128,
         "GROUP_M": 8,
@@ -350,7 +363,7 @@ def fp8_matmul(
     # so the kernel can hoist its load out of the k loop.
     single_scale = group_k >= k
 
-    cfg = _launch_config(m)
+    cfg = _launch_config(m, single_scale)
     grid = (triton.cdiv(m, cfg["BLOCK_M"]) * triton.cdiv(n, cfg["BLOCK_N"]),)
     _fp8_matmul_kernel[grid](
         a,
