@@ -1,0 +1,64 @@
+
+=== my_weight/DeepSeek-V2-Lite  TP=2 EP=2  batch=64  gen=64 ===
+[32m09-04 05:01:33 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep on)[0m
+[32m09-04 05:01:33 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep on)[0m
+[32m09-04 05:01:33 [I] loader.py:138 Building DeepseekV2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 05:01:33 [I] loader.py:138 Building DeepseekV2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 05:01:33 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/DeepSeek-V2-Lite[0m
+[32m09-04 05:01:33 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/DeepSeek-V2-Lite[0m
+[32m09-04 05:01:38 [I] loader.py:157 Loaded DeepseekV2Model onto cuda:1 in 5.48s[0m
+[32m09-04 05:01:38 [I] loader.py:157 Loaded DeepseekV2Model onto cuda in 5.63s[0m
+[36m09-04 05:01:39 [D] comm_overlap.py:195 comm stream pool created for cuda:1[0m
+[36m09-04 05:01:39 [D] comm_overlap.py:195 comm stream pool created for cuda:0[0m
+[32m09-04 05:01:39 [I] kv_cache_manager.py:122 KV-cache profiling: total=21.98 GB peak=15.14 GB -> 159994 cache tokens (util=0.90)[0m
+[32m09-04 05:01:39 [I] kv_cache_manager.py:122 KV-cache profiling: total=21.98 GB peak=15.14 GB -> 159994 cache tokens (util=0.90)[0m
+[32m09-04 05:01:40 [I] kv_cache_manager.py:183 KV cache: 159994 blocks, watermark=15999 blocks (10%), recovery band=7999 blocks[0m
+[32m09-04 05:01:40 [I] kv_cache_manager.py:183 KV cache: 159994 blocks, watermark=15999 blocks (10%), recovery band=7999 blocks[0m
+[36m09-04 05:01:40 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([159994, 1, 576])[0m
+[36m09-04 05:01:40 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([159994, 1, 576])[0m
+[32m09-04 05:01:40 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+sbo_off          TTFT  298.8 ms | TPOT  84.16 ms | TPS   731.3 tok/s | TGS/GPU   365.7
+[32m09-04 05:01:51 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep on)[0m
+[32m09-04 05:01:51 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep on)[0m
+[32m09-04 05:01:51 [I] loader.py:138 Building DeepseekV2Model skeleton on the meta device[0m
+[32m09-04 05:01:51 [I] loader.py:138 Building DeepseekV2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 05:01:51 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/DeepSeek-V2-Lite[0m
+[32m09-04 05:01:51 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/DeepSeek-V2-Lite[0m
+[32m09-04 05:01:57 [I] loader.py:157 Loaded DeepseekV2Model onto cuda in 5.35s[0m
+[32m09-04 05:01:57 [I] loader.py:157 Loaded DeepseekV2Model onto cuda:1 in 5.63s[0m
+[36m09-04 05:01:58 [D] comm_overlap.py:195 comm stream pool created for cuda:1[0m
+[32m09-04 05:01:58 [I] kv_cache_manager.py:122 KV-cache profiling: total=21.98 GB peak=15.16 GB -> 159315 cache tokens (util=0.90)[0m
+[32m09-04 05:01:58 [I] kv_cache_manager.py:122 KV-cache profiling: total=21.98 GB peak=15.17 GB -> 159229 cache tokens (util=0.90)[0m
+[32m09-04 05:01:58 [I] kv_cache_manager.py:183 KV cache: 159229 blocks, watermark=15922 blocks (10%), recovery band=7961 blocks[0m
+[32m09-04 05:01:58 [I] kv_cache_manager.py:183 KV cache: 159229 blocks, watermark=15922 blocks (10%), recovery band=7961 blocks[0m
+[36m09-04 05:01:58 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([159229, 1, 576])[0m
+[36m09-04 05:01:58 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([159229, 1, 576])[0m
+[32m09-04 05:01:59 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+sbo_on           TTFT  300.4 ms | TPOT  89.67 ms | TPS   686.4 tok/s | TGS/GPU   343.2
+-> SBO cuts TPOT by -5.52 ms (-6.6%)
+sbo_on: 37/64 completions identical to the baseline, 0 empty
+
+=== timeline: shared MLP vs dispatch exchange overlap ===
+[32m09-04 05:02:10 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep on)[0m
+[32m09-04 05:02:10 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep on)[0m
+[32m09-04 05:02:10 [I] loader.py:138 Building DeepseekV2Model skeleton on the meta device[0m
+[32m09-04 05:02:10 [I] loader.py:138 Building DeepseekV2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 05:02:10 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/DeepSeek-V2-Lite[0m
+[32m09-04 05:02:10 [I] weight_utils.py:97 Loading weights from 4 file(s) in my_weight/DeepSeek-V2-Lite[0m
+[32m09-04 05:02:16 [I] loader.py:157 Loaded DeepseekV2Model onto cuda:1 in 5.50s[0m
+[32m09-04 05:02:16 [I] loader.py:157 Loaded DeepseekV2Model onto cuda in 5.60s[0m
+[36m09-04 05:02:17 [D] comm_overlap.py:195 comm stream pool created for cuda:0[0m
+[36m09-04 05:02:17 [D] comm_overlap.py:195 comm stream pool created for cuda:1[0m
+[32m09-04 05:02:17 [I] kv_cache_manager.py:122 KV-cache profiling: total=21.98 GB peak=15.16 GB -> 159315 cache tokens (util=0.90)[0m
+[32m09-04 05:02:17 [I] kv_cache_manager.py:122 KV-cache profiling: total=21.98 GB peak=15.17 GB -> 159229 cache tokens (util=0.90)[0m
+[32m09-04 05:02:17 [I] kv_cache_manager.py:183 KV cache: 159229 blocks, watermark=15922 blocks (10%), recovery band=7961 blocks[0m
+[32m09-04 05:02:17 [I] kv_cache_manager.py:183 KV cache: 159229 blocks, watermark=15922 blocks (10%), recovery band=7961 blocks[0m
+[36m09-04 05:02:17 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([159229, 1, 576])[0m
+[36m09-04 05:02:17 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([159229, 1, 576])[0m
+[32m09-04 05:02:18 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+dispatch regions 1300, shared-MLP regions 650; 1271 overlapping pairs totalling 424.01 ms of overlap
+-> benchmarks/logs/overlap_sbo_v3.json

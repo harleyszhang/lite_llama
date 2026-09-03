@@ -64,7 +64,7 @@ def overlap_axes(out_dir: Path) -> None:
     lanes = [
         (
             "A axis  ·  L1 pinned-copy overlap   (default ON)",
-            "executor/overlap.py — StreamPool + Timeline (CUDA events)",
+            "batch_overlap/overlap.py — StreamPool + Timeline (CUDA events)",
             "next pass's H2D upload || current forward on the compute stream",
             "#cfe3f7",
         ),
@@ -221,27 +221,37 @@ def model_matrix(out_dir: Path) -> None:
 
 
 def l2_tbo(out_dir: Path) -> None:
-    """L2 alone: eager on/off pair with the graphed reference beside it."""
+    """L2 alone: eager on/off pair, plain graph, and the captured interleave."""
     data = _load(_latest("overlap_l2_tbo_*.json"))["results"]["batches"]
     batches = sorted(data.keys(), key=int)
     off = [data[b]["tpot_ms"]["tbo_off"] for b in batches]
     on = [data[b]["tpot_ms"]["tbo_on"] for b in batches]
     ref = [data[b]["graph_reference_tpot_ms"] for b in batches]
+    captured = [data[b]["tbo_graph_tpot_ms"] for b in batches]
 
-    fig, ax = plt.subplots(figsize=(7, 4.2))
+    fig, ax = plt.subplots(figsize=(7.6, 4.2))
     x = range(len(batches))
-    ax.bar([i - 0.26 for i in x], off, width=0.26, color=_GREY, label="TBO off (eager)")
-    ax.bar(list(x), on, width=0.26, color=_RED, label="TBO on (eager)")
-    ax.bar([i + 0.26 for i in x], ref, width=0.26, color=_BLUE, label="graph reference")
+    width = 0.2
+    ax.bar([i - 1.5 * width for i in x], off, width=width, color=_GREY, label="TBO off (eager)")
+    ax.bar([i - 0.5 * width for i in x], on, width=width, color=_RED, label="TBO on (eager)")
+    ax.bar([i + 0.5 * width for i in x], ref, width=width, color=_BLUE, label="graph (plain)")
+    ax.bar([i + 1.5 * width for i in x], captured, width=width, color=_GREEN, label="graph + TBO")
     for i, (o, n) in enumerate(zip(off, on, strict=False)):
-        ax.text(i, n, f"({(n - o) / o * 100:+.0f}%)", ha="center", va="bottom", fontsize=9)
+        ax.text(
+            i - 0.5 * width, n, f"({(n - o) / o * 100:+.0f}%)", ha="center", va="bottom", fontsize=9
+        )
+    for i, (r, c) in enumerate(zip(ref, captured, strict=False)):
+        ax.text(
+            i + 1.5 * width, c, f"({(c - r) / r * 100:+.0f}%)", ha="center", va="bottom", fontsize=9
+        )
     ax.set_xticks(list(x))
     ax.set_xticklabels([f"batch {b}" for b in batches])
     ax.set_ylabel("TPOT (ms)")
     ax.set_title(
         "L2 two-batch overlap on PCIe — Qwen2.5-1.5B TP=2\n"
-        "the eager arms sit on the Python launch floor the graphed reference "
-        "escapes: eager TPOT is a CPU number, so the interleave cannot pay"
+        "capture removes the launch floor (eager TBO 60 ms → 10 ms), but the interleave\n"
+        "itself is net-negative here: the all-reduce it hides is ~3-5% of the step, the\n"
+        "half-batch efficiency it pays is not — the mechanism works, the shape doesn't"
     )
     ax.legend(frameon=False, fontsize=9)
     fig.tight_layout()
@@ -368,6 +378,37 @@ def ep_overlap(out_dir: Path) -> None:
     ax.legend(frameon=False, fontsize=8.5, ncol=2)
     fig.tight_layout()
     fig.savefig(out_dir / "overlap_ep_tbo.png", dpi=150)
+    plt.close(fig)
+
+
+def sbo_ep(out_dir: Path) -> None:
+    """SBO alone: the shared MLP beside the dispatch exchange, EP2 decode."""
+    data = _load(_latest("overlap_sbo_*.json"))["results"]["batches"]
+    batches = sorted(data.keys(), key=int)
+    off = [data[b]["tpot_ms"]["sbo_off"] for b in batches]
+    on = [data[b]["tpot_ms"]["sbo_on"] for b in batches]
+
+    fig, ax = plt.subplots(figsize=(6.8, 4.2))
+    x = range(len(batches))
+    width = 0.32
+    ax.bar([i - width / 2 for i in x], off, width=width, color=_GREY, label="SBO off (EP eager)")
+    ax.bar([i + width / 2 for i in x], on, width=width, color=_GREEN, label="SBO on (EP eager)")
+    for i, (o, n) in enumerate(zip(off, on, strict=False)):
+        ax.text(
+            i + width / 2, n, f"({(n - o) / o * 100:+.1f}%)", ha="center", va="bottom", fontsize=9
+        )
+    ax.set_xticks(list(x))
+    ax.set_xticklabels([f"batch {b}" for b in batches])
+    ax.set_ylabel("TPOT (ms)")
+    ax.set_title(
+        "SBO on 2x A10 PCIe — DeepSeek-V2-Lite EP=2, eager arms\n"
+        "the shared MLP does compute beside the dispatch exchange (the timeline counts\n"
+        "the pairs), but both arms sit on the Python launch floor: what SBO can hide is\n"
+        "worth less than the two fences it pays, so the switch stays off by default"
+    )
+    ax.legend(frameon=False, fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out_dir / "overlap_sbo_ep.png", dpi=150)
     plt.close(fig)
 
 
@@ -518,6 +559,7 @@ def main() -> int:
     model_matrix(out_dir)
     l2_tbo(out_dir)
     ep_overlap(out_dir)
+    sbo_ep(out_dir)
     l3_chunked(out_dir)
     l4_tile_signal(out_dir)
     nsys_hidden(out_dir)
@@ -529,6 +571,7 @@ def main() -> int:
         "overlap_model_matrix.png",
         "overlap_l2_tbo.png",
         "overlap_ep_tbo.png",
+        "overlap_sbo_ep.png",
         "overlap_l3_chunked.png",
         "overlap_l4_tile_signal.png",
         "nsys_overlap_hidden.png",

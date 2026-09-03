@@ -1,0 +1,226 @@
+=== environment ===
+  gpu_model: NVIDIA A10
+  gpu_count: 2
+  gpu_memory_gib: 22.0
+  sm_count: 72
+  compute_capability: sm_86
+  driver_version: 550.135
+  interconnect: 	[4mGPU0	GPU1	CPU Affinity	NUMA Affinity	GPU NUMA ID[0m
+GPU0	 X 	PHB	0-63	0		N/A
+GPU1	PHB	 X 	0-63	0		N/A
+  cuda_version: 12.9
+  torch_version: 2.13.0+cu129
+  triton_version: 3.7.1
+  transformers_version: 5.15.1
+  python_version: 3.13.13
+  cpu_cores: 64
+  inference_mode: offline (all prompts submitted at once, no serving queue)
+
+=== model Qwen2.5-1.5B-Instruct: {'model_type': 'qwen2', 'hidden_size': 1536, 'num_hidden_layers': 28, 'num_attention_heads': 12, 'intermediate_size': 8960} ===
+
+--- batch=32 prompt=64 gen=64 tp=2 ---
+[32m09-04 04:42:53 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:42:53 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:42:53 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:42:53 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:42:54 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:42:54 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:42:54 [I] loader.py:157 Loaded Qwen2Model onto cuda:1 in 0.80s[0m
+[32m09-04 04:42:54 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:42:54 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:42:54 [I] loader.py:157 Loaded Qwen2Model onto cuda in 0.88s[0m
+[32m09-04 04:42:54 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:42:54 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:42:55 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  eager_off    TTFT    27.7 ms | TPOT  26.454 ms | TPS   1208.7 | TGS/GPU    604.4
+[32m09-04 04:43:02 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:43:02 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:43:02 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[32m09-04 04:43:02 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:43:02 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:43:02 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:43:03 [I] loader.py:157 Loaded Qwen2Model onto cuda in 0.58s[0m
+[32m09-04 04:43:03 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:43:03 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:43:03 [I] loader.py:157 Loaded Qwen2Model onto cuda:1 in 0.60s[0m
+[32m09-04 04:43:03 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:43:03 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:43:03 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  eager_on     TTFT    26.9 ms | TPOT  25.673 ms | TPS   1245.5 | TGS/GPU    622.8
+[32m09-04 04:43:11 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:43:11 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:43:11 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[32m09-04 04:43:11 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:43:11 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:43:11 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:43:11 [I] loader.py:157 Loaded Qwen2Model onto cuda in 0.56s[0m
+[32m09-04 04:43:11 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:43:11 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:43:11 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:43:11 [I] loader.py:157 Loaded Qwen2Model onto cuda:1 in 0.61s[0m
+[32m09-04 04:43:11 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:43:11 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:43:11 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:43:16 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  graph_off    TTFT    27.3 ms | TPOT   7.635 ms | TPS   4027.2 | TGS/GPU   2013.6
+[32m09-04 04:43:21 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:43:21 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:43:21 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[32m09-04 04:43:21 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:43:21 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:43:21 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:43:22 [I] loader.py:157 Loaded Qwen2Model onto cuda in 0.56s[0m
+[32m09-04 04:43:22 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:43:22 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:43:22 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:43:22 [I] loader.py:157 Loaded Qwen2Model onto cuda:1 in 0.62s[0m
+[32m09-04 04:43:22 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:43:22 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:43:22 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:43:26 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  graph_on     TTFT    27.7 ms | TPOT   7.660 ms | TPS   4011.9 | TGS/GPU   2006.0
+  -> graph_on vs graph_off: TPOT -0.3%
+  -> eager_on vs eager_off: TPOT +3.0%
+
+--- batch=128 prompt=64 gen=64 tp=2 ---
+[32m09-04 04:43:32 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:43:32 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:43:32 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[32m09-04 04:43:32 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:43:32 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:43:32 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:43:32 [I] loader.py:157 Loaded Qwen2Model onto cuda in 0.55s[0m
+[32m09-04 04:43:32 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:43:32 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:43:32 [I] loader.py:157 Loaded Qwen2Model onto cuda:1 in 0.61s[0m
+[32m09-04 04:43:32 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:43:32 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:43:32 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  eager_off    TTFT    74.8 ms | TPOT  31.096 ms | TPS   4027.7 | TGS/GPU   2013.8
+[32m09-04 04:43:40 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:43:40 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:43:40 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[32m09-04 04:43:40 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:43:40 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:43:40 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:43:41 [I] loader.py:157 Loaded Qwen2Model onto cuda in 0.54s[0m
+[32m09-04 04:43:41 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:43:41 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:43:41 [I] loader.py:157 Loaded Qwen2Model onto cuda:1 in 0.61s[0m
+[32m09-04 04:43:41 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:43:41 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:43:41 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  eager_on     TTFT    74.9 ms | TPOT  31.710 ms | TPS   3952.4 | TGS/GPU   1976.2
+[32m09-04 04:43:49 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:43:49 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:43:49 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[32m09-04 04:43:49 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:43:49 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:43:49 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:43:50 [I] loader.py:157 Loaded Qwen2Model onto cuda in 0.57s[0m
+[32m09-04 04:43:50 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:43:50 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:43:50 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:43:50 [I] loader.py:157 Loaded Qwen2Model onto cuda:1 in 0.62s[0m
+[32m09-04 04:43:50 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:43:50 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:43:50 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:43:54 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  graph_off    TTFT    75.1 ms | TPOT  15.267 ms | TPS   7898.9 | TGS/GPU   3949.5
+[32m09-04 04:44:00 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:44:00 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:44:00 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[32m09-04 04:44:00 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:44:00 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:44:00 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:44:01 [I] loader.py:157 Loaded Qwen2Model onto cuda in 0.55s[0m
+[32m09-04 04:44:01 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:44:01 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:44:01 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:44:01 [I] loader.py:157 Loaded Qwen2Model onto cuda:1 in 0.61s[0m
+[32m09-04 04:44:01 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:44:01 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:44:01 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:44:05 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  graph_on     TTFT    75.1 ms | TPOT  15.193 ms | TPS   7933.8 | TGS/GPU   3966.9
+  -> graph_on vs graph_off: TPOT +0.5%
+  -> eager_on vs eager_off: TPOT -2.0%
+
+--- batch=256 prompt=64 gen=64 tp=2 ---
+[32m09-04 04:44:11 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:44:11 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:44:11 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[32m09-04 04:44:11 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:44:11 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:44:11 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:44:12 [I] loader.py:157 Loaded Qwen2Model onto cuda in 0.55s[0m
+[32m09-04 04:44:12 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:44:12 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:44:12 [I] loader.py:157 Loaded Qwen2Model onto cuda:1 in 0.61s[0m
+[32m09-04 04:44:12 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:44:12 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:44:12 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  eager_off    TTFT    75.4 ms | TPOT  31.564 ms | TPS   4011.7 | TGS/GPU   2005.8
+[32m09-04 04:44:22 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:44:22 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:44:22 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[32m09-04 04:44:22 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:44:22 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:44:22 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:44:23 [I] loader.py:157 Loaded Qwen2Model onto cuda in 0.55s[0m
+[32m09-04 04:44:23 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:44:23 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:44:23 [I] loader.py:157 Loaded Qwen2Model onto cuda:1 in 0.62s[0m
+[32m09-04 04:44:23 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:44:23 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:44:23 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  eager_on     TTFT    75.6 ms | TPOT  31.850 ms | TPS   3976.2 | TGS/GPU   1988.1
+[32m09-04 04:44:33 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:44:33 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:44:33 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[32m09-04 04:44:33 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:44:33 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:44:33 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:44:33 [I] loader.py:157 Loaded Qwen2Model onto cuda in 0.55s[0m
+[32m09-04 04:44:33 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:44:33 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:44:33 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:44:33 [I] loader.py:157 Loaded Qwen2Model onto cuda:1 in 0.61s[0m
+[32m09-04 04:44:33 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:44:33 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:44:33 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:44:38 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  graph_off    TTFT    75.5 ms | TPOT  15.761 ms | TPS   7886.9 | TGS/GPU   3943.5
+[32m09-04 04:44:45 [I] parallel_state.py:138 parallel state: global rank 0/2 (dp 0/1, tp 0/2, ep off)[0m
+[32m09-04 04:44:45 [I] parallel_state.py:138 parallel state: global rank 1/2 (dp 0/1, tp 1/2, ep off)[0m
+[32m09-04 04:44:45 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[32m09-04 04:44:45 [I] loader.py:138 Building Qwen2Model skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-04 04:44:45 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:44:45 [I] weight_utils.py:97 Loading weights from 1 file(s) in my_weight/Qwen2.5-1.5B-Instruct[0m
+[32m09-04 04:44:46 [I] loader.py:157 Loaded Qwen2Model onto cuda in 0.54s[0m
+[32m09-04 04:44:46 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:44:46 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:44:46 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:44:46 [I] loader.py:157 Loaded Qwen2Model onto cuda:1 in 0.60s[0m
+[32m09-04 04:44:46 [I] kv_cache_manager.py:183 KV cache: 65536 blocks, watermark=6553 blocks (10%), recovery band=3276 blocks[0m
+[36m09-04 04:44:46 [D] kv_cache_manager.py:257 gpu_kv_buffer per layer shape: torch.Size([65536, 2, 128])[0m
+[32m09-04 04:44:46 [I] model_runner.py:371 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048)[0m
+[32m09-04 04:44:51 [I] executor.py:369 tp rank 1 ready on cuda:1[0m
+  graph_on     TTFT    75.6 ms | TPOT  15.723 ms | TPS   7904.9 | TGS/GPU   3952.5
+  -> graph_on vs graph_off: TPOT +0.2%
+  -> eager_on vs eager_off: TPOT -0.9%
+
+-> benchmarks/logs/tbo_scaling_qwen.json
