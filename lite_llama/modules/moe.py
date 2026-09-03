@@ -16,6 +16,9 @@ Usage:
 
 from __future__ import annotations
 
+import functools
+from collections.abc import Callable
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -30,6 +33,82 @@ from ..kernels import grouped_topk
 from ..models.config import ModelConfig
 from .mlp import FusedMLP
 from .quantization import QuantizationConfig, RawParameter, UnquantizedFusedMoEMethod
+
+# --------------------------------------------------------------------------- #
+# Router GEMM: a vllm-style tiered dispatch (mirrors GateLinear's 5 tiers).
+# --------------------------------------------------------------------------- #
+# Each tier is gated on its dependencies being present. On this codebase only
+# tiers 4 and 5 (pure torch) actually run; tiers 1-3 are slots for vllm's
+# CuteDSL kernels and its compiled fp32 op, which lite_llama does not carry
+# (they need the cutlass Python DSL + quack, or vllm's _C extension). The gates
+# read those dependencies at runtime, so porting a kernel in — or running where
+# vllm's op is present — activates its tier with no further change here.
+
+#: tier 1 / tier 3 CuteDSL kernels are injectable hooks. lite_llama has not
+#: ported vllm's CuteDSL router kernels (``ll_bf16_gemm``, ``bf16x3``); assign
+#: a callable here once ported and the corresponding tier activates.
+_LL_BF16_GEMM: Callable | None = None  # tier 1: (x, w, out_dtype) -> fp32
+_BF16X3_GEMM: Callable | None = None  # tier 3: (x, w) -> fp32
+
+#: vllm's tier-2 fp32 kernel is instantiated only for these (hidden, experts).
+_FP32_ROUTER_SHAPES = frozenset({(3072, 256), (6144, 128)})
+
+
+@functools.lru_cache(maxsize=1)
+def _fp32_router_op_available() -> bool:
+    """Whether vllm's compiled ``fp32_router_gemm`` op is present (tier 2)."""
+    return hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "fp32_router_gemm")
+
+
+def _router_gemm(x: torch.Tensor, gate_weight: torch.Tensor) -> torch.Tensor:
+    """Router-logits GEMM (fp32 out) via a vllm-style 5-tier dispatch.
+
+    Tiers, fastest first — each gated on its deps, so only the runnable ones
+    fire on a given build/hardware:
+
+    1. CuteDSL ``ll_bf16_gemm``  — SM90+, M<=16, bf16, K%8==0    (hook; unported)
+    2. vllm ``fp32_router_gemm`` — fp32 weight, tuned shapes, M<=32 (opportunistic)
+    3. CuteDSL ``bf16x3``        — SM100                          (hook; unported)
+    4. cuBLAS bf16->fp32         — ``torch.mm(out_dtype=fp32)``   (active)
+    5. ``F.linear`` fp32         — CPU / non-bf16 fallback        (active)
+
+    Every tier emits fp32 logits, so the downstream topk is identical whichever
+    fires. Where the CuteDSL/vllm-op deps are absent (this codebase) the tier
+    1-3 gates are all False and tier 4 (CUDA bf16) or tier 5 (else) runs.
+    """
+    on_cuda = gate_weight.is_cuda
+    low_prec = gate_weight.dtype in (torch.bfloat16, torch.float16)
+    m = x.shape[0]
+    k, n = gate_weight.shape[1], gate_weight.shape[0]
+
+    # tier 1: CuteDSL low-latency bf16 GEMM (small-M decode).
+    if _LL_BF16_GEMM is not None and on_cuda and low_prec and m <= 16 and k % 8 == 0:
+        return _LL_BF16_GEMM(x, gate_weight, torch.float32)
+
+    # tier 2: vllm's compiled fp32 router kernel — opportunistic; needs its op
+    # present, an fp32 weight, and one of the shapes it was instantiated for.
+    if (
+        _fp32_router_op_available()
+        and on_cuda
+        and gate_weight.dtype == torch.float32
+        and m <= 32
+        and (k, n) in _FP32_ROUTER_SHAPES
+    ):
+        out = torch.empty(m, n, device=x.device, dtype=torch.float32)
+        torch.ops._C.fp32_router_gemm(out, x, gate_weight)
+        return out
+
+    # tier 3: CuteDSL bf16x3 (SM100).
+    if _BF16X3_GEMM is not None and on_cuda and low_prec:
+        return _BF16X3_GEMM(x, gate_weight)
+
+    # tier 4: cuBLAS bf16 x bf16 -> fp32 (one tensor-core GEMM, fp32 epilogue).
+    if on_cuda and low_prec:
+        x_gemm = x if x.dtype == gate_weight.dtype else x.to(gate_weight.dtype)
+        return torch.mm(x_gemm, gate_weight.t(), out_dtype=torch.float32)
+
+    # tier 5: fp32 fallback (CPU, or a non-bf16/fp16 weight).
+    return F.linear(x.float(), gate_weight.float())
 
 
 class SparseMoeBlock(nn.Module):
@@ -159,18 +238,9 @@ class SparseMoeBlock(nn.Module):
         # fp32 logits, as DeepSeek's router (explicit ``.float()`` casts) and
         # qwen3's reference semantics require: a bf16/fp16 output can flip a
         # topk pick on near-ties, and a wrong expert costs far more than the
-        # precision. The gate weight stays in the model dtype (parity tests
-        # read it that way) — widening it would only add a copy kernel per
-        # step, not precision, because a bf16 x bf16 tensor-core GEMM already
-        # accumulates in fp32. torch.mm's out_dtype epilogue emits the fp32
-        # logits straight from that GEMM, so no weight copy rides the critical
-        # path (vllm's router GateLinear takes the same tier-4 path). out_dtype
-        # is a CUDA-only epilogue, so CPU keeps the fp32 linear.
-        if self.gate_weight.dtype in (torch.bfloat16, torch.float16) and self.gate_weight.is_cuda:
-            x_gemm = x if x.dtype == self.gate_weight.dtype else x.to(self.gate_weight.dtype)
-            router_logits = torch.mm(x_gemm, self.gate_weight.t(), out_dtype=torch.float32)
-        else:
-            router_logits = F.linear(x.float(), self.gate_weight.float())
+        # precision. The GEMM runs through the tiered dispatch above, which
+        # keeps the gate weight in the model dtype and emits fp32 logits.
+        router_logits = _router_gemm(x, self.gate_weight)
         if self.topk_method in ("noaux_tc", "group_limited_greedy"):
             weights, ids = grouped_topk(
                 router_logits,
