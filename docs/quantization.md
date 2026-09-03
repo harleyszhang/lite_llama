@@ -125,7 +125,7 @@ method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 > Model Mem 仅指模型权重；KV Capacity 为最大缓存 token 数（分页池占满剩余 GPU 显存）。
 > 基准日志：[`docs/benchmark_logs/`](../docs/benchmark_logs/)
 >
-> 上表是 0.6B 模型在 A10 上的结果。Qwen3-4B 与 Qwen3-30B-A3B 在 2×H100 上的完整矩阵——每种方案 × TP/DP × CUDA graph × KV dtype，离线与在线，附两套精度参照——见 [`quant_matrix_20260901.md`](benchmark_logs/quant_matrix_20260901.md)。其头条结论与此处的排序相反：在 H100 的 4B 上，**没有任何量化方案在速度上胜过 bf16**，量化换来的是 KV 容量。
+> 上表是 0.6B 模型在 A10 上的结果。Qwen3-4B 与 Qwen3-30B-A3B 在 2×H100 上的完整矩阵——每种方案 × TP/DP × CUDA graph × KV dtype，离线与在线，附两套精度参照——见 [`quant_matrix_20260901.md`](benchmark_logs/quant_matrix_20260901.md)。它的头条结论（在 H100 的 4B 上没有任何量化方案在速度上胜过 bf16）已被 0903 的 dense GEMM tile 重扫部分推翻：int8 W8A8 现在在 48 个 kernel 级格子中的 12 个上胜过 bf16（见[下文](#dense-量化-gemm-的第三次-tile-重扫h100)），量化矩阵表待重跑后更新。
 
 ### Qwen3-30B-A3B-Instruct-2507-FP8 (MoE, 2×H100)
 
@@ -254,7 +254,7 @@ tile 重扫（12 候选 × 5 token 档）确认现有表仍最优（tier 0 16×1
 
 ## w4a16 中的第二个 tile 启发式缺陷
 
-dense GEMM 存在同类问题，而且其中只有一个能通过缓存修复。五个量化 kernel 里，**`w4a16_matmul` 是唯一会查 `ConfigStore` 的**——fp8 W8A8、fp8/int8 W8A16 与 NVFP4 都无条件计算 launch 配置，因此 `bench_quant_gemm.py --tune` 对它们如实报告「无消费者」，而不是写入没有任何 kernel 会读的条目。（`v0.5` 的 changelog 声称 autotune 覆盖「量化 GEMM」；对 dense 路径而言，那只是五个 kernel 中的一个。）
+dense GEMM 存在同类问题，而且其中只有一个能通过缓存修复。五个量化 kernel 里，**`w4a16_matmul` 是唯一会查 `ConfigStore` 的**——fp8 W8A8、fp8/int8 W8A16 与 NVFP4 都无条件计算 launch 配置，因此 `bench_quant_gemm.py --tune` 对它们如实报告「无消费者」，而不是写入没有任何 kernel 会读的条目。（`v0.5` 的 changelog 声称 autotune 覆盖「量化 GEMM」；对 dense 路径而言，那只是五个 kernel 中的一个。其余四个 kernel 的 fallback 在 0903 按 H100 扫描重定过，见[下文](#dense-量化-gemm-的第三次-tile-重扫h100)。）
 
 就在这一个 kernel 上，扫出来的不是按 shape 的调优机会，而是一个启发式缺陷。`m <= 32` 分支原来用 `GROUP_M=1, num_stages=2`，而 `GROUP_M=8, num_stages=4`——*同一个* 16×64 tile——在**全部 16 个** `m <= 32` store key（两个 Qwen3 几何 × 四个投影 × M16/M32 两档）上赢 9.0–41.5%，且 tile 固定不变，这两个旋钮是仅有的变量。`GROUP_M=1` 什么也不分组，于是相邻 program 按行主序遍历网格，在 L2 里共享不到任何权重 tile；更深的流水线随后盖住了 16 行 tile 盖不住的 nibble 解包。因为收益是一致的，修复应该放进 kernel 的 fallback，而不是按 shape 键入的缓存——现在它随每一个没跑过调优的设备一起生效，也正是它把上面的 M=1 int4 行从 34.0 µs 移到 22.2 µs。
 
@@ -263,6 +263,31 @@ dense GEMM 存在同类问题，而且其中只有一个能通过缓存修复。
 一个结构性告诫：共享的 bucket 条目是按桶内 token 数的*总量*选出的，所以桶内某个宽度可能回退，而条目整体仍是净赢。抽查 `qwen3-30b-a3b/qkv` 与 `qwen3-4b/qkv` 的 M512 条目，两个宽度在两个 key 上都有提升（t512 +0.7% / +12.2%，t2048 +25.5% / +24.3%），因此这里没有观察到回退——但只做 decode 的部署仍应把 `--tokens` 收窄到它实际服务的宽度，而不是继承一个 prefill 加权的条目。
 
 这个修复在暴露它的那个配置上值 1.32× 端到端：Qwen3-4B int4 + decode graph 在 tp1 从 419.0 → 551.3 TPS（TPOT 9.28 → 6.97 ms），tp2 471.9 → 583.1，dp2 816.8 → 1057.6；greedy 匹配率如 tile 变更所应有的那样保持 0.157 不变。eager 行只动了 2-4%，这是有用的对照：没有 graph 时 launch 开销主导 decode，更好的 tile 无从显现。重测的行见 [`quant_matrix_20260901.md`](benchmark_logs/quant_matrix_20260901.md) §2。
+
+## dense 量化 GEMM 的第三次 tile 重扫（H100）
+
+w4a16 的缺陷修完后，剩下三个可改 fallback 的 kernel——`fp8_matmul`（fp8 W8A8）、`_smoothquant_matmul`（int8 W8A8）、`_w8a16_matmul`（fp8/int8 W8A16）——的 tile 表仍然是 A10 时代的数据（`w8a16` 的 docstring 原话就写着 "measured on an A10"）。对 H100 这张卡它们错在同一个地方：**`BLOCK_N` 128/256 让 grid 饥饿**。N=6144 的 qkv 投影用 256 宽的 N tile 只有 24 个列块，对 132 个 SM——即使 M 方向有块也填不满芯片。窄 tile 的代价（更多 k 循环迭代、每块更少的计算）在 decode 档几乎不存在，因为那时尚未 compute-bound。
+
+扫描覆盖三个 kernel × 两个 Qwen3 几何的五个代表性投影（4b qkv/o/down/gate_up + 30b o/gate_up，N 从 1536 到 19456）× 五个 M 档（1/8/64/512/2048），tile 空间 BLOCK_M 按档 16–256、BLOCK_N 64/128/256、BLOCK_K 128、warps 4/8、stages 3/4/5、GROUP_M 1/8——fp8/int8 各约 3000 个候选格、w8a16 1360 个（脚本直调 kernel，绕开 launcher 的 `_launch_config`）。每个 kernel 的每档 fallback 取「档内全部格子对全部 shape 无回归、几何均值最优」的配置；全数据在会话 scratch（`/tmp/sweep_dense.json`、`/tmp/sweep_w16.json`），结论已编码进三个 `_launch_config` 的 docstring。
+
+新 fallback 的 kernel 级收益（扫描内新旧行块对比的几何均值）：fp8 W8A8 解码 1.14×/中档 1.07×/prefill 1.21×；int8 W8A8 解码 1.06×/中档 1.03×/prefill 1.25×；w8a16 fp8 解码 1.06×/中档 1.11×/prefill 1.20×。w8a16 的 decode 档 winner 分散在 8 个不同配置上（9 个格子），说明这一档真实需要按 shape 调优，fallback 只能取无回归面最大的那个；`BLOCK_N=64` 在它的 N=19456 gate_up 上倒退 38%，所以 w8a16 的 decode 档保留 128。
+
+随本次重扫一起落地的还有两个 kernel 层优化：
+
+- **`FP8_CVT` 移植到 dense w8a16**：sm89+ 上 e4m3 加宽改用单条硬件 `cvt`（fused MoE kernel 已有的开关，见上节），bit-trick 的五条整数指令与 256× 修正因子消失；旧设备走原路。
+- **`SINGLE_SCALE` 提出循环**：权重 scale 为 per-channel/per-row（`group_k >= k`，fp8 W8A8 与 Qwen block-scale 路径的默认）时，scale 的 k 地址在循环内不变，把它提出 k 循环后循环体只剩权重 tile 加载与 `tl.dot`——原本每个 k 步都驮着一次 `[BLOCK_N]` scale 加载及其地址算术。w8a16 的 HAS_ZEROS（GPTQ bits=8）分支同样受益。
+
+三 kernel 的 fallback 改动 + 两个 kernel 优化一起，在 `bench_quant_gemm.py` 全路径（含激活量化 pass）上量得 ([`bench_quant_gemm_h100_20260903.json`](benchmark_logs/bench_quant_gemm_h100_20260903.json)，对 [`..._20260902.json`](benchmark_logs/bench_quant_gemm_h100_20260902.json)；同表 bf16/awq/nvfp4 行 1.00× 持平，证明测量无系统性漂移)：
+
+| scheme | m≤8 geo | m=32–128 geo | m≥512 geo | 备注 |
+|---|---|---|---|---|
+| int8 W8A8 | 0.86× | 0.92× | 0.81× | vs bf16 胜场 5→**12**/48 |
+| fp8 W8A8 | 0.92× | 0.94× | 0.77× | prefill 从 2.0–2.6× 落后缩到 1.4–2.0× |
+| fp8 W8A16 | 0.96× | 1.00× | 0.68× | prefill 从 3.8–5.1× 落后缩到 2.1–3.2× |
+
+（表内数字是 new/old 的时长几何均值，<1 为更快。）新胜场全部来自 int8 W8A8：4b/gate_up 全六档（1.13–1.46×）、4b/qkv 的 m1/m8/m32/m2048（1.02–1.25×）、30b qkv 与 o 的 m2048（1.06×/1.03×）。没有一个此前胜过 bf16 的格子回退。mid 档的取舍如实记录：w8a16 用 30b o 投影 m64 的 -14% 换其余四投影 +2–54%（一层总时间为正）；fp8 W8A8 用 4b/qkv m64 的 -4% 换其余 +11–21%。
+
+nvfp4 与 awq 未动、仍全败（nvfp4 的 Triton 解包在 H100 上结构性劣势，见上文）；int4 的 autotune 消费者地位不变，本轮未重扫。
 
 ## Tensor 并行 × CUDA Graph
 
