@@ -14,9 +14,13 @@ import torch
 import torch.nn.functional as F
 
 from lite_llama.kernels.ops.quantization import (
+    COLUMN_MAJOR_TMA,
     NVFP4_BLOCK,
+    ROW_MAJOR,
+    create_scale_output,
     fp8_matmul,
     fp8_quantize_per_token,
+    infer_scale_layout,
     nvfp4_matmul,
     per_token_group_quant,
     quantize_nvfp4_blockwise,
@@ -240,6 +244,65 @@ def test_per_token_group_quant_column_major_scales():
     assert s_cm.stride() == (1, 37)
     assert torch.equal(s_cm, s_rm)
     assert torch.equal(q_cm, q_rm)
+
+
+def test_per_token_group_quant_tma_aligned_scales():
+    """``layout=COLUMN_MAJOR_TMA`` pads the token stride to a 4-word multiple."""
+    torch.manual_seed(0)
+    # T=37 pads to 40; T=38 is already a multiple of 4 and needs no pad.
+    x = torch.randn(37, 2560, device="cuda", dtype=torch.bfloat16)
+
+    q_tma, s_tma = per_token_group_quant(x, 128, layout=COLUMN_MAJOR_TMA)
+    q_rm, s_rm = per_token_group_quant(x, 128)
+
+    assert s_tma.shape == (37, 20) and s_tma.stride() == (1, 40)
+    assert torch.equal(s_tma, s_rm) and torch.equal(q_tma, q_rm)
+    assert infer_scale_layout(s_tma).tma_aligned
+
+    for rows in (1, 3, 4, 37, 38):
+        xr = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
+        _, sr = per_token_group_quant(xr, 128, layout=COLUMN_MAJOR_TMA)
+        assert sr.stride() == (1, (rows + 3) // 4 * 4), rows
+
+
+def test_per_token_group_quant_caller_owned_buffers():
+    """Caller-owned buffers are filled in place; their strides set the layout."""
+    torch.manual_seed(0)
+    x = torch.randn(37, 2560, device="cuda", dtype=torch.bfloat16)
+    q_ref, s_ref = per_token_group_quant(x, 128)
+
+    # A column-major slab allocated elsewhere (another framework, a captured
+    # graph pool): its strides speak for it, no layout flag needed.
+    out_q = torch.empty(37, 2560, device="cuda", dtype=torch.int8)
+    out_s = create_scale_output(x.shape, x.device, 128, COLUMN_MAJOR_TMA)
+    q, s = per_token_group_quant(x, 128, output_q=out_q, output_s=out_s)
+    assert q.data_ptr() == out_q.data_ptr() and s.data_ptr() == out_s.data_ptr()
+    assert s.stride() == (1, 40)
+    assert torch.equal(q, q_ref) and torch.equal(s, s_ref)
+
+    # A row-major scale buffer alone routes the whole call through its layout.
+    row_s = create_scale_output(x.shape, x.device, 128)
+    _, s2 = per_token_group_quant(x, 128, output_s=row_s)
+    assert s2.data_ptr() == row_s.data_ptr() and s2.stride() == (20, 1)
+    assert torch.equal(s2, s_ref)
+
+
+def test_per_token_group_quant_layout_contradictions_raise():
+    """An ambiguous layout request fails loudly instead of guessing."""
+    torch.manual_seed(0)
+    x = torch.randn(37, 2560, device="cuda", dtype=torch.bfloat16)
+
+    with pytest.raises(ValueError, match="contradicts"):
+        per_token_group_quant(x, 128, layout=ROW_MAJOR, column_major_scales=True)
+    # A caller-owned buffer contradicts the request spelled next to it.
+    with pytest.raises(ValueError, match="row-major"):
+        per_token_group_quant(
+            x, 128, output_s=torch.empty(37, 20, device="cuda"), column_major_scales=True
+        )
+    with pytest.raises(ValueError, match="output_s strides describe"):
+        per_token_group_quant(
+            x, 128, output_s=torch.empty(37, 20, device="cuda"), layout=COLUMN_MAJOR_TMA
+        )
 
 
 @pytest.mark.parametrize("out_dtype", [torch.int8, torch.uint8])

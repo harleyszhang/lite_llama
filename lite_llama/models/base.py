@@ -70,7 +70,7 @@ class Attention(nn.Module):
             config.head_dim,
             bias=qkv_bias,
             quant=quant,
-            dtype=config.dtype,
+            params_dtype=config.dtype,
         )
         # This rank's share of the head geometry, read back from the layer
         # that owns the weight rather than divided a second time here.
@@ -80,7 +80,11 @@ class Attention(nn.Module):
         self.kv_size = self.qkv_proj.kv_size
 
         self.o_proj = RowParallelLinear(
-            config.q_size, self.hidden_size, quant=quant, dtype=config.dtype, what="query features"
+            config.q_size,
+            self.hidden_size,
+            quant=quant,
+            params_dtype=config.dtype,
+            what="query features",
         )
 
         if use_qk_norm:
@@ -93,7 +97,7 @@ class Attention(nn.Module):
             self.num_kv_heads,
             self.head_dim,
             kv_cache_dtype=config.kv_cache_torch_dtype,
-            dtype=config.dtype,
+            params_dtype=config.dtype,
         )
 
     def _project_qkv(
@@ -244,12 +248,14 @@ class CausalLM(nn.Module):
         # :mod:`lite_llama.modules.vocab_parallel`): they are the largest pair of
         # weights in a large-vocabulary model, the decode-step head GEMM scales with
         # them, and a tied model cannot honestly shard one without the other.
-        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size, dtype)
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size, config.hidden_size, params_dtype=dtype
+        )
         self.layers = nn.ModuleList(
             self._build_decoder_layer(config, i) for i in range(config.num_layers)
         )
         self.norm_weight = nn.Parameter(torch.ones(config.hidden_size, dtype=dtype))
-        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size, dtype)
+        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size, params_dtype=dtype)
 
         self.rotary_emb = self.rotary_class(config.rope_config)
         self.rms_norm_eps = config.rms_norm_eps

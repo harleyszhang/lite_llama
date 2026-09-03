@@ -18,6 +18,11 @@ and each program carries ``_QUANT_TILE`` elements' worth of groups (eight at
 
 Usage:
     qx, scales = per_token_group_quant(x, 128, out_dtype=torch.uint8)
+
+Scale layout is decided at allocation, not consumption: pass ``layout=``
+and the scale grid is born in the consumer's storage order (see
+``scale_layout.py``), or hand in caller-owned ``output_q``/``output_s``
+buffers and the layout they carry is read back off their strides.
 """
 
 from __future__ import annotations
@@ -28,6 +33,13 @@ import triton.language as tl
 
 from ..activation.activations import silu
 from .fp8 import FP8_E4M3_MAX, has_native_fp8
+from .scale_layout import (
+    COLUMN_MAJOR,
+    ROW_MAJOR,
+    ScaleLayout,
+    create_scale_output,
+    infer_scale_layout,
+)
 
 #: Largest magnitude symmetric int8 stores. A local restatement of
 #: ``w8a8._INT8_MAX`` — kept private there, so this module states its own.
@@ -153,6 +165,9 @@ def per_token_group_quant(
     column_major_scales: bool = False,
     fuse_silu_and_mul: bool = False,
     eps: float = 1e-10,
+    output_q: torch.Tensor | None = None,
+    output_s: torch.Tensor | None = None,
+    layout: ScaleLayout | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantise activations with one scale per token per ``group_size`` elements.
 
@@ -163,6 +178,12 @@ def per_token_group_quant(
     No host synchronisation, so a layer holding this on its critical path
     stays CUDA-graph capturable.
 
+    The scale layout is decided where the buffer is born, not where it is
+    read: pass ``layout=`` and the grid comes out of ``torch.empty`` already
+    in the consumer's storage order, or hand in caller-owned buffers and
+    their strides declare the layout (sglang's ``_infer_scale_layout``
+    move). Either way no post-hoc transpose rides the critical path.
+
     Args:
         x: ``[..., K]`` float activations. Leading dims are flattened to rows.
             With ``fuse_silu_and_mul`` the row holds ``[gate | up]`` halves
@@ -171,18 +192,30 @@ def per_token_group_quant(
             (post-halving) row width; 128 matches the blockwise checkpoints.
         out_dtype: ``torch.int8``, or ``torch.uint8`` for fp8-e4m3 bytes (the
             bit-pattern convention every fp8 op in this package uses).
-        column_major_scales: Store the ``[T, G]`` scale grid with token stride
-            1 — the layout a TMA-based consumer reads it in. 2D inputs only.
+        column_major_scales: Legacy boolean spelling of
+            ``layout=COLUMN_MAJOR`` — store the ``[T, G]`` scale grid with
+            token stride 1. 2D inputs only. Superseded by ``layout``, which
+            also covers TMA-padded grids.
         fuse_silu_and_mul: Quantise ``silu(x[:, :K//2]) * x[:, K//2:]`` straight
             from the gate/up buffer, saving the fp16 round trip through HBM a
             separate activation kernel would take before the quantiser.
         eps: Amax floor, so an all-zero group divides by ``eps/QMAX`` rather
             than zero (sglang bakes in ``1e-10``).
+        output_q: Caller-owned buffer ``[..., H]`` in ``out_dtype``; filled in
+            place instead of allocating — e.g. a CUDA-graph-captured slab.
+        output_s: Caller-owned fp32 scale grid ``[..., K/group_size]``; its
+            strides declare the layout and are honoured as-is, with a loud
+            error on contradicting ``layout``/``column_major_scales``.
+        layout: The ``ScaleLayout`` (``scale_layout.py``) to allocate the
+            scale grid in when ``output_s`` is not given — e.g.
+            ``COLUMN_MAJOR_TMA`` for a TMA-fed operand. ``None`` keeps the
+            historical row-major default.
 
     Returns:
         ``(q, scales)``: ``q`` shaped like ``x`` (or ``[..., K/2]`` when
         fused) in ``out_dtype``, ``scales`` fp32 shaped ``[..., K/group_size]``
-        — a transposed-stride view of it when ``column_major_scales``.
+        in the layout the allocation decided (transposed strides when
+        column-major).
     """
     if out_dtype not in (torch.int8, torch.uint8):
         raise ValueError(f"out_dtype must be int8 or uint8 (e4m3 bytes), got {out_dtype}")
@@ -200,8 +233,10 @@ def per_token_group_quant(
         h = k
     if h % group_size:
         raise ValueError(f"row width {h} is not a multiple of group_size {group_size}")
-    if column_major_scales and x.dim() != 2:
-        raise ValueError("column_major_scales supports 2D inputs only")
+    if layout is not None and column_major_scales and layout.column_major != column_major_scales:
+        raise ValueError(
+            f"layout {layout} contradicts column_major_scales={column_major_scales}; pass one"
+        )
 
     qmax = FP8_E4M3_MAX if out_dtype is torch.uint8 else _INT8_MAX
     flat = x.reshape(-1, k)
@@ -210,40 +245,85 @@ def per_token_group_quant(
     t = flat.shape[0]
     g = h // group_size
 
-    q = torch.empty((t, h), device=x.device, dtype=out_dtype)
-    if column_major_scales:
-        # Allocated [G, T] and viewed transposed: the buffer stays what the
-        # kernel wrote, the *shape* the caller sees is [T, G] with token
-        # stride 1.
-        scales = torch.empty((g, t), device=x.device, dtype=torch.float32).transpose(0, 1)
-        out_scales = scales
+    if output_q is not None:
+        if output_q.dtype != out_dtype:
+            raise ValueError(f"output_q must have dtype {out_dtype}, got {output_q.dtype}")
+        if tuple(output_q.shape) != (*x.shape[:-1], h):
+            raise ValueError(
+                f"output_q must have shape {(*x.shape[:-1], h)}, got {tuple(output_q.shape)}"
+            )
+    if output_s is not None:
+        if tuple(output_s.shape) != (*x.shape[:-1], g):
+            raise ValueError(
+                f"output_s must have shape {(*x.shape[:-1], g)}, got {tuple(output_s.shape)}"
+            )
+        # A caller-owned buffer carries its own layout decision: read it back
+        # off the strides and fail loudly if it contradicts what was asked.
+        resolved = infer_scale_layout(output_s)
+        if layout is not None and resolved != layout:
+            raise ValueError(f"output_s strides describe {resolved}, but layout declares {layout}")
+        if column_major_scales and not resolved.column_major:
+            raise ValueError(
+                "output_s strides describe row-major scales, "
+                "but column_major_scales=True was requested"
+            )
+    elif layout is not None:
+        resolved = layout
     else:
-        scales = torch.empty((t, g), device=x.device, dtype=torch.float32)
-        out_scales = scales.reshape(*x.shape[:-1], g)
+        resolved = COLUMN_MAJOR if column_major_scales else ROW_MAJOR
+    if resolved.column_major and x.dim() != 2:
+        raise ValueError("column-major scales support 2D inputs only")
+
+    if output_q is not None:
+        q = output_q
+    else:
+        q = torch.empty((t, h), device=x.device, dtype=out_dtype)
+    if output_s is not None:
+        scales = output_s
+    else:
+        # The layout rides on the allocation: create_scale_output hands back
+        # the grid in *resolved*'s storage order — column-major is an
+        # allocated-[G, T] view, so the buffer stays what the kernel wrote
+        # while the shape the caller sees is [T, G] with token stride 1 — and
+        # the kernel fills it through strides it was already carrying. The
+        # grid belongs to the *logical* output (fuse_silu_and_mul halves the
+        # row), so allocate to the output shape, not the fused input's.
+        scales = create_scale_output((*x.shape[:-1], h), x.device, group_size, resolved)
 
     if t == 0 or g == 0:
-        return q.reshape(*x.shape[:-1], h), out_scales
+        return q.reshape(*x.shape[:-1], h), scales
 
     if out_dtype is torch.uint8 and not has_native_fp8(x.device.index):
-        q, scales = _per_token_group_quant_torch(flat, h, group_size, fuse_silu_and_mul, qmax, eps)
-        if column_major_scales:
-            scales = scales.t().contiguous().t()
-            return q.reshape(*x.shape[:-1], h), scales
-        return q.reshape(*x.shape[:-1], h), scales.reshape(*x.shape[:-1], g)
+        eq, es = _per_token_group_quant_torch(flat, h, group_size, fuse_silu_and_mul, qmax, eps)
+        # The eager spelling mints fresh contiguous buffers; fold them into
+        # whatever the caller owns (or the layout demanded) instead of
+        # letting the layout slip back to "however eager happened to write
+        # it". copy_ carries the values across any stride arrangement.
+        if output_q is not None:
+            q.view(t, h).copy_(eq)
+        else:
+            q = eq
+        scales.copy_(es.reshape(scales.shape))
+        return q.reshape(*x.shape[:-1], h), scales
 
     # Tile size: _QUANT_TILE elements split as [groups, group_size], capped by
     # however few groups a narrow row actually has. num_warps follows the
     # element count — 256 elements per warp is the same ratio the per-token
     # quantisers' 1024/4 uses.
     groups_per_prog = max(1, min(g, _QUANT_TILE // group_size))
+    # 2D views for the kernel's stride pair: row-major grids flatten their
+    # leading dims (they are contiguous), column-major ones are already 2D,
+    # and a 2D q makes the view a no-op.
+    q_2d = q.view(t, h)
+    scales_2d = scales.view(t, g)
     _per_token_group_quant_kernel[(t, triton.cdiv(g, groups_per_prog))](
         flat,
-        q,
-        scales,
+        q_2d,
+        scales_2d,
         flat.stride(0),
-        q.stride(0),
-        scales.stride(0),
-        scales.stride(1),
+        q_2d.stride(0),
+        scales_2d.stride(0),
+        scales_2d.stride(1),
         g,
         h,
         GROUP_SIZE=group_size,
@@ -254,4 +334,4 @@ def per_token_group_quant(
         EPS=eps,
         num_warps=max(1, (groups_per_prog * group_size) // 256),
     )
-    return q.reshape(*x.shape[:-1], h), out_scales
+    return q.reshape(*x.shape[:-1], h), scales

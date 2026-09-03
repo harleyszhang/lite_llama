@@ -40,7 +40,7 @@ def _fill(module: VocabParallelEmbedding) -> VocabParallelEmbedding:
 
 
 def _build(cls, device: torch.device) -> VocabParallelEmbedding:
-    module = cls(VOCAB, HIDDEN, dtype=torch.float32)
+    module = cls(VOCAB, HIDDEN, params_dtype=torch.float32)
     return _fill(module.to(device))
 
 
@@ -106,11 +106,16 @@ def test_concatenated_local_logits_reproduce_the_full_logits(tp_size: int):
     if torch.cuda.device_count() < tp_size:
         pytest.skip(f"needs {tp_size} CUDA devices")
     shards = run_on_tp_ranks(_head_payload, tp_size=tp_size)
-    expected = _hidden_states() @ _table().T
+    # The reference computes on the device as well, so the shards and the full
+    # matmul share one numerical path — measured bit-identical for this GEMM.
+    # A CPU reference would make the tolerance measure GPU-vs-CPU BLAS
+    # disagreement (~1e-3 on this fp32 GEMM) instead of the sharding the test
+    # is about; a sharding bug still moves logits by O(1) either way.
+    expected = _hidden_states().cuda() @ _table().cuda().T
 
     assert all(len(row) == VOCAB // tp_size for row in shards[0])
     gathered = torch.cat([torch.tensor(shard) for shard in shards], dim=-1)
-    torch.testing.assert_close(gathered, expected, rtol=1e-5, atol=1e-4)
+    torch.testing.assert_close(gathered, expected.cpu(), rtol=1e-5, atol=1e-4)
 
 
 def _local_contribution_payload(rank: int) -> list[list[float]]:
@@ -141,8 +146,8 @@ def test_a_rank_contributes_zeros_for_ids_outside_its_shard():
 
 
 def _tie_payload(rank: int) -> tuple[bool, int, int]:
-    embedding = VocabParallelEmbedding(VOCAB, HIDDEN, dtype=torch.float32)
-    head = ParallelLMHead(VOCAB, HIDDEN, dtype=torch.float32)
+    embedding = VocabParallelEmbedding(VOCAB, HIDDEN, params_dtype=torch.float32)
+    head = ParallelLMHead(VOCAB, HIDDEN, params_dtype=torch.float32)
     head.weight = embedding.weight
     return head.weight is embedding.weight, head.local_vocab_size, ps.get_tensor_model_parallel_world_size()
 

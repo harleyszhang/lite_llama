@@ -12,11 +12,24 @@ from __future__ import annotations
 
 import torch
 
+from lite_llama.kernels.ops.quantization.scale_layout import (
+    ROW_MAJOR,
+    ScaleLayout,
+    create_scale_output,
+)
+
 #: Largest finite e4m3 value; scales normalise by amax / FP8_E4M3_MAX.
 FP8_E4M3_MAX = 448.0
 
 #: DeepGEMM's group size — 128 on both the activation and the weight side.
 GROUP_SIZE = 128
+
+#: The layout this backend reads activation scales in — declared so the
+#: contract lives with the backend that owns it instead of buried in the
+#: helper's allocation call. It is the row-major grid the eager path below
+#: has always produced; a caller pre-allocating scale buffers for this
+#: backend allocates to :data:`SCALE_LAYOUT`, and the two can never drift.
+SCALE_LAYOUT: ScaleLayout = ROW_MAJOR
 
 
 def per_token_group_quant_fp8(
@@ -27,8 +40,9 @@ def per_token_group_quant_fp8(
 
     Returns:
         ``(x_fp8, scales)`` with ``x_fp8`` ``[m, k]`` e4m3 and ``scales``
-        ``[m, k // group_size]`` fp32 — DeepGEMM's activation operand pair.
-        All-zero rows quantise to zero with a clamped scale, never NaN.
+        ``[m, k // group_size]`` fp32 in :data:`SCALE_LAYOUT` — DeepGEMM's
+        activation operand pair. All-zero rows quantise to zero with a
+        clamped scale, never NaN.
     """
     if x.dim() != 2:
         raise ValueError(f"per_token_group_quant_fp8 wants [m, k], got {tuple(x.shape)}")
@@ -37,7 +51,16 @@ def per_token_group_quant_fp8(
         raise ValueError(f"DeepGEMM needs k % {group_size} == 0, got k={k}")
     groups = x.reshape(m, k // group_size, group_size)
     amax = groups.abs().amax(dim=-1)
-    scales = (amax / FP8_E4M3_MAX).clamp(min=1e-12).float()
+    # Allocated in SCALE_LAYOUT up front — the elementwise chain lands in a
+    # buffer of the declared layout instead of wherever amax's reduction
+    # happened to sit. Same values as before: the bf16 div/clamp chain is
+    # unchanged, only where it writes moved.
+    scales = create_scale_output(x.shape, x.device, group_size, SCALE_LAYOUT)
+    # The Triton kernel's eps semantics (``tl.maximum(amax, EPS) / QMAX``):
+    # floor the amax *before* dividing, in fp32, so the two activation
+    # quantisers hand their GEMMs bit-identical scales — an all-zero group
+    # lands on eps/QMAX instead of bare eps.
+    scales.copy_(amax.float().clamp(min=1e-10) / FP8_E4M3_MAX)
     q = (groups / scales.unsqueeze(-1)).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX)
     return q.reshape(m, k).to(torch.float8_e4m3fn), scales
 

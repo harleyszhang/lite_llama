@@ -62,18 +62,22 @@ class VocabParallelEmbedding(nn.Module):
     Args:
         vocab_size: Full vocabulary size (split across ranks).
         hidden_size: Width of the residual stream (not split).
-        dtype: Storage type of the weight.
+        params_dtype: Storage type of the weight; ``None`` defers to
+            ``torch.get_default_dtype()`` (vLLM's auto convention — the layer
+            itself prescribes no precision).
     """
 
     def __init__(
-        self, vocab_size: int, hidden_size: int, dtype: torch.dtype = torch.bfloat16
+        self, vocab_size: int, hidden_size: int, params_dtype: torch.dtype | None = None
     ) -> None:
         super().__init__()
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.shard = vocab_shard(vocab_size)
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
         self.weight = nn.Parameter(
-            torch.empty(len(self.shard), hidden_size, dtype=dtype), requires_grad=False
+            torch.empty(len(self.shard), hidden_size, dtype=params_dtype), requires_grad=False
         )
         self.weight.weight_loader = self._weight_loader
 
