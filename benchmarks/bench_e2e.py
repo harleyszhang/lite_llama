@@ -21,6 +21,7 @@ from benchmarks.common import (
     PROMPTS,
     HFBackend,
     LiteBackend,
+    VLLMBackend,
     expand_prompts,
     make_backend,
     print_table,
@@ -36,6 +37,16 @@ def run_hf(args, prompts: list[str]) -> None:
     result = backend.measure(prompts, args.max_gen_len, greedy=args.greedy)
     print_table({f"hf-{args.attn}": result})
     print(f"sample[0]: {backend.sample_text()!r}")
+
+
+def run_vllm(args, prompts: list[str]) -> None:
+    """vllm 对照:同一批 prompt、同一指标口径（TTFT 为单独一轮 1-token 测量）。"""
+    backend = VLLMBackend(args.model_dir, max_model_len=2048)
+    result = backend.measure(prompts, args.max_gen_len, greedy=args.greedy)
+    print_table({"vllm": result})
+    print(f"sample[0]: {backend.sample_text()!r}")
+    if args.json:
+        write_json_log(args.json, vars(args), {"vllm": result.as_dict()})
 
 
 def run_lite(args, prompts: list[str]) -> dict:
@@ -89,7 +100,7 @@ def main() -> int:
     ap.add_argument("--json", type=str, default=None)
     ap.add_argument("--greedy", action="store_true", help="temperature=0, deterministic")
     ap.add_argument("--mode", choices=["eager", "graph", "both"], default="both")
-    ap.add_argument("--backend", choices=["lite", "hf"], default="lite")
+    ap.add_argument("--backend", choices=["lite", "hf", "vllm"], default="lite")
     ap.add_argument("--model-dir", type=str, default=CKPT)
     ap.add_argument(
         "--attn",
@@ -114,6 +125,10 @@ def main() -> int:
 
     if args.backend == "hf":
         run_hf(args, prompts)
+        return 0
+
+    if args.backend == "vllm":
+        run_vllm(args, prompts)
         return 0
 
     results = run_lite(args, prompts)

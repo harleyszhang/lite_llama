@@ -1,0 +1,28 @@
+{
+  "config": {
+    "max_gen_len": 128,
+    "batch": 8,
+    "json": "/tmp/lite_05b_b8.json",
+    "greedy": true,
+    "mode": "graph",
+    "backend": "lite",
+    "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2___5-0___5B-Instruct",
+    "attn": "sdpa",
+    "verify": false,
+    "max_gpu_num_blocks": 40960,
+    "image": "examples/assets/vision_bench.jpg",
+    "timestamp": "2026-09-03T19:52:17"
+  },
+  "results": {
+    "graph": {
+      "ttft_ms": 13.16140964627266,
+      "tpot_ms": 1.3074601347756198,
+      "total_s": 0.17967327684164047,
+      "steps": 128,
+      "batch": 8,
+      "gen_tokens": 1024,
+      "tpot_p50_ms": 1.3089105486869812,
+      "tps": 5699.233731360774
+    }
+  }
+}

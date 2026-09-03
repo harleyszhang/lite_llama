@@ -1,0 +1,28 @@
+{
+  "config": {
+    "max_gen_len": 128,
+    "batch": 8,
+    "json": "/tmp/vllm_05b_b8.json",
+    "greedy": true,
+    "mode": "both",
+    "backend": "vllm",
+    "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2___5-0___5B-Instruct",
+    "attn": "sdpa",
+    "verify": false,
+    "max_gpu_num_blocks": 40960,
+    "image": "examples/assets/vision_bench.jpg",
+    "timestamp": "2026-09-03T19:53:22"
+  },
+  "results": {
+    "vllm": {
+      "ttft_ms": 20.356526598334312,
+      "tpot_ms": 4.196447298282713,
+      "total_s": 0.5533053334802389,
+      "steps": 128,
+      "batch": 8,
+      "gen_tokens": 1024,
+      "tpot_p50_ms": 0.0,
+      "tps": 1850.6960588272943
+    }
+  }
+}

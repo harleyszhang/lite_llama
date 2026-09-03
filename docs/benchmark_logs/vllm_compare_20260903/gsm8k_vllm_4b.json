@@ -1,0 +1,13 @@
+{
+  "engine": "vllm",
+  "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507",
+  "num_questions": 200,
+  "num_shots": 5,
+  "max_gen_len": 512,
+  "chat_template": "True",
+  "accuracy": 0.215,
+  "invalid_rate": 0.0,
+  "latency_s": 6.3094168193638325,
+  "generated_tokens": 102400,
+  "questions_per_second": 31.698650719380694
+}
