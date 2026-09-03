@@ -1,0 +1,103 @@
+{
+  "meta": {
+    "date": "2026-09-03",
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "geometry": {
+      "hidden": 2048,
+      "num_experts": 128
+    },
+    "op": "MoE router GEMM (x @ gate_weight.T -> fp32 expert logits)",
+    "protocol": "triton.testing.do_bench, bf16 operands, fp32 logits both paths; topk parity verified before timing (same top-8 experts)",
+    "paths": {
+      "fp32_sgemm": "old: F.linear(x.float(), w.float()) -> 2 bf16->fp32 copies + simt SGEMM + split-K reduce",
+      "tier4_bf16": "new: torch.mm(x, w.T, out_dtype=fp32) -> single nvjet tensor-core GEMM, fp32 accumulate/output"
+    },
+    "note": "operator-level microbenchmark; per-model e2e TPOT unchanged in this log (requires real checkpoints, not present in this environment)"
+  },
+  "rows": [
+    {
+      "num_tokens": 1,
+      "fp32_sgemm_us": 19.609,
+      "tier4_bf16_us": 8.93,
+      "speedup": 2.2
+    },
+    {
+      "num_tokens": 2,
+      "fp32_sgemm_us": 22.648,
+      "tier4_bf16_us": 8.927,
+      "speedup": 2.54
+    },
+    {
+      "num_tokens": 4,
+      "fp32_sgemm_us": 22.874,
+      "tier4_bf16_us": 8.96,
+      "speedup": 2.55
+    },
+    {
+      "num_tokens": 8,
+      "fp32_sgemm_us": 22.91,
+      "tier4_bf16_us": 8.953,
+      "speedup": 2.56
+    },
+    {
+      "num_tokens": 16,
+      "fp32_sgemm_us": 23.146,
+      "tier4_bf16_us": 9.185,
+      "speedup": 2.52
+    },
+    {
+      "num_tokens": 32,
+      "fp32_sgemm_us": 23.088,
+      "tier4_bf16_us": 9.385,
+      "speedup": 2.46
+    },
+    {
+      "num_tokens": 64,
+      "fp32_sgemm_us": 23.985,
+      "tier4_bf16_us": 9.45,
+      "speedup": 2.54
+    },
+    {
+      "num_tokens": 128,
+      "fp32_sgemm_us": 24.406,
+      "tier4_bf16_us": 9.531,
+      "speedup": 2.56
+    },
+    {
+      "num_tokens": 256,
+      "fp32_sgemm_us": 27.222,
+      "tier4_bf16_us": 9.685,
+      "speedup": 2.81
+    },
+    {
+      "num_tokens": 512,
+      "fp32_sgemm_us": 31.865,
+      "tier4_bf16_us": 10.054,
+      "speedup": 3.17
+    },
+    {
+      "num_tokens": 1024,
+      "fp32_sgemm_us": 43.106,
+      "tier4_bf16_us": 10.448,
+      "speedup": 4.13
+    },
+    {
+      "num_tokens": 2048,
+      "fp32_sgemm_us": 61.907,
+      "tier4_bf16_us": 11.721,
+      "speedup": 5.28
+    },
+    {
+      "num_tokens": 4096,
+      "fp32_sgemm_us": 99.658,
+      "tier4_bf16_us": 14.853,
+      "speedup": 6.71
+    },
+    {
+      "num_tokens": 8192,
+      "fp32_sgemm_us": 163.446,
+      "tier4_bf16_us": 22.798,
+      "speedup": 7.17
+    }
+  ]
+}

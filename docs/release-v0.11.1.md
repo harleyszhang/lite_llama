@@ -14,6 +14,8 @@ v0.11.1 是 v0.11.0 之上的优化与修复版：两处每步固定开销从 de
 
 ### 优化 A：MoE 路由权重的一次性 fp32 加宽（`modules/moe.py`）
 
+![router GEMM 三代演进](images/v0111_router_evolution.png)
+
 ```python
 # 之前：每层每步一个 cast kernel
 router_logits = F.linear(x.float(), self.gate_weight.float())
@@ -25,6 +27,8 @@ router_logits = F.linear(x.float(), self._gate_weight_fp32)
 ```
 
 fp32 语义本身不动：DeepSeek 的路由（显式 `.float()`）与 qwen3 的参考实现都要求 fp32 logits，bf16 GEMM 会在 near-tie 上翻转 topk 选择，选错一个专家的代价远大于加宽。权重本体仍按模型 dtype 存储——parity 测试把 `gate_weight.dtype` 读作模型 dtype 的代理，只有 GEMM 的操作数加宽。lazy 初始化（而非构造时）是刻意的：测试和 loader 可以在构造之后再填 `gate_weight`；CUDA graph capture 前的三次 eager warmup 保证缓存在录制前已经存在。
+
+**后续演进（tier-4，e80fd63）**：fp32 缓存路径随后被 vllm 的 tier-4 router 路径取代——`torch.mm(x, gate_weight.T, out_dtype=fp32)`，单个 bf16 tensor-core GEMM 带 fp32 accumulate/output epilogue，把 fp32 权重副本和每步 `x.float()` 加宽一起拿掉。算子级（H100，hidden 2048 × 128 experts，topk parity 验证后计时）：decode 2.2×、batch 8 约 2.56×、2048 tokens 5.28×，geomean 3.23×（[`router_gemm_tier4_h100_20260903.json`](benchmark_logs/router_gemm_tier4_h100_20260903.json)）；e2e A/B（同一棵树 monkey-patch `_route`，隔离 router GEMM）：graph TPOT -2.6% / TPS +2.7%，eager 在噪声内（[`router_ab_h100_20260903.json`](benchmark_logs/router_ab_h100_20260903.json)）。上图三代框即这条演进线。
 
 ### 优化 B：K/V 半区 view 的身份感知缓存（`modules/attention.py`）
 
@@ -42,6 +46,8 @@ return views
 身份检查（`is`）覆盖唯一合法的 buffer 更换场景：KV profiling 的 dummy forward 跑在临时 buffer 上。缓存持有 source 的强引用，所以 `is` 比较永远不会看到被回收后复用的地址。MLA 路径不受益也不需要：它的 latent 布局把整行交给 kernel，没有半区切分。
 
 ### TP 图捕获关闭死锁的修复（`executor/executor.py` + `distributed/parallel_state.py`）
+
+![teardown 时序对比](images/v0111_teardown_timeline.png)
 
 三层修复，一层比一层防御：
 
@@ -65,6 +71,8 @@ return views
 
 ## Benchmark
 
+![e2e A/B TPOT](images/v0111_e2e_tpot_ab.png)
+
 H100 单卡，`bench_e2e.py` 口径（greedy，gen=256，每格两次进程级重复 + 每次两轮 in-process warmup），基线 = 反演两处优化后的同一棵树（A/B 对照，不是跨版本对比）。日志：[`docs/benchmark_logs/optim_ab_h100_20260903.json`](benchmark_logs/optim_ab_h100_20260903.json)。
 
 | 模型 | 模式 | batch | TPOT（基线） | TPOT（优化后） | 差值 |
@@ -76,6 +84,13 @@ H100 单卡，`bench_e2e.py` 口径（greedy，gen=256，每格两次进程级�
 | Qwen3-0.6B-FP8 | graph | 8 | 3.25 ms | 3.26 ms | 噪声内 |
 
 读法：两处优化都是 host 开销，模型越深（层×专家路由次数）、batch 越小（固定开销占比越高），收益越大；0.6B graph 持平是预期——replay 不走 Python。graph 档位的 `--verify` 全部通过（eager 与 graph 的贪心输出逐字节一致），证明缓存不改变数值路径。
+
+router tier-4 演进的 e2e A/B（Qwen3-30B-A3B-FP8，同一棵树 monkey-patch `_route`，两次进程级重复）：
+
+| 模式 | TPOT（fp32 cache） | TPOT（tier-4） | TPS（fp32 cache） | TPS（tier-4） |
+|------|-------------------|---------------|-------------------|---------------|
+| graph | 10.88 ms | 10.60 ms（**-2.6%**） | 725.4 | 744.7（**+2.7%**） |
+| eager | 46.46 ms | 46.16 ms（噪声内 ~0.7%） | 172.2 | 173.3 |
 
 ## 测试结果
 
@@ -90,7 +105,7 @@ H100 单卡，`bench_e2e.py` 口径（greedy，gen=256，每格两次进程级�
 ## 文件清单
 
 ```text
-lite_llama/modules/moe.py                        优化 A：_gate_weight_fp32 lazy 缓存
+lite_llama/modules/moe.py                        优化 A：_gate_weight_fp32 lazy 缓存（后演进为 tier-4 out_dtype GEMM）
 lite_llama/modules/attention.py                  优化 B：_kv_view_pair 身份感知缓存
 lite_llama/executor/executor.py                  死锁修复：销毁顺序 + barrier + 时限 + abandon
 lite_llama/distributed/parallel_state.py         新 API：tensor_model_parallel_barrier / abandon_parallel
@@ -99,6 +114,10 @@ lite_llama/kernels/ops/quantization/__init__.py  per_token_group_quant 导出
 pyproject.toml                                   pytest --import-mode=importlib 补回
 tests/golden/test_deepseek_trimmed_parity.py     硬编码路径改相对
 docs/benchmark_logs/optim_ab_h100_20260903.json  A/B benchmark 日志
+docs/benchmark_logs/router_gemm_tier4_h100_20260903.json  router 算子级 tier-4 vs fp32 SGEMM
+docs/benchmark_logs/router_ab_h100_20260903.json          router e2e A/B（tier-4 vs fp32 cache）
+scripts/gen_v0111_release_figs.py                本版三张图的生成脚本（数据读自上述 JSON）
+docs/images/v0111_{router_evolution,e2e_tpot_ab,teardown_timeline}.png
 ```
 
 ## 相关文档
