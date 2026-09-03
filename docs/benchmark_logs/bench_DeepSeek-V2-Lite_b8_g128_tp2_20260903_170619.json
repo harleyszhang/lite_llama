@@ -1,0 +1,32 @@
+{
+  "config": {
+    "model": "my_weight/DeepSeek-V2-Lite",
+    "batch_size": 8,
+    "gen_len": 128,
+    "iters": 2,
+    "tensor_parallel_size": 2,
+    "hf_overrides": null,
+    "gpu": "NVIDIA A10",
+    "timestamp": "2026-09-03T17:06:19"
+  },
+  "lite_llama": {
+    "engine": "lite_llama",
+    "batch_size": 8,
+    "prompt_tokens": 121,
+    "output_tokens": 1024,
+    "ttft_s": 0.06601083092391491,
+    "tpot_ms": 25.342801629792987,
+    "tgs": 311.7629654521591,
+    "latency_s": 3.2845466379076242
+  },
+  "transformers": {
+    "engine": "transformers",
+    "batch_size": 8,
+    "prompt_tokens": 121,
+    "output_tokens": 940,
+    "ttft_s": 0.11965148709714413,
+    "tpot_ms": 149.2866684758612,
+    "tgs": 53.678862681481796,
+    "latency_s": 17.511548364534974
+  }
+}
