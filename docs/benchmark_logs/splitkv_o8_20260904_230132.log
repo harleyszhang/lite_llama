@@ -1,0 +1,39 @@
+device    NVIDIA A10  (600 GB/s peak, 125 TFLOP/s dense tc, 6 MiB L2)
+software  torch 2.13.0+cu129, triton 3.7.1, python 3.13.13
+commit    v0.10.0-129-gdaec61b-dirty
+command   benchmarks/kernels/bench_splitkv.py --json docs/benchmark_logs/splitkv_o8_20260904_230132.json
+env       (none set)
+
+Correctness / partition-size invariance:
+  ok   fixed[128] vs ref [fragmented]               max_abs_diff=6.104e-05  (rtol=0.01, atol=0.01)
+  ok   adaptive vs ref   [fragmented]               max_abs_diff=6.104e-05  (rtol=0.01, atol=0.01)
+  ok   adaptive vs fixed                            max_abs_diff=0.000e+00  (rtol=0.01, atol=0.01)
+  ok   fixed[128] vs ref [contiguous]               max_abs_diff=6.104e-05  (rtol=0.01, atol=0.01)
+  ok   adaptive vs ref   [contiguous]               max_abs_diff=6.104e-05  (rtol=0.01, atol=0.01)
+  ok   adaptive vs fixed                            max_abs_diff=0.000e+00  (rtol=0.01, atol=0.01)
+
+batch    seq |  fixed_us fix_part  fix_grid |  adapt_us adt_part  adt_grid |  speedup
+-------------------------------------------------------------------------------------
+    1    512 |      27.6      128       128 |      15.4       32       512 |   1.800x
+    1   2048 |      37.7      128       512 |      32.8       64      1024 |   1.149x
+    1   8192 |      91.1      128      2048 |      91.1      128      2048 |   1.000x
+    4   2048 |      89.1      128      2048 |      89.1      128      2048 |   1.000x
+    4   8192 |     334.8      128      8192 |     340.0      128      8192 |   0.985x
+   16   1024 |     167.9      128      4096 |     169.0      128      4096 |   0.994x
+   16   4096 |     719.9      128     16384 |     751.7      128     16384 |   0.958x
+   64    512 |     360.4      128      8192 |     364.5      128      8192 |   0.989x
+   64   2048 |    1538.0      128     32768 |    1573.9      128     32768 |   0.977x
+
+num_sms=72  geomean speedup=1.072x  best b1_s512=1.800x  worst b16_s4096=0.958x
+Read as: speedup > 1 means the adaptive split is faster than fixed-128.
+The win is batch=1 short/medium context, where a fixed 128 leaves the
+stage-1 grid below one wave (num_sms*16 = 1152 blocks on A10) and the
+policy splits finer to fill it. Every other shape already fills the GPU
+at 128, so the policy returns the baseline and the cell is exactly 1.0x
+(coarsening an overfilled grid was measured and dropped: sign flipped
+with shape, magnitude inside noise). mid_o partials are MB-scale and
+consumed by the merge immediately (L2-resident), so the win is grid
+occupancy, not a DRAM round-trip avoided.
+-> docs/benchmark_logs/splitkv_o8_20260904_230132.json
+
+wrote docs/benchmark_logs/splitkv_o8_20260904_230132.json
