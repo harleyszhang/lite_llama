@@ -154,6 +154,7 @@ from rapid_llm.kernels.ops.moe.fused_moe import (
     moe_align_block_size,
 )
 from rapid_llm.kernels.ops.quantization import repack_int4_experts
+from rapid_llm.kernels.ops.tile_policy import has_native_fp8
 from rapid_llm.modules.quantization.utils import (
     quantize_fp8_per_channel,
     quantize_fp8_per_token,
@@ -256,6 +257,46 @@ class Scheme:
     #: Must match the table in the kernel exactly, or ``--tune`` writes entries the
     #: kernel never looks up. Every row below passes it explicitly.
     tune_dtype: str = "fp16"
+    #: Set for schemes whose kernels store/load ``tl.float8e4nv``. Triton only emits
+    #: e4m3 from sm89; on sm86 (A10) the type does not exist at all, so these schemes
+    #: cannot compile there and must be skipped rather than crash the run.
+    native_fp8_only: bool = False
+    #: Non-empty when the scheme is known-broken independent of device and is
+    #: therefore deferred out of every gate/table until fixed. The reason is
+    #: printed at the call sites so the omission is visible, not silent.
+    deferred_reason: str = ""
+
+
+def active_schemes() -> tuple[Scheme, ...]:
+    """The schemes this device can actually compile and that are not deferred.
+
+    fp8 W8A8 stores its activation as ``tl.float8e4nv`` in the silu epilogue; on
+    pre-sm89 parts Triton rejects that dtype outright. int8 W8A8 is deferred
+    everywhere: its inline activation-quant path (``A_QUANT``, tokens <= 32) loads
+    ``a`` at full precision and never narrows it to int8, so the grouped GEMM dots
+    a bf16 ``a`` against an int8 ``b`` and fails to compile -- i.e. W8A8-int8 MoE
+    is broken at decode shapes on every device, not just here. Both are dropped
+    here (with a printed note) instead of aborting ``--tune``/the table.
+    """
+    return tuple(
+        s
+        for s in SCHEMES
+        if not s.deferred_reason and (not s.native_fp8_only or has_native_fp8(None))
+    )
+
+
+def skipped_scheme_notes() -> list[tuple[str, str]]:
+    """``(key, reason)`` for every scheme :func:`active_schemes` dropped."""
+    notes = []
+    active = active_schemes()
+    for s in SCHEMES:
+        if s in active:
+            continue
+        if s.deferred_reason:
+            notes.append((s.key, s.deferred_reason))
+        else:
+            notes.append((s.key, "needs sm89+ native fp8; this device lacks it"))
+    return notes
 
 
 def _build_bf16(w1: torch.Tensor, w2: torch.Tensor) -> Built:
@@ -447,6 +488,7 @@ SCHEMES: tuple[Scheme, ...] = (
         _IMPL_A8,
         _fp8_round_trip,
         tune_dtype="fp8_a8",
+        native_fp8_only=True,
     ),
     Scheme(
         "w8a8_int8",
@@ -456,6 +498,7 @@ SCHEMES: tuple[Scheme, ...] = (
         _IMPL_A8_INT8,
         _int8_round_trip,
         tune_dtype="int8_a8",
+        deferred_reason="inline A-quant defect: A_QUANT loads full-precision a, dots bf16 vs int8",
     ),
     Scheme("blockwise_int8", "int8", _build_int8, 8, tune_dtype="int8"),
     Scheme("awq", "int4", _build_int4, 4, tune_dtype="int4"),
@@ -622,7 +665,7 @@ def check_correctness() -> None:
             / geo.intermediate**0.5
         )
         weights, ids, _ = routing(tokens, geo)
-        for scheme in SCHEMES:
+        for scheme in active_schemes():
             call, ref1, ref2, _ = scheme.build(w1, w2)
             ref = fused_moe_reference(x, ref1, ref2, weights, ids, act_quant=scheme.act_quant)
             label = f"{scheme.impl} [{scheme.key}] {geo.case(tokens)}"
@@ -647,13 +690,15 @@ def show_dispatch() -> None:
     stale.
     """
     print("\nDispatch for moe:")
-    for scheme in SCHEMES:
+    for scheme in active_schemes():
         sel = dispatch("moe", dtype="bf16", scheme=scheme.key)
         assert sel.spec.name == scheme.impl, (
             f"table labels {scheme.key} as {scheme.impl}, dispatch picks {sel.spec.name}"
         )
         assert sel.load() is not None
         print(f"  {scheme.key:<16} -> {sel.spec.name}")
+    for key, reason in skipped_scheme_notes():
+        print(f"  {key:<16} -> (skipped: {reason})")
     # One full chain, so a filtered-out backend (deepgemm's grouped fp8 row is
     # registered but unverified) is visible in the log rather than inferred.
     print(f"\n{dispatch('moe', dtype='bf16', scheme='w8a8_fp8').explain()}")
@@ -800,7 +845,7 @@ def tune(
             )
             / geo.intermediate**0.5
         )
-        built = {s.key: s.build(w1, w2)[0] for s in SCHEMES}
+        built = {s.key: s.build(w1, w2)[0] for s in active_schemes()}
         del w1, w2
         torch.cuda.empty_cache()
 
@@ -808,7 +853,7 @@ def tune(
         for t in sorted(tokens):
             buckets.setdefault(bucket_m(t), []).append(t)
 
-        for scheme in SCHEMES:
+        for scheme in active_schemes():
             call = built[scheme.key]
             for bucket, group in buckets.items():
                 inputs = []
@@ -920,7 +965,7 @@ def measure(geometries: tuple[MoeGeometry, ...], tokens: tuple[int, ...]) -> lis
         )
         # Quantisation happens once per checkpoint, outside every timed region:
         # a served model quantises at load time, not per step.
-        built = [(s, *s.build(w1, w2)) for s in SCHEMES]
+        built = [(s, *s.build(w1, w2)) for s in active_schemes()]
         del w1, w2
         torch.cuda.empty_cache()
 

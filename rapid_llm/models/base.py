@@ -16,7 +16,7 @@ from typing import Any, ClassVar
 import torch
 import torch.nn as nn
 
-from ..kernels import qk_rmsnorm, rope_emb_forward, skip_rmsnorm
+from ..kernels import fused_add_rmsnorm, qk_rmsnorm, rope_emb_forward, skip_rmsnorm
 from ..modules import (
     FusedMLP,
     LinearBase,
@@ -216,8 +216,15 @@ class DecoderLayer(nn.Module):
     def _post_attention_norm(
         self, hidden_states: torch.Tensor, residual: torch.Tensor | None
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """The fused add-and-norm both MLP paths start with (dense and EP)."""
-        return skip_rmsnorm(
+        """The fused add-and-norm both MLP paths start with (dense and EP).
+
+        Uses :func:`fused_add_rmsnorm` (O11 communication–RMSNorm fusion):
+        after the row-parallel all-reduce completes in-place on
+        ``hidden_states``, the residual add and the RMSNorm run in a single
+        Triton kernel pass — one fewer HBM read of the residual tensor
+        compared to calling :func:`skip_rmsnorm` separately.
+        """
+        return fused_add_rmsnorm(
             hidden_states,
             residual,
             self.post_attention_layernorm_weight,

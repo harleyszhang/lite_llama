@@ -90,6 +90,17 @@ class Executor(ABC):
         """Run one pass: its sampled token ids, one per sampled row, and any
         logprob records the plan asked for (``None`` when none did)."""
 
+    def execute_verify(
+        self, model_input: ModelInput
+    ) -> tuple[torch.Tensor, PassLogprobs | None, torch.Tensor | None]:
+        """O5 speculative decoding: like execute but also returns full logits.
+
+        Default falls back to execute with ``None`` logits. Subclasses override
+        to actually return the logits tensor for per-position verification.
+        """
+        tokens, records = self.execute(model_input)
+        return tokens, records, None
+
     @abstractmethod
     def shutdown(self) -> None:
         """Release whatever the executor owns beyond this object's lifetime."""
@@ -155,6 +166,11 @@ class UniProcExecutor(Executor):
     def execute(self, model_input: ModelInput) -> tuple[torch.Tensor, PassLogprobs | None]:
         return self._worker.execute(model_input)
 
+    def execute_verify(
+        self, model_input: ModelInput
+    ) -> tuple[torch.Tensor, PassLogprobs | None, torch.Tensor | None]:
+        return self._worker.execute_verify(model_input)
+
     def readback_async(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.cuda.Event | None]:
         return self._worker.readback(tokens)
 
@@ -212,6 +228,13 @@ class MultiprocExecutor(Executor):
         ensure_followers_alive(self._followers)
         tensor_model_parallel_broadcast_object_list(model_input)
         return self._worker.execute(model_input)
+
+    def execute_verify(
+        self, model_input: ModelInput
+    ) -> tuple[torch.Tensor, PassLogprobs | None, torch.Tensor | None]:
+        ensure_followers_alive(self._followers)
+        tensor_model_parallel_broadcast_object_list(model_input)
+        return self._worker.execute_verify(model_input)
 
     def readback_async(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.cuda.Event | None]:
         # Rank 0's copy is the only one that matters: followers discard their tokens
