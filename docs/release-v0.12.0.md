@@ -114,38 +114,29 @@
 
 ### O11 通信-RMSNorm 融合
 
-**问题：** all-reduce 完成后，`_post_attention_norm` 需要 residual add + RMSNorm。设计目标是将 all-reduce 分解为 reduce-scatter → RMSNorm → all-gather，让 norm 计算与 all-gather 通信重叠。
+**问题：** all-reduce 完成后，`_post_attention_norm` 需要 residual add + RMSNorm。`skip_rmsnorm` 已经融合了 residual add 和 RMSNorm，但 all-reduce 的结果需要先写回 HBM，再被 norm kernel 读出来，多一次 HBM 遍历。
 
-**实现：**
-- `fused_allreduce_rmsnorm(partial, residual, weight, eps)` 函数：
-  1. reduce-scatter：每个 rank 拿到自己那块 token 的跨 rank 求和结果
-  2. residual add + RMSNorm：每个 rank 只算自己的 chunk
-  3. all-gather：拼回完整的 normed output
-- `fused_add_rmsnorm` 作为 fallback（TP=1 或 token 数不整除时）
-- `_skip_allreduce` ContextVar 让 row-parallel linear 跳过 all-reduce
+**设计目标：** 将 all-reduce 通信本身与 RMSNorm 融合，消除中间 HBM 写回。vLLM 通过 FlashInfer 的 `allreduce_fusion` CUDA kernel 实现——在 all-reduce 的 epilogue 里直接做 residual add + RMSNorm，数据始终在 registers/shared memory 里。
+
+**当前实现：**
+- `fused_add_rmsnorm` kernel：all-reduce 结果 + residual add + RMSNorm 在单个 Triton kernel 里完成，省一次 residual tensor 的 HBM 读取
+- `fused_allreduce_rmsnorm`：尝试 FlashInfer `allreduce_fusion`，无 FlashInfer 时 fallback 到 `all-reduce + fused_add_rmsnorm`
+- `DecoderLayer._post_attention_norm` 使用 `fused_allreduce_rmsnorm`
 
 **Kernel benchmark 结果（TP=2, A10）：**
 
-| shape | baseline (μs) | O11 fusion (μs) | speedup |
-|-------|---------------|-----------------|--------|
-| (4, 2048) | 342.47 | 3240.16 | 0.106x |
-| (16, 4096) | 210.81 | 562.81 | 0.375x |
-| (32, 4096) | 166.12 | 452.84 | 0.367x |
-| (64, 8192) | 255.05 | 348.61 | 0.732x |
+| shape | all-reduce + skip_rmsnorm (μs) | all-reduce + fused_add_rmsnorm (μs) | speedup |
+|-------|-------------------------------|-----------------------------------|--------|
+| (4, 2048) | 4411.35 | 4411.28 | 1.000x |
+| (16, 4096) | 4411.99 | 4411.32 | 1.000x |
+| (32, 4096) | 4411.46 | 4411.38 | 1.000x |
+| (64, 8192) | 4415.56 | 4415.50 | 1.000x |
 
-**结论：** O11 fusion 在 TP=2 A10 上比 baseline 慢 2.5x-9.4x。原因：
-1. **两次通信 vs 一次**：reduce-scatter + all-gather 的延迟开销 > 单次 NCCL all-reduce
-2. **没有通信-计算重叠**：当前实现是串行的（reduce-scatter → norm → all-gather），未利用异步重叠
-3. **小消息场景**：TP=2 时消息量小（4KB-1MB），通信延迟主导，无法用计算掩盖
-
-**适用场景：** O11 在以下条件下可能有效：
-- TP>2（如 TP=4/8），reduce-scatter + all-gather 可分摊
-- 大消息（prefill 阶段），通信延迟可被计算掩盖
-- 实现异步通信-计算重叠（需要 CommStreamPool 基础设施）
+**结论：** fused kernel 与 baseline 持平。all-reduce 通信延迟（~4.4ms）完全主导，norm kernel 的 HBM 节省可以忽略。真正的 O11 收益需要 FlashInfer `allreduce_fusion` 把通信本身和 norm 融合（消除 all-reduce 的中间 HBM 写回）。当前环境 NCCL P2P send/recv 不可用，FlashInfer 未安装，O11 的完整收益待后续 FlashInfer 集成后释放。
 
 **证据：**
 - Benchmark: `docs/benchmark_logs/fused_allreduce_rmsnorm_o11_*.json`
-- Code: `rapid_llm/kernels/ops/layernorm/skip_rmsnorm.py::fused_allreduce_rmsnorm`
+- Code: `rapid_llm/kernels/ops/layernorm/skip_rmsnorm.py::fused_add_rmsnorm`
 - Integration: `rapid_llm/models/base.py::DecoderLayer._post_attention_norm`
 
 
