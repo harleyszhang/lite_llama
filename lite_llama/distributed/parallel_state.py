@@ -232,6 +232,17 @@ def get_world_size() -> int:
     return _DP_WORLD_SIZE * _TP_WORLD_SIZE
 
 
+def get_tensor_model_parallel_group() -> dist.ProcessGroup | None:
+    """The replica's TP process group, or ``None`` when TP is disabled.
+
+    Callers that issue their own collectives on a side stream — the overlap
+    package's deferred all-reduce, for instance — need the group object rather
+    than the wrapped helpers, because they post the reduction themselves and
+    fence it with their own events.
+    """
+    return _TP_GROUP
+
+
 def expert_parallel_enabled() -> bool:
     """Whether MoE experts split whole-expert across this replica's ranks.
 
