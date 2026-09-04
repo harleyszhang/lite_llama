@@ -12,10 +12,12 @@
 <b>加速特性</b>
          ✅ Flash attention     ✅ Cuda Graph Optimize   ✅ Chunked Prefill         ✅ Prefix Caching
          ✅ W8A16 (fp8/int8)    ✅ W4A16 (AWQ/GPTQ)      ✅ SmoothQuant W8A8        ✅ FP8 KV Cache (2×)
+         ✅ NVFP4 weight-only   ✅ FP8 W8A8 Fused MoE    ✅ TP + CUDA Graph
          ✅ Kernel Autotune     ✅ Fused MoE             ✅ Tensor Parallel         ✅ Data Parallel
+         ✅ 计算-通信重叠       ✅ Tile-Signaling        ✅ DP × CUDA Graph         ✅ DeepSeek V4 (mHC)
 
-<b>框架特性</b>
-         ✅ Continuous batching ✅ OpenAI API server     ✅ Preemption              ✅ Backend Registry
+<b>框架设计</b>
+         ✅ 连续批处理          ✅ OpenAI API 服务       ✅ 抢占机制                ✅ 算子后端注册表
 </pre>
 
 </div>

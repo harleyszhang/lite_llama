@@ -2,7 +2,7 @@
 
 # RapidLLM
 
-**A light llama-like llm inference framework based on the triton/cuda kernel.**
+**RapidLLM (Registry · Attention · Pipeline · Inference · Dispatch) — A production-grade LLM inference serving framework with pluggable Triton/CUDA kernels.**
 
 [![en](https://img.shields.io/badge/lang-en-red.svg)](https://github.com/harleyszhang/rapid_llm/blob/main/README.md)
 [![zh](https://img.shields.io/badge/lang-zh-yellow.svg)](https://github.com/harleyszhang/rapid_llm/blob/main/README.zh.md)
