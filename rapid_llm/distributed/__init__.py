@@ -39,8 +39,15 @@ from .parallel_state import (
     tensor_model_parallel_ranks_agree,
     warmup_collectives,
 )
+from .sequence_parallel import (
+    SequenceParallelPass,
+    is_sequence_parallel,
+    sequence_parallel_enabled,
+)
 
 __all__ = [
+    # Sequence-parallelism graph pass
+    "SequenceParallelPass",
     "all_to_all",
     "destroy_parallel",
     "destroy_tensor_parallel",
@@ -57,9 +64,11 @@ __all__ = [
     "grid_coordinates",
     "init_parallel",
     "init_tensor_parallel",
+    "is_sequence_parallel",
     "recv",
     "reduce_scatter",
     "send",
+    "sequence_parallel_enabled",
     "tensor_model_parallel_all_gather",
     "tensor_model_parallel_all_reduce",
     "tensor_model_parallel_all_reduce_max",

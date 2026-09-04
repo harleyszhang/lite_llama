@@ -11,15 +11,21 @@ Usage:
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, ClassVar
 
 import torch
 import torch.nn as nn
 
-from contextlib import contextmanager
-from contextvars import ContextVar
-
-from ..kernels import fused_add_rmsnorm, fused_allreduce_rmsnorm, qk_rmsnorm, rope_emb_forward, skip_rmsnorm
+from ..distributed.sequence_parallel import SequenceParallelPass, is_sequence_parallel
+from ..kernels import (
+    fused_add_rmsnorm,
+    fused_allreduce_rmsnorm,
+    qk_rmsnorm,
+    rope_emb_forward,
+    skip_rmsnorm,
+)
 from ..modules import (
     FusedMLP,
     LinearBase,
@@ -43,7 +49,6 @@ _O11_FUSION_ENABLED: ContextVar[bool] = ContextVar("o11_fusion", default=False)
 @contextmanager
 def _skip_allreduce_for_o11():
     """Context: row-parallel all-reduces inside this block are skipped (O11)."""
-    from ..batch_overlap.comm_overlap import is_allreduce_skipped
     # We use the batch_overlap infrastructure's skip flag.
     from ..batch_overlap import comm_overlap as _co
     token = _co._skip_allreduce.set(True)
@@ -221,17 +226,15 @@ class DecoderLayer(nn.Module):
         at the head of :meth:`forward_mlp_stage`; everyone else keeps using
         :meth:`forward`, which runs the stages back to back.
 
-        Under O11 fusion (TP>1), the o_proj all-reduce is skipped here and
-        decomposed into reduce-scatter + RMSNorm + all-gather in
-        :meth:`forward_mlp_stage`.
+        Under sequence parallelism (the :class:`SequenceParallelPass` marked this
+        seam), the o_proj all-reduce is skipped here and decomposed into
+        reduce-scatter + RMSNorm + all-gather in :meth:`forward_mlp_stage`.
 
         Returns the *un-normalised* attention output plus the running
         residual — :meth:`forward_mlp_stage`'s fused add-and-norm consumes
         the pair.
         """
-        from ..distributed.parallel_state import get_tensor_model_parallel_world_size
-        use_o11 = get_tensor_model_parallel_world_size() > 1
-        if use_o11:
+        if is_sequence_parallel(self):
             with _skip_allreduce_for_o11():
                 hidden_states, residual = skip_rmsnorm(
                     hidden_states, residual, self.input_layernorm_weight, self.rms_norm_eps
@@ -253,17 +256,17 @@ class DecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """The fused add-and-norm both MLP paths start with (dense and EP).
 
-        Under O11 fusion (TP>1), uses :func:`fused_allreduce_rmsnorm`:
-        decomposes the all-reduce + residual-add + RMSNorm into
-        reduce-scatter → add+RMSNorm → all-gather, overlapping the norm
-        with the all-gather.
+        Under sequence parallelism (the :class:`SequenceParallelPass` marked this
+        seam), uses :func:`fused_allreduce_rmsnorm`: decomposes the all-reduce +
+        residual-add + RMSNorm into reduce-scatter → add+RMSNorm → all-gather,
+        norming only this rank's token segment and overlapping the norm with the
+        communication.
 
         Otherwise uses :func:`fused_add_rmsnorm`: after the row-parallel
         all-reduce completes in-place on ``hidden_states``, the residual
         add and the RMSNorm run in a single Triton kernel pass.
         """
-        from ..distributed.parallel_state import get_tensor_model_parallel_world_size
-        if get_tensor_model_parallel_world_size() > 1:
+        if is_sequence_parallel(self):
             return fused_allreduce_rmsnorm(
                 hidden_states,
                 residual,
@@ -452,6 +455,14 @@ class CausalLM(nn.Module):
 
         self.rotary_emb = self.rotary_class(config.rope_config)
         self.rms_norm_eps = config.rms_norm_eps
+
+        # Sequence-parallelism graph pass: mark every AllReduce->RMSNorm seam
+        # (the o_proj output projection feeding the post-attention norm) to run
+        # the reduce-scatter -> local-norm -> all-gather decomposition under TP.
+        # A no-op when TP is off or RAPID_LLM_SEQUENCE_PARALLEL disables it; the
+        # blocks read the mark at their seam (see is_sequence_parallel).
+        self.sequence_parallel_pass = SequenceParallelPass()
+        self.sequence_parallel_pass.apply(self)
 
     def _layer_quant(self, layer_index: int) -> QuantizationConfig | None:
         """Quantisation layout for layer ``layer_index``, honouring the checkpoint's
