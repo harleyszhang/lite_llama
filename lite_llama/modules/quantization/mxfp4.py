@@ -67,6 +67,27 @@ def e8m0_to_fp32(scale: torch.Tensor) -> torch.Tensor:
     raise ValueError(f"e8m0 scale table has unexpected dtype {scale.dtype}")
 
 
+#: e2m1 code points indexed by nibble (bit 3 sign, bits [2:1] exponent, bit 0
+#: mantissa) — the table the fused kernel decodes on device.
+_E2M1_VALUES = torch.tensor(
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+)
+
+
+def dequant_mxfp4(packed: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """``[..., K//2]`` byte-packed e2m1 + ``[..., K//32]`` e8m0 scales -> fp32.
+
+    The host-side inverse of the checkpoint packing: even K position in the
+    low nibble, odd in the high — the order :func:`repack_mxfp4_pairs`
+    documents. Shapes are whole 32-element groups (:data:`MXFP4_GROUP`).
+    """
+    b = packed.view(torch.uint8).to(torch.long)
+    vals = torch.empty(*b.shape[:-1], b.shape[-1] * 2, dtype=torch.float32)
+    vals[..., 0::2] = _E2M1_VALUES[b & 0xF]
+    vals[..., 1::2] = _E2M1_VALUES[b >> 4]
+    return vals * e8m0_to_fp32(scale).repeat_interleave(MXFP4_GROUP, dim=-1)
+
+
 class Mxfp4MoEMethod(FusedMoEMethodBase):
     """Routed experts as int32-packed e2m1 with per-32 fp32 scales.
 
