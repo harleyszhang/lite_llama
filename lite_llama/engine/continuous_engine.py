@@ -756,6 +756,10 @@ class ContinuousBatchingEngine:
                     # forward ago. Only a drained queue's final harvest pays.
                     event.synchronize()
                 values = host.tolist()
+                # The buffer goes back only now. This step's launches already
+                # ran above, so releasing earlier would have let their copies
+                # overwrite the tokens being read here.
+                self._executor.release_readback(host)
                 emitted: list[tuple[Request, int, PositionLogprobs | None]] = []
                 for request, token, record in zip(work_item.requests, values, records, strict=True):
                     # The token is spent either way — the ledger closes for
