@@ -1,28 +1,23 @@
 #!/usr/bin/env python
-"""Data-parallel benchmarks: throughput scaling and prefix-cache routing.
+"""Data-parallel benchmarks: scaling, prefix-cache routing and CUDA graphs.
 
-Two experiments behind one entry point, both driving the same DP coordinator
-(``measure_dp``) and both diffing outputs so speed never hides wrongness:
-
-* ``--mode scaling`` (default) — replica-count scaling. ``--scaling weak`` grows
-  the total batch with the replica count (the serving question, where DP earns
-  near-linear gains), ``strong`` splits a fixed batch. An in-process ``LLM`` row
-  is the reference.
-* ``--mode prefix`` — prefix caching across replicas. Prompts share prefixes
-  within a group; whether a cache-aware balancer keeps a group on one replica
-  decides if the prefix cache ever hits. Reports both routing quality (exact)
-  and the resulting latency (noisy).
+Three experiments behind one entry point, all driving the same DP coordinator
+(``measure_dp`` / ``DataParallelEngine``) and all diffing outputs so speed never
+hides wrongness:
 
 Usage:
     python benchmarks/bench_data_parallel.py --model <ckpt> --dp 2
     python benchmarks/bench_data_parallel.py --mode prefix --model <ckpt> --dp 2
+    python benchmarks/bench_data_parallel.py --mode graph --model <ckpt> --dp 2
 """
 
 from __future__ import annotations
 
 import argparse
 import random
+import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,7 +40,7 @@ from benchmarks.lib import (
     timestamped_log_path,
     write_json_log,
 )
-from lite_llama import LLM
+from lite_llama import LLM, DataParallelEngine
 from lite_llama.engine.dp_load_balancer import LOAD_BALANCERS, make_load_balancer
 
 #: Per-mode fallbacks for the knobs ``add_dp_args`` declares without a default, so
@@ -68,6 +63,15 @@ _MODE_DEFAULTS = {
         "max_num_seqs": 16,
         "max_seq_len": 2048,
         "max_gpu_num_blocks": 65536,
+    },
+    # The CUDA-graph experiment wants capture in the timed build and the same
+    # batch per replica, so the graphs' price shows up against the eager cell.
+    "graph": {
+        "gen_len": 128,
+        "iters": 2,
+        "max_num_seqs": 0,
+        "max_seq_len": 1024,
+        "max_gpu_num_blocks": None,
     },
 }
 
@@ -477,13 +481,139 @@ def run_prefix(args) -> None:
         )
 
 
+# --------------------------------------------------------------------------- #
+# graph mode
+# --------------------------------------------------------------------------- #
+
+
+def gpu_used_mb() -> list[int]:
+    """Per-GPU used memory in MB, straight from the driver."""
+    out = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+        text=True,
+    )
+    return [int(x) for x in out.strip().splitlines()]
+
+
+def measure_graph_cell(
+    model: str, dp: int, graph: bool, batch: int, gen_len: int, iters: int, max_seq_len: int
+) -> dict:
+    """One ``(dp, graph)`` cell: build time, TPOT, per-GPU memory, texts.
+
+    ``max_num_seqs`` is the replica's concurrency ceiling and has to equal the
+    batch: a replica hosts a resident engine, and an oversized ceiling would let
+    the eager cell queue differently from the graphed one.
+    """
+    prompts = expand_prompts(PROMPTS, batch)
+    before = gpu_used_mb()
+    time.sleep(2.0)  # let the previous cell's workers fully release
+
+    t0 = time.perf_counter()
+    with DataParallelEngine(
+        model=model,
+        data_parallel_size=dp,
+        tensor_parallel_size=1,
+        load_balancer="round_robin",
+        max_num_seqs=batch,
+        max_seq_len=max_seq_len,
+        use_cuda_graph=graph,
+    ) as engine:
+        build_s = time.perf_counter() - t0
+        median, tokens, texts = measure_generate(
+            engine.generate, prompts, gen_len=gen_len, iters=iters, tokenizer=engine.tokenizer
+        )
+        used = gpu_used_mb()
+
+    return {
+        "build_s": round(build_s, 2),
+        "tpot_ms": round(median * 1000 / gen_len, 3),
+        "tps": round(tokens / median, 1),
+        "gpu_used_mb": used[:dp],
+        "gpu_delta_mb": [after - base for after, base in zip(used[:dp], before[:dp], strict=True)],
+        "texts": texts,
+    }
+
+
+def run_graph(args) -> None:
+    visible = require_gpus(1)
+    args.dp = min(args.dp, visible)
+
+    print_run_header(
+        args.model,
+        {
+            "mode": "graph",
+            "batch_per_replica": args.batch_size,
+            "gen_len": args.gen_len,
+            "iters": args.iters,
+            "dp": args.dp,
+        },
+    )
+
+    results = {}
+    texts_by_cell = {}
+    for dp in range(1, args.dp + 1):
+        for graph in (False, True):
+            label = f"dp{dp}_{'graph' if graph else 'eager'}"
+            cell = measure_graph_cell(
+                args.model,
+                dp,
+                graph,
+                args.batch_size * dp,
+                args.gen_len,
+                args.iters,
+                args.max_seq_len,
+            )
+            results[label] = {k: v for k, v in cell.items() if k != "texts"}
+            texts_by_cell[label] = cell["texts"]
+
+            print(f"\n{label}  batch={args.batch_size * dp}  gen={args.gen_len}")
+            print(f"  build      {cell['build_s']:7.2f} s   (capture included when graph)")
+            print(f"  TPOT       {cell['tpot_ms']:7.3f} ms")
+            print(f"  throughput {cell['tps']:7.1f} tok/s")
+            print(f"  gpu used   {cell['gpu_used_mb']} MB   delta {cell['gpu_delta_mb']} MB")
+
+    print("\n=== deltas ===")
+    for dp in range(1, args.dp + 1):
+        eager, graph = results[f"dp{dp}_eager"], results[f"dp{dp}_graph"]
+        tpot = (eager["tpot_ms"] - graph["tpot_ms"]) / eager["tpot_ms"]
+        print(
+            f"dp={dp}: graph cuts TPOT by {tpot:.1%} "
+            f"({eager['tpot_ms']:.3f} -> {graph['tpot_ms']:.3f} ms), "
+            f"capture adds {graph['build_s'] - eager['build_s']:.2f}s build, "
+            f"+{sum(graph['gpu_delta_mb']) - sum(eager['gpu_delta_mb'])} MB"
+        )
+    if args.dp >= 2:
+        eager1, graph2 = results["dp1_eager"], results["dp2_graph"]
+        print(
+            f"no-lock-step: dp2 graph throughput is {graph2['tps'] / eager1['tps']:.2f}x dp1 eager"
+        )
+
+    report_agreement(texts_by_cell["dp1_eager"], list(texts_by_cell.items()))
+
+    if args.log_dir:
+        path = timestamped_log_path(args.log_dir, f"dp_graph_{Path(args.model).name}")
+        write_json_log(
+            path,
+            {
+                "model": args.model,
+                "mode": "graph",
+                "batch_per_replica": args.batch_size,
+                "gen_len": args.gen_len,
+                "iters": args.iters,
+                "dp": args.dp,
+            },
+            results,
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument(
         "--mode",
         default="scaling",
-        choices=["scaling", "prefix"],
-        help="scaling: replica-count throughput; prefix: prefix-cache routing quality",
+        choices=["scaling", "prefix", "graph"],
+        help="scaling: replica-count throughput; prefix: prefix-cache routing quality; "
+        "graph: CUDA graphs under DP",
     )
     # The five knobs below default to None so each mode can fill its own fallback
     # without mistaking an explicit value for "not passed".
@@ -501,7 +631,8 @@ def main() -> None:
         "--batch-size",
         type=int,
         default=16,
-        help="[scaling] Prompts: total across replicas (strong) or per replica (weak)",
+        help="[scaling] Prompts: total across replicas (strong) or per replica (weak); "
+        "[graph] per replica",
     )
     parser.add_argument(
         "--scaling", default="weak", choices=["strong", "weak"], help="[scaling] workload shape"
@@ -543,6 +674,8 @@ def main() -> None:
 
     if args.mode == "prefix":
         run_prefix(args)
+    elif args.mode == "graph":
+        run_graph(args)
     else:
         run_scaling(args)
 

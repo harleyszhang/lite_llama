@@ -6,7 +6,7 @@ directly comparable. Greedy decoding, chat template for instruction-tuned
 checkpoints (the counterpart of runner.as_user_turn).
 
 Usage:
-    python benchmarks/bench_gsm8k_vllm.py --model-dir <checkpoint> \
+    python -m benchmarks.accuracy.gsm8k_vllm --model-dir <checkpoint> \
         [--num-questions 200] [--chat-template] [--json out.json]
 """
 
@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
+from pathlib import Path
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tests.evals.dataset import load_gsm8k
 from tests.evals.gsm8k import STOP, build_prompts, score

@@ -32,7 +32,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.common import require_gpus, timestamped_log_path, write_json_log
+from benchmarks.lib import require_gpus, timestamped_log_path, write_json_log
 
 PREFILL_BATCH = 2
 PREFILL_SEQS = [256, 1024, 2048]

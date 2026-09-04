@@ -28,6 +28,7 @@ lite_llama/logs/
 images/tmp/
 tests/tmp/
 tests/debug/
+benchmarks/.v4_matrix_tmp/
 
 # Local agent tooling (skill installs; nothing the repo builds or runs)
 .agents/
