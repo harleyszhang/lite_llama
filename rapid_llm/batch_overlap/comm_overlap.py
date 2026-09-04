@@ -480,10 +480,21 @@ _deferred: ContextVar[DeferredArContext | None] = ContextVar(
     "rapid_llm_deferred_all_reduce", default=None
 )
 
+#: O11 fusion: when True, row_parallel_forward skips the all-reduce so the
+#: caller can decompose it into reduce-scatter + norm + all-gather.
+_skip_allreduce: ContextVar[bool] = ContextVar(
+    "rapid_llm_skip_allreduce", default=False
+)
+
 
 def current_deferred_ar() -> DeferredArContext | None:
     """The deferred-AR context this call site runs in, if any."""
     return _deferred.get()
+
+
+def is_allreduce_skipped() -> bool:
+    """Whether row-parallel all-reduces should be skipped (O11 fusion)."""
+    return _skip_allreduce.get()
 
 
 @contextmanager
@@ -541,6 +552,9 @@ def row_parallel_forward(layer: LinearBase, x: torch.Tensor) -> torch.Tensor:
       and the caller fences where it consumes (L2);
     * under an enabled L3 policy with enough rows, the GEMM is split into row
       chunks whose reductions overlap the next chunk's GEMM;
+    * under :func:`fused_allreduce_rmsnorm`, the all-reduce is skipped
+      entirely — the caller decomposes it into reduce-scatter + norm +
+      all-gather (O11 communication–RMSNorm fusion);
     * otherwise, the blocking all-reduce every earlier test was written against.
 
     Args:
@@ -550,6 +564,8 @@ def row_parallel_forward(layer: LinearBase, x: torch.Tensor) -> torch.Tensor:
     """
     world_size = get_tensor_model_parallel_world_size()
     rows = x.shape[:-1].numel()
+    if is_allreduce_skipped():
+        return layer.apply_linear(x)
     mode = _dispatch_mode(world_size, _deferred.get() is not None, comm_overlap_policy(), rows)
     if mode == "passthrough":
         return layer.apply_linear(x)

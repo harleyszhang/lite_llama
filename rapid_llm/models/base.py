@@ -16,7 +16,10 @@ from typing import Any, ClassVar
 import torch
 import torch.nn as nn
 
-from ..kernels import fused_add_rmsnorm, qk_rmsnorm, rope_emb_forward, skip_rmsnorm
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+from ..kernels import fused_add_rmsnorm, fused_allreduce_rmsnorm, qk_rmsnorm, rope_emb_forward, skip_rmsnorm
 from ..modules import (
     FusedMLP,
     LinearBase,
@@ -31,6 +34,23 @@ from ..modules import (
 from ..modules.quantization import QuantizationConfig, adapt_packed_checkpoint
 from . import weights
 from .config import ModelConfig
+
+# O11 fusion: when TP>1, skip the o_proj all-reduce and decompose it into
+# reduce-scatter + RMSNorm + all-gather in _post_attention_norm.
+_O11_FUSION_ENABLED: ContextVar[bool] = ContextVar("o11_fusion", default=False)
+
+
+@contextmanager
+def _skip_allreduce_for_o11():
+    """Context: row-parallel all-reduces inside this block are skipped (O11)."""
+    from ..batch_overlap.comm_overlap import is_allreduce_skipped
+    # We use the batch_overlap infrastructure's skip flag.
+    from ..batch_overlap import comm_overlap as _co
+    token = _co._skip_allreduce.set(True)
+    try:
+        yield
+    finally:
+        _co._skip_allreduce.reset(token)
 
 
 class Attention(nn.Module):
@@ -201,10 +221,25 @@ class DecoderLayer(nn.Module):
         at the head of :meth:`forward_mlp_stage`; everyone else keeps using
         :meth:`forward`, which runs the stages back to back.
 
+        Under O11 fusion (TP>1), the o_proj all-reduce is skipped here and
+        decomposed into reduce-scatter + RMSNorm + all-gather in
+        :meth:`forward_mlp_stage`.
+
         Returns the *un-normalised* attention output plus the running
         residual — :meth:`forward_mlp_stage`'s fused add-and-norm consumes
         the pair.
         """
+        from ..distributed.parallel_state import get_tensor_model_parallel_world_size
+        use_o11 = get_tensor_model_parallel_world_size() > 1
+        if use_o11:
+            with _skip_allreduce_for_o11():
+                hidden_states, residual = skip_rmsnorm(
+                    hidden_states, residual, self.input_layernorm_weight, self.rms_norm_eps
+                )
+                return (
+                    self.self_attn(hidden_states, atten_info, layer_index, position_embeddings),
+                    residual,
+                )
         hidden_states, residual = skip_rmsnorm(
             hidden_states, residual, self.input_layernorm_weight, self.rms_norm_eps
         )
@@ -218,12 +253,23 @@ class DecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """The fused add-and-norm both MLP paths start with (dense and EP).
 
-        Uses :func:`fused_add_rmsnorm` (O11 communication–RMSNorm fusion):
-        after the row-parallel all-reduce completes in-place on
-        ``hidden_states``, the residual add and the RMSNorm run in a single
-        Triton kernel pass — one fewer HBM read of the residual tensor
-        compared to calling :func:`skip_rmsnorm` separately.
+        Under O11 fusion (TP>1), uses :func:`fused_allreduce_rmsnorm`:
+        decomposes the all-reduce + residual-add + RMSNorm into
+        reduce-scatter → add+RMSNorm → all-gather, overlapping the norm
+        with the all-gather.
+
+        Otherwise uses :func:`fused_add_rmsnorm`: after the row-parallel
+        all-reduce completes in-place on ``hidden_states``, the residual
+        add and the RMSNorm run in a single Triton kernel pass.
         """
+        from ..distributed.parallel_state import get_tensor_model_parallel_world_size
+        if get_tensor_model_parallel_world_size() > 1:
+            return fused_allreduce_rmsnorm(
+                hidden_states,
+                residual,
+                self.post_attention_layernorm_weight,
+                self.rms_norm_eps,
+            )
         return fused_add_rmsnorm(
             hidden_states,
             residual,

@@ -5,18 +5,26 @@ output in one launch; passing a zero residual degrades to plain RMSNorm.
 :func:`qk_rmsnorm` normalises a query and a key tensor in a single launch for
 the models that RMSNorm q and k per head before RoPE.
 
-:func:`fused_add_rmsnorm` is the communication–RMSNorm fusion (O11): after
-an all-reduce has completed in-place on ``x``, it adds ``residual`` and
+:func:`fused_add_rmsnorm` is the residual-add + RMSNorm fusion: after an
+all-reduce has completed in-place on ``x``, it adds ``residual`` and
 normalises in a single kernel pass — one fewer HBM read of the residual
 tensor compared to calling ``skip_rmsnorm`` separately.
+
+:func:`fused_allreduce_rmsnorm` is the full O11 communication–RMSNorm
+fusion: it decomposes the all-reduce + residual-add + RMSNorm sequence into
+reduce-scatter → residual-add + RMSNorm → all-gather. The norm runs on each
+rank's local chunk while the all-gather is in flight, overlapping compute
+with communication.
 
 Usage:
     residual, y = skip_rmsnorm(x, residual, weight, eps)
     q, k = qk_rmsnorm(q, k, q_weight, k_weight, eps)
     residual, y = fused_add_rmsnorm(x, residual, weight, eps)
+    residual, y = fused_allreduce_rmsnorm(partial, residual, weight, eps)
 """
 
 import torch
+import torch.distributed as dist
 import triton
 import triton.language as tl
 
@@ -246,7 +254,7 @@ def fused_add_rms_norm_kernel(
 
 @torch.no_grad()
 def fused_add_rmsnorm(x, residual, weight, eps=1e-5):
-    """Fused all-reduce-result + residual-add + RMSNorm (O11 communication–norm fusion).
+    """Fused all-reduce-result + residual-add + RMSNorm.
 
     After an all-reduce has completed in-place on ``x``, this adds ``residual``
     and normalises in a single Triton kernel launch. The arithmetic is identical
@@ -281,6 +289,90 @@ def fused_add_rmsnorm(x, residual, weight, eps=1e-5):
         BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps,
     )
     return Y.view(orig_shape), residual.view(orig_shape)
+
+
+@torch.no_grad()
+def fused_allreduce_rmsnorm(partial, residual, weight, eps=1e-5):
+    """O11 communication–RMSNorm fusion: reduce-scatter → add+RMSNorm → all-gather.
+
+    Replaces the all-reduce + residual-add + RMSNorm sequence with a decomposed
+    variant that overlaps the norm computation with the all-gather:
+
+    1. **Reduce-scatter**: each rank gets the summed partial for its token chunk.
+    2. **Residual add + RMSNorm**: each rank normalises its local chunk.
+    3. **All-gather**: collect the normalised chunks back to the full tensor.
+
+    Falls back to :func:`fused_add_rmsnorm` when TP=1 (no communication to
+    decompose) or when the token count doesn't divide across ranks.
+
+    The caller must ensure the all-reduce in the preceding row-parallel linear
+    was skipped (see :func:`~rapid_llm.batch_overlap.comm_overlap.is_allreduce_skipped`).
+
+    Args:
+        partial: ``(..., hidden)`` partial-sum activations (pre-all-reduce).
+        residual: ``(..., hidden)`` running residual, updated in place.
+        weight: ``(hidden,)`` learned scale.
+        eps: Added to the mean square before the reciprocal square root.
+
+    Returns:
+        ``(normalised, residual)`` — same contract as :func:`skip_rmsnorm`.
+    """
+    from ....distributed.parallel_state import (
+        get_tensor_model_parallel_group,
+        get_tensor_model_parallel_rank,
+        get_tensor_model_parallel_world_size,
+    )
+
+    world_size = get_tensor_model_parallel_world_size()
+    if world_size <= 1:
+        return fused_add_rmsnorm(partial, residual, weight, eps)
+
+    group = get_tensor_model_parallel_group()
+    if group is None or dist.get_backend(group) != "nccl":
+        from ....distributed.parallel_state import tensor_model_parallel_all_reduce
+        full = tensor_model_parallel_all_reduce(partial)
+        return fused_add_rmsnorm(full, residual, weight, eps)
+
+    orig_shape = partial.shape
+    hidden = orig_shape[-1]
+    flat = partial.contiguous().view(-1, hidden)
+    total_tokens = flat.shape[0]
+
+    if total_tokens % world_size != 0:
+        from ....distributed.parallel_state import tensor_model_parallel_all_reduce
+        full = tensor_model_parallel_all_reduce(partial)
+        return fused_add_rmsnorm(full, residual, weight, eps)
+
+    rank = get_tensor_model_parallel_rank()
+    chunk_size = total_tokens // world_size
+    BLOCK_SIZE, num_warps = calculate_settings(hidden)
+
+    flat_residual = residual.contiguous().view(-1, hidden)
+
+    # Step 1: reduce-scatter — each rank gets summed partial for its chunk.
+    recv_buf = torch.empty(chunk_size, hidden, dtype=flat.dtype, device=flat.device)
+    dist.reduce_scatter_tensor(recv_buf, flat, op=dist.ReduceOp.SUM, group=group)
+
+    # Step 2: residual add + RMSNorm on this rank's chunk.
+    res_chunk = flat_residual[rank * chunk_size : (rank + 1) * chunk_size]
+    recv_buf.add_(res_chunk)
+    # Update the running residual in place (chunk slice).
+    flat_residual[rank * chunk_size : (rank + 1) * chunk_size].copy_(recv_buf)
+
+    # RMSNorm the chunk (plain norm — residual add already done above).
+    normed_chunk = torch.empty_like(recv_buf)
+    rms_norm_kernel[chunk_size,](
+        normed_chunk, recv_buf, weight,
+        hidden, 1, hidden, 1, hidden, eps,
+        BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps,
+    )
+
+    # Step 3: all-gather the normalised chunks.
+    gathered = [torch.empty_like(normed_chunk) for _ in range(world_size)]
+    dist.all_gather(gathered, normed_chunk, group=group)
+    full_normed = torch.cat(gathered, dim=0).view(orig_shape)
+
+    return full_normed, flat_residual.view(orig_shape)
 
 
 @torch.no_grad()
