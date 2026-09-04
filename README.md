@@ -24,32 +24,47 @@
 
 ## Features
 
-- Up to **6.5×** speedup over HuggingFace `transformers` (Qwen3-0.6B, A10, greedy) — see the [benchmark table](#qwen3-06b-benchmark) below.
-- **Online batch inference with continuous batching**: requests join and leave a running batch, so an arrival never waits for the current generation to finish. On one A10 with Qwen2.5-1.5B-Instruct and requests arriving 250 ms apart, throughput goes from 93 → 644 tok/s (**6.9×**) and mean latency from 19.1 s → 2.3 s (**8.3×**) — see [docs/continuous_batching.md](./docs/continuous_batching.md).
-- **OpenAI-compatible server** (`rapid-llm serve`): `/v1/completions` and `/v1/chat/completions` with streaming — the official `openai` client works unchanged. See [docs/online_serving.md](./docs/online_serving.md).
-- Supports `llama3`, `Qwen2.5/Qwen3`, `Qwen3-MoE`, `LLaVA-1.5`, `Qwen3-VL`; `top-p` / `top-k` sampling and streaming output.
-- **CUDA graph**: decode-stage CUDA graph capture (within batch-size limits), including under tensor parallelism — capture is gated by a grid-agreement all-reduce and a graph-vs-eager numerical check, because a mismatched graph under TP hangs in a collective instead of raising. `RAPID_LLM_TP_CUDA_GRAPH=0` restores eager.
-- **Attention backends**: `flashattention2`, `flashdecoding` (with `NopadAttention` for unpadded sequences and GQA support). Dynamic KV-cache management via paged `TokenAttention` slots.
-- **Operator fusion**: `silu` multiply, K/V projection fusion, skip-connection + `rmsnorm`. Custom `triton` kernels for `rmsnorm`, `rope`, `softmax`, and element-wise multiply.
-- **Quantization**: W8A16 (fp8/int8), W4A16 (AWQ/GPTQ), SmoothQuant W8A8, fp8 W8A8 (dense + MoE experts), NVFP4 weight-only — up to **6.9×** decode speedup over HF fp16. 4-bit schemes trade speed for footprint on an H100; the per-shape numbers are in [docs/quantization.md](docs/quantization.md).
-- **Tensor Parallelism**: split a 30B MoE model across 2× A10 (24 GB) with one all-reduce per block.
-- **Data Parallelism**: replicate the model across GPUs and route requests between them — **2.00×** throughput on 2 GPUs (100% linear).
-- **Kernel Autotune** (v0.5): offline search persists optimal tile configs per `(GPU, op, shape)` to `~/.cache/rapid_llm/autotune/`; kernels auto-load on startup.
-- **FP8 KV Cache** (v0.6): `--kv-cache-dtype fp8` halves KV memory — **1.91× capacity** (282K vs 148K tokens on A10) with only 9% throughput cost.
+Up to **6.5×** speedup over HuggingFace `transformers` (Qwen3-0.6B, A10, greedy) — see the [benchmark table](#qwen3-06b-benchmark) below. The list is grouped by what each part does for a deployment; deep dives with figures and on/off measurements live in [Optimize Features](#optimize-features) and [Observability](#observability).
+
+**Serving and scheduling**
+
+- **Continuous batching**: requests join and leave a running batch, so an arrival never waits for the current generation to finish. On one A10 with Qwen2.5-1.5B-Instruct and requests arriving 250 ms apart, throughput goes from 93 → 644 tok/s (**6.9×**) and mean latency from 19.1 s → 2.3 s (**8.3×**) — see [docs/continuous_batching.md](./docs/continuous_batching.md).
 - **Chunked Prefill** (v0.7): long prompts split into 512-token chunks so per-step prefill work is bounded (2000 → 512 tokens, 3.9× lower peak) — decode requests interleave instead of waiting behind a whole prompt.
 - **Prefix Caching** (v0.7): block-hash chained prefix reuse — shared system prompts are prefilled once and reused by later requests; LRU-evicted under capacity pressure (aligned with vLLM's `BlockPool`).
 - **Preemption** (v0.7): opt-in recompute-based eviction (`enable_preemption`) when the running set exceeds slot capacity; evicted requests re-queue with a progress quantum that prevents livelock.
-- **Backend Registry** (v0.8): declarative kernel-backend selection with availability checks + `explain_selection()`; environment-variable override and graceful degradation when a backend's dependency is missing.
-- **Declarative kernel dispatch** (v0.9): every kernel is a `KernelSpec` row (availability / capability / dtype+scheme / shape / layout / golden), selection is `filter → rank → cache` with a per-rejection reason, and a frozen measured ranking replaces hand-written priorities. One dispatch costs 27 µs at construction time and nothing per step.
+- **OpenAI-compatible server** (`rapid-llm serve`): `/v1/completions` and `/v1/chat/completions` with streaming — the official `openai` client works unchanged. See [docs/online_serving.md](./docs/online_serving.md).
+- **Streaming reasoning & tool-call parsing** (v0.11): `reasoning_parser` / `tool_parser` are **request fields**, not server flags — one deployment serves R1-style and direct models side by side. Streamed frames concatenate to the one-shot message by construction (tested as an axiom); DeepSeek/Qwen tool marker families; ~1.2 µs/token. Details in [Structured Streaming Output](#structured-streaming-output).
+
+**Parallelism and overlap**
+
+- **Tensor Parallelism**: split a 30B MoE model across 2× A10 (24 GB) with one all-reduce per block.
+- **Data Parallelism**: replicate the model across GPUs and route requests between them — **2.00×** throughput on 2 GPUs (100% linear). Every replica captures and replays its own decode graph (tp=1 per replica, so no collective lands inside a graph): TPOT 25.9 → 5.2 ms and 618 → 6162 tok/s on 2× A10 with Qwen3-0.6B.
+- **CUDA graph**: decode-stage capture (within batch-size limits), including under tensor parallelism — gated by a grid-agreement all-reduce and a graph-vs-eager numerical check, because a mismatched graph under TP hangs in a collective instead of raising; `RAPID_LLM_TP_CUDA_GRAPH=0` restores eager. A graph × TP × quant cross-validation suite (bf16/fp8/nvfp4) runs every combination and demands byte-identical greedy output.
+- **Compute–communication overlap** (v0.11.5): five primitives that hide transfers and collectives behind compute, each behind its own switch — L1 pinned-copy uploads (on by default), L2 two-batch ping-pong, L3 chunked all-reduce, SBO single-batch MoE overlap, L4 tile-signaling kernels. Every one is measured on/off on the same workload, and the regressions ship in the same table as the wins — see [docs/release-v0.11.5.md](./docs/release-v0.11.5.md).
+
+**Memory and quantization**
+
+- **Weight quantization**: W8A16 — fp8 checkpoints with 128×128 block scales (auto-detected from `config.json`) and runtime int8 (`--quantization int8`); W8A8 — true fp8 and SmoothQuant int8 with dynamic per-token/per-channel scales, dense and MoE experts (`--quantization fp8` / `smoothquant`); W4A16 — AWQ/GPTQ group-128 checkpoints; NVFP4 weight-only — 2.85× smaller weights than bf16. Up to **6.9×** decode speedup over HF fp16; the 4-bit schemes trade speed for footprint on an H100, and the per-shape numbers are in [docs/quantization.md](docs/quantization.md).
+- **FP8 KV Cache** (v0.6): `--kv-cache-dtype fp8` halves KV memory — **1.91× capacity** (282K vs 148K tokens on A10) with only 9% throughput cost.
+- **MLA — DeepSeek-V2-Lite end-to-end** (v0.11): every token caches one 576-element latent row instead of per-head K and V (5120 for the same architecture uncompressed), through the same `(dim,)` KV row every other model uses; under TP the latent is replicated, not sharded. On 2× A10: **33.6k vs 9.3k KV tokens per GiB** of pool memory vs a GQA model on the same card, golden-gated against `transformers` token by token.
+
+**Kernel layer**
+
+- **Attention backends**: `flashattention2`, `flashdecoding` (with `NopadAttention` for unpadded sequences and GQA support); dynamic KV-cache management via paged `TokenAttention` slots.
+- **Operator fusion**: SwiGLU runs the silu gate and the elementwise multiply in one Triton launch; residual-add + RMSNorm fuse into `skip_rmsnorm` (a zero residual degrades to plain RMSNorm); K/V projections fuse into a single GEMM; hand-written Triton kernels for `rmsnorm`, `rope`, `softmax`, and element-wise multiply.
+- **Fused MoE**: top-k routed experts run as one grouped-GEMM pipeline — `moe_align_block_size` → gate-up GEMM → `silu_and_mul` → down GEMM with the router weight folded in → `moe_sum` — in fp16, fp8, int8, and int4 variants; DeepSeek's grouped routers (V2 `group_limited_greedy`, V3 `noaux_tc`) run as single kernels.
+- **Kernel Autotune** (v0.5): offline search persists optimal tile configs per `(GPU, op, shape)` to `~/.cache/rapid_llm/autotune/`; kernels auto-load on startup.
+- **Backend registry & declarative dispatch** (v0.8/v0.9): every kernel is a `KernelSpec` row (availability / capability / dtype+scheme / shape / layout / golden); selection is `filter → rank → cache` with availability checks, a per-rejection reason, and `explain_selection()`; a frozen measured ranking replaces hand-written priorities; environment-variable override and graceful degradation when a backend's dependency is missing. One dispatch costs 27 µs at construction time and nothing per step.
+
+**Observability**
+
 - **Token scores** (v0.10): `logprobs=k` reports the chosen token and its top-k alternatives, `prompt_logprobs=k` scores every prompt position — both out of the forward pass that was happening anyway, no rescoring run. Verified against `transformers` on every position.
 - **Metrics and tracing** (v0.10): Prometheus `/metrics` (queue time, TTFT, TPOT, token counters) with no `prometheus_client` dependency, plus one OTLP span per request when a collector is configured. Measured cost is below the 0.5% run-to-run noise.
-- **MLA — DeepSeek-V2-Lite end-to-end** (v0.11): latent KV — 576 elements/token/layer vs 5120 for the same architecture uncompressed — through the same `(dim,)` KV row every other model uses; under TP the latent is replicated, not sharded. On 2× A10: **33.6k vs 9.3k KV tokens per GiB** of pool memory vs a GQA model on the same card, golden-gated against `transformers` token by token.
-- **Streaming reasoning & tool-call parsing** (v0.11): `reasoning_parser` / `tool_parser` are **request fields**, not server flags — one deployment serves R1-style and direct models side by side. Streamed frames concatenate to the one-shot message by construction (tested as an axiom); DeepSeek/Qwen tool marker families; ~1.2 µs/token.
-- **Decode host-overhead cuts** (v0.11.1): the MoE router's fp32 gate widen and the attention K/V half-view slicing each happen once per layer per step — now once per engine. TPOT on Qwen3-30B-A3B (H100, eager): **-3.5%** at batch 1, -2.6% at batch 8; graphs gain +2.0% throughput with byte-identical greedy output. The router then moved to vllm's tier-4 path — `torch.mm(x, gate_weight.T, out_dtype=fp32)`, one bf16 tensor-core GEMM with an fp32 epilogue — worth 2.2–5.28× at the operator level and another -2.6% graph TPOT e2e. Numbers, method and figures in [docs/release-v0.11.1.md](docs/release-v0.11.1.md).
-- **TP shutdown deadlock fixed** (v0.11.1): a TP=2 engine with captured CUDA graphs used to hang forever at shutdown — `ncclCommAbort` on a graph-captured communicator parks in a futex (a PyTorch/NCCL interaction). Teardown now rendezvouses every rank at a gloo barrier and destroys with a deadline, abandoning a wedged group to die with the process. The graph × TP × quant cross-validation suite (bf16/fp8/nvfp4, logit parity, byte-identical greedy) went from a 900 s timeout to 11/11 green.
-- **Compute–communication overlap** (v0.11.5): five primitives that hide transfers and collectives behind compute, each behind its own switch — L1 pinned-copy uploads (on by default), L2 two-batch ping-pong, L3 chunked all-reduce, SBO single-batch MoE overlap, L4 tile-signaling kernels. Every one is measured on/off on the same workload, and the regressions ship in the same table as the wins — see [docs/release-v0.11.5.md](./docs/release-v0.11.5.md).
-- **DP × CUDA graph** (v0.11.5): every data-parallel replica captures and replays its own decode graph (tp=1 per replica, so no collective lands inside a graph) — TPOT 25.9 → 5.2 ms and 618 → 6162 tok/s on 2× A10 with Qwen3-0.6B.
-- **DeepSeek-V4 (trimmed) end-to-end** (v0.11.5): mHC residual, Compressor + Lightning Indexer, SWA/CSA hybrid attention and Hash MoE run through the engine with per-module golden tests; prefill reaches **1.06×** `transformers` at seq 2048 while decode stays CPU-bound — both numbers published.
+
+**Models**
+
+- `llama3`, `Qwen2.5/Qwen3`, `Qwen3-MoE`, `LLaVA-1.5`, `Qwen3-VL`; `top-p` / `top-k` sampling and streaming output.
+- **DeepSeek-V4 (trimmed) end-to-end** (v0.11.5): mHC residual, Compressor + Lightning Indexer, SWA/CSA hybrid attention and Hash MoE run through the engine with per-module golden tests; prefill reaches **1.06×** `transformers` at seq 2048 while decode stays CPU-bound — both numbers published. See [DeepSeek-V4](#deepseek-v4-v0115).
 
 ## Setup and Installation
 
