@@ -145,7 +145,7 @@ def _dispatch_combine_routes_across_ranks(rank: int) -> bool:
     full weighted sum over its own tokens' slots — the combine lands the complete
     routed result on the origin rank, so no all-reduce follows.
     """
-    from lite_llama.modules.ep_dispatch import AllToAllDispatcher
+    from lite_llama.modules.moe import AllToAllDispatcher
 
     ep = ps.get_ep_world_size()
     r = ps.get_ep_rank()

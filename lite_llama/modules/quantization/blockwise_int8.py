@@ -22,9 +22,9 @@ from .base_config import (
     QuantizeMethodBase,
     allocate_expert_weights,
     allocate_linear_weights,
+    column_major_scale,
     run_quant_linear,
 )
-from .base_config import column_major_scale
 from .parameter import RawParameter
 from .utils import quantize_int8_groupwise, quantize_int8_per_channel
 

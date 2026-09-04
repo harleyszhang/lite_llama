@@ -32,8 +32,8 @@ from .base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
     run_quant_linear,
+    scale_parameter,
 )
-from .base_config import scale_parameter
 from .parameter import RawParameter
 
 

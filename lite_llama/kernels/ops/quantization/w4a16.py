@@ -31,8 +31,6 @@ import torch
 import triton
 import triton.language as tl
 
-from ..tile_policy import TileTier, resolve_tiles, tile_tier
-
 _PACK_FACTOR = 8
 
 
@@ -241,17 +239,12 @@ def _launch(
     config is measured on exactly the launch the runtime performs.
     """
     block_m, block_n = config["BLOCK_M"], config["BLOCK_N"]
-    # Store entries written before BLOCK_K existed carry no key; fall back to
-    # the measured 256. Whatever the source, the k-tile must cover whole
-    # quantisation groups *and* divide K evenly (this kernel does not mask a
-    # ragged k-tail) — halve until both hold. The group_size fallback always
-    # fits because k % group_size == 0 in :func:`w4a16_matmul`.
-    block_k = config.get("BLOCK_K", 256)
-    while block_k > group_size and (block_k % group_size != 0 or k % block_k != 0):
-        block_k //= 2
-    if block_k % group_size != 0 or k % block_k != 0:
+
+    block_k = config.get("BLOCK_K") or group_size
+    if k % block_k or block_k % group_size:
         block_k = group_size
     grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+
     _w4a16_matmul_kernel[grid](
         a,
         qweight,

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import torch
 
-from lite_llama.modules.ep_dispatch import AllToAllDispatcher
+from lite_llama.modules.moe import AllToAllDispatcher
 
 
 def _grouped_expert(recv_x: torch.Tensor, local_ids: torch.Tensor, weight: torch.Tensor):

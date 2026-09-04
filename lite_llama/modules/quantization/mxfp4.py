@@ -20,7 +20,6 @@ import torch.nn as nn
 
 from .base_config import (
     FusedMoEMethodBase,
-    LinearMethodBase,
     QuantizationConfig,
     QuantizeMethodBase,
     expert_scale_parameter,

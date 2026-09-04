@@ -204,7 +204,7 @@ def _payload_async_matches_blocking(rank: int) -> str:
     assert event is not None, "a two-rank NCCL group must return a fence event"
     event.synchronize()  # host-side fence: the value is final now
     blocking = x.clone()
-    ps.all_reduce(blocking)
+    ps.tensor_model_parallel_all_reduce(blocking)
     assert torch.equal(async_view, blocking)
     return "ok"
 
@@ -218,7 +218,7 @@ def _payload_chunked_matches_blocking(rank: int) -> str:
     layer = _layer_on(rank, device)
     gen = torch.Generator().manual_seed(200 + rank)
     x = torch.randn(32, 32, IN // 2, generator=gen).to(device)  # 1024 tokens
-    ref = ps.all_reduce(layer.apply_linear(x.reshape(-1, IN // 2))).view(32, 32, OUT)
+    ref = ps.tensor_model_parallel_all_reduce(layer.apply_linear(x.reshape(-1, IN // 2))).view(32, 32, OUT)
     out = layer.forward(x)
     assert out.shape == (32, 32, OUT), "the leading dims come back as they went in"
     assert torch.equal(out, ref)
@@ -230,7 +230,7 @@ def _payload_deferred_matches_blocking(rank: int) -> str:
     layer = _layer_on(rank, device)
     gen = torch.Generator().manual_seed(300 + rank)
     x = torch.randn(2, 8, IN // 2, generator=gen).to(device)
-    ref = ps.all_reduce(layer.apply_linear(x))
+    ref = ps.tensor_model_parallel_all_reduce(layer.apply_linear(x))
     with deferred_all_reduce(device) as ctx:
         partial = layer.forward(x)  # deferred: the value is not final yet
         ctx.drain()  # the consume point
@@ -250,7 +250,7 @@ def _payload_collecting_routes_events_per_batch(rank: int) -> str:
         assert len(events) == 1, "one row-parallel forward defers exactly one reduce"
         ctx.fence(events)  # empties the collector
         assert events == []
-        assert torch.equal(partial, ps.all_reduce(layer.apply_linear(x)))
+        assert torch.equal(partial, ps.tensor_model_parallel_all_reduce(layer.apply_linear(x)))
     return "ok"
 
 

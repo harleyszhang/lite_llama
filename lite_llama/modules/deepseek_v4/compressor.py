@@ -79,8 +79,8 @@ class DeepseekV4HCACompressor(nn.Module):
         # The V4 checkpoints leave the compressors' projections in bf16 even on
         # quantised models; the quant argument exists for signature parity with
         # the CSA compressor and is unused here.
-        self.kv_proj = ReplicatedLinear(config.hidden_size, self.head_dim, dtype=config.dtype)
-        self.gate_proj = ReplicatedLinear(config.hidden_size, self.head_dim, dtype=config.dtype)
+        self.kv_proj = ReplicatedLinear(config.hidden_size, self.head_dim, params_dtype=config.dtype)
+        self.gate_proj = ReplicatedLinear(config.hidden_size, self.head_dim, params_dtype=config.dtype)
         self.position_bias = nn.Parameter(
             torch.zeros(self.compress_rate, self.head_dim, dtype=config.dtype)
         )
@@ -198,16 +198,16 @@ class DeepseekV4Indexer(nn.Module):
         self.weights_scaling = self.num_heads**-0.5
         # Only the indexer's query projection is fp8 on quantised V4
         # checkpoints; the compressor-side projections stay bf16.
-        self.kv_proj = ReplicatedLinear(config.hidden_size, 2 * self.head_dim, dtype=config.dtype)
-        self.gate_proj = ReplicatedLinear(config.hidden_size, 2 * self.head_dim, dtype=config.dtype)
+        self.kv_proj = ReplicatedLinear(config.hidden_size, 2 * self.head_dim, params_dtype=config.dtype)
+        self.gate_proj = ReplicatedLinear(config.hidden_size, 2 * self.head_dim, params_dtype=config.dtype)
         self.position_bias = nn.Parameter(
             torch.zeros(self.compress_rate, 2 * self.head_dim, dtype=config.dtype)
         )
         self.kv_norm = DeepseekV4RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.q_b_proj = ReplicatedLinear(
-            config.q_lora_rank, self.num_heads * self.head_dim, dtype=config.dtype, quant=quant
+            config.q_lora_rank, self.num_heads * self.head_dim, params_dtype=config.dtype, quant=quant
         )
-        self.weights_proj = ReplicatedLinear(config.hidden_size, self.num_heads, dtype=config.dtype)
+        self.weights_proj = ReplicatedLinear(config.hidden_size, self.num_heads, params_dtype=config.dtype)
         self.rotary_emb = DeepseekV4RotaryEmbedding(config)
         self._rows: list[dict] = []
 
@@ -343,8 +343,8 @@ class DeepseekV4CSACompressor(nn.Module):
         super().__init__()
         self.compress_rate = int(config.compress_rates["compressed_sparse_attention"])
         self.head_dim = config.head_dim
-        self.kv_proj = ReplicatedLinear(config.hidden_size, 2 * self.head_dim, dtype=config.dtype)
-        self.gate_proj = ReplicatedLinear(config.hidden_size, 2 * self.head_dim, dtype=config.dtype)
+        self.kv_proj = ReplicatedLinear(config.hidden_size, 2 * self.head_dim, params_dtype=config.dtype)
+        self.gate_proj = ReplicatedLinear(config.hidden_size, 2 * self.head_dim, params_dtype=config.dtype)
         self.position_bias = nn.Parameter(
             torch.zeros(self.compress_rate, 2 * self.head_dim, dtype=config.dtype)
         )
