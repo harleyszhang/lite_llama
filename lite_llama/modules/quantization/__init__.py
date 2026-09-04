@@ -143,6 +143,9 @@ def for_runtime_scheme(name: str) -> QuantizationConfig:
 # Grouped by role rather than sorted: the groups say what each name is for,
 # which a flat alphabetical list cannot.
 __all__ = [  # noqa: RUF022
+    "adapt_packed_checkpoint",
+    "NVFP4LinearMethod",
+    "Mxfp4MoEMethod",
     # ABC
     "QuantizationConfig",
     "QuantizeMethodBase",

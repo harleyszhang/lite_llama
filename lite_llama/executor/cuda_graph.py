@@ -19,10 +19,9 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
 import zlib
-
-import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 

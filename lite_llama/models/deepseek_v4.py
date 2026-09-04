@@ -23,7 +23,8 @@ Usage:
 from __future__ import annotations
 
 import re
-from typing import ClassVar, Iterable
+from collections.abc import Iterable
+from typing import ClassVar
 
 import torch
 import torch.nn as nn

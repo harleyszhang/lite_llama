@@ -20,9 +20,10 @@ from .base_config import (
     LinearMethodBase,
     QuantizationConfig,
     QuantizeMethodBase,
+    expert_scale_parameter,
     run_quant_linear,
+    scale_parameter,
 )
-from .base_config import expert_scale_parameter, scale_parameter
 from .parameter import RawParameter
 from .utils import quantize_int4_groupwise, quantize_int8_groupwise_asym
 

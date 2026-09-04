@@ -35,7 +35,7 @@ from ..activation.activations import silu
 from ..quantization.fp8 import FP8_E4M3_MAX, fp8_quantize_per_token
 from ..quantization.w8a8 import int8_quantize_per_token
 from ..quantization.w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
-from ..tile_policy import TileTier, has_native_fp8, resolve_tiles, tile_tier
+from ..tile_policy import has_native_fp8, resolve_tiles
 from ..utils import torch_to_triton_dtype
 
 #: ``QUANT_MODE`` values shared by the kernel and its launcher. Modes 1-3 are
@@ -883,7 +883,7 @@ def _silu_and_mul_kernel(
     # silu evaluates its sigmoid in fp32, matching the dense swiglu kernel.
     gate = tl.load(x_ptr + pid_m * stride_xm + offs, mask=mask, other=0.0).to(tl.float32)
     up = tl.load(x_ptr + pid_m * stride_xm + N + offs, mask=mask, other=0.0).to(tl.float32)
-    if LIMIT < float("inf"):
+    if float("inf") > LIMIT:
         gate = tl.minimum(gate, LIMIT)
         up = tl.minimum(tl.maximum(up, -LIMIT), LIMIT)
     out = silu(gate) * up
@@ -1352,7 +1352,14 @@ def fused_moe(
             group_k=group_k,
             config=config,
         )
-    return expanded
+
+    # Reduce over the top_k slot dim -> [M, hidden]
+    out = torch.empty((num_tokens, hidden), device=device, dtype=dtype)
+    block_n = min(triton.next_power_of_2(hidden), 1024)
+    _moe_sum_kernel[(num_tokens, triton.cdiv(hidden, block_n))](
+        expanded, out, hidden, top_k=top_k, BLOCK_N=block_n, num_warps=4
+    )
+    return out
 
 
 def fused_moe_w8a8_fp8(

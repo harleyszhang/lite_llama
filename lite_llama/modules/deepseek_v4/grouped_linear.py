@@ -14,7 +14,10 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ...distributed.parallel_state import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from ...distributed.parallel_state import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from ..quantization import QuantizationConfig, RawParameter
 
 

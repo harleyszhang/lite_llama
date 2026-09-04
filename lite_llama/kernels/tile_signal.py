@@ -443,7 +443,7 @@ def serial_gemm_swiglu(
     versus :func:`pipelined_gemm_swiglu` is the execution strategy — which is
     exactly what the L4 benchmark needs to isolate.
     """
-    num_tiles, sm_count, gate, up, out, producer, consumer, n = _launch_common(
+    _num_tiles, _sm_count, gate, up, out, producer, consumer, n = _launch_common(
         a, gate_w, up_w, buffer, block_m, block_n, block_k, num_warps, num_stages, max_spin
     )
     m, k = a.shape

@@ -18,7 +18,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ...distributed.parallel_state import divide, get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from ...distributed.parallel_state import (
+    divide,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from ...models.config import ModelConfig
 from ..linear import ColumnParallelLinear, ReplicatedLinear, RowParallelLinear
 from ..quantization import QuantizationConfig
@@ -80,15 +84,15 @@ class DeepseekV4Attention(nn.Module):
         self.local_groups = self.o_groups // world
 
         self.q_a_proj = ReplicatedLinear(
-            config.hidden_size, config.q_lora_rank, dtype=dtype, quant=quant
+            config.hidden_size, config.q_lora_rank, params_dtype=dtype, quant=quant
         )
         self.q_a_norm = DeepseekV4RMSNorm(config.q_lora_rank, eps=config.rms_norm_eps)
         self.q_b_proj = ColumnParallelLinear(
-            config.q_lora_rank, config.num_heads * self.head_dim, dtype=dtype, quant=quant
+            config.q_lora_rank, config.num_heads * self.head_dim, params_dtype=dtype, quant=quant
         )
         self.q_b_norm = DeepseekV4UnweightedRMSNorm(eps=config.rms_norm_eps)
         self.kv_proj = ReplicatedLinear(
-            config.hidden_size, self.head_dim, dtype=dtype, quant=quant
+            config.hidden_size, self.head_dim, params_dtype=dtype, quant=quant
         )
         self.kv_norm = DeepseekV4RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.o_a_proj = DeepseekV4GroupedLinear(
@@ -99,7 +103,7 @@ class DeepseekV4Attention(nn.Module):
             quant=quant,
         )
         self.o_b_proj = RowParallelLinear(
-            self.o_groups * self.o_lora_rank, config.hidden_size, dtype=dtype, quant=quant
+            self.o_groups * self.o_lora_rank, config.hidden_size, params_dtype=dtype, quant=quant
         )
         self.sinks = nn.Parameter(torch.empty(self.num_heads, dtype=dtype))
         self.sinks.weight_loader = _sink_loader
