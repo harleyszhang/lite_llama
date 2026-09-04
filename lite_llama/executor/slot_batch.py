@@ -289,7 +289,7 @@ class SlotBatch:
             Batch size submitted; exceeds ``len(slots)`` when padded to a captured
             graph size (caller discards trailing rows).
         """
-        padded_slots, padded_lens = self._pad(slots, seq_lens)
+        padded_slots, padded_lens = self.pad_decode_rows(slots, seq_lens)
 
         if padded_slots == self._host_slots and padded_lens == [
             length + 1 for length in self._host_lens
@@ -347,11 +347,13 @@ class SlotBatch:
     def pad_decode_rows(
         self, slots: Sequence[int], seq_lens: Sequence[int]
     ) -> tuple[list[int], list[int]]:
-        """The host view of :meth:`begin_decode`'s graph padding.
+        """Grow the batch to the next captured CUDA-graph size, if there is one.
 
-        Grows the batch to the next captured graph size with filler-slot rows
-        carrying the batch's max length, so the upload path knows the padded width
-        first. With one slot there is nothing to spare, so it passes through.
+        Graphs are captured for a fixed grid, so an unpadded batch would fall back
+        to eager and lose the graph's win; filler-slot rows carry the batch's max
+        length. The upload path calls this too, to know the padded width before it
+        builds the inputs. With one slot there is nothing to spare, so it passes
+        through.
         """
         slots, seq_lens = list(slots), list(seq_lens)
         if self._filler_slot is None:
@@ -412,15 +414,6 @@ class SlotBatch:
         row_lens = self._to_device(starts)[row_req] + within + 1
         row_slots = self._to_device(slots)[row_req]
         return row_slots, row_lens
-
-    def _pad(self, slots: Sequence[int], seq_lens: Sequence[int]) -> tuple[list[int], list[int]]:
-        """Grow the batch to the next captured CUDA-graph size, if there is one.
-
-        Graphs are captured for a fixed grid, so an unpadded batch would fall back
-        to eager and lose the graph's win. Alias of :meth:`pad_decode_rows` (which
-        the upload path also calls), kept for the decode path's readability.
-        """
-        return self.pad_decode_rows(slots, seq_lens)
 
     def _to_device(self, values: Sequence[int]) -> torch.Tensor:
         """Upload a host list as a fresh int64 tensor.
