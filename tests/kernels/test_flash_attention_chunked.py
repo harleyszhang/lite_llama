@@ -17,7 +17,7 @@ import math
 import pytest
 import torch
 
-from lite_llama.kernels import flash_attention2_chunked
+from rapid_llm.kernels import flash_attention2_chunked
 
 # Same budget as the nopad kernel: fp16 inputs, fp32 accumulation.
 _RTOL, _ATOL = 2e-2, 2e-2

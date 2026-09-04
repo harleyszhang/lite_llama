@@ -31,8 +31,8 @@ from benchmarks.lib import (
     sampling_params,
     write_json_log,
 )
-from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
-from lite_llama.engine.llm_engine import LLMEngine
+from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+from rapid_llm.engine.llm_engine import LLMEngine
 
 CKPT = "my_weight/Qwen2.5-1.5B-Instruct"
 

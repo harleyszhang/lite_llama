@@ -13,7 +13,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from lite_llama.kernels.ops.quantization import (
+from rapid_llm.kernels.ops.quantization import (
     COLUMN_MAJOR_TMA,
     NVFP4_BLOCK,
     ROW_MAJOR,
@@ -29,7 +29,7 @@ from lite_llama.kernels.ops.quantization import (
     w4a16_matmul,
     w8a16_matmul,
 )
-from lite_llama.modules.quantization.utils import (
+from rapid_llm.modules.quantization.utils import (
     gptq_adapt_key,
     quantize_fp8_per_token,
     quantize_int4_groupwise,
@@ -664,7 +664,7 @@ def test_smoothquant_matches_reference(M, N, K):
 # QuantizationConfig
 # --------------------------------------------------------------------------- #
 def test_quant_config_fp8():
-    from lite_llama.modules.quantization.fp8 import Fp8Config
+    from rapid_llm.modules.quantization.fp8 import Fp8Config
 
     qc = Fp8Config(group_n=128, group_k=128)
     assert qc.is_fp8
@@ -673,7 +673,7 @@ def test_quant_config_fp8():
 
 
 def test_quant_config_int8():
-    from lite_llama.modules.quantization.blockwise_int8 import BlockInt8Config
+    from rapid_llm.modules.quantization.blockwise_int8 import BlockInt8Config
 
     qc = BlockInt8Config.per_channel()
     assert qc.get_name() == "blockwise_int8"
@@ -682,7 +682,7 @@ def test_quant_config_int8():
 
 
 def test_quant_config_int4():
-    from lite_llama.modules.quantization.awq import AWQConfig
+    from rapid_llm.modules.quantization.awq import AWQConfig
 
     qc = AWQConfig(group_size=128)
     assert qc.is_int4
@@ -691,7 +691,7 @@ def test_quant_config_int4():
 
 
 def test_quant_config_smoothquant():
-    from lite_llama.modules.quantization.w8a8_int8 import W8A8Int8Config
+    from rapid_llm.modules.quantization.w8a8_int8 import W8A8Int8Config
 
     qc = W8A8Int8Config()
     assert qc.get_name() == "w8a8_int8"

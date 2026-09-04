@@ -23,9 +23,9 @@ from kv_pool import PagedPool, paged_pool
 from microbench import Row, Work, bench, metadata, report, require_cuda, verify
 
 # Importing the facade registers every spec row, so dispatch() below finds them.
-import lite_llama.kernels
-from lite_llama.kernels.dispatcher import dispatch
-from lite_llama.kernels.ops.attention.flashdecoding import flash_decoding
+import rapid_llm.kernels
+from rapid_llm.kernels.dispatcher import dispatch
+from rapid_llm.kernels.ops.attention.flashdecoding import flash_decoding
 from tests.reference import paged_decode_attention
 
 #: ``(batch, seq_len, num_q_heads, num_kv_heads, head_dim)``. GQA 4x with 128-dim
@@ -68,7 +68,7 @@ def decode_work(pool: PagedPool, num_q_heads: int) -> Work:
 
 
 def run(pool: PagedPool, q: torch.Tensor, **scales: float):
-    """Invoke the kernel exactly as :mod:`lite_llama.modules.attention` does."""
+    """Invoke the kernel exactly as :mod:`rapid_llm.modules.attention` does."""
     return flash_decoding(
         q,
         pool.k,

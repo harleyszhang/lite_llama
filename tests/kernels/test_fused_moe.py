@@ -14,15 +14,15 @@ from __future__ import annotations
 import pytest
 import torch
 
-import lite_llama.kernels.ops.moe.fused_moe as _fused_moe_mod
-from lite_llama.kernels.ops.moe.fused_moe import (
+import rapid_llm.kernels.ops.moe.fused_moe as _fused_moe_mod
+from rapid_llm.kernels.ops.moe.fused_moe import (
     fused_moe,
     fused_moe_w8a8_fp8,
     fused_moe_w8a8_int8,
     moe_align_block_size,
 )
-from lite_llama.kernels.ops.quantization import repack_int4_experts, unpack_int8_experts
-from lite_llama.modules.quantization.utils import (
+from rapid_llm.kernels.ops.quantization import repack_int4_experts, unpack_int8_experts
+from rapid_llm.modules.quantization.utils import (
     quantize_fp8_per_channel,
     quantize_fp8_per_token,
     quantize_int4_groupwise,

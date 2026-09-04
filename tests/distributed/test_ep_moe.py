@@ -26,7 +26,7 @@ import tempfile
 import pytest
 import torch
 
-from lite_llama.distributed import parallel_state as ps
+from rapid_llm.distributed import parallel_state as ps
 from tests.distributed.tp_harness import needs_gpus, run_on_tp_ranks
 
 _NUM_EXPERTS = 6
@@ -65,7 +65,7 @@ _CONFIG_BODY = {
 
 def _make_config():
     """A ``ModelConfig`` for the MoE body above, from a throwaway config.json."""
-    from lite_llama.models.config import ModelConfig
+    from rapid_llm.models.config import ModelConfig
 
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, "config.json"), "w") as fh:
@@ -109,7 +109,7 @@ def _weight_loader_partitions_experts(rank: int) -> bool:
     Non-local experts are skipped (the loader returns an empty view), local ones
     are copied whole — no TP narrow, because EP and TP expert splits are exclusive.
     """
-    from lite_llama.modules.moe import SparseMoeBlock
+    from rapid_llm.modules.moe import SparseMoeBlock
 
     config = _make_config()
     block = SparseMoeBlock(config)  # EP active: harness set enable_expert_parallel
@@ -145,7 +145,7 @@ def _dispatch_combine_routes_across_ranks(rank: int) -> bool:
     full weighted sum over its own tokens' slots — the combine lands the complete
     routed result on the origin rank, so no all-reduce follows.
     """
-    from lite_llama.modules.moe import AllToAllDispatcher
+    from rapid_llm.modules.moe import AllToAllDispatcher
 
     ep = ps.get_ep_world_size()
     r = ps.get_ep_rank()
@@ -199,7 +199,7 @@ class TestExpertParallelGloo:
 # --------------------------------------------------------------------------- #
 def _build_ep_block(device):
     """A SparseMoeBlock under EP with global-seeded weights; returns it plus the globals."""
-    from lite_llama.modules.moe import SparseMoeBlock
+    from rapid_llm.modules.moe import SparseMoeBlock
 
     config = _make_config()
     block = SparseMoeBlock(config).to(device)
@@ -216,7 +216,7 @@ def _build_ep_block(device):
 
 def _ep_forward_matches_full_experts(rank: int) -> bool:
     """EP forward == the same routing through ``fused_moe`` with every expert local."""
-    from lite_llama.kernels import fused_moe
+    from rapid_llm.kernels import fused_moe
 
     device = f"cuda:{rank}"
     block, gate_up, down, x = _build_ep_block(device)
@@ -236,12 +236,12 @@ def _ep_tbo_op_stream_matches_sequential(rank: int) -> bool:
     EP group in the same stage order on every rank and never cross-pair. Each
     half keeps its own :class:`MoEOpContext` and dispatch handle.
     """
-    from lite_llama.batch_overlap.operations import (
+    from rapid_llm.batch_overlap.operations import (
         StateDict,
         YieldOperation,
         execute_overlapped_operations,
     )
-    from lite_llama.modules.moe import MoEOpContext
+    from rapid_llm.modules.moe import MoEOpContext
 
     device = f"cuda:{rank}"
     block, _gu, _dn, x = _build_ep_block(device)

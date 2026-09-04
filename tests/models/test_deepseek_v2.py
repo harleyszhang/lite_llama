@@ -18,7 +18,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from lite_llama.models.config import ModelConfig
+from rapid_llm.models.config import ModelConfig
 
 #: V2-Lite's relations at test size: one dense layer, then MoE with two shared
 #: experts and a 2.5 routed scaling factor. ``norm_topk_prob`` is False — the
@@ -49,7 +49,7 @@ _BODY = {
 
 
 def _loaded_pair(tmp_path, seed: int = 0):
-    """Build the HF model, checkpoint it, and load the same weights into lite_llama.
+    """Build the HF model, checkpoint it, and load the same weights into rapid_llm.
 
     Returns:
         ``(hf_model, lite_model, config)`` with both sides in eval mode on
@@ -58,9 +58,9 @@ def _loaded_pair(tmp_path, seed: int = 0):
     """
     from transformers import DeepseekV2ForCausalLM
 
-    from lite_llama.executor.loader import materialise_parameters
-    from lite_llama.executor.weight_utils import hf_weights_iterator
-    from lite_llama.models.registry import ModelRegistry
+    from rapid_llm.executor.loader import materialise_parameters
+    from rapid_llm.executor.weight_utils import hf_weights_iterator
+    from rapid_llm.models.registry import ModelRegistry
 
     (tmp_path / "config.json").write_text(json.dumps(_BODY))
     config = ModelConfig.from_pretrained(tmp_path, max_seq_len=128)
@@ -83,7 +83,7 @@ def test_router_scales_instead_of_renormalising(tmp_path):
     multiply, so the weights sum to ``factor`` times the softmax mass of the
     selected experts — never to 1.
     """
-    from lite_llama.modules.moe import SparseMoeBlock
+    from rapid_llm.modules.moe import SparseMoeBlock
 
     (tmp_path / "config.json").write_text(json.dumps(_BODY))
     config = ModelConfig.from_pretrained(tmp_path, max_seq_len=128)

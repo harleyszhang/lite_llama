@@ -17,7 +17,7 @@ JSON 重算，非手抄。
 | vllm | 0.28.0（本轮未用作对照） |
 | python | 3.14.7 |
 | 代码基线 | `8eb1166`（q/k RMSNorm 融合）之后的工作树 |
-| autotune | `LITE_LLAMA_AUTOTUNE=0`（关掉档位搜索，避免首次运行混入调优开销） |
+| autotune | `RAPID_LLM_AUTOTUNE=0`（关掉档位搜索，避免首次运行混入调优开销） |
 
 ## 2. 推理工作负载
 
@@ -66,7 +66,7 @@ baseline 格是全关，每格只在其上加一个开关（组合格加多个�
 ## 4. 运行脚本命令
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. LITE_LLAMA_AUTOTUNE=0 \
+CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. RAPID_LLM_AUTOTUNE=0 \
   .venv/bin/python benchmarks/bench_optimizations.py \
   --model-dir my_weight/Qwen2.5-0.5B-Instruct \
   --workload short --batch 8 --max-gen-len 128 --max-seq-len 2048 \
@@ -218,7 +218,7 @@ cuda_graph 的 7.92× 略低。差额来自叠加开关各自的固定开销（p
 eager 与 graph 的 greedy 输出 8/8 全不同。定位到根因：打开 CUDA graph 会把
 `_chunked_min_rows` 从 1 抬到「最大捕获 batch + 1」，于是续传 chunk 的路由
 从「全部走 chunked prefill kernel」变成「短余量走 EXTEND」。用
-`LITE_LLAMA_FUSED_CHUNK_PREFILL=0/1` 直接对拍两条路由，首 token 即不同——
+`RAPID_LLM_FUSED_CHUNK_PREFILL=0/1` 直接对拍两条路由，首 token 即不同——
 两条路由不是逐位等价的，greedy argmax 把这个差异放大成整条序列的分岔。
 
 这是既有实现层面的问题（路由逻辑本身是有意为之，见

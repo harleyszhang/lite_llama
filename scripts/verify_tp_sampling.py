@@ -32,20 +32,20 @@ def _run_rank(
     torch.manual_seed(seed + rank)  # deliberately different seeds per rank
     torch.cuda.manual_seed(seed + rank)
 
-    from lite_llama.distributed.parallel_state import init_tensor_parallel
+    from rapid_llm.distributed.parallel_state import init_tensor_parallel
 
     init_tensor_parallel(rank=rank, world_size=world_size)
 
     if disable_broadcast:
         # Monkey-patch to simulate the pre-fix behavior
-        import lite_llama.engine.continuous_engine as ceng
-        import lite_llama.engine.llm_engine as eng
+        import rapid_llm.engine.continuous_engine as ceng
+        import rapid_llm.engine.llm_engine as eng
 
         # Override the module-level reference so the decode loop's broadcast is a no-op
         eng.tensor_model_parallel_broadcast = lambda t, src=0: t
         ceng.tensor_model_parallel_broadcast = lambda t, src=0: t
 
-    from lite_llama import SamplingParams, TextGenerator
+    from rapid_llm import SamplingParams, TextGenerator
 
     gen = TextGenerator(
         checkpoints_dir=model_dir,
@@ -56,7 +56,7 @@ def _run_rank(
     params = SamplingParams(temperature=temperature, max_gen_len=32, top_p=0.9)
     outputs = gen.generate(["The meaning of life is"], params)
 
-    from lite_llama.distributed.parallel_state import destroy_tensor_parallel
+    from rapid_llm.distributed.parallel_state import destroy_tensor_parallel
 
     destroy_tensor_parallel()
 

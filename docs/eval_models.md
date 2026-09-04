@@ -54,7 +54,7 @@ python -m tests.evals.gsm8k --model-dir my_weight/Qwen2.5-1.5B-Instruct \
 python -m tests.evals.gsm8k --model-dir my_weight/Qwen2.5-0.5B --save-results eval_runs.jsonl
 ```
 
-首次运行会把 GSM8K 下载到 `~/.cache/lite_llama/evals/gsm8k/`（train 4.0 MB + test 736 KB）。`LITE_LLAMA_EVAL_DATA_DIR` 改缓存目录，`LITE_LLAMA_EVAL_BASE_URL` 换下载源。
+首次运行会把 GSM8K 下载到 `~/.cache/rapid_llm/evals/gsm8k/`（train 4.0 MB + test 736 KB）。`RAPID_LLM_EVAL_DATA_DIR` 改缓存目录，`RAPID_LLM_EVAL_BASE_URL` 换下载源。
 
 greedy 解码是确定性的：同一 checkpoint 重复跑得到逐字节相同的输出，因此准确率可精确复现（上表 0.5B/200 题的 35.00% 在独立脚本与 pytest 两条路径下取到同一个值）。
 
@@ -120,4 +120,4 @@ python examples/eval_accuracy.py \
 
 与 GSM8K 口径的两点差异：解码用采样（temperature 0.7 / top_p 0.8）而非 greedy，同一 checkpoint 重复跑不保证逐字节相同；`--max-gen-len` 默认 1900，给推理链留长度，评分只取答案。
 
-运行前提：`examples/evaluator/datasets.py` 依赖 `sentence_transformers`（不在 lite_llama 自身的 requirement 里），需先 `pip install sentence_transformers`。该导入是按数据集按需发生的，所以没装时 `--help` 仍可用，报错只在真正跑数据集时出现。
+运行前提：`examples/evaluator/datasets.py` 依赖 `sentence_transformers`（不在 rapid_llm 自身的 requirement 里），需先 `pip install sentence_transformers`。该导入是按数据集按需发生的，所以没装时 `--help` 仍可用，报错只在真正跑数据集时出现。

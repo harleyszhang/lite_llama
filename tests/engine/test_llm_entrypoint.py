@@ -1,4 +1,4 @@
-"""Tests for the vLLM-style :class:`~lite_llama.engine.llm.LLM` entry point.
+"""Tests for the vLLM-style :class:`~rapid_llm.engine.llm.LLM` entry point.
 
 Return shapes, single-string convenience, greedy determinism, finish
 reasons, and the rejected promises (images on a text model, legacy
@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from lite_llama import LLM, RequestOutput, SamplingParams, TextGenerator
+from rapid_llm import LLM, RequestOutput, SamplingParams, TextGenerator
 
 pytestmark = [pytest.mark.gpu, pytest.mark.weights]
 
@@ -76,9 +76,9 @@ def test_parallel_size_contract(model_dir: Path):
 
     ``LLM`` is a single replica driven by a lockstep batch loop, so
     ``data_parallel_size>1`` needs
-    :class:`~lite_llama.engine.data_parallel.DataParallelEngine` and
+    :class:`~rapid_llm.engine.data_parallel.DataParallelEngine` and
     ``tensor_parallel_size>1`` needs
-    :class:`~lite_llama.engine.continuous_engine.ContinuousBatchingEngine` — the only
+    :class:`~rapid_llm.engine.continuous_engine.ContinuousBatchingEngine` — the only
     path whose executor broadcasts each step's plan to follower ranks.
 
     The TP half is a regression guard. The argument used to be accepted and then

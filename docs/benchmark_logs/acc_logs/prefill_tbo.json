@@ -55,8 +55,8 @@
       "greedy": true
     },
     "framework_flags": {
-      "LITE_LLAMA_TBO": "per arm",
-      "LITE_LLAMA_SBO": "per arm",
+      "RAPID_LLM_TBO": "per arm",
+      "RAPID_LLM_SBO": "per arm",
       "NCCL_MAX_CTAS": "20 when SM budget on",
       "use_cuda_graph": "False (EP + prefill)"
     },

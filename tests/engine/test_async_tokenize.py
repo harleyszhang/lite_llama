@@ -18,9 +18,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lite_llama.engine.async_engine import AsyncLLMEngine
-from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
-from lite_llama.engine.scheduler import SchedulerConfig
+from rapid_llm.engine.async_engine import AsyncLLMEngine
+from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+from rapid_llm.engine.scheduler import SchedulerConfig
 
 _EOS = 2
 _WORD = 100

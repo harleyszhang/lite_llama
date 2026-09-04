@@ -12,14 +12,14 @@ from __future__ import annotations
 
 import torch
 
-from lite_llama.distributed import parallel_state as ps
-from lite_llama.engine.sampler import (
+from rapid_llm.distributed import parallel_state as ps
+from rapid_llm.engine.sampler import (
     global_argmax,
     local_vocab_offset,
     sharded_top_p,
     vocab_logsumexp,
 )
-from lite_llama.modules import vocab_parallel
+from rapid_llm.modules import vocab_parallel
 from tests.distributed.tp_harness import needs_gpus, run_on_tp_ranks
 
 VOCAB, BATCH = 256, 4

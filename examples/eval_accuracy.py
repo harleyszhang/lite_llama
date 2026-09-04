@@ -1,4 +1,4 @@
-"""Accuracy evaluation on HotpotQA / HellaSwag with lite_llama.
+"""Accuracy evaluation on HotpotQA / HellaSwag with rapid_llm.
 
 :class:`EvaluatorAccuracy` drives one dataset end to end — load data, generate
 completions, score exact match / F1 (or MCQ accuracy) — so a checkpoint swap
@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import torch
 
-from lite_llama.engine import SamplingParams, TextGenerator
+from rapid_llm.engine import SamplingParams, TextGenerator
 
 warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
 
@@ -35,7 +35,7 @@ def _dataset_class(marker: str):
     """The dataset class for ``marker``, imported on demand.
 
     ``examples/evaluator/datasets.py`` pulls in ``sentence_transformers``, which is not
-    one of lite_llama's own requirements — importing it at module scope would make even
+    one of rapid_llm's own requirements — importing it at module scope would make even
     ``--help`` fail on a stock install.
     """
     from evaluator.datasets import HellaSwag, HotpotQA
@@ -44,7 +44,7 @@ def _dataset_class(marker: str):
 
 
 class EvaluatorAccuracy:
-    """Runs a benchmark dataset through lite_llama and scores the completions."""
+    """Runs a benchmark dataset through rapid_llm and scores the completions."""
 
     def __init__(
         self,

@@ -22,7 +22,7 @@ Usage:
     pytest tests/golden/test_deepseek_v2_tp2.py
 
 Needs the DeepSeek-V2-Lite checkpoint under ``my_weight/`` (override with
-``LITE_LLAMA_TEST_DSV2_DIR``), two CUDA devices, and the ``accelerate`` extra
+``RAPID_LLM_TEST_DSV2_DIR``), two CUDA devices, and the ``accelerate`` extra
 for the reference's ``device_map="auto"``.
 """
 
@@ -36,8 +36,8 @@ from typing import Any
 import pytest
 import torch
 
-from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
-from lite_llama.engine.sampler import SamplingParams
+from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+from rapid_llm.engine.sampler import SamplingParams
 from tests.conftest import REPO_ROOT, checkpoint_problem
 
 # No ``weights`` mark: that mark binds a test to the shared ``model_dir``
@@ -106,12 +106,12 @@ def _dsv2_problem(path: Path) -> str | None:
 @pytest.fixture(scope="module")
 def dsv2_dir() -> Path:
     """The checkpoint under test, under the golden gate's no-silent-skip policy."""
-    path = Path(os.environ.get("LITE_LLAMA_TEST_DSV2_DIR", _DSV2))
+    path = Path(os.environ.get("RAPID_LLM_TEST_DSV2_DIR", _DSV2))
     if not path.is_absolute():
         path = REPO_ROOT / path
     problem = _dsv2_problem(path)
     if problem:
-        if os.environ.get("LITE_LLAMA_GOLDEN_STRICT", "") == "1":
+        if os.environ.get("RAPID_LLM_GOLDEN_STRICT", "") == "1":
             pytest.fail(f"GOLDEN GATE FAIL: {problem}", pytrace=False)
         pytest.xfail(f"UNVERIFIED: {problem}")
     return path

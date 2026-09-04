@@ -1,4 +1,4 @@
-"""Shared fixtures and collection policy for the lite_llama test suite.
+"""Shared fixtures and collection policy for the rapid_llm test suite.
 
 ``pytest_ignore_collect`` drops GPU-only and golden directories when no
 checkpoint or device is available; fixtures expose the resolved model
@@ -20,13 +20,13 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: Checkpoint the integration tier uses by default. Override with
-#: ``LITE_LLAMA_TEST_MODEL_DIR`` to point at any other checkpoint.
+#: ``RAPID_LLM_TEST_MODEL_DIR`` to point at any other checkpoint.
 DEFAULT_MODEL_NAME = "Qwen2.5-0.5B"
 
 #: Shared checkpoint root, the same variable the benchmark scripts read. Honoured
 #: here too so a machine that keeps weights outside the repository runs the
 #: integration tier without symlinking them into ``my_weight/``.
-MODELZOO_ENV = "LITE_LLAMA_MODELZOO"
+MODELZOO_ENV = "RAPID_LLM_MODELZOO"
 
 #: Directories whose tests always need a CUDA device.
 _GPU_ONLY_DIRS = ("kernels",)
@@ -35,7 +35,7 @@ _GPU_ONLY_DIRS = ("kernels",)
 _GOLDEN_DIRS = ("golden",)
 
 #: When set, golden tests that cannot run become hard FAILs instead of xfail.
-_GOLDEN_STRICT = os.environ.get("LITE_LLAMA_GOLDEN_STRICT", "") == "1"
+_GOLDEN_STRICT = os.environ.get("RAPID_LLM_GOLDEN_STRICT", "") == "1"
 
 
 def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
@@ -88,12 +88,12 @@ def checkpoint_candidates(reference: str) -> list[Path]:
 def _resolve_model_dir() -> Path:
     """Absolute path of the checkpoint under test, without validating it.
 
-    An explicit ``LITE_LLAMA_TEST_MODEL_DIR`` is the whole answer: a caller that
+    An explicit ``RAPID_LLM_TEST_MODEL_DIR`` is the whole answer: a caller that
     named a checkpoint does not want a fallback silently substituted for it.
     Otherwise the first usable candidate, or the first candidate when none is
     usable -- the caller reports that one's problem rather than testing nothing.
     """
-    explicit = os.environ.get("LITE_LLAMA_TEST_MODEL_DIR")
+    explicit = os.environ.get("RAPID_LLM_TEST_MODEL_DIR")
     if explicit:
         path = Path(explicit)
         return path if path.is_absolute() else REPO_ROOT / path
@@ -128,7 +128,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     """Apply directory-based marks, then skip what the machine cannot run.
 
     For golden tests the outcome is never a silent skip:
-    - ``LITE_LLAMA_GOLDEN_STRICT=1``: hard FAIL (pytest.fail at collect time).
+    - ``RAPID_LLM_GOLDEN_STRICT=1``: hard FAIL (pytest.fail at collect time).
     - Otherwise: ``xfail(reason="UNVERIFIED: ...", run=False)`` — shows as
       yellow/orange in CI rather than green.
     """
@@ -157,7 +157,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
                     # Override with a custom fixture that calls pytest.fail
                     item.add_marker(
                         pytest.mark.xfail(
-                            reason="UNVERIFIED: no CUDA device (set LITE_LLAMA_GOLDEN_STRICT=1 to hard-fail)",
+                            reason="UNVERIFIED: no CUDA device (set RAPID_LLM_GOLDEN_STRICT=1 to hard-fail)",
                             run=False,
                             strict=True,
                         )
@@ -217,18 +217,18 @@ def _reset_torch_state():
 #: builders in tests/engine, tests/golden, ...) are instantiated before
 #: function-scoped autouse fixtures, and a dispatch made there caches its
 #: decision on the global registry for the rest of the session.
-os.environ["LITE_LLAMA_FROZEN_RANK"] = "0"
+os.environ["RAPID_LLM_FROZEN_RANK"] = "0"
 
 
 @pytest.fixture(autouse=True)
 def _frozen_rank_off(monkeypatch: pytest.MonkeyPatch):
     """Re-pin the switch per test, so one opting in cannot leak the opt-in.
 
-    A test opting into frozen ranking sets ``LITE_LLAMA_FROZEN_RANK=1`` (via
+    A test opting into frozen ranking sets ``RAPID_LLM_FROZEN_RANK=1`` (via
     monkeypatch) for its own duration; teardown restores the process-wide
     ``"0"`` above rather than an unset variable.
     """
-    monkeypatch.setenv("LITE_LLAMA_FROZEN_RANK", "0")
+    monkeypatch.setenv("RAPID_LLM_FROZEN_RANK", "0")
 
 
 @pytest.fixture(scope="session")

@@ -1,7 +1,7 @@
 """GSM8K accuracy on vllm — the comparison side of tests/evals/gsm8k.py.
 
 Same prompts (build_prompts), same stop markers, same scoring (score) as the
-lite_llama path; only the generation engine differs, so the two accuracies are
+rapid_llm path; only the generation engine differs, so the two accuracies are
 directly comparable. Greedy decoding, chat template for instruction-tuned
 checkpoints (the counterpart of runner.as_user_turn).
 

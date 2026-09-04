@@ -97,7 +97,7 @@ CUDA graph 不受影响：replay 的输入本来就是静态 buffer，把 device
 
 **预期收益**：batch=1 TPOT -20~25%（~7.5ms → ~6ms）；并发下收益更大，CPU 组批时间随 batch 涨、GPU 时间不涨。这条也把 ROADMAP P9 的第一落点从「独立进程 + ZMQ」降级为同进程重叠，成本 10% 拿到 90% 收益，且不再与 F2（单进程 pdb 直达）冲突。
 
-**落地记录（dev-v0.10）**：已按本节设计实现，开关 `LITE_LLAMA_PIPELINE`（默认关；显式 `1`/`true`/`on` 打开，`from_pretrained(pipeline=True)` 亦可，TP follower 由 driver 经环境变量教会）。循环形态是 `_step_pipelined`：schedule → launch(N) → harvest(N-1)，`_inflight` 深度恒 1。与设计的差异如下：
+**落地记录（dev-v0.10）**：已按本节设计实现，开关 `RAPID_LLM_PIPELINE`（默认关；显式 `1`/`true`/`on` 打开，`from_pretrained(pipeline=True)` 亦可，TP follower 由 driver 经环境变量教会）。循环形态是 `_step_pipelined`：schedule → launch(N) → harvest(N-1)，`_inflight` 深度恒 1。与设计的差异如下：
 
 - 多吐一个 token 的对策不是 admit 时预扣 `max_gen_len`，而是 harvest 时检查 `request.is_finished`：晚停那步的 pass 照常发射，token 读回后丢弃不追加。占槽一步的代价相同，但停止语义与同步版逐位一致，admit 逻辑不用动。
 - 乐观账目落在 `Request.pending_tokens`：launch +1、harvest -1（丢弃的也减，账目闭合归零）；decode 计划的长度加上它，token 用 `-1` 占位（非法 id，若泄漏到 embedding 会直接报错），真值由 worker 的 `_next_tokens` device 网格 gather 接力。
@@ -176,9 +176,9 @@ TP 组内 one-shot all-reduce：rank 间直接 P2P 写对端 IPC buffer + flag �
 
 ### O3.2 TBO 双批重叠
 
-decode batch 切两个 micro-batch，micro-A 做 all-reduce 时 micro-B 在算 GEMM。参照 sglang `batch_overlap/`（原 two_batch_overlap）。lite_llama 已有 `PassKind` / `ModelInput` 抽象，双 pass metadata 现成。做成 batch 超阈值才启用的 policy。PCIe 互联通信占比高时收益真实，NVLink 上气泡更小。
+decode batch 切两个 micro-batch，micro-A 做 all-reduce 时 micro-B 在算 GEMM。参照 sglang `batch_overlap/`（原 two_batch_overlap）。rapid_llm 已有 `PassKind` / `ModelInput` 抽象，双 pass metadata 现成。做成 batch 超阈值才启用的 policy。PCIe 互联通信占比高时收益真实，NVLink 上气泡更小。
 
-**落地记录（v0.11.5）**：完整 TBO 已落地，`lite_llama/batch_overlap/` 与 sglang 同布局；开关默认关（`LITE_LLAMA_TBO=1` 显式开）。
+**落地记录（v0.11.5）**：完整 TBO 已落地，`rapid_llm/batch_overlap/` 与 sglang 同布局；开关默认关（`RAPID_LLM_TBO=1` 显式开）。
 
 - **执行器（`operations.py`）**：`YieldOperation` + `StateDict`（键写一次、pop 后才能重写，`clear(expect_keys)` 校验中间量是否按时释放）+ `_StageExecutor` + `execute_overlapped_operations`：op 流按 yield 切 stage，双流按 `delta_stages` 交错推进（lead 领先 N 个 stage，尾部对称收尾）。
 - **策略（`operations_strategy.py`）**：`OperationsStrategy.init_new_tbo` 按 layer 类名分派，收的是各层自己的 bound method；dense 流 `[op_attn, yield, op_mlp]` delta 0，EP MoE 流 delta 2（两个 a2a 各带一个 yield）；混合栈（dense 前导层 + MoE）取最宽 lead。
@@ -189,7 +189,7 @@ decode batch 切两个 micro-batch，micro-A 做 all-reduce 时 micro-B 在算 G
 
 ### O11 通信-RMSNorm 融合
 
-TP 下 o_proj/mlp 后的 all-reduce + RMSNorm 改成 reduce-scatter → 每 rank 只对持有的 token 段做 norm → all-gather；norm 并行化，且 reduce-scatter 完成的 token 段立刻进 norm 而不用等全量到齐，通信尾部与 norm 重叠。flashinfer 的 fused allreduce+rmsnorm 是同类思路，lite_llama 已有 `skip_rmsnorm` kernel，融合点现成。
+TP 下 o_proj/mlp 后的 all-reduce + RMSNorm 改成 reduce-scatter → 每 rank 只对持有的 token 段做 norm → all-gather；norm 并行化，且 reduce-scatter 完成的 token 段立刻进 norm 而不用等全量到齐，通信尾部与 norm 重叠。flashinfer 的 fused allreduce+rmsnorm 是同类思路，rapid_llm 已有 `skip_rmsnorm` kernel，融合点现成。
 
 **实例**：batch=1 时 norm 读写是 8KB 级，收益可忽略，这条不适用于 batch=1。batch=32 时 norm 读写省一半，通信尾部可藏。预期 batch≥16 每步 -0.3–0.5ms，batch=1 <5%。它是 O3.1 的增值包，不是独立项。
 
@@ -273,7 +273,7 @@ prefill（compute-bound）与 decode（memory-bound）无数据依赖（decode �
 | P3 | O5 ngram + O7 + O8 | accept ≥2；TTFT / 长上下文 TPOT 达标 |
 | P4 | O3.2 TBO + O4 + O12 + O11 | 每项 on/off 对照正收益才保留 |
 
-P1 进度（2026-09）：O2 / O6.3 / O9 / O10 / O13 五项已落地并各有测试与落地记录，其中 O10、O13 与 O2 同为默认关闭的 opt-in 开关；未动的只剩 O3.1 与 TP graph。O3.2 完整 TBO 已在 v0.11.5 落地（`lite_llama/batch_overlap/`，对齐 sglang 布局），默认关；prefill TBO 按其节内启动条件（all-reduce 占步长 >20%）仍未做，实测占比只有 ~3-5%。
+P1 进度（2026-09）：O2 / O6.3 / O9 / O10 / O13 五项已落地并各有测试与落地记录，其中 O10、O13 与 O2 同为默认关闭的 opt-in 开关；未动的只剩 O3.1 与 TP graph。O3.2 完整 TBO 已在 v0.11.5 落地（`rapid_llm/batch_overlap/`，对齐 sglang 布局），默认关；prefill TBO 按其节内启动条件（all-reduce 占步长 >20%）仍未做，实测占比只有 ~3-5%。
 
 每阶段沿用 ROADMAP 第十一节的铁律：新东西必须有 on/off 对照 benchmark 归档进 `docs/release-vX.Y.Z.md`，golden 双跑；基线用 2×A10 Qwen3-30B-A3B-FP8 的 TPOT / 并发 TPS / prefix 命中 TTFT 三条曲线。
 

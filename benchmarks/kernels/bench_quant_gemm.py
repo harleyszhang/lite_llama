@@ -6,7 +6,7 @@ Usage:
     python benchmarks/kernels/bench_quant_gemm.py --model-dir /path/to/Qwen3-4B
     python benchmarks/kernels/bench_quant_gemm.py --tune [--dry-run]
 
-The numbers quoted above were recorded with ``LITE_LLAMA_AUTOTUNE=0``, which is
+The numbers quoted above were recorded with ``RAPID_LLM_AUTOTUNE=0``, which is
 what a user without a tuning cache gets. With the cache from ``--tune`` the int4
 row is a further 13-25% faster at ``m>=512``; nothing else in the table moves,
 because nothing else reads the store.
@@ -33,12 +33,12 @@ from microbench import Row, Work, bench, device_peaks, metadata, report, require
 from tuning import TuneResult, nbytes
 
 # Importing the facade registers every spec row, so dispatch() below finds them.
-import lite_llama.kernels  # registers the spec rows as a side effect
-import lite_llama.kernels.dispatcher.autotune as autotune_module
-from lite_llama.kernels.dispatcher import dispatch
-from lite_llama.kernels.dispatcher.autotune import ConfigStore, TuneKey, bucket_m
-from lite_llama.kernels.dispatcher.autotune import reset as autotune_reset
-from lite_llama.kernels.ops.gemm.linear import (
+import rapid_llm.kernels  # registers the spec rows as a side effect
+import rapid_llm.kernels.dispatcher.autotune as autotune_module
+from rapid_llm.kernels.dispatcher import dispatch
+from rapid_llm.kernels.dispatcher.autotune import ConfigStore, TuneKey, bucket_m
+from rapid_llm.kernels.dispatcher.autotune import reset as autotune_reset
+from rapid_llm.kernels.ops.gemm.linear import (
     linear_nvfp4,
     linear_torch,
     linear_w4a16,
@@ -46,9 +46,9 @@ from lite_llama.kernels.ops.gemm.linear import (
     linear_w8a8_int8,
     linear_w8a16,
 )
-from lite_llama.kernels.ops.quantization import NVFP4_BLOCK, quantize_nvfp4_blockwise
-from lite_llama.kernels.ops.quantization.w4a16 import launch_config as w4a16_launch_config
-from lite_llama.modules.quantization.utils import (
+from rapid_llm.kernels.ops.quantization import NVFP4_BLOCK, quantize_nvfp4_blockwise
+from rapid_llm.kernels.ops.quantization.w4a16 import launch_config as w4a16_launch_config
+from rapid_llm.modules.quantization.utils import (
     quantize_fp8_per_channel,
     quantize_int4_groupwise,
     quantize_int8_per_channel,
@@ -287,7 +287,7 @@ def fp8_gemm_only(w: torch.Tensor, x: torch.Tensor) -> Callable[[], torch.Tensor
     ``linear_w8a8_int8``, which quantises inside its Triton kernel, showed no such
     gap — the corroborating half of the hypothesis.
 
-    *What changed.* ``lite_llama.kernels.ops.quantization.fp8_quantize_per_token``
+    *What changed.* ``rapid_llm.kernels.ops.quantization.fp8_quantize_per_token``
     now does it in one launch, and ``linear_w8a8_fp8`` calls that. The 73.5 us
     ``qkv m=1`` row became 24.4 us.
 
@@ -297,8 +297,8 @@ def fp8_gemm_only(w: torch.Tensor, x: torch.Tensor) -> Callable[[], torch.Tensor
     about the fact that the ``w8a8_fp8`` row does strictly more work than the
     GEMM its ``moved`` figure accounts for.
     """
-    from lite_llama.kernels.ops.quantization import fp8_matmul
-    from lite_llama.modules.quantization.utils import quantize_fp8_per_token
+    from rapid_llm.kernels.ops.quantization import fp8_matmul
+    from rapid_llm.modules.quantization.utils import quantize_fp8_per_token
 
     qw, scale = quantize_fp8_per_channel(w)
     qx, x_scale = quantize_fp8_per_token(x)
@@ -761,7 +761,7 @@ def main() -> None:
             print(f"written to {ConfigStore().cache_dir}")
             print(
                 "Re-running without --tune now measures the persisted configs on the\n"
-                "int4 row only. Run with LITE_LLAMA_AUTOTUNE=0 to measure what a user\n"
+                "int4 row only. Run with RAPID_LLM_AUTOTUNE=0 to measure what a user\n"
                 "without this cache gets."
             )
         return
@@ -798,7 +798,7 @@ def main() -> None:
         "is the Triton fp8 wgmma codegen: its matmul-only ablation sits at\n"
         "0.61-1.09x of cuBLAS bf16 at m>=512 depending on shape.\n"
         "\nOnly the int4 row reads the autotune store. Run --tune to fill it (13-25%\n"
-        "at m>=512), or LITE_LLAMA_AUTOTUNE=0 to measure the heuristic a user gets\n"
+        "at m>=512), or RAPID_LLM_AUTOTUNE=0 to measure the heuristic a user gets\n"
         "without a cache."
     )
 

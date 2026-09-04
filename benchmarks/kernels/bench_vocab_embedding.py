@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from microbench import bench, metadata, require_cuda
 
-from lite_llama.kernels import vocab_parallel_embedding
+from rapid_llm.kernels import vocab_parallel_embedding
 
 VOCAB = 151_936
 HIDDEN = 4096

@@ -1,11 +1,11 @@
 <div align="center">
 
-# lite_llama
+# RapidLLM
 
-**A light llama-like llm inference framework based on the triton/cuda kernel.**
+**RapidLLM（Registry · Attention · Pipeline · Inference · Dispatch）—— 基于可插拔 Triton/CUDA 算子的生产级 LLM 推理服务框架。**
 
-[![en](https://img.shields.io/badge/lang-en-red.svg)](https://github.com/harleyszhang/lite_llama/blob/main/README.md)
-[![zh](https://img.shields.io/badge/lang-zh-yellow.svg)](https://github.com/harleyszhang/lite_llama/blob/main/README.zh.md)
+[![en](https://img.shields.io/badge/lang-en-red.svg)](https://github.com/harleyszhang/rapid_llm/blob/main/README.md)
+[![zh](https://img.shields.io/badge/lang-zh-yellow.svg)](https://github.com/harleyszhang/rapid_llm/blob/main/README.zh.md)
 ![PyPI - Python Version](https://img.shields.io/badge/python-3.13-blue)
 
 <pre>
@@ -24,7 +24,7 @@
 
 - 相比 HuggingFace `transformers`，Qwen3-0.6B 加速比最高达 **6.5×**（A10，greedy）——见下方 [benchmark 表](#qwen3-06b-benchmark)。
 - **在线批量推理 + 连续批处理**：请求随时加入、结束即离开正在跑的 batch，新到达的请求不必等当前这轮生成结束。单卡 A10 + Qwen2.5-1.5B-Instruct、16 个请求每 250 ms 到达一个：吞吐 93 → 644 tok/s（**6.9×**），平均端到端延迟 19.1s → 2.3s（**8.3×**）。设计与完整口径见 [docs/continuous_batching.md](docs/continuous_batching.md)。
-- **OpenAI 兼容 HTTP 服务**（`lite-llama serve`）：`/v1/completions` 与 `/v1/chat/completions`，含 SSE 流式，官方 `openai` 客户端可直接指过来。见 [docs/online_serving.md](docs/online_serving.md)。
+- **OpenAI 兼容 HTTP 服务**（`rapid-llm serve`）：`/v1/completions` 与 `/v1/chat/completions`，含 SSE 流式，官方 `openai` 客户端可直接指过来。见 [docs/online_serving.md](docs/online_serving.md)。
 - 支持 `llama3`、`Qwen2.5/Qwen3`、`Qwen3-MoE`、`LLaVA-1.5`、`Qwen3-VL`；`top-p` / `top-k` 采样，流式输出。直接加载 HuggingFace checkpoint：配置走 `AutoConfig`，权重从 `*.safetensors` 流式读入，K/V 投影与 MoE 专家在加载时就地融合/堆叠，无需离线转换。
 - **CUDA graph**：decode 阶段 CUDA graph 捕获（有 batch_size 限制）。
 - **Attention 后端**：`flashattention2`、`flashdecoding`（含 `NopadAttention` 无 padding 序列 + GQA 支持）。分页式 `TokenAttention` slot 动态管理 KV cache。
@@ -70,14 +70,14 @@ make test-gpu  # 需要 CUDA
 
 ![llava 模型流式输出](./docs/images/llava_output2.gif)
 
-性能测试，改好自己的模型权重路径后，直接运行 `lite_llama/examples/benchmark.py` 文件，会输出 lite_llama 和 transformers 库的 latency 和吞吐量性能对比，第一次运行结果不太准确，建议以第二次结果为准。如 Llama-3.2-3B 模型 在 `prompt_len = 25`、`batch_size = 12` 和 `max_gen_len = 1900` 时，benchmark 性能测试运行结果:
+性能测试，改好自己的模型权重路径后，直接运行 `rapid_llm/examples/benchmark.py` 文件，会输出 rapid_llm 和 transformers 库的 latency 和吞吐量性能对比，第一次运行结果不太准确，建议以第二次结果为准。如 Llama-3.2-3B 模型 在 `prompt_len = 25`、`batch_size = 12` 和 `max_gen_len = 1900` 时，benchmark 性能测试运行结果:
 
 ```bash
-lite_llama inference time: 31.3463 s
+rapid_llm inference time: 31.3463 s
 Transformers inference time: 69.1433 s
-lite_llama throughput: 730.45 tokens/s
+rapid_llm throughput: 730.45 tokens/s
 Transformers throughput: 183.95 tokens/s
-lite_llama per token latency: 1.369015 ms/token
+rapid_llm per token latency: 1.369015 ms/token
 Transformers per token latency: 5.436221 ms/token
 ```
 
@@ -123,14 +123,14 @@ llama3.2-1.5B-Instruct 模型流式输出结果测试：
 起一个 OpenAI 兼容服务：
 
 ```bash
-pip install 'lite-llama[serve]'
-lite-llama serve --model-dir my_weight/Qwen2.5-1.5B-Instruct --port 8000
+pip install 'rapid-llm[serve]'
+rapid-llm serve --model-dir my_weight/Qwen2.5-1.5B-Instruct --port 8000
 ```
 
 也可以直接驱动引擎——每个 prompt 是一个独立请求，各自带自己的采样参数：
 
 ```python
-from lite_llama import ContinuousBatchingEngine, SamplingParams
+from rapid_llm import ContinuousBatchingEngine, SamplingParams
 
 engine = ContinuousBatchingEngine.from_pretrained(
     "my_weight/Qwen2.5-1.5B-Instruct", max_num_seqs=16
@@ -146,7 +146,7 @@ while engine.has_unfinished_requests():
 离线跑一批 prompt（仍走连续批处理调度）：
 
 ```bash
-lite-llama batch --model-dir my_weight/Qwen2.5-1.5B-Instruct --show-stats
+rapid-llm batch --model-dir my_weight/Qwen2.5-1.5B-Instruct --show-stats
 ```
 
 更多用法（异步接口、SSE、CLI 参数、线程模型）见
@@ -158,7 +158,7 @@ lite-llama batch --model-dir my_weight/Qwen2.5-1.5B-Instruct --show-stats
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
-│  User Layer        lite-llama CLI (chat / vl-chat / serve / batch) · examples · tests           │
+│  User Layer        rapid-llm CLI (chat / vl-chat / serve / batch) · examples · tests           │
 ├─────────────────────────────────────────────────────────────────────────────────────────────────┤
 │  Facade            LLM · TextGenerator · VisionGenerator · AsyncLLMEngine · DataParallelEngine  │
 ├─────────────────────────────────────────────────────────────────────────────────────────────────┤
@@ -187,7 +187,7 @@ lite-llama batch --model-dir my_weight/Qwen2.5-1.5B-Instruct --show-stats
 下方目录与上游布局逐文件对应 —— 阅读任一代码库时，都能直接找到对应的文件。
 
 ```text
-lite_llama/
+rapid_llm/
 ├── engine/
 │   ├── llm.py               # LLM entry point
 │   ├── llm_engine.py        # one-shot batch: a single prefill/decode loop
@@ -256,13 +256,13 @@ lite_llama/
 
 ## Citation
 
-If you use Litellama in your research, please cite the following work:
+If you use RapidLLM in your research, please cite the following work:
 
 ```bibtex
-@misc{litellama-2023,
-  author       = {Litellama AI team},
-  title        = {Litellama},
-  howpublished = {\url{https://github.com/harleyszhang/lite_llama}},
+@misc{rapidllm-2023,
+  author       = {RapidLLM AI team},
+  title        = {RapidLLM},
+  howpublished = {\url{https://github.com/harleyszhang/rapid_llm}},
   year         = {2023},
 }
 ```

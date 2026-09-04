@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from lite_llama import DataParallelEngine, SamplingParams
+from rapid_llm import DataParallelEngine, SamplingParams
 from tests.distributed.tp_harness import needs_gpus
 
 pytestmark = [pytest.mark.gpu, pytest.mark.weights, pytest.mark.slow]

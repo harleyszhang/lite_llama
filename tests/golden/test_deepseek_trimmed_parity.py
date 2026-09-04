@@ -1,4 +1,4 @@
-"""Trimmed-stack parity: lite_llama vs transformers on DeepSeek checkpoints.
+"""Trimmed-stack parity: rapid_llm vs transformers on DeepSeek checkpoints.
 
 Two gates the full-stack TP=2 gate cannot cover:
 
@@ -32,7 +32,7 @@ Usage:
     pytest tests/golden/test_deepseek_trimmed_parity.py
 
 Needs one CUDA device and the checkpoints (override with
-``LITE_LLAMA_TEST_DSV2_DIR`` / ``LITE_LLAMA_TEST_DSV3_DIR``).
+``RAPID_LLM_TEST_DSV2_DIR`` / ``RAPID_LLM_TEST_DSV3_DIR``).
 """
 
 from __future__ import annotations
@@ -45,8 +45,8 @@ from typing import Any
 import pytest
 import torch
 
-from lite_llama.engine.llm import LLM
-from lite_llama.engine.sampler import SamplingParams
+from rapid_llm.engine.llm import LLM
+from rapid_llm.engine.sampler import SamplingParams
 from tests.conftest import REPO_ROOT, checkpoint_problem
 
 pytestmark = [pytest.mark.gpu, pytest.mark.slow]
@@ -54,8 +54,8 @@ pytestmark = [pytest.mark.gpu, pytest.mark.slow]
 # Both checkpoints live in the shared lab store; ``my_weight/`` carries
 # symlinks to them, which keeps these defaults relative (the
 # no-hardcoded-path hook) while pointing at the same weights as the TP=2 gate.
-_DSV2 = os.environ.get("LITE_LLAMA_TEST_DSV2_DIR", "my_weight/DeepSeek-V2-Lite")
-_DSV3 = os.environ.get("LITE_LLAMA_TEST_DSV3_DIR", "my_weight/DeepSeek-V3-4layers-MTP-BF16")
+_DSV2 = os.environ.get("RAPID_LLM_TEST_DSV2_DIR", "my_weight/DeepSeek-V2-Lite")
+_DSV3 = os.environ.get("RAPID_LLM_TEST_DSV3_DIR", "my_weight/DeepSeek-V3-4layers-MTP-BF16")
 
 
 def _resolve(path: str) -> Path:
@@ -91,7 +91,7 @@ def _checkpoint_gate(path: Path) -> Path:
     """The no-silent-skip policy every golden gate shares."""
     problem = checkpoint_problem(path)
     if problem:
-        if os.environ.get("LITE_LLAMA_GOLDEN_STRICT", "") == "1":
+        if os.environ.get("RAPID_LLM_GOLDEN_STRICT", "") == "1":
             pytest.fail(f"GOLDEN GATE FAIL: {problem}", pytrace=False)
         pytest.xfail(f"UNVERIFIED: {problem}")
     return path
@@ -108,7 +108,7 @@ def v3_dir() -> Path:
 
 
 # --------------------------------------------------------------------------- #
-# Shared machinery: run lite_llama, run transformers, compare
+# Shared machinery: run rapid_llm, run transformers, compare
 # --------------------------------------------------------------------------- #
 def _greedy_runs(checkpoints_dir: Path, hf_overrides: dict[str, object] | None) -> dict[str, Any]:
     """Greedy generations with per-step logprobs through the one-shot LLM API."""
@@ -145,7 +145,7 @@ def _reference_rows(checkpoints_dir: Path, hf_overrides: dict[str, object] | Non
     The same override is applied to the reference's config, so both sides run
     the same trimmed stack. Unexpected keys (the layers the trim removed, the
     MTP layer past ``num_hidden_layers``) are exactly what transformers
-    ignores with a warning and what lite_llama's loader drops on purpose.
+    ignores with a warning and what rapid_llm's loader drops on purpose.
     """
     from transformers import AutoConfig, AutoModelForCausalLM
 

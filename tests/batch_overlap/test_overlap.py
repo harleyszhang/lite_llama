@@ -15,13 +15,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lite_llama.batch_overlap.overlap import (
+from rapid_llm.batch_overlap.overlap import (
     OVERLAP_ENV,
     OverlapPolicy,
     StreamPool,
     Timeline,
 )
-from lite_llama.executor.slot_batch import SlotBatch, flatten_extend_rows
+from rapid_llm.executor.slot_batch import SlotBatch, flatten_extend_rows
 
 
 # --------------------------------------------------------------------------- #

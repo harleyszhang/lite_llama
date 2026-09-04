@@ -67,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
 
-    from lite_llama.tools.harness import HFLayerReference, SingleLayerHarness, layer_keys
+    from rapid_llm.tools.harness import HFLayerReference, SingleLayerHarness, layer_keys
 
     harness = SingleLayerHarness.from_pretrained(
         args.model_dir, args.layer, device=args.device, max_seq_len=args.max_seq_len

@@ -22,10 +22,10 @@ from kv_pool import fresh_rows, paged_pool
 from microbench import Row, Work, bench, bench_host, metadata, report, require_cuda, verify
 
 # Importing the facade registers every spec row, so dispatch() below finds them.
-import lite_llama.kernels
-from lite_llama.executor.kv_cache_manager import KVCacheManager
-from lite_llama.kernels.dispatcher import dispatch
-from lite_llama.kernels.ops.kvcache.update_kv_buffer import update_kv_buffer
+import rapid_llm.kernels
+from rapid_llm.executor.kv_cache_manager import KVCacheManager
+from rapid_llm.kernels.dispatcher import dispatch
+from rapid_llm.kernels.ops.kvcache.update_kv_buffer import update_kv_buffer
 
 #: ``(label, seq_lens)``. The scatter's cost is set by how many tokens are
 #: written and how their destination rows are spread, so prefill (one sequence,

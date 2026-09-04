@@ -14,7 +14,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from lite_llama.kernels import vocab_parallel_embedding
+from rapid_llm.kernels import vocab_parallel_embedding
 
 # A shard in the middle of a larger id space, so foreign ids exist on *both*
 # sides of it — the situation of every rank except the first and the last.

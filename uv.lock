@@ -902,7 +902,7 @@ wheels = [
 ]
 
 [[package]]
-name = "lite-llama"
+name = "rapid-llm"
 version = "0.11.0"
 source = { editable = "." }
 dependencies = [

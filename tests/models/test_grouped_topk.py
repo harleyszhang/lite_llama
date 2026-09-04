@@ -21,7 +21,7 @@ import itertools
 import pytest
 import torch
 
-from lite_llama.modules.moe import grouped_topk
+from rapid_llm.modules.moe import grouped_topk
 
 
 def _naive_grouped_topk(

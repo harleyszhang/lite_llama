@@ -1,6 +1,6 @@
 {
  "meta": {
-  "header": "device    NVIDIA H100 80GB HBM3  (3352 GB/s peak, 989 TFLOP/s dense tc, 50 MiB L2)\nsoftware  torch 2.13.0+cu130, triton 3.7.1, python 3.14.7\ncommit    v0.10.0-20-gd0f4578-dirty\ncommand   benchmarks/kernels/bench_fused_moe.py --json docs/benchmark_logs/bench_fused_moe_h100_20260902.json\nenv       {'LITE_LLAMA_AUTOTUNE': '0'}",
+  "header": "device    NVIDIA H100 80GB HBM3  (3352 GB/s peak, 989 TFLOP/s dense tc, 50 MiB L2)\nsoftware  torch 2.13.0+cu130, triton 3.7.1, python 3.14.7\ncommit    v0.10.0-20-gd0f4578-dirty\ncommand   benchmarks/kernels/bench_fused_moe.py --json docs/benchmark_logs/bench_fused_moe_h100_20260902.json\nenv       {'RAPID_LLM_AUTOTUNE': '0'}",
   "device": "NVIDIA H100 80GB HBM3",
   "peak_gbps": 3352.32,
   "peak_tflops": 989.0,

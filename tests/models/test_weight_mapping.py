@@ -16,10 +16,10 @@ import pytest
 import torch
 import torch.nn as nn
 
-from lite_llama.executor.weight_utils import hf_weight_files
-from lite_llama.models import weights
-from lite_llama.models.base import CausalLM
-from lite_llama.modules import ColumnParallelLinear, QKVParallelLinear, SparseMoeBlock
+from rapid_llm.executor.weight_utils import hf_weight_files
+from rapid_llm.models import weights
+from rapid_llm.models.base import CausalLM
+from rapid_llm.modules import ColumnParallelLinear, QKVParallelLinear, SparseMoeBlock
 
 #: The packed-mapping the text models actually use; the translator is a pure
 #: function of the key and this table, so the tests exercise the production rules
@@ -34,7 +34,7 @@ _PACKED = CausalLM.packed_modules_mapping
 @pytest.mark.parametrize(
     "key,expected",
     [
-        # Untouched: these already carry lite_llama parameter names.
+        # Untouched: these already carry rapid_llm parameter names.
         ("embed_tokens.weight", ("embed_tokens.weight", None)),
         ("lm_head.weight", ("lm_head.weight", None)),
         ("layers.3.mlp.gate_proj.weight", ("layers.3.mlp.gate_up_proj.weight", 0)),

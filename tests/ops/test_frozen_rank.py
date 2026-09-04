@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from lite_llama.kernels.dispatcher import (
+from rapid_llm.kernels.dispatcher import (
     DispatchKey,
     GoldenRecord,
     KernelSpec,
@@ -20,8 +20,8 @@ from lite_llama.kernels.dispatcher import (
     dispatch,
     set_perf_provider,
 )
-from lite_llama.kernels.dispatcher.autotune import ConfigStore, TuneKey
-from lite_llama.kernels.dispatcher.autotune.frozen import (
+from rapid_llm.kernels.dispatcher.autotune import ConfigStore, TuneKey
+from rapid_llm.kernels.dispatcher.autotune.frozen import (
     FROZEN_RANK_ENV,
     freeze_record,
     frozen_bucket,
@@ -29,7 +29,7 @@ from lite_llama.kernels.dispatcher.autotune.frozen import (
     install_frozen_perf_provider,
     make_frozen_perf_provider,
 )
-from lite_llama.platform.spec import PlatformInfo
+from rapid_llm.platform.spec import PlatformInfo
 
 A10 = PlatformInfo("cuda", 8, 6, "NVIDIA A10")
 H100 = PlatformInfo("cuda", 9, 0, "NVIDIA H100 80GB HBM3")

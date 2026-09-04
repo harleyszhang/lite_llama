@@ -22,9 +22,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.lib import write_json_log
-from lite_llama.engine.reasoning import _CLOSE as _UNTHINK
-from lite_llama.engine.reasoning import _OPEN as _THINK
-from lite_llama.engine.tool_parser import (
+from rapid_llm.engine.reasoning import _CLOSE as _UNTHINK
+from rapid_llm.engine.reasoning import _OPEN as _THINK
+from rapid_llm.engine.tool_parser import (
     _DS_ARGS_END,
     _DS_CALLS_BEGIN,
     _DS_CALLS_END,
@@ -60,8 +60,8 @@ def build_corpus(chunks: int) -> list[str]:
 
 
 def run_once(chunks: list[str], *, reasoning: bool, tools: bool) -> float:
-    from lite_llama.engine.reasoning import ReasoningSplitter
-    from lite_llama.engine.tool_parser import DeepSeekToolParser
+    from rapid_llm.engine.reasoning import ReasoningSplitter
+    from rapid_llm.engine.tool_parser import DeepSeekToolParser
 
     splitter = ReasoningSplitter(starts_inside=False) if reasoning else None
     tool_parser = DeepSeekToolParser() if tools else None

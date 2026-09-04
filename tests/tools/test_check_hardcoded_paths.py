@@ -98,7 +98,7 @@ def test_the_report_names_the_file_line_and_path(hook, tmp_path: Path):
     "source",
     [
         pytest.param('CKPT = "my_weight/Qwen2.5-0.5B"', id="relative-path"),
-        pytest.param('CKPT = os.environ["LITE_LLAMA_MODEL_DIR"]', id="from-env"),
+        pytest.param('CKPT = os.environ["RAPID_LLM_MODEL_DIR"]', id="from-env"),
         pytest.param('CKPT = "/usr/share/data"', id="system-prefix-not-personal"),
         pytest.param('CKPT = "/opt/models"', id="opt"),
         pytest.param('    # CKPT = "/home/foo/w"', id="commented-out"),
@@ -144,7 +144,7 @@ def test_main_exits_nonzero_and_explains_the_fix(hook, tmp_path: Path, monkeypat
     stderr = capsys.readouterr().err
     assert "/home/foo/w" in stderr
     # A failing hook has to say what to do instead, or it just blocks the commit.
-    assert "LITE_LLAMA_MODEL_DIR" in stderr
+    assert "RAPID_LLM_MODEL_DIR" in stderr
 
 
 def test_the_whole_tracked_tree_passes(hook):

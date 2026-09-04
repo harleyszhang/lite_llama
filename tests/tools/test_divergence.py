@@ -22,8 +22,8 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
-from lite_llama.models.config import ModelConfig
-from lite_llama.tools.accuracy import (
+from rapid_llm.models.config import ModelConfig
+from rapid_llm.tools.accuracy import (
     DEFAULT_REL_THRESHOLD,
     DivergenceChecker,
     DivergenceReport,
@@ -31,7 +31,7 @@ from lite_llama.tools.accuracy import (
     LogitsDiff,
     SubmoduleDiff,
 )
-from lite_llama.tools.harness import Diff, SingleLayerHarness
+from rapid_llm.tools.harness import Diff, SingleLayerHarness
 
 #: Qwen3 dense at test size — the body shape ``test_harness.py`` pins, with
 #: four layers so the layer after the perturbed one always exists: the first

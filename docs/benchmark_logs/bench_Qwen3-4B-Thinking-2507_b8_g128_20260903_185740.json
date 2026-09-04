@@ -9,8 +9,8 @@
     "gpu": "NVIDIA H100 80GB HBM3",
     "timestamp": "2026-09-03T18:57:40"
   },
-  "lite_llama": {
-    "engine": "lite_llama",
+  "rapid_llm": {
+    "engine": "rapid_llm",
     "batch_size": 8,
     "prompt_tokens": 118,
     "output_tokens": 1024,

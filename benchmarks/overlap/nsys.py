@@ -193,7 +193,7 @@ def write_report(off_csv: Path, on_csv: Path, out: Path) -> int:
         f"# nsys overlap evidence — TP=2 decode, {Path(MODEL).name}, batch {BATCH}, eager",
         "",
         "Two payloads identical except the overlap switches "
-        "(`LITE_LLAMA_OVERLAP`/`LITE_LLAMA_TBO`/`LITE_LLAMA_COMM_OVERLAP`), traced with "
+        "(`RAPID_LLM_OVERLAP`/`RAPID_LLM_TBO`/`RAPID_LLM_COMM_OVERLAP`), traced with "
         "`nsys profile --trace=cuda`, kernels exported via "
         "`nsys stats -r cuda_gpu_trace --format csv`, then aggregated per GPU over every "
         "NCCL kernel (both warmup and steady passes — the overlap behaviour is the same in "

@@ -21,8 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from microbench import Row, Work, bench, metadata, report, verify
 
-from lite_llama.kernels.dispatcher import MLA_LATENT_TAGS, dispatch
-from lite_llama.kernels.ops.attention.mla import (
+from rapid_llm.kernels.dispatcher import MLA_LATENT_TAGS, dispatch
+from rapid_llm.kernels.ops.attention.mla import (
     QK_ROPE_HEAD_DIM,
     mla_decode,
     mla_decode_reference,
@@ -54,7 +54,7 @@ def build_case(cache_len: int) -> tuple:
 
 
 def main() -> None:
-    from lite_llama.kernels.backend import flashmla
+    from rapid_llm.kernels.backend import flashmla
 
     print(metadata())
     rows: list[Row] = []

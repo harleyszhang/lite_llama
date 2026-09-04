@@ -17,9 +17,9 @@ import os
 import pytest
 import torch
 
-import lite_llama.batch_overlap.comm_overlap as comm_overlap
-from lite_llama.distributed import parallel_state as ps
-from lite_llama.batch_overlap.comm_overlap import (
+import rapid_llm.batch_overlap.comm_overlap as comm_overlap
+from rapid_llm.distributed import parallel_state as ps
+from rapid_llm.batch_overlap.comm_overlap import (
     COMM_OVERLAP_ENV,
     L3_CHUNKS_ENV,
     L3_MIN_ROWS_ENV,
@@ -31,8 +31,8 @@ from lite_llama.batch_overlap.comm_overlap import (
     deferred_all_reduce,
     reset_comm_overlap_policy,
 )
-from lite_llama.modules import RowParallelLinear
-from lite_llama.tools.observability import Collective, CollectiveStats
+from rapid_llm.modules import RowParallelLinear
+from rapid_llm.tools.observability import Collective, CollectiveStats
 from tests.distributed.tp_harness import needs_gpus, run_on_tp_ranks
 
 IN, OUT = 64, 32
@@ -269,7 +269,7 @@ def _payload_stats_counts_async_traffic(rank: int) -> str:
 
 
 def _payload_timeline_records_the_reduce_region(rank: int) -> str:
-    os.environ["LITE_LLAMA_OVERLAP_TIMELINE"] = "1"
+    os.environ["RAPID_LLM_OVERLAP_TIMELINE"] = "1"
     CommStreamPool.reset()  # rebuild with a timeline enabled pool
     device = torch.device("cuda", rank)
     pool = CommStreamPool.for_device(device)

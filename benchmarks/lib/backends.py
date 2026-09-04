@@ -1,6 +1,6 @@
 """The measured systems: one ABC, one factory.
 
-Every engine the benchmarks compare — lite_llama's three entry points plus the
+Every engine the benchmarks compare — rapid_llm's three entry points plus the
 HF / vllm baselines — adapts into a :class:`Backend` here, so a scenario script
 measures systems without knowing their constructors. ``make_backend`` picks the
 strategy from the checkpoint and the parallelism.
@@ -57,7 +57,7 @@ class Backend(ABC):
 
 
 class LiteBackend(Backend):
-    """Single-process lite_llama: a stream callback per step splits TTFT from TPOT.
+    """Single-process rapid_llm: a stream callback per step splits TTFT from TPOT.
 
     The batch advances in lockstep, so ``gen_tokens = steps * batch``. Constructor
     arguments pass straight through to ``TextGenerator`` (no defaults here, so this
@@ -65,7 +65,7 @@ class LiteBackend(Backend):
     """
 
     def __init__(self, model_dir: str, use_cuda_graph: bool, **gen_kwargs):
-        from lite_llama import TextGenerator
+        from rapid_llm import TextGenerator
 
         self._gen = TextGenerator(
             checkpoints_dir=model_dir,
@@ -118,7 +118,7 @@ class EngineBackend(Backend):
     """
 
     def __init__(self, model_dir: str, *, tensor_parallel_size: int = 1, **engine_kwargs):
-        from lite_llama.engine import ContinuousBatchingEngine
+        from rapid_llm.engine import ContinuousBatchingEngine
 
         self._engine = ContinuousBatchingEngine.from_pretrained(
             model_dir, tensor_parallel_size=tensor_parallel_size, **engine_kwargs
@@ -151,7 +151,7 @@ class EngineBackend(Backend):
 class VisionBackend(Backend):
     """Multimodal measurement: ``VisionGenerator`` serves one request at a time.
 
-    lite_llama's multimodal path is serial (the processor takes one request), so
+    rapid_llm's multimodal path is serial (the processor takes one request), so
     ``--batch`` becomes the number of serial requests: TTFT is the mean of each
     request's first-token latency, TPOT the mean of all decode-step intervals, TPS
     the aggregate throughput of the whole serial loop. Images are resized to a
@@ -164,8 +164,8 @@ class VisionBackend(Backend):
     def __init__(self, model_dir: str, use_cuda_graph: bool, image_path: str, **gen_kwargs):
         from PIL import Image
 
-        from lite_llama import VisionGenerator
-        from lite_llama.models.config import read_model_type
+        from rapid_llm import VisionGenerator
+        from rapid_llm.models.config import read_model_type
 
         self._image = Image.open(image_path).convert("RGB").resize((672, 672), Image.BICUBIC)
         self._gen = VisionGenerator(
@@ -260,9 +260,9 @@ class HFBackend(Backend):
     """HF transformers: ``generate`` has no per-step callback, so TTFT is a separate run.
 
     Weights load at the checkpoint's declared dtype (see :func:`checkpoint_dtype`),
-    the same precision lite_llama uses. Under greedy, ``min_new_tokens ==
+    the same precision rapid_llm uses. Under greedy, ``min_new_tokens ==
     max_gen_len`` forbids early EOS so the batch runs exactly ``max_gen_len`` steps
-    (matching lite_llama's lockstep); under sampling, early EOS is allowed, ``steps``
+    (matching rapid_llm's lockstep); under sampling, early EOS is allowed, ``steps``
     is the longest sequence's, and ``gen_tokens`` counts non-pad tokens.
     """
 
@@ -352,9 +352,9 @@ class VLLMBackend(Backend):
     separate one-token run — the same pattern :class:`HFBackend` uses, which is
     what keeps the two external baselines' TTFT columns comparable.
 
-    Weights load at the checkpoint's declared dtype (the precision lite_llama
+    Weights load at the checkpoint's declared dtype (the precision rapid_llm
     uses too). vllm's own CUDA-graph capture stays on (its default), matching
-    lite_llama's graph rows. Under greedy, ``min_tokens == max_gen_len`` with
+    rapid_llm's graph rows. Under greedy, ``min_tokens == max_gen_len`` with
     ``ignore_eos`` locks every sequence to exactly ``max_gen_len`` steps,
     mirroring HF's ``min_new_tokens``; under sampling, early EOS is allowed and
     ``gen_tokens`` counts what each sequence actually produced.
@@ -391,7 +391,7 @@ class VLLMBackend(Backend):
         ttft = time.perf_counter() - t0
 
         # Full run. Greedy locks the batch to exactly max_gen_len steps, the
-        # lockstep the lite_llama rows are measured under.
+        # lockstep the rapid_llm rows are measured under.
         full = SamplingParams(
             max_tokens=max_gen_len,
             **base,
@@ -450,8 +450,8 @@ def make_backend(
     make each request's KV demand a function of image resolution, so reusing a text
     workload's pool size there only OOMs — let the engine profile it.
     """
-    from lite_llama.models.config import read_model_type
-    from lite_llama.models.registry import ModelRegistry
+    from rapid_llm.models.config import read_model_type
+    from rapid_llm.models.registry import ModelRegistry
 
     if ModelRegistry.resolve(read_model_type(model_dir)).is_multimodal:
         if not image_path:

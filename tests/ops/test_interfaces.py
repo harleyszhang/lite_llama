@@ -16,7 +16,7 @@ from inspect import signature
 import pytest
 import torch
 
-from lite_llama.kernels.ops.interfaces import (
+from rapid_llm.kernels.ops.interfaces import (
     LOGICAL_OPS,
     AttentionDecodeOp,
     AttentionPrefillOp,
@@ -376,7 +376,7 @@ class TestCpuImplementations:
 
 class TestTorchFreeContracts:
     def test_interfaces_module_never_imports_torch_at_runtime(self) -> None:
-        import lite_llama.kernels.ops.interfaces as iface
+        import rapid_llm.kernels.ops.interfaces as iface
 
         tree = ast.parse(__import__("pathlib").Path(iface.__file__).read_text(encoding="utf-8"))
 

@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from microbench import Row, Work, bench, metadata, report, require_cuda
 
-from lite_llama.kernels.ops.quantization import fp8_quantize_per_token, per_token_group_quant
+from rapid_llm.kernels.ops.quantization import fp8_quantize_per_token, per_token_group_quant
 
 #: Scale granularity under test — the ``block_shape=[128, 128]`` convention.
 GROUP_SIZE = 128

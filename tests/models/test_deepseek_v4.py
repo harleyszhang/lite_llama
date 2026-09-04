@@ -24,7 +24,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from lite_llama.models.config import ModelConfig
+from rapid_llm.models.config import ModelConfig
 
 #: Trimmed V4 at test size. Six layers = two passes over the three attention
 #: types; two of them route through the hash router, four through top-k.
@@ -76,7 +76,7 @@ def _write_config(tmp_path) -> None:
 
 
 def _loaded_pair(tmp_path, seed: int = 0):
-    """Build the HF reference, checkpoint it, load the same weights in lite_llama.
+    """Build the HF reference, checkpoint it, load the same weights in rapid_llm.
 
     Returns:
         ``(hf_model, lite_model, config)`` with both sides on CUDA in eval
@@ -85,9 +85,9 @@ def _loaded_pair(tmp_path, seed: int = 0):
     """
     from transformers.models.deepseek_v4 import DeepseekV4ForCausalLM
 
-    from lite_llama.executor.loader import materialise_parameters
-    from lite_llama.executor.weight_utils import hf_weights_iterator
-    from lite_llama.models.registry import ModelRegistry
+    from rapid_llm.executor.loader import materialise_parameters
+    from rapid_llm.executor.weight_utils import hf_weights_iterator
+    from rapid_llm.models.registry import ModelRegistry
 
     _write_config(tmp_path)
     config = ModelConfig.from_pretrained(tmp_path, max_seq_len=128)
@@ -156,7 +156,7 @@ def _loaded_pair(tmp_path, seed: int = 0):
 
 def _lite_metadata(batch: int, seq_len: int, *, prefill: bool):
     """A minimal AttentionMetadata carrying just the V4-relevant fields."""
-    from lite_llama.executor.attention_metadata import AttentionMetadata
+    from rapid_llm.executor.attention_metadata import AttentionMetadata
 
     meta = AttentionMetadata()
     meta.is_prefill = prefill
@@ -355,7 +355,7 @@ def test_end_to_end_greedy_parity(pair):
             tokens_h.append(next_tok)
     reference = torch.cat(tokens_h[1:], dim=1)
 
-    # --- lite_llama: prefill then decode through the model runner API ------ #
+    # --- rapid_llm: prefill then decode through the model runner API ------ #
     tokens_l = [input_ids]
     with torch.no_grad():
         meta = _lite_metadata(batch, prompt_len, prefill=True)

@@ -19,7 +19,7 @@ OUT="${2:?用法: $0 <fused|baseline> <输出目录> [single|parallel|all]}"
 SCOPE="${3:-all}"
 mkdir -p "$OUT"
 
-export LITE_LLAMA_AUTOTUNE=0
+export RAPID_LLM_AUTOTUNE=0
 export PYTHONPATH=.
 
 # 单卡离线矩阵（含 30B）：标签|权重路径|batch 列表

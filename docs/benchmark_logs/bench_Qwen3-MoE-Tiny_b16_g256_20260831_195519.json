@@ -7,8 +7,8 @@
     "gpu": "NVIDIA A10",
     "timestamp": "2026-08-31T19:55:19"
   },
-  "lite_llama": {
-    "engine": "lite_llama",
+  "rapid_llm": {
+    "engine": "rapid_llm",
     "batch_size": 16,
     "prompt_tokens": 213,
     "output_tokens": 4234,

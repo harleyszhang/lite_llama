@@ -1,4 +1,4 @@
-"""Tests for the O13 lazy capture path in :class:`~lite_llama.executor.cuda_graph`.
+"""Tests for the O13 lazy capture path in :class:`~rapid_llm.executor.cuda_graph`.
 
 Pure CPU: ``CUDAGraphRunner`` is monkeypatched with a counter-equipped fake,
 so these tests pin the *policy* — which shapes get captured when, what gets
@@ -17,9 +17,9 @@ from typing import ClassVar
 import pytest
 import torch
 
-from lite_llama.executor import cuda_graph
-from lite_llama.executor.attention_metadata import AttentionMetadata
-from lite_llama.executor.cuda_graph import (
+from rapid_llm.executor import cuda_graph
+from rapid_llm.executor.attention_metadata import AttentionMetadata
+from rapid_llm.executor.cuda_graph import (
     DEFAULT_BATCH_SIZES,
     DEFAULT_SEQ_LEN_BUCKETS,
     LAZY_SEED_SHAPES,

@@ -1,4 +1,4 @@
-"""Tests for :mod:`lite_llama.engine.data_parallel`.
+"""Tests for :mod:`rapid_llm.engine.data_parallel`.
 
 Argument validation and the routing table run CPU-only through a
 ``_RouteHarness``; only the end-to-end two-GPU test needs real
@@ -20,10 +20,10 @@ from typing import ClassVar
 import pytest
 import torch
 
-from lite_llama.engine.data_parallel import _SHUTDOWN, DataParallelEngine, _dp_worker, _ReplicaLoop
-from lite_llama.engine.outputs import RequestOutput
-from lite_llama.engine.sampler import SamplingParams
-from lite_llama.engine.scheduler import Request, RequestStatus
+from rapid_llm.engine.data_parallel import _SHUTDOWN, DataParallelEngine, _dp_worker, _ReplicaLoop
+from rapid_llm.engine.outputs import RequestOutput
+from rapid_llm.engine.sampler import SamplingParams
+from rapid_llm.engine.scheduler import Request, RequestStatus
 
 # Enough KV for the short generations here, small enough that two replicas plus the
 # single-GPU reference engine coexist on one card.
@@ -98,7 +98,7 @@ class _RouteHarness:
     """
 
     def __init__(self, dp_size: int, policy: str = "round_robin"):
-        from lite_llama.engine.dp_load_balancer import make_load_balancer
+        from rapid_llm.engine.dp_load_balancer import make_load_balancer
 
         self.data_parallel_size = dp_size
         self._balancer = make_load_balancer(policy, dp_size)
@@ -228,7 +228,7 @@ def test_a_replica_shares_one_queue_across_its_ranks():
     contract in the constructor — and the reason the old per-cell queues could not
     stay, since a follower reading a request would consume it from its leader.
     """
-    from lite_llama.engine import data_parallel as dp_module
+    from rapid_llm.engine import data_parallel as dp_module
 
     _FakeProcess.spawned = []
     with pytest.MonkeyPatch.context() as patch:
@@ -300,7 +300,7 @@ def test_dp_times_tp_spawns_one_process_per_grid_cell(monkeypatch: pytest.Monkey
     were never started — a failure no timeout in the coordinator can explain. Asserting
     the grid needs no GPU at all, which is the point: the bug reproduces on a laptop.
     """
-    from lite_llama.engine import data_parallel as dp_module
+    from rapid_llm.engine import data_parallel as dp_module
 
     _FakeProcess.spawned = []
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 4)
@@ -735,7 +735,7 @@ class TestTwoReplicas:
         comparison is byte-exact — see this module's docstring for why comparing
         against one run over all six prompts would not be.
         """
-        from lite_llama.engine.llm import LLM
+        from rapid_llm.engine.llm import LLM
 
         dp_texts = [out.text for out in engine.generate(_PROMPTS, _GREEDY)]
 

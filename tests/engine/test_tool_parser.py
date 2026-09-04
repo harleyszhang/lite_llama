@@ -20,7 +20,7 @@ import pytest
 
 # Marker spellings are assembled, never written out: the transport delivering
 # source edits strips anything it parses as markup.
-from lite_llama.engine.tool_parser import (
+from rapid_llm.engine.tool_parser import (
     _DS_ARGS_END,
     _DS_CALLS_BEGIN,
     _DS_CALLS_END,
@@ -111,11 +111,7 @@ QWEN_ONE_CALL = (
 #: arguments-first key order: the scanner must keep walking the object so the
 #: trailing name still fires before the call's deltas go out.
 QWEN_ARGS_FIRST = (
-    "a"
-    + _QWEN_OPEN
-    + '{"arguments": {"city": "Paris"}, "name": "get_weather"}'
-    + _QWEN_CLOSE
-    + "b"
+    "a" + _QWEN_OPEN + '{"arguments": {"city": "Paris"}, "name": "get_weather"}' + _QWEN_CLOSE + "b"
 )
 #: escaped quotes and braces inside argument strings: string-aware counting.
 _ARGS_RAW = '{"code": "say \\"hi\\" {}", "n": 2}'
@@ -143,9 +139,7 @@ def test_qwen_parse_extracts_the_call_and_content():
 def test_qwen_arguments_first_order_still_names_the_call():
     content, calls = QwenToolParser.parse(QWEN_ARGS_FIRST)
     assert content == "ab"
-    assert [(c.name, c.arguments) for c in calls] == [
-        ("get_weather", '{"city": "Paris"}')
-    ]
+    assert [(c.name, c.arguments) for c in calls] == [("get_weather", '{"city": "Paris"}')]
 
 
 def test_qwen_arguments_text_is_valid_json_verbatim():
@@ -243,9 +237,7 @@ def test_for_model_builds_each_registered_family():
         (QwenToolParser, "a" + _QWEN_OPEN[:4]),
         (QwenToolParser, _QWEN_OPEN + '{"name": "x"'[:5]),
     ],
-    ids=lambda value: (
-        value if isinstance(value, str) else f"{value.name}-axiom"
-    ),
+    ids=lambda value: value if isinstance(value, str) else f"{value.name}-axiom",
 )
 def test_every_two_cut_split_agrees_with_parse(parser_cls, text):
     _assert_axiom(parser_cls, text)

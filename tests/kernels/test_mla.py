@@ -16,8 +16,8 @@ import math
 import pytest
 import torch
 
-from lite_llama.kernels.ops.attention import mla
-from lite_llama.kernels.ops.attention.mla import (
+from rapid_llm.kernels.ops.attention import mla
+from rapid_llm.kernels.ops.attention.mla import (
     QK_ROPE_HEAD_DIM,
     mla_decode,
     mla_decode_reference,
@@ -40,9 +40,7 @@ def _latent_cache(seq_lens, page_size, lora=_LORA, *, scattered=False):
     """
     pages_per_seq = [(n + page_size - 1) // page_size for n in seq_lens]
     num_pages = sum(pages_per_seq)
-    kv_cache = torch.randn(
-        num_pages, page_size, lora + _ROPE, device="cuda", dtype=torch.bfloat16
-    )
+    kv_cache = torch.randn(num_pages, page_size, lora + _ROPE, device="cuda", dtype=torch.bfloat16)
     max_pages = max(pages_per_seq)
     block_table = torch.zeros(len(seq_lens), max_pages, dtype=torch.int32, device="cuda")
     if scattered:
@@ -71,9 +69,7 @@ def _run_decode(seq_lens, num_heads, page_size, lora=_LORA, *, scattered=False, 
     )
     if q is None:
         q = (
-            torch.randn(
-                len(seq_lens), num_heads, lora + _ROPE, device="cuda", dtype=torch.bfloat16
-            )
+            torch.randn(len(seq_lens), num_heads, lora + _ROPE, device="cuda", dtype=torch.bfloat16)
             * 0.3
         )
     scale = 1.0 / math.sqrt(lora + _ROPE)

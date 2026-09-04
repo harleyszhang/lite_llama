@@ -1,4 +1,4 @@
-"""Tests for the :class:`~lite_llama.models.registry.ModelRegistry` lookup.
+"""Tests for the :class:`~rapid_llm.models.registry.ModelRegistry` lookup.
 
 Resolution per model type, multimodal flagging, case-insensitivity,
 helpful errors listing alternatives, and lazy ``load_class`` imports —
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from lite_llama.models.registry import ModelRegistry, ModelSpec
+from rapid_llm.models.registry import ModelRegistry, ModelSpec
 
 EXPECTED_TYPES = {
     "llama",
@@ -63,6 +63,6 @@ def test_every_registered_implementation_imports(model_type: str):
 
 def test_model_spec_load_class_defers_import():
     """A misconfigured implementation string must fail only when actually used."""
-    spec = ModelSpec(model_type="broken", implementation="lite_llama.models.nope:Missing")
+    spec = ModelSpec(model_type="broken", implementation="rapid_llm.models.nope:Missing")
     with pytest.raises(ModuleNotFoundError):
         spec.load_class()

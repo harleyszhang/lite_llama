@@ -1,4 +1,4 @@
-"""Tests for :mod:`lite_llama.engine.async_data_parallel`.
+"""Tests for :mod:`rapid_llm.engine.async_data_parallel`.
 
 Fakes replace processes and queues (``_ChannelQueue``,
 ``_FakeProcess``), so the asyncio surface — streamed chunks, replica
@@ -18,9 +18,9 @@ from typing import ClassVar
 import pytest
 import torch
 
-from lite_llama.engine import data_parallel as dp_module
-from lite_llama.engine.async_data_parallel import AsyncDataParallelEngine
-from lite_llama.engine.async_engine import StreamedOutput
+from rapid_llm.engine import data_parallel as dp_module
+from rapid_llm.engine.async_data_parallel import AsyncDataParallelEngine
+from rapid_llm.engine.async_engine import StreamedOutput
 
 _TIMEOUT = 20.0
 

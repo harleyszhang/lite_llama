@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.executor.slot_batch import SlotBatch
+from rapid_llm.executor.slot_batch import SlotBatch
 
 LAYERS = 2
 HEADS = 2
@@ -33,7 +33,7 @@ class _StubKVCacheManager:
 
 
 class _StubRunner:
-    """Minimal stand-in for :class:`~lite_llama.executor.model_runner.ModelRunner`."""
+    """Minimal stand-in for :class:`~rapid_llm.executor.model_runner.ModelRunner`."""
 
     def __init__(self, num_slots: int, max_seq_len: int, rows: int | None = None) -> None:
         self.device = torch.device("cpu")

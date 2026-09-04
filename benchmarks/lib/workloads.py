@@ -21,7 +21,7 @@ PROMPTS = [
     "How to learn cnn, please introduce resnet architecture and give code ",
 ]
 
-#: Non-greedy defaults, matching lite_llama's sampling branch.
+#: Non-greedy defaults, matching rapid_llm's sampling branch.
 SAMPLE_KW = {"temperature": 0.7, "top_p": 0.8}
 
 #: Greedy, with repetition penalty and early exit off. A benchmark's token count
@@ -42,6 +42,6 @@ def expand_prompts(prompts: list[str], batch: int) -> list[str]:
 
 def sampling_params(max_gen_len: int, greedy: bool = True):
     """The benchmark's ``SamplingParams``: :data:`GREEDY_PARAMS` or :data:`SAMPLE_KW`."""
-    from lite_llama import SamplingParams
+    from rapid_llm import SamplingParams
 
     return SamplingParams(max_gen_len=max_gen_len, **(GREEDY_PARAMS if greedy else SAMPLE_KW))

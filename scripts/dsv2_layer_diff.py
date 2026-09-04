@@ -80,14 +80,14 @@ def _probe_layer(mod, sink: dict, *, hf: bool = False) -> list:
 
 def _lite_payload(rank: int):
     """Rank's share: load the model, prefill the prompt, return layer outputs."""
-    from lite_llama.distributed import parallel_state as ps
+    from rapid_llm.distributed import parallel_state as ps
 
     ps.init_parallel(global_rank=rank, tp_size=2, dp_size=1)
     try:
-        from lite_llama.executor.loader import DefaultModelLoader
-        from lite_llama.models.config import ModelConfig
-        from lite_llama.models.registry import ModelRegistry
-        from lite_llama.tools.accuracy.divergence import PrefillCache
+        from rapid_llm.executor.loader import DefaultModelLoader
+        from rapid_llm.models.config import ModelConfig
+        from rapid_llm.models.registry import ModelRegistry
+        from rapid_llm.tools.accuracy.divergence import PrefillCache
 
         device = f"cuda:{rank}"
         config = ModelConfig.from_pretrained(_MODEL, _SEQ_CAP)
@@ -138,7 +138,7 @@ def _lite_payload(rank: int):
             }
         return None
     finally:
-        from lite_llama.distributed import parallel_state as ps
+        from rapid_llm.distributed import parallel_state as ps
 
         ps.destroy_parallel()
 

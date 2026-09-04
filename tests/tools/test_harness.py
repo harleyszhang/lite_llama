@@ -16,8 +16,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from lite_llama.models.config import ModelConfig
-from lite_llama.tools.harness import (
+from rapid_llm.models.config import ModelConfig
+from rapid_llm.tools.harness import (
     Diff,
     LayerReport,
     ModuleTimer,
@@ -132,7 +132,7 @@ def test_index_outside_the_stack_is_rejected(tmp_path):
 
 def test_moe_layer_gets_the_routed_mlp(tmp_path):
     """The per-layer MLP choice comes from the model class, not from the harness."""
-    from lite_llama.modules import SparseMoeBlock
+    from rapid_llm.modules import SparseMoeBlock
 
     assert isinstance(_harness(tmp_path, _MOE).layer.mlp, SparseMoeBlock)
 
@@ -214,7 +214,7 @@ def test_mirrored_weights_land_in_the_right_blocks(tmp_path):
     fused-QKV block order were wrong, the layer would still run and every generation
     from it would be garbage.
     """
-    from lite_llama.tools.harness import HFLayerReference
+    from rapid_llm.tools.harness import HFLayerReference
 
     config = _config(tmp_path, _DENSE)
     harness = SingleLayerHarness(config, 1, device="cpu")
@@ -239,7 +239,7 @@ def test_mirrored_weights_land_in_the_right_blocks(tmp_path):
 
 def test_a_missing_key_fails_loudly(tmp_path):
     """Coverage checking is why a one-layer load goes through ``weights.load_weights``."""
-    from lite_llama.tools.harness import HFLayerReference
+    from rapid_llm.tools.harness import HFLayerReference
 
     config = _config(tmp_path, _DENSE)
     harness = SingleLayerHarness(config, 1, device="cpu")
@@ -343,7 +343,7 @@ def test_mla_layer_builds_the_latent_attention(tmp_path):
     The absorbed-decode views are checked by shape because that is their whole
     contract: zero-copy reads of kv_b's per-head ``[k_nope | v]`` layout.
     """
-    from lite_llama.modules import DeepseekV2MLAAttention, FusedMLP, SparseMoeBlock
+    from rapid_llm.modules import DeepseekV2MLAAttention, FusedMLP, SparseMoeBlock
 
     config = _config(tmp_path, _MLA)
     harness = SingleLayerHarness(config, 0, device="cpu")
@@ -380,7 +380,7 @@ def test_mla_weights_mirror_into_the_right_blocks(tmp_path):
     if the per-head halves were transposed at load time this copy would pass and
     every later kernel would read the wrong halves.
     """
-    from lite_llama.tools.harness import HFLayerReference
+    from rapid_llm.tools.harness import HFLayerReference
 
     config = _config(tmp_path, _MLA)
     harness = SingleLayerHarness(config, 0, device="cpu")
@@ -405,7 +405,7 @@ def test_mla_weights_mirror_into_the_right_blocks(tmp_path):
 
 def test_mla_q_lora_weights_mirror(tmp_path):
     """The V2-full query path (q_a + layernorm + q_b) loads the same way."""
-    from lite_llama.tools.harness import HFLayerReference
+    from rapid_llm.tools.harness import HFLayerReference
 
     config = _config(tmp_path, _MLA, q_lora_rank=16)
     harness = SingleLayerHarness(config, 0, device="cpu")
@@ -521,7 +521,7 @@ def test_reference_layer_class_comes_from_the_config(tmp_path):
 
 
 def test_reference_decode_before_prefill_is_an_error(tmp_path):
-    from lite_llama.tools.harness import HFLayerReference
+    from rapid_llm.tools.harness import HFLayerReference
 
     config = _config(tmp_path, _DENSE)
     reference = HFLayerReference(config, 0, device="cpu")
@@ -541,7 +541,7 @@ def test_layer_agrees_with_transformers(tmp_path):
     paged-decode bug is invisible in a prefill-only comparison, and catching it here is
     the point of the harness.
     """
-    from lite_llama.tools.harness import HFLayerReference
+    from rapid_llm.tools.harness import HFLayerReference
 
     config = _config(tmp_path, _DENSE)
     harness = SingleLayerHarness(config, 1, device="cuda")
@@ -585,7 +585,7 @@ def test_mla_layer_agrees_with_transformers(tmp_path):
     absorbed against the latent — so two green numbers prove two different
     kernel compositions, plus the rope-on-pe-slice handling between them.
     """
-    from lite_llama.tools.harness import HFLayerReference
+    from rapid_llm.tools.harness import HFLayerReference
 
     config = _config(tmp_path, _MLA)
     harness = SingleLayerHarness(config, 0, device="cuda")
@@ -601,7 +601,7 @@ def test_mla_layer_agrees_with_transformers(tmp_path):
 @pytest.mark.usefixtures("cuda_available")
 def test_mla_q_lora_layer_agrees_with_transformers(tmp_path):
     """Same alignment through the down-projected query path (V2-full shape)."""
-    from lite_llama.tools.harness import HFLayerReference
+    from rapid_llm.tools.harness import HFLayerReference
 
     config = _config(tmp_path, _MLA, q_lora_rank=16)
     harness = SingleLayerHarness(config, 0, device="cuda")

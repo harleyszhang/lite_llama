@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Reject hard-coded absolute model/weight paths in tracked Python sources.
 
-lite_llama historically shipped entry points with the author's own checkpoint
+rapid_llm historically shipped entry points with the author's own checkpoint
 directory baked in — ``model_path = "/gemini/code/Llama-3.2-1B-Instruct/"`` and
 friends — which makes the CLI unusable for everybody else. Checkpoint locations
 must come from a CLI argument or an environment variable instead.
@@ -68,7 +68,7 @@ def main() -> int:
     if problems:
         print("\n".join(problems), file=sys.stderr)
         print(
-            "\nPass the checkpoint directory via a CLI flag or the LITE_LLAMA_MODEL_DIR "
+            "\nPass the checkpoint directory via a CLI flag or the RAPID_LLM_MODEL_DIR "
             "environment variable instead of hard-coding it.",
             file=sys.stderr,
         )

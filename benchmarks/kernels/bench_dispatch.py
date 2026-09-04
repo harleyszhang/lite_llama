@@ -21,9 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from freeze_dispatch_ranking import MEASURERS
 
-import lite_llama.kernels  # registers every spec row
-from lite_llama.kernels.dispatcher.dispatch import _forced_backend, dispatch, invalidate_cache
-from lite_llama.platform.interface import current_platform
+import rapid_llm.kernels  # registers every spec row
+from rapid_llm.kernels.dispatcher.dispatch import _forced_backend, dispatch, invalidate_cache
+from rapid_llm.platform.interface import current_platform
 
 DTYPE = "bf16"
 DECODE_STEP_MS = 4.75

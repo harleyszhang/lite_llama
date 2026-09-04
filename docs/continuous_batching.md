@@ -26,9 +26,9 @@ step  A B C D                        step  A B C D   等待队列
 
 | 模块 | 职责 | 在哪一侧 |
 | --- | --- | --- |
-| [`Scheduler`](../lite_llama/engine/scheduler.py) | 谁 prefill、谁 decode、谁拿哪个槽位 | 纯 host，无张量 |
-| [`SlotBatch`](../lite_llama/executor/slot_batch.py) | KV 布局与每步 attention 元数据 | 纯 device |
-| [`ContinuousBatchingEngine`](../lite_llama/engine/continuous_engine.py) | 串起 step 循环、采样、停止判定 | 两侧 |
+| [`Scheduler`](../rapid_llm/engine/scheduler.py) | 谁 prefill、谁 decode、谁拿哪个槽位 | 纯 host，无张量 |
+| [`SlotBatch`](../rapid_llm/executor/slot_batch.py) | KV 布局与每步 attention 元数据 | 纯 device |
+| [`ContinuousBatchingEngine`](../rapid_llm/engine/continuous_engine.py) | 串起 step 循环、采样、停止判定 | 两侧 |
 
 `Scheduler` 不持有任何张量，这是刻意的：调度策略因此可以在没有 GPU、没有权重的机器上完整单测（`tests/engine/test_scheduler.py` 25 个用例全部跑在 CPU 上）。
 
@@ -69,7 +69,7 @@ cur_select_index = table[self._b_req_idx, self._b_seq_len - 1]   # 纯设备 gat
 
 稳态下一个 decode 步的元数据只有两个 kernel，零传输。集合变化时才 `torch.tensor(...)` 上传一次——而且刻意每次**新建**张量而不是写回复用的 staging buffer：上一步的张量可能还排在流里等着被 kernel 读，从 host 覆写它会和未执行完的 kernel 竞争。
 
-同样的"仅在集合变化时重建"策略也用在采样参数上： [`BatchedSamplingParams`](../lite_llama/engine/sampler.py) 把每个请求的 temperature / top-p / repetition_penalty 摊成 `[batch, 1]` 张量，一次采样覆盖整批混合配置，而不是按配置分组多次启动 kernel。
+同样的"仅在集合变化时重建"策略也用在采样参数上： [`BatchedSamplingParams`](../rapid_llm/engine/sampler.py) 把每个请求的 temperature / top-p / repetition_penalty 摊成 `[batch, 1]` 张量，一次采样覆盖整批混合配置，而不是按配置分组多次启动 kernel。
 
 ## CUDA Graph：把奇数 batch 补齐
 
@@ -154,4 +154,4 @@ python benchmarks/bench_continuous.py --model-dir my_weight/Qwen2.5-1.5B-Instruc
 
 ## 相关文档
 
-- [在线推理服务](./online_serving.md)：`lite-llama serve` 与 OpenAI 兼容端点。
+- [在线推理服务](./online_serving.md)：`rapid-llm serve` 与 OpenAI 兼容端点。

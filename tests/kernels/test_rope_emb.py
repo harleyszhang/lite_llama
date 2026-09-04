@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.kernels import rope_emb_forward
+from rapid_llm.kernels import rope_emb_forward
 from tests.reference import rope_half_split
 
 _RTOL, _ATOL = 2e-2, 2e-2

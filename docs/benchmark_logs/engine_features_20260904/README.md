@@ -12,10 +12,10 @@
 | torch / triton / python | 2.13.0+cu130 / 3.7.1 / 3.14.7 |
 | 采样 | greedy，`--verify` 逐格断言文本一致 |
 | batch / max_gen_len | 8 / 32 |
-| autotune | 关闭（`LITE_LLAMA_AUTOTUNE=0`） |
+| autotune | 关闭（`RAPID_LLM_AUTOTUNE=0`） |
 
 ```bash
-LITE_LLAMA_AUTOTUNE=0 PYTHONPATH=. .venv/bin/python benchmarks/bench_optimizations.py \
+RAPID_LLM_AUTOTUNE=0 PYTHONPATH=. .venv/bin/python benchmarks/bench_optimizations.py \
   --model-dir <ckpt> --mode all --workload <short|long|shared> --verify --greedy \
   --batch 8 --max-gen-len 32 --json <out>.json
 # MoE 需 TP2 分片权重（单卡 OOM）：加 --tp 2 --mode single --features cuda_graph
@@ -59,7 +59,7 @@ self._chunked_min_rows = cap + 1 if fused else math.inf
 
 `_prefill_work` 用它路由续传 chunk：graphs off 时阈值为 1，所有续传 chunk 走 chunked
 prefill kernel；graphs on 时阈值为「最大捕获 batch + 1」，短余量改走 EXTEND。两条
-kernel 不逐位等价（`LITE_LLAMA_FUSED_CHUNK_PREFILL=0/1` 直接对拍首 token 即不同），
+kernel 不逐位等价（`RAPID_LLM_FUSED_CHUNK_PREFILL=0/1` 直接对拍首 token 即不同），
 greedy argmax 把这个差异放大成整条序列分岔。
 
 这解释了为何 short 干净而 long/shared 报错：**问题不在特性本身，而在续传 chunk 的

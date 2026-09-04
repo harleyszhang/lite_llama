@@ -1,4 +1,4 @@
-"""Vision benchmark: lite_llama vs HF transformers at a fixed image size.
+"""Vision benchmark: rapid_llm vs HF transformers at a fixed image size.
 
 Both backends run the same image + question prompts with the generation
 length pinned, so the comparison isolates engine overhead from the
@@ -24,7 +24,7 @@ import torch
 from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
-from lite_llama.engine import SamplingParams, VisionGenerator
+from rapid_llm.engine import SamplingParams, VisionGenerator
 
 warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
 
@@ -99,9 +99,9 @@ def load_image(path: str, size: int) -> Image.Image:
 
 def build_prompts(model_dir: str, questions: list[str]) -> list[str]:
     """LLaVA wants the explicit vicuna turn + ``<image>`` marker; Qwen3-VL's
-    preparer (lite_llama) and chat template (both engines) take a plain
+    preparer (rapid_llm) and chat template (both engines) take a plain
     question and add the vision placeholders themselves."""
-    from lite_llama.models.config import read_model_type
+    from rapid_llm.models.config import read_model_type
 
     if read_model_type(model_dir) == "llava":
         return [f"USER: <image>\n{q} ASSISTANT:" for q in questions]
@@ -130,7 +130,7 @@ def bench_lite(model_dir, prompts, image, gen_len, iters, device) -> Metrics:
     del gen
     gc.collect()
     torch.cuda.empty_cache()
-    return Metrics.from_runs("lite_llama", len(prompts), prompt_tokens, ttfts, latencies, out_tokens)
+    return Metrics.from_runs("rapid_llm", len(prompts), prompt_tokens, ttfts, latencies, out_tokens)
 
 
 def bench_hf(model_dir, prompts, image, gen_len, iters, device, dtype="fp16") -> Metrics:
@@ -140,7 +140,7 @@ def bench_hf(model_dir, prompts, image, gen_len, iters, device, dtype="fp16") ->
         tokenizer.pad_token = tokenizer.eos_token
 
     # Qwen3-VL needs the chat template to insert the vision placeholders
-    # (lite_llama's preparer applies the same template on its side).
+    # (rapid_llm's preparer applies the same template on its side).
     texts = prompts
     if getattr(processor, "chat_template", None) and "<image>" not in prompts[0]:
         texts = [
@@ -212,7 +212,7 @@ def main() -> None:
     parser.add_argument("--gen-len", type=int, default=128)
     parser.add_argument("--iters", type=int, default=2, help="Timed repeats (median reported)")
     parser.add_argument("--hf-dtype", choices=["fp16", "bf16", "auto"], default="fp16")
-    parser.add_argument("--engine", choices=["both", "lite_llama", "transformers"], default="both")
+    parser.add_argument("--engine", choices=["both", "rapid_llm", "transformers"], default="both")
     parser.add_argument("--log-dir", default="docs/benchmark_logs")
     args = parser.parse_args()
 
@@ -222,7 +222,7 @@ def main() -> None:
     prompts = build_prompts(args.model, _QUESTIONS[: args.num_requests])
 
     lite = hf = None
-    if args.engine in ("both", "lite_llama"):
+    if args.engine in ("both", "rapid_llm"):
         lite = bench_lite(args.model, prompts, image, args.gen_len, args.iters, device)
     if args.engine in ("both", "transformers"):
         hf = bench_hf(args.model, prompts, image, args.gen_len, args.iters, device, args.hf_dtype)
@@ -239,7 +239,7 @@ def main() -> None:
     log_path = log_dir / f"bench_v_{tag}_g{args.gen_len}_{stamp}.json"
     with open(log_path, "w") as f:
         json.dump({"config": cfg,
-                   "lite_llama": asdict(lite) if lite else None,
+                   "rapid_llm": asdict(lite) if lite else None,
                    "transformers": asdict(hf) if hf else None}, f, indent=2)
     print(f"-> {log_path}")
 

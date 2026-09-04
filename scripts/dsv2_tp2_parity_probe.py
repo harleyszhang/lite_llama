@@ -27,8 +27,8 @@ _MAX_GEN = 32
 
 def _lite_run() -> list[dict]:
     """Greedy completions with per-step logprobs from a two-rank engine."""
-    from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
-    from lite_llama.engine.sampler import SamplingParams
+    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+    from rapid_llm.engine.sampler import SamplingParams
 
     engine = ContinuousBatchingEngine.from_pretrained(
         model=_MODEL,

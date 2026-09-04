@@ -16,9 +16,9 @@ import gc
 import pytest
 import torch
 
-from lite_llama.engine.async_engine import AsyncLLMEngine
-from lite_llama.engine.sampler import SamplingParams
-from lite_llama.engine.scheduler import Request, Scheduler, SchedulerConfig
+from rapid_llm.engine.async_engine import AsyncLLMEngine
+from rapid_llm.engine.sampler import SamplingParams
+from rapid_llm.engine.scheduler import Request, Scheduler, SchedulerConfig
 
 _TIMEOUT = 20.0
 
@@ -257,8 +257,8 @@ async def test_the_engine_serves_a_second_event_loop():
 @pytest.mark.weights
 async def test_concurrent_coroutines_get_their_own_answers(model_dir):
     """Real model, three coroutines, one batch: nobody may get another's text."""
-    from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
-    from lite_llama.engine.llm_engine import LLMEngine
+    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+    from rapid_llm.engine.llm_engine import LLMEngine
 
     engine = AsyncLLMEngine(
         ContinuousBatchingEngine(

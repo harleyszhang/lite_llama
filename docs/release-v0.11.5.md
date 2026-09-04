@@ -15,7 +15,7 @@ v0.11.5 沿三条轴把「通信时间藏在计算后面」做成可独立开关
 
 **L2/SBO 在 decode TPOT 上收益不显著，根因已查清并写入「decode TPOT 收益归因」节（含一次重要修正）**：早期记录的「TBO eager +129~135%、graph +47~61%」是**重构前实现**的数据；TBO 重构为对齐 sglang 的实现后重测（两模型 × batch 32/128/256 × eager/graph 四臂，共 12 个测量点），**收益全部落在 ±3% 的噪声带内，正负交替，且不随 batch 或模型规模单调改善**。不是 Bug（parity 与接线测试全绿、重叠实测确实发生）；天花板低的决定性原因是 **comm 时间绝大部分是 NCCL 在 spin-wait 对端 rank（rank 0 的 comm 62.44 ms ≈ rank 1 的 compute 63.88 ms），等待时间无法被计算隐藏**。另：graph 形态比 eager 快 2-3.5 倍，这才是 decode 上真正值钱的那一刀。
 
-**质量故事（本版最有价值的产出之一）**：组合矩阵（M7）抓到了单特性测试漏掉的 TBO 数值回归——闭包在构建期快照了 `state.hidden`，所有层的 segment 都拿初始 embedding 当输入，交错输出与 eager 基线 maxdiff 27+；而「切分本身正确」的隔离证据来自 manual-halves 对照（同一 `TboSplitter` 切分、逐半顺序 forward 拼接 → maxdiff 0.0000）。修复为闭包运行时惰性读 state（`lite_llama/batch_overlap/two_batch_overlap.py` 的 `_attn_segment` docstring 记录了完整机理）。**这正是「不同优化特性做混合、交叉测试」在计划里的目的：单特性的 parity 测试过 ≠ 组合下依然对。**
+**质量故事（本版最有价值的产出之一）**：组合矩阵（M7）抓到了单特性测试漏掉的 TBO 数值回归——闭包在构建期快照了 `state.hidden`，所有层的 segment 都拿初始 embedding 当输入，交错输出与 eager 基线 maxdiff 27+；而「切分本身正确」的隔离证据来自 manual-halves 对照（同一 `TboSplitter` 切分、逐半顺序 forward 拼接 → maxdiff 0.0000）。修复为闭包运行时惰性读 state（`rapid_llm/batch_overlap/two_batch_overlap.py` 的 `_attn_segment` docstring 记录了完整机理）。**这正是「不同优化特性做混合、交叉测试」在计划里的目的：单特性的 parity 测试过 ≠ 组合下依然对。**
 
 **模型覆盖**：dense Qwen2.5-1.5B、DeepSeek-V2-Lite（MLA+MoE）、V3-4layers（biased noaux_tc 路由）、V4 裁剪版（mHC 残差/压缩器/Lightning Indexer/Hash MoE，transformers 5.8 随机初始化 checkpoint——V4 无公开权重）。
 
@@ -25,7 +25,7 @@ v0.11.5 沿三条轴把「通信时间藏在计算后面」做成可独立开关
 
 *四条可独立开关的重叠路径：A 轴 L1（`batch_overlap/overlap.py`，默认开）把下一个 pass 的 H2D 上传藏进当前 forward；C 轴 L2/L3/SBO（`batch_overlap/`，默认关）分别用半批 ping-pong、行分块与单 batch 双流把通信挪到通信流上；B 轴 L4（`kernels/tile_signal.py`）是单卡 kernel 级的逐 tile 流水；P8 让每个 DP 副本 capture 自己的 graph。L2 与 L3 共用同一个分发点 `row_parallel_forward`（passthrough > deferred TBO > chunked L3 > blocking），四条路径最终汇进同一个组合矩阵交叉验证。*
 
-包结构（`lite_llama/batch_overlap/`，对齐 sglang 的 `batch_overlap` 布局）：
+包结构（`rapid_llm/batch_overlap/`，对齐 sglang 的 `batch_overlap` 布局）：
 
 * `overlap.py` — A 轴（host↔device）：`OverlapPolicy` + `StreamPool`（copy stream + pinned staging 环）+ `Timeline`（CUDA event 区间记录，跨 stream 同一时钟）。本轮从 `executor/` 迁入：两条轴同住一个包，`Timeline` 是它们共用的证据设施
 * `operations.py` — stage/yield 交错原语，对齐 sglang 同名文件：`YieldOperation`、`StateDict`（键写一次、pop 后才能重写，`clear(expect_keys)` 校验中间量是否按时释放）、`_StageExecutor` 与 `execute_operations` / `execute_overlapped_operations`
@@ -90,7 +90,7 @@ graph 参照臂与两 eager 臂同负载、同 TP2，唯一差别 `use_cuda_grap
 
 **成本模型根因（本版新增，`benchmarks/kernels/bench_tbo_cost_model.py`）**：TBO 把 batch 切两半，每半各自跑一遍 GEMM。decode 小 batch 下 GEMM 是**访存瓶颈**（读权重主导，时间对 M 几乎是平的）：实测 Qwen2.5-1.5B TP2 形状，M=16 与 M=8 的每个 GEMM 耗时几乎相同（o_proj 20.60 vs 20.36 us、down_proj 46.56 vs 46.06 us），所以**切半 = 1.98× 全量**——两半各读一遍权重。整网计算 4.41 ms → 8.75 ms，多出 **+4.35 ms 的重复权重读取**，恰好解释 graph 6.65 ms → graph+TBO 11.44 ms（+4.79 ms）的回归。这个惩罚在 A10 上一直延伸到 M=512（仍 1.26×），因为 A10 算力弱、访存瓶颈区间宽。可藏的 AR 只占 step 的 ~3-5%，永远盖不过翻倍的权重读取——**TBO 在整个访存瓶颈 decode 区间都是净负，这是数学事实，不是调参问题**。
 
-**自门控（本版修复，保证永不负收益）**：`TboPolicy.from_env` 的默认激活阈值不再是固定的 8，而是 roofline ridge point（`_ridge_rows`，A10 上 = 520）——GEMM 从访存瓶颈转为计算瓶颈的 batch。低于 ridge，切半翻倍权重读取，TBO 拒绝激活；高于 ridge，GEMM 计算瓶颈、切半不翻倍，TBO 才可能获益。显式 `LITE_LLAMA_TBO_MIN_ROWS` 覆盖该阈值（parity 测试与 benchmark 据此在小 batch 强制开启交错）。这样 `LITE_LLAMA_TBO=1` 再也不会把一个 decode 步拖入灾难性的访存瓶颈区。
+**自门控（本版修复，保证永不负收益）**：`TboPolicy.from_env` 的默认激活阈值不再是固定的 8，而是 roofline ridge point（`_ridge_rows`，A10 上 = 520）——GEMM 从访存瓶颈转为计算瓶颈的 batch。低于 ridge，切半翻倍权重读取，TBO 拒绝激活；高于 ridge，GEMM 计算瓶颈、切半不翻倍，TBO 才可能获益。显式 `RAPID_LLM_TBO_MIN_ROWS` 覆盖该阈值（parity 测试与 benchmark 据此在小 batch 强制开启交错）。这样 `RAPID_LLM_TBO=1` 再也不会把一个 decode 步拖入灾难性的访存瓶颈区。
 
 ### SBO single-batch overlap（EP MoE 的单 batch 双流重叠）
 
@@ -103,9 +103,9 @@ L2 的 TBO 需要两半才能 ping-pong；EP decode 往往只有一个 batch，�
 
 机制：`SparseMoeBlock._forward_ep` 在 SBO 激活时改走 op 分解——先发 dispatch a2a，再把 shared MLP 放到一条 compute 侧的 alt stream 上算（`sbo_alt_stream`），双向 fence 收口（alt 等 main 的 route 结果，main 等 alt 的 shared 输出后再相加）。不开 SBO 时 shared MLP 排在 dispatch+experts+combine **之后**串行跑，两次交换的时间它一点也没藏住。
 
-一处如实的适配差异：sglang 的 SBO 靠 `DeepEPConfig.num_sms` 给通信 kernel 限定 SM 预算（DeepEP 的 kernel 接受这个参数），所以交换被钉在固定的 SM 子集上、GEMM 拿剩下的。lite_llama 的 combine 走 `all_to_all_single`，NCCL 的 kernel 自管 SM、不接受调用方的预算——所以这里的 `communicate_num_sms` 是**预算估计**（用于划分 producer/consumer 的 grid），不是对交换的实际限制；交换真正占多少 SM 是外部变量，benchmark 如实报告而不做推断。
+一处如实的适配差异：sglang 的 SBO 靠 `DeepEPConfig.num_sms` 给通信 kernel 限定 SM 预算（DeepEP 的 kernel 接受这个参数），所以交换被钉在固定的 SM 子集上、GEMM 拿剩下的。rapid_llm 的 combine 走 `all_to_all_single`，NCCL 的 kernel 自管 SM、不接受调用方的预算——所以这里的 `communicate_num_sms` 是**预算估计**（用于划分 producer/consumer 的 grid），不是对交换的实际限制；交换真正占多少 SM 是外部变量，benchmark 如实报告而不做推断。
 
-另一处如实的边界：sglang 的 `enable_combine_down_gemm_two_stream_overlap`（combine a2a 与 down GEMM 的 tile 级重叠）本版**未实现**。lite_llama 的 `fused_moe` 里 down GEMM（gemm2）按 `sorted_token_ids` 把结果 scattered 写到原始 slot 行，而 `_moe_sum_kernel` 按连续的 token 行读——「某个 GEMM tile 完成」对不上「某个 row block 就绪」，要做 tile 级同步需要额外的 inverse mapping 加原子计数，本版留作后续。已实现的是 sglang 三个重叠里的 dispatch↔shared 那一个。
+另一处如实的边界：sglang 的 `enable_combine_down_gemm_two_stream_overlap`（combine a2a 与 down GEMM 的 tile 级重叠）本版**未实现**。rapid_llm 的 `fused_moe` 里 down GEMM（gemm2）按 `sorted_token_ids` 把结果 scattered 写到原始 slot 行，而 `_moe_sum_kernel` 按连续的 token 行读——「某个 GEMM tile 完成」对不上「某个 row block 就绪」，要做 tile 级同步需要额外的 inverse mapping 加原子计数，本版留作后续。已实现的是 sglang 三个重叠里的 dispatch↔shared 那一个。
 
 证据：EP2 单测里 SBO 开关两侧输出一致（`torch.allclose` 2e-2），且 timeline 证明 shared MLP 的区间与 dispatch 交换的区间在同一设备时钟上真相交。eager 轮（`overlap/policies.py（sbo）`）实测 1248 个 dispatch region、624 个 shared-MLP region、**198 对真重叠共 78.92 ms**——shared MLP 确实与交换并行。
 
@@ -161,7 +161,7 @@ launch floor 消除后，SBO 藏的交换成为一个 GPU-bound 步里的真实�
 | GPU | 2× NVIDIA A10，22.0 GiB/卡，driver 550.135 |
 | 算力 | sm_86，72 SM/卡 |
 | 互联 | PHB（PCIe host bridge），**无 NVLink**；NVLink 拓扑未测、不做推断 |
-| 库版本 | torch 2.13.0+cu129 / triton 3.7.1 / transformers 5.15.1 / CUDA 12.9 / lite_llama 0.11.0 |
+| 库版本 | torch 2.13.0+cu129 / triton 3.7.1 / transformers 5.15.1 / CUDA 12.9 / rapid_llm 0.11.0 |
 | 主机 | 64 核 CPU，369 GiB 内存 |
 | 推理口径 | **离线推理**（全部 prompt 一次性提交、跑完收工，无 serving 排队与连续到达） |
 
@@ -176,7 +176,7 @@ launch floor 消除后，SBO 藏的交换成为一个 GPU-bound 步里的真实�
 | 并行 | TP=2 |
 | KV 池 | Qwen 65536 blocks；Llama-8B 49152 blocks |
 | 采样 | greedy |
-| 框架开关 | `LITE_LLAMA_TBO` 逐臂；`use_cuda_graph` 逐臂；`LITE_LLAMA_OVERLAP=1`（L1 默认开）；`LITE_LLAMA_COMM_OVERLAP=0`（L3 关）；`LITE_LLAMA_SBO=0`（SBO 关） |
+| 框架开关 | `RAPID_LLM_TBO` 逐臂；`use_cuda_graph` 逐臂；`RAPID_LLM_OVERLAP=1`（L1 默认开）；`RAPID_LLM_COMM_OVERLAP=0`（L3 关）；`RAPID_LLM_SBO=0`（SBO 关） |
 
 运行命令：
 
@@ -240,7 +240,7 @@ Meta-Llama-3.1-8B-Instruct，TP=2：
 
 **结论：重构后的 TBO 在 decode TPOT 上收益不显著——12 个测量点全部落在 ±3% 内，正负交替，且没有随 batch 或模型规模单调改善的趋势。**batch 从 32 加到 256、模型从 1.5B 加到 8B（hidden 1536→4096，AR payload 大 2.7 倍）都没有把收益推出噪声带。另外两个事实值得记住：graph 形态比 eager 快 2-3.5 倍（TPOT 26.45→7.64 ms、30.17→23.46 ms），这才是 decode 上真正值钱的那一刀；TBO 叠在 graph 上也不改变这个量级。
 
-**与成本模型的衔接（必读，避免两节自相矛盾）**：本节 ±3% 的读数与 L2 节的成本模型（切半 1.98× 权重读取）表面冲突，但 doubled 权重读取是 SM 上不可隐藏的实际计算——若 TBO 真的跑了，TPOT 必然上升。本节 TBO on 臂 ≈ off 臂（eager 25.67 vs 26.45、graph 7.66 vs 7.64），说明**该 benchmark 的 TBO 臂很可能没有真正激活交错**（在比较 off vs off）；而 `overlap/levels.py（L2）` 显式设 `LITE_LLAMA_TBO_MIN_ROWS=8` 后，同一 batch 32 的 eager TBO 实测 -181%、graph+TBO（batch 16）-72%，与成本模型一致。本版的 ridge 自门控让这个问题不再重要：TBO 只在计算瓶颈区（切半 ~free）激活，访存瓶颈区一律拒绝。
+**与成本模型的衔接（必读，避免两节自相矛盾）**：本节 ±3% 的读数与 L2 节的成本模型（切半 1.98× 权重读取）表面冲突，但 doubled 权重读取是 SM 上不可隐藏的实际计算——若 TBO 真的跑了，TPOT 必然上升。本节 TBO on 臂 ≈ off 臂（eager 25.67 vs 26.45、graph 7.66 vs 7.64），说明**该 benchmark 的 TBO 臂很可能没有真正激活交错**（在比较 off vs off）；而 `overlap/levels.py（L2）` 显式设 `RAPID_LLM_TBO_MIN_ROWS=8` 后，同一 batch 32 的 eager TBO 实测 -181%、graph+TBO（batch 16）-72%，与成本模型一致。本版的 ridge 自门控让这个问题不再重要：TBO 只在计算瓶颈区（切半 ~free）激活，访存瓶颈区一律拒绝。
 
 #### 重构前的旧数据（仅作历史对照，不要引用）
 
@@ -298,13 +298,13 @@ Meta-Llama-3.1-8B-Instruct，TP=2：
 
 #### 为什么 sglang 的收益更高：三个框架能力缺失（不是实现 Bug）
 
-对照 sglang 的实现、单测与用例配置后，lite_llama 收益低的原因不在交错逻辑（parity 全绿、重叠实测发生），而在三个框架级能力缺失与一个场景错配。
+对照 sglang 的实现、单测与用例配置后，rapid_llm 收益低的原因不在交错逻辑（parity 全绿、重叠实测发生），而在三个框架级能力缺失与一个场景错配。
 
-**1. SBO 缺 tile 级重叠能力（最主要的差距）**。sglang 的 SBO 主力是 `enable_combine_down_gemm_two_stream_overlap`——combine a2a 与 down GEMM 的 **tile 级**重叠，靠两个硬条件：（a）MoE kernel backend 必须是 `flashinfer_cutedsl` 或 `deep_gemm`；（b）MoE runner 提供 `set_overlap_args(down_gemm_overlap_args, meta_overlap_args)` 接口（`layers/moe/fused_moe_triton/layer.py`），让 down GEMM 能按 `num_sms` 限定 grid 并逐 tile 发布 signal。lite_llama 的 `fused_moe` **没有这个接口**，triton kernel 也不支持 SM 分区，所以只能做 stream 级的 dispatch↔shared（sglang 三个重叠里最弱的那个）。这直接解释了 SBO 收益为何在 ±2% 而不是 sglang 的量级。
+**1. SBO 缺 tile 级重叠能力（最主要的差距）**。sglang 的 SBO 主力是 `enable_combine_down_gemm_two_stream_overlap`——combine a2a 与 down GEMM 的 **tile 级**重叠，靠两个硬条件：（a）MoE kernel backend 必须是 `flashinfer_cutedsl` 或 `deep_gemm`；（b）MoE runner 提供 `set_overlap_args(down_gemm_overlap_args, meta_overlap_args)` 接口（`layers/moe/fused_moe_triton/layer.py`），让 down GEMM 能按 `num_sms` 限定 grid 并逐 tile 发布 signal。rapid_llm 的 `fused_moe` **没有这个接口**，triton kernel 也不支持 SM 分区，所以只能做 stream 级的 dispatch↔shared（sglang 三个重叠里最弱的那个）。这直接解释了 SBO 收益为何在 ±2% 而不是 sglang 的量级。
 
 **2. TBO 测试场景错配**。sglang 的 TBO 用例配置（`test/manual/test_two_batch_overlap.py`）是 `--tp 2 --dp 2 --enable-dp-attention --moe-a2a-backend deepep --deepep-mode normal --disable-cuda-graph --enable-two-batch-overlap`——它藏的是 **MoE 的 DeepEP a2a**（payload = batch × hidden × top_k，极大）并搭配 DP attention。而本版 TBO 的 scaling 测的是 **dense TP + NCCL all-reduce**（payload = batch × hidden，小一个 top_k 量级）。同样一套交错逻辑，藏的 payload 差一个量级，收益自然差一个量级。
 
-**3. 缺 DeepEP 类的通信 backend**。sglang 靠 DeepEP 给通信 kernel 限定 SM 预算（交换钉在固定 SM 子集、GEMM 拿剩下的）；lite_llama 的 combine 走 `all_to_all_single`，NCCL kernel 自管 SM、不接受调用方预算——所以即使补上 tile signal，也无法做真正的 SM 硬分区（参考 vLLM DBO：SM partition 在 kernel 层而非 stream 层）。
+**3. 缺 DeepEP 类的通信 backend**。sglang 靠 DeepEP 给通信 kernel 限定 SM 预算（交换钉在固定 SM 子集、GEMM 拿剩下的）；rapid_llm 的 combine 走 `all_to_all_single`，NCCL kernel 自管 SM、不接受调用方预算——所以即使补上 tile signal，也无法做真正的 SM 硬分区（参考 vLLM DBO：SM partition 在 kernel 层而非 stream 层）。
 
 **附：模型规模**。sglang 的 TBO 单测跑 MLA 模型（DeepSeek 系，hidden 7168、MoE），本版 scaling 跑的是 Qwen2.5-1.5B（hidden 1536、dense）与 Llama-3.1-8B（hidden 4096、dense）——两个都不是 sglang 的目标形状。
 
@@ -419,8 +419,8 @@ V4 无公开权重（仅 config.json），用 transformers 5.8 随机初始化�
 
 ```bash
 pytest tests/golden/ -q                                        # 默认：9 passed
-LITE_LLAMA_OVERLAP=1 LITE_LLAMA_TBO=1 LITE_LLAMA_COMM_OVERLAP=1 \
-LITE_LLAMA_TBO_MIN_ROWS=2 pytest tests/golden/ -q              # 全开：9 passed
+RAPID_LLM_OVERLAP=1 RAPID_LLM_TBO=1 RAPID_LLM_COMM_OVERLAP=1 \
+RAPID_LLM_TBO_MIN_ROWS=2 pytest tests/golden/ -q              # 全开：9 passed
 ```
 
 第二遍把 TBO 激活阈值压到 2 强制 TP2 golden 走 `forward_tbo` 路径，V2-Lite 的 greedy/logprob parity 预算（mean 0.4/max 2.5 nats，2× 实测漂移校准——校准证据链见测试内注释）依然全绿。
@@ -459,11 +459,11 @@ TBO+graph capture 落地轮补测（新增 `capture_eligible` 谓词、FakeRunne
 ## 已知边界（如实标注）
 
 1. **互联**：全部数据来自 2×A10 **PCIe**（无 NVLink 硬件）。L2 的负收益根因是双重的：eager 形态的 CPU launch floor（graph 参照臂 6.2-7.6 ms 对 eager 臂 27-66 ms），加上切半翻倍权重读取的成本模型惩罚（见 L2 节）；PCIe 只决定 AR wire 时间（~32 us/次）。NVLink 上的一切**未测**，不做推断。
-2. **L2 默认 off + 成本模型自门控**：TBO 在整个访存瓶颈 decode 区间净负（切半 1.98× 权重读取，成本模型实测）。本版把 `TboPolicy` 默认激活阈值改为 roofline ridge point（A10=520），只在计算瓶颈区激活，保证 `LITE_LLAMA_TBO=1` 永不负收益；显式 `LITE_LLAMA_TBO_MIN_ROWS` 可覆盖（测试/benchmark 用）。A10 上现实 decode batch（≤128）均低于 ridge，故 TBO 实际不会激活。
+2. **L2 默认 off + 成本模型自门控**：TBO 在整个访存瓶颈 decode 区间净负（切半 1.98× 权重读取，成本模型实测）。本版把 `TboPolicy` 默认激活阈值改为 roofline ridge point（A10=520），只在计算瓶颈区激活，保证 `RAPID_LLM_TBO=1` 永不负收益；显式 `RAPID_LLM_TBO_MIN_ROWS` 可覆盖（测试/benchmark 用）。A10 上现实 decode batch（≤128）均低于 ridge，故 TBO 实际不会激活。
 3. **V4 fp4**：本版仅 bf16/fp16 unquantised 权重（parity 基础）；fp4 量化加载留待后续。
 4. **V4 TBO 未接线**：mHC 栈的段结构与两段拆分不匹配，本版 V4 不走 `forward_tbo`（矩阵里 V4 只测 L1+L3 组合）。
-5. **裁剪 checkpoint 的 grouped_topk**：V3-4layers（8 experts/8 组）落在所有参考实现（transformers/vLLM）都会崩的几何上；lite_llama 按数学极限退化处理（单 expert 组分数 = top-2 和的极限 = 该 expert 分数），`tests/kernels/test_grouped_topk_kernel.py` 锁定该语义。
-6. **SBO 的 SM 预算是估计而非限制**：lite_llama 的 combine 走 NCCL `all_to_all_single`，不接受调用方的 SM 预算（sglang 靠 DeepEP 的 `num_sms` 把交换钉在固定 SM 子集上），`communicate_num_sms` 只用于划分 producer/consumer 的 grid。sglang 的 combine↔down GEMM tile 级重叠本版未实现：`fused_moe` 的 gemm2 按 `sorted_token_ids` scattered 写入，使 GEMM tile 与 consumer 的 row block 对不齐，需额外的 inverse mapping 加原子计数。
+5. **裁剪 checkpoint 的 grouped_topk**：V3-4layers（8 experts/8 组）落在所有参考实现（transformers/vLLM）都会崩的几何上；rapid_llm 按数学极限退化处理（单 expert 组分数 = top-2 和的极限 = 该 expert 分数），`tests/kernels/test_grouped_topk_kernel.py` 锁定该语义。
+6. **SBO 的 SM 预算是估计而非限制**：rapid_llm 的 combine 走 NCCL `all_to_all_single`，不接受调用方的 SM 预算（sglang 靠 DeepEP 的 `num_sms` 把交换钉在固定 SM 子集上），`communicate_num_sms` 只用于划分 producer/consumer 的 grid。sglang 的 combine↔down GEMM tile 级重叠本版未实现：`fused_moe` 的 gemm2 按 `sorted_token_ids` scattered 写入，使 GEMM tile 与 consumer 的 row block 对不齐，需额外的 inverse mapping 加原子计数。
 7. **EP graph 默认 lazy capture**：本版 EP 不再强制关 graph（a2a 与 TBO deferred-AR 用同一套可捕获原语，parity 由 `ep2_graph` 测试臂门禁）。但 EP 的 a2a buffer 让每个 graph 远大于 dense TP，全网格捕获会在 profiled KV 池旁 OOM，故 EP 默认走 lazy capture（种子对 + 按需捕获），`enable_cuda_graph` 的 OOM 回退（已拓宽到捕获期的 `AcceleratorError`）兜底任何仍放不下的形状。
 
 ## 图表

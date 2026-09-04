@@ -11,9 +11,9 @@ import torch.distributed as dist
 
 
 def payload(rank: int) -> dict:
-    from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
-    from lite_llama.executor.attention_metadata import AttentionMetadata
-    from lite_llama.kernels import skip_rmsnorm
+    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+    from rapid_llm.executor.attention_metadata import AttentionMetadata
+    from rapid_llm.kernels import skip_rmsnorm
 
     eng = ContinuousBatchingEngine.from_pretrained(
         model="my_weight/DeepSeek-V2-Lite",

@@ -1,7 +1,7 @@
 """Record the v0.11.5 overlap GIFs: L2 ping-pong, L3 chunked AR, L4 tile pipeline.
 
 Three levels, three pictures, one renderer. Every bar is a CUDA-event region the
-engine itself recorded (``LITE_LLAMA_OVERLAP_TIMELINE=1``) on a real run — L2 and
+engine itself recorded (``RAPID_LLM_OVERLAP_TIMELINE=1``) on a real run — L2 and
 L3 on a TP=2 Qwen2.5-1.5B decode/prefill, L4 on one GPU's producer/consumer
 kernel pair — so what the frame shows is device-side concurrency, not a drawing
 of what the code intends to do. The overlap is read back off the same records
@@ -38,7 +38,7 @@ from PIL import Image, ImageDraw, ImageFont
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from lite_llama.batch_overlap.overlap import RegionRecord  # noqa: E402
+from rapid_llm.batch_overlap.overlap import RegionRecord  # noqa: E402
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
@@ -52,7 +52,7 @@ DIM, TEXT_FG, AXIS_FG = (128, 136, 148), (222, 226, 232), (52, 58, 68)
 OVERLAP_FG = (245, 99, 72)
 
 CKPT = "my_weight/Qwen2.5-1.5B-Instruct"
-TIMELINE_ENV = "LITE_LLAMA_OVERLAP_TIMELINE"
+TIMELINE_ENV = "RAPID_LLM_OVERLAP_TIMELINE"
 
 
 @dataclass(frozen=True)
@@ -71,11 +71,11 @@ class Lane:
 
 def record_l2(model_dir: str) -> list[RegionRecord]:
     """TP=2 decode with TBO on: half-A/B segments plus the deferred reductions."""
-    os.environ["LITE_LLAMA_TBO"] = "1"
+    os.environ["RAPID_LLM_TBO"] = "1"
     os.environ[TIMELINE_ENV] = "1"
     from benchmarks.common import make_backend
-    from lite_llama.batch_overlap.comm_overlap import CommStreamPool
-    from lite_llama.batch_overlap.two_batch_overlap import reset_tbo_policy
+    from rapid_llm.batch_overlap.comm_overlap import CommStreamPool
+    from rapid_llm.batch_overlap.two_batch_overlap import reset_tbo_policy
 
     reset_tbo_policy()  # the policy is cached per process; this run opts in
     CommStreamPool.reset()
@@ -107,10 +107,10 @@ def record_l2(model_dir: str) -> list[RegionRecord]:
 
 def record_l3(model_dir: str) -> list[RegionRecord]:
     """TP=2 chunked prefill with L3 on: ``l3.gemm.k`` against ``l3.all_reduce.k``."""
-    os.environ["LITE_LLAMA_COMM_OVERLAP"] = "1"
+    os.environ["RAPID_LLM_COMM_OVERLAP"] = "1"
     os.environ[TIMELINE_ENV] = "1"
     from benchmarks.common import PROMPTS, expand_prompts, make_backend
-    from lite_llama.batch_overlap.comm_overlap import CommStreamPool, reset_comm_overlap_policy
+    from rapid_llm.batch_overlap.comm_overlap import CommStreamPool, reset_comm_overlap_policy
 
     reset_comm_overlap_policy()
     CommStreamPool.reset()
@@ -137,8 +137,8 @@ def record_l4() -> list[RegionRecord]:
     """One GPU: the tile-signaling producer/consumer pair, instrumented."""
     import torch
 
-    from lite_llama.batch_overlap.overlap import Timeline
-    from lite_llama.kernels.tile_signal import TileSignalBuffer, pipelined_gemm_swiglu
+    from rapid_llm.batch_overlap.overlap import Timeline
+    from rapid_llm.kernels.tile_signal import TileSignalBuffer, pipelined_gemm_swiglu
 
     # The Qwen2.5-1.5B TP2 MLP shape at a prefill-ish batch: enough tiles that
     # the consumer has real work to overlap with the producer.
@@ -237,7 +237,7 @@ LEVELS: dict[str, dict] = {
         "record": record_l2,
         "lanes": lanes_l2,
         "caption": caption_l2,
-        "title": "lite-llama  —  L2 two-batch overlap (decode ping-pong over a deferred all-reduce)",
+        "title": "rapid-llm  —  L2 two-batch overlap (decode ping-pong over a deferred all-reduce)",
         "out": "docs/images/overlap_l2.gif",
         "regions": 30,
     },
@@ -245,7 +245,7 @@ LEVELS: dict[str, dict] = {
         "record": record_l3,
         "lanes": lanes_l3,
         "caption": caption_l3,
-        "title": "lite-llama  —  L3 chunked all-reduce (row chunks of one row-parallel GEMM)",
+        "title": "rapid-llm  —  L3 chunked all-reduce (row chunks of one row-parallel GEMM)",
         "out": "docs/images/overlap_l3.gif",
         "regions": 24,
     },
@@ -253,7 +253,7 @@ LEVELS: dict[str, dict] = {
         "record": record_l4,
         "lanes": lanes_l4,
         "caption": caption_l4,
-        "title": "lite-llama  —  L4 tile-signaling (GEMM producer / epilogue consumer, one GPU)",
+        "title": "rapid-llm  —  L4 tile-signaling (GEMM producer / epilogue consumer, one GPU)",
         "out": "docs/images/overlap_l4.gif",
         "regions": 6,
     },

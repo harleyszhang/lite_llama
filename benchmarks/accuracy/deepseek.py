@@ -1,11 +1,11 @@
-"""DeepSeek trimmed-checkpoint accuracy: reference implementations vs lite_llama.
+"""DeepSeek trimmed-checkpoint accuracy: reference implementations vs rapid_llm.
 
 Two cut-down checkpoints serve as the accuracy targets — small enough to run
 eagerly, same module structure and quantization paths as the full models:
 
 * **V3-4layers** (bf16, 13 GiB): one A10 holds one implementation at a time,
   so the transformers reference runs first, leaves its logits and greedy
-  tokens on the CPU, and frees the GPU before lite_llama loads. The vLLM
+  tokens on the CPU, and frees the GPU before rapid_llm loads. The vLLM
   vote runs from the vLLM source tree's venv (third subcommand); pairwise
   greedy agreement across the three stacks pins residual divergence on bf16
   numerics rather than structure.
@@ -16,19 +16,19 @@ eagerly, same module structure and quantization paths as the full models:
   (``vllm/platforms/cuda.py::support_deep_gemm``) — so the reference is
   transformers 5.15's eager DeepseekV4ForCausalLM on CPU, its weights filled
   from the DSpark files by :mod:`benchmarks.accuracy.dspark_to_hf`. The
-  lite_llama side consumes the DSpark storage directly (TP-2, fp8/mxfp4)
+  rapid_llm side consumes the DSpark storage directly (TP-2, fp8/mxfp4)
   over the tests' tp harness, so the two sides meet through their JSONs.
 
 Both targets run 32 greedy steps — through each framework's own incremental
-path (transformers' DynamicCache against lite_llama's paged KV metadata) —
+path (transformers' DynamicCache against rapid_llm's paged KV metadata) —
 and every step records its top-5 logprobs, the comparison record the
 agreement subcommands consume.
 
-    lite_llama venv, single GPU:
+    rapid_llm venv, single GPU:
         python -m benchmarks.accuracy.deepseek v3 parity
     vLLM source tree's venv:
         /path/to/vllm-venv/python -m benchmarks.accuracy.deepseek v3 vllm
-    lite_llama venv, GPUs (TP-2) / CPU:
+    rapid_llm venv, GPUs (TP-2) / CPU:
         python -m benchmarks.accuracy.deepseek v4 lite
         python -m benchmarks.accuracy.deepseek v4 hf
     analyses (either venv):
@@ -184,12 +184,12 @@ def run_v3_reference(prompt_ids: list[torch.Tensor]) -> dict:
 
 
 def run_v3_lite(prompt_ids: list[torch.Tensor], reference: dict) -> dict:
-    """lite_llama side: loads the same checkpoint, compares on the fly."""
-    from lite_llama.executor.attention_metadata import AttentionMetadata
-    from lite_llama.executor.loader import materialise_parameters
-    from lite_llama.executor.weight_utils import hf_weights_iterator
-    from lite_llama.models.config import ModelConfig
-    from lite_llama.models.registry import ModelRegistry
+    """rapid_llm side: loads the same checkpoint, compares on the fly."""
+    from rapid_llm.executor.attention_metadata import AttentionMetadata
+    from rapid_llm.executor.loader import materialise_parameters
+    from rapid_llm.executor.weight_utils import hf_weights_iterator
+    from rapid_llm.models.config import ModelConfig
+    from rapid_llm.models.registry import ModelRegistry
 
     config = ModelConfig.from_pretrained(V3_CKPT, max_seq_len=2048, hf_overrides=V3_HF_OVERRIDES)
     assert config.quant is None, "the V3-4layers checkpoint is plain bf16"
@@ -300,7 +300,7 @@ def cmd_v3_parity(args) -> int:
 
     t0 = time.time()
     results = run_v3_lite(prompt_ids, reference)
-    print(f"lite_llama side done in {time.time() - t0:.1f}s")
+    print(f"rapid_llm side done in {time.time() - t0:.1f}s")
 
     for p in results["prompts"]:
         pre, greedy = p["prefill"], p["greedy"]
@@ -386,7 +386,7 @@ def cmd_v3_three_way(args) -> int:
 
 
 # --------------------------------------------------------------------- #
-# V4-Flash: fp32 CPU oracle vs lite_llama TP-2
+# V4-Flash: fp32 CPU oracle vs rapid_llm TP-2
 # --------------------------------------------------------------------- #
 
 V4_PREFILL_LENS = [64, 256, 1024]
@@ -400,12 +400,12 @@ def _v4_prompt_ids(length: int) -> torch.Tensor:
 
 def _v4_lite_payload(rank: int) -> dict:
     """Module-level so tp_harness's spawned workers can pickle it."""
-    from lite_llama.distributed.parallel_state import tensor_model_parallel_all_gather
-    from lite_llama.executor.attention_metadata import AttentionMetadata
-    from lite_llama.executor.loader import materialise_parameters
-    from lite_llama.executor.weight_utils import hf_weights_iterator
-    from lite_llama.models.config import ModelConfig
-    from lite_llama.models.registry import ModelRegistry
+    from rapid_llm.distributed.parallel_state import tensor_model_parallel_all_gather
+    from rapid_llm.executor.attention_metadata import AttentionMetadata
+    from rapid_llm.executor.loader import materialise_parameters
+    from rapid_llm.executor.weight_utils import hf_weights_iterator
+    from rapid_llm.models.config import ModelConfig
+    from rapid_llm.models.registry import ModelRegistry
 
     config = ModelConfig.from_pretrained(V4_CKPT, max_seq_len=2048)
     model = ModelRegistry.resolve("deepseek_v4").load_class()(config)
@@ -467,7 +467,7 @@ def cmd_v4_hf(args) -> int:
     from transformers.models.deepseek_v4 import DeepseekV4ForCausalLM
 
     from benchmarks.accuracy.dspark_to_hf import load_dspark_hf
-    from lite_llama.models.config import ModelConfig
+    from rapid_llm.models.config import ModelConfig
 
     config = ModelConfig.from_pretrained(V4_CKPT, max_seq_len=2048).hf_config
     with torch.device("meta"):
@@ -520,7 +520,7 @@ def main() -> int:
 
     v3 = sub.add_parser("v3", help="V3-4layers: transformers / lite / vLLM three-way")
     v3_sub = v3.add_subparsers(dest="mode", required=True)
-    v3_sub.add_parser("parity", help="transformers vs lite_llama over the real checkpoint")
+    v3_sub.add_parser("parity", help="transformers vs rapid_llm over the real checkpoint")
     v3_sub.add_parser("vllm", help="the vLLM vote (run from the vLLM venv)")
     three = v3_sub.add_parser("three-way", help="pairwise greedy agreement from two JSONs")
     three.add_argument("parity", help="parity JSON (from the v3 parity subcommand)")
@@ -528,7 +528,7 @@ def main() -> int:
 
     v4 = sub.add_parser("v4", help="V4-Flash: fp32 CPU oracle vs lite TP-2")
     v4_sub = v4.add_subparsers(dest="mode", required=True)
-    v4_sub.add_parser("lite", help="lite_llama side, TP-2 over the tp harness")
+    v4_sub.add_parser("lite", help="rapid_llm side, TP-2 over the tp harness")
     v4_sub.add_parser("hf", help="transformers reference side, DSpark weights on CPU")
     compare = v4_sub.add_parser("compare", help="greedy agreement and top-5 drift from two JSONs")
     compare.add_argument("lite", help="lite JSON (from the v4 lite subcommand)")

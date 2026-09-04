@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from lite_llama import SamplingParams, TextGenerator
+from rapid_llm import SamplingParams, TextGenerator
 from tests.golden.cases import (
     CASES,
     MAX_GPU_NUM_BLOCKS,

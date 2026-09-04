@@ -102,7 +102,7 @@ def measure_dp(
         the tokenizer lets a caller replay routing decisions on exactly the ids the
         balancer saw.
     """
-    from lite_llama import DataParallelEngine
+    from rapid_llm import DataParallelEngine
 
     with DataParallelEngine(
         model=model, data_parallel_size=dp, max_num_seqs=max_num_seqs, **engine_kwargs

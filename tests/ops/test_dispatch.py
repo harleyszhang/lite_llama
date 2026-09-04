@@ -15,7 +15,7 @@ import re
 
 import pytest
 
-from lite_llama.kernels.dispatcher import (
+from rapid_llm.kernels.dispatcher import (
     REGISTRY,
     GoldenRecord,
     KernelSpec,
@@ -31,7 +31,7 @@ from lite_llama.kernels.dispatcher import (
     step_prepare_for,
     unsafe_for_graph,
 )
-from lite_llama.platform.spec import CapabilityRequirement, PlatformInfo
+from rapid_llm.platform.spec import CapabilityRequirement, PlatformInfo
 
 A10 = PlatformInfo("cuda", 8, 6, "NVIDIA A10")
 H100 = PlatformInfo("cuda", 9, 0, "NVIDIA H100")
@@ -101,8 +101,8 @@ def external(name: str, **over) -> KernelSpec:
 
 @pytest.fixture(autouse=True)
 def _no_env_overrides(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("LITE_LLAMA_FORCE_BACKEND", raising=False)
-    monkeypatch.delenv("LITE_LLAMA_KERNEL_TRACE", raising=False)
+    monkeypatch.delenv("RAPID_LLM_FORCE_BACKEND", raising=False)
+    monkeypatch.delenv("RAPID_LLM_KERNEL_TRACE", raising=False)
     monkeypatch.delenv(op_backend_env("test.op"), raising=False)
 
 
@@ -300,14 +300,14 @@ class TestForcedBackend:
 
     def test_env_variable_forces_globally(self, monkeypatch: pytest.MonkeyPatch) -> None:
         reg = make_reg(native(), external("x/a"))
-        monkeypatch.setenv("LITE_LLAMA_FORCE_BACKEND", "x")
+        monkeypatch.setenv("RAPID_LLM_FORCE_BACKEND", "x")
         sel = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         assert sel.spec.name == "x/a"
 
     def test_op_id_becomes_an_env_key(self) -> None:
         # Dots are not legal in a shell variable name, so they become '_'.
-        assert op_backend_env("attention.decode") == "LITE_LLAMA_ATTENTION_DECODE_BACKEND"
-        assert op_backend_env("linear") == "LITE_LLAMA_LINEAR_BACKEND"
+        assert op_backend_env("attention.decode") == "RAPID_LLM_ATTENTION_DECODE_BACKEND"
+        assert op_backend_env("linear") == "RAPID_LLM_LINEAR_BACKEND"
 
     def test_per_op_env_pins_just_that_op(self, monkeypatch: pytest.MonkeyPatch) -> None:
         reg = make_reg(native(), external("x/a"))
@@ -322,14 +322,14 @@ class TestForcedBackend:
     def test_per_op_env_beats_the_global_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Narrower wins: the run says "x everywhere", the op says "native here".
         reg = make_reg(native(), external("x/a", priority=99))
-        monkeypatch.setenv("LITE_LLAMA_FORCE_BACKEND", "x")
+        monkeypatch.setenv("RAPID_LLM_FORCE_BACKEND", "x")
         monkeypatch.setenv(op_backend_env("test.op"), "native")
         sel = dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         assert sel.spec.name == "native/floor"
 
     def test_backend_argument_beats_every_env_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         reg = make_reg(native(), external("x/a", priority=99))
-        monkeypatch.setenv("LITE_LLAMA_FORCE_BACKEND", "x")
+        monkeypatch.setenv("RAPID_LLM_FORCE_BACKEND", "x")
         monkeypatch.setenv(op_backend_env("test.op"), "x")
         sel = dispatch("test.op", dtype="bf16", backend="native", platform_info=A10, registry=reg)
         assert sel.spec.name == "native/floor"
@@ -356,7 +356,7 @@ class TestExplainAndTrace:
     def test_trace_emits_one_json_line(
         self, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture
     ) -> None:
-        monkeypatch.setenv("LITE_LLAMA_KERNEL_TRACE", "1")
+        monkeypatch.setenv("RAPID_LLM_KERNEL_TRACE", "1")
         reg = make_reg(native())
         dispatch("test.op", dtype="bf16", platform_info=A10, registry=reg)
         # The project logger propagates to a coloured stderr handler only, so
@@ -392,7 +392,7 @@ class TestTargetResolution:
 
 
 class TestGraphGate:
-    """graph_safe marking + the runner's pre-capture query — the lite_llama
+    """graph_safe marking + the runner's pre-capture query — the rapid_llm
     analogue of vLLM's AttentionCGSupport check before its first capture."""
 
     def test_ranked_unsafe_backend_is_reported(self) -> None:

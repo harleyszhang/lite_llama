@@ -7,7 +7,7 @@ Four subcommands share the workload builders, the offline harness
   workloads: shared-prefix waves (measures hit rate and the TTFT gain) and
   long prompts beside running decodes (measures the chunked-prefill step mix
   and the graph replay coverage of resumed chunks).
-* ``serving`` — the same engine over the HTTP API (``lite-llama serve``):
+* ``serving`` — the same engine over the HTTP API (``rapid-llm serve``):
   TTFT/TPOT/aggregate throughput per concurrency level, plus three
   prefix-parity checks that separate batch-dependent arithmetic from leaked
   request state.
@@ -60,7 +60,7 @@ from benchmarks.lib import (
 
 #: The modelzoo root when it is set, else the ``my_weight`` convention every other
 #: bench script uses — a machine-specific path here would only work on one host.
-_MODELZOO = os.environ.get("LITE_LLAMA_MODELZOO")
+_MODELZOO = os.environ.get("RAPID_LLM_MODELZOO")
 _DEFAULT_MODEL = (
     f"{_MODELZOO}/Qwen/Qwen2___5-0___5B-Instruct" if _MODELZOO else "my_weight/Qwen2.5-0.5B"
 )
@@ -197,7 +197,7 @@ def _write_texts(json_path: str, results: dict[str, WorkloadStats]) -> None:
 # matrix — the feature matrix, in-process
 # --------------------------------------------------------------------------- #
 def _matrix_main(args: argparse.Namespace) -> int:
-    from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
+    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 
     require_gpus(args.tp)
 
@@ -327,11 +327,11 @@ class ServeSpec:
     def serve_argv(
         self, model_dir: str, port: int, max_seq_len: int, max_num_seqs: int
     ) -> list[str]:
-        """The ``lite-llama serve`` command line for this configuration."""
+        """The ``rapid-llm serve`` command line for this configuration."""
         argv = [
             sys.executable,
             "-m",
-            "lite_llama.cli",
+            "rapid_llm.cli",
             "serve",
             "--model-dir",
             model_dir,
@@ -541,9 +541,9 @@ async def _serial(port: int, model: str, prompts: list[str], max_tokens: int) ->
 def _offline_child(payload: dict[str, Any], out: mp.Queue) -> None:
     """The in-process reference: same scheme, batch of one, plus one duplicate batch."""
     try:
-        from lite_llama import SamplingParams
-        from lite_llama.engine import ContinuousBatchingEngine
-        from lite_llama.engine.scheduler import DEFAULT_MAX_NUM_SEQS
+        from rapid_llm import SamplingParams
+        from rapid_llm.engine import ContinuousBatchingEngine
+        from rapid_llm.engine.scheduler import DEFAULT_MAX_NUM_SEQS
 
         spec: ServeSpec = payload["spec"]
         kwargs: dict[str, Any] = {
@@ -911,7 +911,7 @@ def _serving_main(args: argparse.Namespace) -> int:
     try:
         import httpx  # noqa: F401
     except ImportError:
-        print("serving needs httpx: pip install 'lite_llama[serve]'", file=sys.stderr)
+        print("serving needs httpx: pip install 'rapid_llm[serve]'", file=sys.stderr)
         return 1
 
     from transformers import AutoTokenizer
@@ -1000,7 +1000,7 @@ def _configure_serving(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ready-timeout", type=float, default=_READY_TIMEOUT_S)
     parser.add_argument(
         "--server-log-dir",
-        default="/tmp/lite_llama_serving",
+        default="/tmp/rapid_llm_serving",
         help="Where each server's stdout goes; a failed startup is diagnosed from it",
     )
     parser.add_argument("--json", help="Output path; a default under docs/benchmark_logs is used")
@@ -1016,8 +1016,8 @@ def _diag_prefix_main(args: argparse.Namespace) -> int:
     ``SlotBatch.copy_prefix`` to time KV copies and prints the stream timeline
     so forward.prefill / forward.extend / forward.decode are each accounted for.
     """
-    from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
-    from lite_llama.executor.slot_batch import SlotBatch
+    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+    from rapid_llm.executor.slot_batch import SlotBatch
 
     copy_wall_s = 0.0
     copy_calls = 0
@@ -1122,10 +1122,10 @@ def _diag_preempt_main(args: argparse.Namespace) -> int:
     """
     import gc
 
-    from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
-    from lite_llama.engine.llm_engine import LLMEngine
-    from lite_llama.engine.scheduler import SchedulerConfig
-    from lite_llama.executor.executor import UniProcExecutor
+    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+    from rapid_llm.engine.llm_engine import LLMEngine
+    from rapid_llm.engine.scheduler import SchedulerConfig
+    from rapid_llm.executor.executor import UniProcExecutor
 
     def build(preempt: bool, max_num_seqs: int, slots_tokens: int):
         engine_llm = LLMEngine(

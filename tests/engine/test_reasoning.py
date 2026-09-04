@@ -16,7 +16,7 @@ import itertools
 
 import pytest
 
-from lite_llama.engine.reasoning import ReasoningSplitter, for_family
+from rapid_llm.engine.reasoning import ReasoningSplitter, for_family
 
 # Tag spellings are assembled, never written out: the transport delivering
 # source edits strips anything it parses as markup.

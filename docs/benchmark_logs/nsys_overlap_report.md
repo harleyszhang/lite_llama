@@ -1,7 +1,7 @@
 # nsys overlap evidence — TP=2 decode, Qwen2.5-1.5B, batch 16, eager
 
 Two payloads identical except the overlap switches
-(`LITE_LLAMA_OVERLAP`/`LITE_LLAMA_TBO`/`LITE_LLAMA_COMM_OVERLAP`);
+(`RAPID_LLM_OVERLAP`/`RAPID_LLM_TBO`/`RAPID_LLM_COMM_OVERLAP`);
 traced with `nsys profile --trace=cuda`, kernels exported via
 `nsys stats -r cuda_gpu_trace --format csv`, then aggregated per GPU
 over every NCCL kernel (both warmup and steady passes — the overlap

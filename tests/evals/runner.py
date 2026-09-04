@@ -20,7 +20,7 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
-from lite_llama import LLM, SamplingParams
+from rapid_llm import LLM, SamplingParams
 
 
 def resolve_model_dir(model_dir: str) -> Path:
@@ -141,7 +141,7 @@ def build_llm(
     quantization: str | None = None,
     kv_cache_dtype: str = "auto",
 ) -> Iterator[LLM]:
-    """Build an :class:`~lite_llama.LLM` and free the device on the way out.
+    """Build an :class:`~rapid_llm.LLM` and free the device on the way out.
 
     The engine, executor and KV manager reference each other, so dropping the
     last name is not enough to release the weights; without the explicit
@@ -174,7 +174,7 @@ def build_llm(
 def greedy_params(max_gen_len: int) -> SamplingParams:
     """Sampling settings a benchmark should be scored under.
 
-    Greedy, and with both of lite_llama's chat-facing defaults switched off:
+    Greedy, and with both of rapid_llm's chat-facing defaults switched off:
     ``repetition_penalty`` rescales logits and ``stop_on_repeat`` can cut a
     sequence short, so leaving either on would score a decoding policy rather
     than the model. They exist to keep small models out of loops in interactive
@@ -217,7 +217,7 @@ def generate_completions(
         prompts: One prompt per question.
         max_gen_len: Decode steps per batch. Every sequence runs the full count
             unless it hits EOS, so this is the dominant cost term.
-        batch_size: Prompts per :meth:`~lite_llama.LLM.generate` call.
+        batch_size: Prompts per :meth:`~rapid_llm.LLM.generate` call.
         stop: Markers to truncate each completion at.
         progress: Show a per-batch progress bar.
     """

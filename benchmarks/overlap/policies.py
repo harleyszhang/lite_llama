@@ -260,8 +260,8 @@ def bench_prefill(args) -> dict:
         "greedy": True,
     }
     summary["framework_flags"] = {
-        "LITE_LLAMA_TBO": "per arm",
-        "LITE_LLAMA_SBO": "per arm",
+        "RAPID_LLM_TBO": "per arm",
+        "RAPID_LLM_SBO": "per arm",
         "NCCL_MAX_CTAS": "20 when the SM budget is on",
         "use_cuda_graph": "False (EP + prefill)",
     }
@@ -329,7 +329,7 @@ def bench_scaling(args) -> dict:
 
 def model_facts(model_dir: str) -> dict:
     """The architecture numbers that decide whether halving M stays efficient."""
-    from lite_llama.models.config import ModelConfig
+    from rapid_llm.models.config import ModelConfig
 
     cfg = ModelConfig.from_pretrained(model_dir, 2048)
     return {

@@ -92,7 +92,7 @@
         "tpot_change_pct": -1.69
       },
       "deepseek-v4-trimmed": {
-        "model_dir": "/home/honggao/projects/lite_llama/benchmarks/.v4_matrix_tmp",
+        "model_dir": "/home/honggao/projects/rapid_llm/benchmarks/.v4_matrix_tmp",
         "tpot_ms": {
           "baseline": 111.22797944006466,
           "l1l3": 108.50043695360895

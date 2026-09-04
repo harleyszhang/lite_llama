@@ -38,13 +38,13 @@ GIF 由 `scripts/gen_logprobs_gif.py` 驱动**真实 Qwen3-0.6B** 生成：promp
 ### A7 运行时可观测性（commit ce01b75）
 
 ```bash
-lite-llama serve --model-dir my_weight/Qwen3-0.6B &
+rapid-llm serve --model-dir my_weight/Qwen3-0.6B &
 curl -s localhost:8000/metrics | grep -A2 time_to_first_token
 ```
 
-`tools/observability/metrics.py` 是一个不到 310 行的进程内 registry：Counter / Gauge / Histogram 各自渲染 Prometheus 文本，桶网格照 vLLM 的粒度取（延迟 1 ms – 10 s，token 数 1 – 16K）。为一个"每种指标几行文本"的格式引入 `prometheus_client`，代价是每个离线用户都要多装一个包，所以没引。采集是 opt-out（`LITE_LLAMA_METRICS=0`），因为它本身只是 finish 路径上的几次浮点加法。
+`tools/observability/metrics.py` 是一个不到 310 行的进程内 registry：Counter / Gauge / Histogram 各自渲染 Prometheus 文本，桶网格照 vLLM 的粒度取（延迟 1 ms – 10 s，token 数 1 – 16K）。为一个"每种指标几行文本"的格式引入 `prometheus_client`，代价是每个离线用户都要多装一个包，所以没引。采集是 opt-out（`RAPID_LLM_METRICS=0`），因为它本身只是 finish 路径上的几次浮点加法。
 
-`tools/observability/trace.py` 是 opt-in 的另一面：`LITE_LLAMA_OTLP_ENDPOINT` 给了就每个请求一条 span（request_id / prompt_tokens / output_tokens / finish_reason），没给就返回 `None` 当 span——`start_span` / `end_span` 对 `None` 是无操作，OpenTelemetry SDK 保持可选依赖，不装也不报错。
+`tools/observability/trace.py` 是 opt-in 的另一面：`RAPID_LLM_OTLP_ENDPOINT` 给了就每个请求一条 span（request_id / prompt_tokens / output_tokens / finish_reason），没给就返回 `None` 当 span——`start_span` / `end_span` 对 `None` 是无操作，OpenTelemetry SDK 保持可选依赖，不装也不报错。
 
 ### F1 单层 harness（本分支）
 
@@ -125,7 +125,7 @@ autotune store 经 `set_perf_provider` 接进 rank 步：有冻结记录就按�
 
 ### v0.9.0 ↔ v0.10.0 端到端对照
 
-同一份不依赖 `benchmarks/` 的探针脚本，分别以两个 worktree 的 `PYTHONPATH` 运行，保证只有 lite_llama 不同、测量代码逐字相同：
+同一份不依赖 `benchmarks/` 的探针脚本，分别以两个 worktree 的 `PYTHONPATH` 运行，保证只有 rapid_llm 不同、测量代码逐字相同：
 
 | 路径 | 指标 | v0.9.0 | v0.10.0 | 差值 |
 | ------ | ------ | -------- | --------- | ------ |
@@ -152,11 +152,11 @@ autotune store 经 `set_perf_provider` 接进 rank 步：有冻结记录就按�
 
 | 操作 | 路径 |
 | ------ | ------ |
-| 新建 | `lite_llama/observe/{__init__,metrics,trace}.py`（A7 registry + OTLP tracer） |
-| 新建 | `lite_llama/tools/harness/`、`scripts/layer_harness.py`（F1 单层 harness） |
-| 新建 | `lite_llama/kernels/dispatcher/autotune/frozen.py`、`benchmarks/kernels/freeze_dispatch_ranking.py`（冻结实测排序） |
-| 修改 | `lite_llama/engine/{sampler,continuous_engine,llm_engine,llm,async_engine,scheduler,outputs}.py`、`lite_llama/executor/{worker,executor}.py`、`lite_llama/entrypoints/{api_server,protocol}.py`（logprobs 六层透传） |
-| 修改 | `lite_llama/executor/weight_utils.py`（`key_filter`，读张量前过滤）、`lite_llama/kernels/dispatcher/registry.py`（`decisions()`） |
+| 新建 | `rapid_llm/observe/{__init__,metrics,trace}.py`（A7 registry + OTLP tracer） |
+| 新建 | `rapid_llm/tools/harness/`、`scripts/layer_harness.py`（F1 单层 harness） |
+| 新建 | `rapid_llm/kernels/dispatcher/autotune/frozen.py`、`benchmarks/kernels/freeze_dispatch_ranking.py`（冻结实测排序） |
+| 修改 | `rapid_llm/engine/{sampler,continuous_engine,llm_engine,llm,async_engine,scheduler,outputs}.py`、`rapid_llm/executor/{worker,executor}.py`、`rapid_llm/entrypoints/{api_server,protocol}.py`（logprobs 六层透传） |
+| 修改 | `rapid_llm/executor/weight_utils.py`（`key_filter`，读张量前过滤）、`rapid_llm/kernels/dispatcher/registry.py`（`decisions()`） |
 | 新建 | `benchmarks/bench_observability.py`、`benchmarks/kernels/bench_dispatch.py` |
 | 修改 | `benchmarks/common.py` + 全部 bench 脚本接工厂；删除 `bench_all_kernels.py` / `flashattention*.py` / `bench_hf_baseline.py` |
 | 新建 | `tests/golden/test_logprob_parity.py`、`tests/observe/test_metrics.py`、`tests/ops/test_frozen_rank.py`、`tests/tools/test_harness.py` |
@@ -170,16 +170,16 @@ git checkout dev-v0.10 && uv pip install -e .
 
 # token 分数（默认关闭，按请求打开）
 python -c "
-from lite_llama import LLM, SamplingParams
+from rapid_llm import LLM, SamplingParams
 llm = LLM(model='my_weight/Qwen3-0.6B')
 print(llm.generate(['The capital of France is'], SamplingParams(logprobs=5))[0].outputs[0].logprobs[0])
 "
 
 # Prometheus 抓取
-lite-llama serve --model-dir my_weight/Qwen3-0.6B & curl -s localhost:8000/metrics | head
+rapid-llm serve --model-dir my_weight/Qwen3-0.6B & curl -s localhost:8000/metrics | head
 
 # OTLP 追踪（不设这个变量 tracer 就是 no-op）
-LITE_LLAMA_OTLP_ENDPOINT=http://localhost:4318 lite-llama serve --model-dir my_weight/Qwen3-0.6B
+RAPID_LLM_OTLP_ENDPOINT=http://localhost:4318 rapid-llm serve --model-dir my_weight/Qwen3-0.6B
 
 # 单层验证
 python scripts/layer_harness.py --model-dir my_weight/Qwen3-0.6B --layer 3 \

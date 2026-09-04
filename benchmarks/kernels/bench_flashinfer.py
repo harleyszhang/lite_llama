@@ -27,14 +27,14 @@ from microbench import (
     verify,
 )
 
-import lite_llama.kernels
-from lite_llama.kernels.dispatcher import dispatch
-from lite_llama.kernels.ops.attention.flashattention2_nopad import (
+import rapid_llm.kernels
+from rapid_llm.kernels.dispatcher import dispatch
+from rapid_llm.kernels.ops.attention.flashattention2_nopad import (
     flash_attention2_no_pad,
 )
-from lite_llama.kernels.ops.attention.flashdecoding import flash_decoding
-from lite_llama.kernels.ops.layernorm.skip_rmsnorm import skip_rmsnorm
-from lite_llama.kernels.ops.rope.rope_emb import rope_emb_forward
+from rapid_llm.kernels.ops.attention.flashdecoding import flash_decoding
+from rapid_llm.kernels.ops.layernorm.skip_rmsnorm import skip_rmsnorm
+from rapid_llm.kernels.ops.rope.rope_emb import rope_emb_forward
 
 #: GQA 4x with 128-dim heads and 2k cached tokens: the serving geometry the
 #: paged rows were tuned for, kept small enough to run on any dev box.
@@ -47,7 +47,7 @@ DEVICE = "cuda"
 
 def require_flashinfer() -> None:
     """Exit with the install recipe rather than crash without the library."""
-    from lite_llama.kernels.backend import flashinfer
+    from rapid_llm.kernels.backend import flashinfer
 
     if not flashinfer.available():
         print(f"flashinfer is not importable here: {flashinfer.INSTALL.how_to_get_it()}")
@@ -236,7 +236,7 @@ def main() -> None:
         "become dispatch's ranking once frozen:\n"
         "  python benchmarks/kernels/freeze_dispatch_ranking.py\n"
         "writes them into the autotune frozen/ store, and the provider wired\n"
-        "at lite_llama.kernels import ranks by them from then on."
+        "at rapid_llm.kernels import ranks by them from then on."
     )
 
 

@@ -24,7 +24,7 @@
     "part": "all",
     "v4_rebuild": false,
     "repeat": 2,
-    "json": "/home/honggao/projects/lite_llama/docs/benchmark_logs/overlap_ep_tbo_20260904_123821.json",
+    "json": "/home/honggao/projects/rapid_llm/docs/benchmark_logs/overlap_ep_tbo_20260904_123821.json",
     "timestamp": "2026-09-04T12:40:28",
     "environment": {
       "gpu_model": "NVIDIA A10",

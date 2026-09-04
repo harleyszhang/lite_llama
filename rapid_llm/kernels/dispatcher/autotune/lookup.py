@@ -1,0 +1,77 @@
+"""High-level autotune lookup — the call sites' single entry point.
+
+:func:`get_best_config` resolves the ambient store and GPU, builds the
+:class:`TuneKey`, and returns the stored best config or None; ``reset``
+clears the cached store handle between tests.
+
+Usage:
+    config = get_best_config("fused_moe", m, n, k, "fp16")
+"""
+
+from __future__ import annotations
+
+from ....utils.env_compat import getenv
+from .config_key import TuneKey, make_shape_bucket, normalize_gpu_name
+from .config_store import ConfigStore
+
+#: Module-level singleton store, lazily initialised on first call.
+_store: ConfigStore | None = None
+
+#: Cached GPU name (avoids repeated CUDA calls).
+_gpu_name: str | None = None
+
+
+def _get_store() -> ConfigStore:
+    global _store
+    if _store is None:
+        _store = ConfigStore()
+    return _store
+
+
+def _get_gpu() -> str:
+    global _gpu_name
+    if _gpu_name is None:
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                _gpu_name = normalize_gpu_name(torch.cuda.get_device_name(0))
+            else:
+                _gpu_name = "unknown"
+        except Exception:
+            _gpu_name = "unknown"
+    return _gpu_name
+
+
+def get_best_config(op: str, m: int, n: int, k: int, dtype: str) -> dict | None:
+    """Look up the best tuned config for the given kernel invocation.
+
+    Args:
+        op: Kernel family name (e.g. ``"fused_moe"``).
+        m: Activation rows (will be bucketed before lookup).
+        n: Output columns.
+        k: Reduction dimension.
+        dtype: Dtype label (``"fp16"``, ``"int8"``, ``"int4"``).
+
+    Returns:
+        A tile config dict (``{"BLOCK_M": ..., ...}``) if found, otherwise ``None``.
+        When ``None`` is returned the caller should fall back to its heuristic.
+    """
+    # Fast-path disable via env var
+    if getenv("RAPID_LLM_AUTOTUNE", "1") == "0":
+        return None
+
+    key = TuneKey(
+        gpu=_get_gpu(),
+        op=op,
+        shape_bucket=make_shape_bucket(m, n, k),
+        dtype=dtype,
+    )
+    return _get_store().get(key)
+
+
+def reset() -> None:
+    """Reset the module-level cache (useful for testing)."""
+    global _store, _gpu_name
+    _store = None
+    _gpu_name = None

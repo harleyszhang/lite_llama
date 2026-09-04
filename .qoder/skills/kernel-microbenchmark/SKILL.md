@@ -1,14 +1,14 @@
 ---
 name: kernel-microbenchmark
-description: Build, run and read lite_llama GPU kernel microbenchmarks — Triton/torch kernels, cold-L2 timing, correctness gates before numbers, KV-cache pool fixtures, host-time measurement for the block allocator, SOL sanity checks, and feeding results back into autotune and dispatch.
+description: Build, run and read rapid_llm GPU kernel microbenchmarks — Triton/torch kernels, cold-L2 timing, correctness gates before numbers, KV-cache pool fixtures, host-time measurement for the block allocator, SOL sanity checks, and feeding results back into autotune and dispatch.
 ---
 
 # Kernel Microbenchmark
 
 A measurement in this repo touches three tiers: the kernels themselves in
-`lite_llama/kernels/*.py`, the `KernelSpec` rows that declare what a backend can
-serve in `lite_llama/kernels/backends/*.py`, and `dispatch()` in
-`lite_llama/kernels/ops/`. The reason to benchmark is to give the third tier a
+`rapid_llm/kernels/*.py`, the `KernelSpec` rows that declare what a backend can
+serve in `rapid_llm/kernels/backends/*.py`, and `dispatch()` in
+`rapid_llm/kernels/ops/`. The reason to benchmark is to give the third tier a
 basis for preferring one row over another, so a table whose rows do not name
 registry entries cannot close that loop, however precise its numbers are.
 
@@ -83,7 +83,7 @@ Rules behind the table:
   roughly 100 µs on an A10, where the same 2 MiB working set times 26.6 µs cold
   and 100.5 µs warm-but-synchronised. Anything shorter than that floor is
   reported as the floor. `AutotuneSearcher._benchmark` has exactly this shape
-  (`lite_llama/kernels/autotune/searcher.py:99`), so its search is not
+  (`rapid_llm/kernels/autotune/searcher.py:99`), so its search is not
   discriminating at decode sizes; use the harness when comparing configs there.
 - A CUDA-event timer around a host-blocking call reports it as nearly free: it
   measures the device timeline, and a function that stalls the launch queue for
@@ -109,7 +109,7 @@ Qwen3/Llama-3 decode geometry (8 KV heads, 128 dim, fp16):
   cache row a random gather runs near streaming speed. Paging is not where a
   decode regression hides, and this row is the bound that says so.
 - **Combined per-layer buffer with strided K/V views.** What
-  `lite_llama/modules/attention.py` passes. A split-allocation variant, which
+  `rapid_llm/modules/attention.py` passes. A split-allocation variant, which
   halves the row stride, never came out ahead — equal at three of four shapes,
   8% slower at one. Each side is already 16 cache lines, so no line's payload
   changes. Keep the row as a guard for smaller geometries (MQA, 64-dim heads),
@@ -168,8 +168,8 @@ It is host time spent on `nonzero(...).item()`, invisible to a CUDA-event timer.
 
 - `dispatch()` ranks on `(perf, -preference_score, -priority, name)`. Install
   measurements with
-  `from lite_llama.kernels.ops.dispatch import set_perf_provider` — it is not
-  re-exported from `lite_llama.kernels.ops`. The provider returns **milliseconds**
+  `from rapid_llm.kernels.ops.dispatch import set_perf_provider` — it is not
+  re-exported from `rapid_llm.kernels.ops`. The provider returns **milliseconds**
   while the harness reports **microseconds**; divide by 1000.
 - `AutotuneSearcher` persists `latency_us` (`config_store.py`), a third unit in
   the same loop. Convert deliberately at each boundary.

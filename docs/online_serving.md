@@ -1,12 +1,12 @@
 # 在线推理服务（online batch inference）
 
-`lite-llama serve` 起一个 OpenAI 兼容的 HTTP 服务，底层是 [连续批处理引擎](./continuous_batching.md)：并发到达的请求被自动合并进同一个 batch，而不是排队串行。
+`rapid-llm serve` 起一个 OpenAI 兼容的 HTTP 服务，底层是 [连续批处理引擎](./continuous_batching.md)：并发到达的请求被自动合并进同一个 batch，而不是排队串行。
 
 ## 快速开始
 
 ```bash
-pip install 'lite-llama[serve]'          # fastapi + uvicorn，可选依赖
-lite-llama serve --model-dir my_weight/Qwen2.5-1.5B-Instruct --port 8000
+pip install 'rapid-llm[serve]'          # fastapi + uvicorn，可选依赖
+rapid-llm serve --model-dir my_weight/Qwen2.5-1.5B-Instruct --port 8000
 ```
 
 ```bash
@@ -46,7 +46,7 @@ for chunk in client.chat.completions.create(
 
 支持的采样字段：`max_tokens`、`temperature`、`top_p`、`repetition_penalty`。
 
-**默认值刻意对齐 OpenAI 而不是 lite_llama 的 CLI**：`temperature` 与 `top_p` 都是 `1.0`、`repetition_penalty` 是 `1.0`。CLI 的 `0.6 / 0.9 / 1.1` 是给交互式聊天调的手感，不该悄悄改变一个按 OpenAI 语义写好的客户端的行为。
+**默认值刻意对齐 OpenAI 而不是 rapid_llm 的 CLI**：`temperature` 与 `top_p` 都是 `1.0`、`repetition_penalty` 是 `1.0`。CLI 的 `0.6 / 0.9 / 1.1` 是给交互式聊天调的手感，不该悄悄改变一个按 OpenAI 语义写好的客户端的行为。
 
 **不支持的字段显式报错而不是静默忽略。** `n > 1` 返回 422：客户端要 4 条补全却拿到 1 条，是没有办法自己发现的。
 
@@ -54,7 +54,7 @@ for chunk in client.chat.completions.create(
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
-| `--model-dir` | 环境变量 `LITE_LLAMA_MODEL_DIR` | 权重目录 |
+| `--model-dir` | 环境变量 `RAPID_LLM_MODEL_DIR` | 权重目录 |
 | `--host` / `--port` | `0.0.0.0` / `8000` | 监听地址 |
 | `--served-model-name` | 目录名 | `/v1/models` 里报的名字 |
 | `--max-seq-len` | `2048` | 上下文窗口，同时也是每个槽位的 KV 容量 |
@@ -71,7 +71,7 @@ for chunk in client.chat.completions.create(
 
 ## 线程模型
 
-引擎的 `step()` 是阻塞的同步调用，直接在事件循环里跑会让一步计算卡住所有连接。所以 [`AsyncLLMEngine`](../lite_llama/engine/async_engine.py) 把引擎放在**独立工作线程**上：
+引擎的 `step()` 是阻塞的同步调用，直接在事件循环里跑会让一步计算卡住所有连接。所以 [`AsyncLLMEngine`](../rapid_llm/engine/async_engine.py) 把引擎放在**独立工作线程**上：
 
 ```text
     协程 A ──┐                            ┌──> asyncio.Queue A ──> 协程 A
@@ -90,11 +90,11 @@ for chunk in client.chat.completions.create(
 
 ### 多卡：`--data-parallel-size` / `--tensor-parallel-size`
 
-`--tensor-parallel-size > 1` 时仍是上面这个形状（TP 的 follower 由引擎内部拉起，对服务层透明）。`--data-parallel-size > 1` 时换成 [`AsyncDataParallelEngine`](../lite_llama/engine/async_data_parallel.py)：每个副本一个进程一条常驻引擎，负载均衡器逐请求选副本，一条**泵线程**把共享结果队列里的消息按 request_id 投回各协程的事件循环——协程仍然只看到同样的 `generate` / `generate_text` 接口，OpenAI 层和所有端点行为不变。
+`--tensor-parallel-size > 1` 时仍是上面这个形状（TP 的 follower 由引擎内部拉起，对服务层透明）。`--data-parallel-size > 1` 时换成 [`AsyncDataParallelEngine`](../rapid_llm/engine/async_data_parallel.py)：每个副本一个进程一条常驻引擎，负载均衡器逐请求选副本，一条**泵线程**把共享结果队列里的消息按 request_id 投回各协程的事件循环——协程仍然只看到同样的 `generate` / `generate_text` 接口，OpenAI 层和所有端点行为不变。
 
 ```bash
 # 两份整模型副本，按在飞 token 数路由
-lite-llama serve --model-dir my_weight/Qwen2.5-1.5B-Instruct \
+rapid-llm serve --model-dir my_weight/Qwen2.5-1.5B-Instruct \
     --data-parallel-size 2 --load-balancer total_tokens
 ```
 
@@ -105,7 +105,7 @@ lite-llama serve --model-dir my_weight/Qwen2.5-1.5B-Instruct \
 服务层很薄，引擎自己就能用。同步、step 驱动：
 
 ```python
-from lite_llama import ContinuousBatchingEngine, SamplingParams
+from rapid_llm import ContinuousBatchingEngine, SamplingParams
 
 engine = ContinuousBatchingEngine.from_pretrained(
     "my_weight/Qwen2.5-1.5B-Instruct", max_num_seqs=16
@@ -123,7 +123,7 @@ while engine.has_unfinished_requests():
 
 ```python
 import asyncio
-from lite_llama import AsyncLLMEngine, SamplingParams
+from rapid_llm import AsyncLLMEngine, SamplingParams
 
 async def main():
     async with AsyncLLMEngine.from_pretrained("my_weight/Qwen2.5-1.5B-Instruct") as engine:
@@ -138,7 +138,7 @@ asyncio.run(main())
 离线跑一批 prompt，走的仍是连续批处理调度（先结束的请求立刻让位给排队的）：
 
 ```bash
-lite-llama batch --model-dir my_weight/Qwen2.5-1.5B-Instruct \
+rapid-llm batch --model-dir my_weight/Qwen2.5-1.5B-Instruct \
     --prompts-file prompts.txt --max-num-seqs 16 --show-stats
 ```
 

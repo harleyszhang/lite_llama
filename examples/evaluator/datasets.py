@@ -104,7 +104,7 @@ class HotpotQA(object):
         }
 
         print(
-            f"The test result of lite_llama inference for {self.data_type} dataset: {scores}"
+            f"The test result of rapid_llm inference for {self.data_type} dataset: {scores}"
         )
 
 
@@ -190,7 +190,7 @@ class HellaSwag(object):
         }
 
         print(
-            f"The test result of lite_llama inference for {self.data_type} dataset: {scores}"
+            f"The test result of rapid_llm inference for {self.data_type} dataset: {scores}"
         )
 
 

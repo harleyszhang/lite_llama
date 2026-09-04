@@ -12,20 +12,20 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.kernels.ops.gemm.linear import (
+from rapid_llm.kernels.ops.gemm.linear import (
     linear_w4a16,
     linear_w8a8_fp8,
     linear_w8a8_int8,
     linear_w8a16,
 )
-from lite_llama.kernels.ops.quantization import (
+from rapid_llm.kernels.ops.quantization import (
     fp8_matmul,
     smoothquant_matmul,
     w4a16_matmul,
     w8a16_matmul,
 )
-from lite_llama.modules.quantization.base_config import run_quant_linear
-from lite_llama.modules.quantization.utils import (
+from rapid_llm.modules.quantization.base_config import run_quant_linear
+from rapid_llm.modules.quantization.utils import (
     quantize_fp8_per_token,
     quantize_int4_groupwise,
     quantize_int8_per_channel,

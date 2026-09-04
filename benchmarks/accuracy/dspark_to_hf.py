@@ -4,10 +4,10 @@ The reference sides that consume the DSpark-format Flash checkpoint — the
 fp32 CPU oracle in :mod:`benchmarks.accuracy.deepseek` and the bf16-on-disk
 variant in :mod:`benchmarks.accuracy.convert_v4_hf` — share this loader.
 transformers has no reader for the DSpark layout, so :func:`load_dspark_hf`
-renames keys through :func:`lite_llama.models.deepseek_v4.adapt_dspark_key`
+renames keys through :func:`rapid_llm.models.deepseek_v4.adapt_dspark_key`
 plus the few leaves where transformers' module tree differs
 (:data:`_LAYER_RENAMES`), widens the fp8 linears with
-:func:`lite_llama.executor.weight_utils.dequant_block_fp8`, rebuilds the
+:func:`rapid_llm.executor.weight_utils.dequant_block_fp8`, rebuilds the
 MXFP4 expert stacks one layer at a time (:func:`dequant_mxfp4`) so the
 dequantised intermediates never double up in host memory, and re-creates
 the non-persistent RoPE tables the checkpoint never carries.
@@ -26,7 +26,7 @@ from torch import nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from lite_llama.models.deepseek_v4 import adapt_dspark_key
+from rapid_llm.models.deepseek_v4 import adapt_dspark_key
 
 _EXPERT_WEIGHT = re.compile(r"^layers\.\d+\.ffn\.experts\.\d+\.w[123]\.weight$")
 
@@ -75,8 +75,8 @@ def load_dspark_hf(
     """
     from safetensors.torch import safe_open
 
-    from lite_llama.executor.weight_utils import dequant_block_fp8
-    from lite_llama.modules.quantization.mxfp4 import dequant_mxfp4
+    from rapid_llm.executor.weight_utils import dequant_block_fp8
+    from rapid_llm.modules.quantization.mxfp4 import dequant_mxfp4
 
     ckpt = Path(checkpoint)
     weight_map = json.loads((ckpt / "model.safetensors.index.json").read_text())["weight_map"]

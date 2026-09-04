@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.platform import (
+from rapid_llm.platform import (
     CapabilityRequirement,
     CpuPlatform,
     Platform,
@@ -96,7 +96,7 @@ class TestCurrentPlatform:
     def test_cuda_box_detects_real_device(self) -> None:
         if not torch.cuda.is_available():
             pytest.skip("asserts the CUDA detection path")
-        from lite_llama.platform.cuda import CudaPlatform
+        from rapid_llm.platform.cuda import CudaPlatform
 
         plat = current_platform()
         assert isinstance(plat, CudaPlatform)

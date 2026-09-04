@@ -28,7 +28,7 @@ v0.9 有两条工作线。
 
 ### L1 跨 stream 重叠（commit 07ee09e + 本分支集成）
 
-`executor/overlap.py` 三件套：`OverlapPolicy`（`LITE_LLAMA_OVERLAP` 环境变量，默认开）、`StreamPool`（copy stream + pinned staging 环 + event）、`Timeline`（CUDA event 区间记录，全部 region 挂在同一 epoch 事件上，跨 stream 可直接比较，`LITE_LLAMA_OVERLAP_TIMELINE=1` 开启）。
+`executor/overlap.py` 三件套：`OverlapPolicy`（`RAPID_LLM_OVERLAP` 环境变量，默认开）、`StreamPool`（copy stream + pinned staging 环 + event）、`Timeline`（CUDA event 区间记录，全部 region 挂在同一 epoch 事件上，跨 stream 可直接比较，`RAPID_LLM_OVERLAP_TIMELINE=1` 开启）。
 
 本分支完成的集成把模块接进热路径：
 
@@ -100,7 +100,7 @@ multimodal decode 路径接入 CUDA graph replay，并补 TP 与多模态的 e2e
 
 ```text
 1067 passed, 78 skipped, 4 xfailed in 164s    tests/ 全量（A10 ×2）
-4 passed (LITE_LLAMA_GOLDEN_STRICT=1)          tests/golden，Qwen3-0.6B 逐 token 基线一致
+4 passed (RAPID_LLM_GOLDEN_STRICT=1)          tests/golden，Qwen3-0.6B 逐 token 基线一致
 ```
 
 golden 门禁在 overlap 默认开启下通过：prepared 路径与 inline 路径逐 token 一致，证明 prepare 重构与 deferred harvest 没有改变任何一个输出 token。skip 项均为本机缺 checkpoint（`Qwen2.5-0.5B` 等）或需 4 卡，无静默变绿。
@@ -109,9 +109,9 @@ golden 门禁在 overlap 默认开启下通过：prepared 路径与 inline 路�
 
 | 操作 | 路径 |
 | ------ | ------ |
-| 修改 | `lite_llama/executor/slot_batch.py`（prepare-path helpers：`flatten_extend_rows` / `plan_extend_rows` / `pad_decode_rows`） |
-| 修改 | `lite_llama/executor/worker.py`（`_PreparedPass` + `prepare()` + 三个 `_forward_*` 消费 prepared 并记录 timeline） |
-| 修改 | `lite_llama/engine/continuous_engine.py`（step 改 deferred harvest，一步一次同步） |
+| 修改 | `rapid_llm/executor/slot_batch.py`（prepare-path helpers：`flatten_extend_rows` / `plan_extend_rows` / `pad_decode_rows`） |
+| 修改 | `rapid_llm/executor/worker.py`（`_PreparedPass` + `prepare()` + 三个 `_forward_*` 消费 prepared 并记录 timeline） |
+| 修改 | `rapid_llm/engine/continuous_engine.py`（step 改 deferred harvest，一步一次同步） |
 | 修改 | `benchmarks/overlap/levels.py (L1)`（长短不齐的长 prompt 负载 + token 预算参数） |
 | 修改 | `tests/utils/test_prompt_templates.py`、`tests/models/test_checkpoint_index.py`（测试债修复） |
 | 新建 | `scripts/gen_overlap_l1_gif.py`、`docs/images/overlap_l1.gif` |
@@ -125,16 +125,16 @@ golden 门禁在 overlap 默认开启下通过：prepared 路径与 inline 路�
 git checkout release-v0.9.0 && uv pip install -e .
 
 # overlap 默认开启；关闭对照
-LITE_LLAMA_OVERLAP=0 python -m benchmarks.overlap.levels --level l1
+RAPID_LLM_OVERLAP=0 python -m benchmarks.overlap.levels --level l1
 
 # 录制 timeline 证据（copy/compute 泳道相交）
-LITE_LLAMA_OVERLAP_TIMELINE=1 python -m benchmarks.overlap.levels --level l1 --timeline
+RAPID_LLM_OVERLAP_TIMELINE=1 python -m benchmarks.overlap.levels --level l1 --timeline
 
 # 重新生成上面的 GIF
 python scripts/gen_overlap_l1_gif.py
 
 # 查看某个算子的分发决策链
-LITE_LLAMA_KERNEL_TRACE=1 python -m lite_llama.cli chat --model-dir my_weight/Qwen3-0.6B
+RAPID_LLM_KERNEL_TRACE=1 python -m rapid_llm.cli chat --model-dir my_weight/Qwen3-0.6B
 ```
 
 ## 相关文档

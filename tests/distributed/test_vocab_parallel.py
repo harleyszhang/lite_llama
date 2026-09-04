@@ -13,8 +13,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.distributed import parallel_state as ps
-from lite_llama.modules import ParallelLMHead, VocabParallelEmbedding, vocab_parallel
+from rapid_llm.distributed import parallel_state as ps
+from rapid_llm.modules import ParallelLMHead, VocabParallelEmbedding, vocab_parallel
 from tests.distributed.tp_harness import needs_gpus, run_on_tp_ranks
 
 VOCAB, HIDDEN = 256, 128
@@ -149,7 +149,11 @@ def _tie_payload(rank: int) -> tuple[bool, int, int]:
     embedding = VocabParallelEmbedding(VOCAB, HIDDEN, params_dtype=torch.float32)
     head = ParallelLMHead(VOCAB, HIDDEN, params_dtype=torch.float32)
     head.weight = embedding.weight
-    return head.weight is embedding.weight, head.local_vocab_size, ps.get_tensor_model_parallel_world_size()
+    return (
+        head.weight is embedding.weight,
+        head.local_vocab_size,
+        ps.get_tensor_model_parallel_world_size(),
+    )
 
 
 @needs_gpus(2)

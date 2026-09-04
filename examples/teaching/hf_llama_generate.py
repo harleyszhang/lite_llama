@@ -1,7 +1,7 @@
 """Teaching demo: HuggingFace ``generate()`` and ``pipeline()`` baselines.
 
 ``generate_text`` shows the built-in sampler path and ``pipline_text``
-the one-call pipeline, so later comparisons against lite_llama's
+the one-call pipeline, so later comparisons against rapid_llm's
 engines have an honest reference point.
 
 Usage:
@@ -91,9 +91,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--model-dir",
-        default=os.environ.get("LITE_LLAMA_MODEL_DIR"),
-        required=os.environ.get("LITE_LLAMA_MODEL_DIR") is None,
-        help="HF 格式的 Llama 权重目录(或设置 LITE_LLAMA_MODEL_DIR)",
+        default=os.environ.get("RAPID_LLM_MODEL_DIR"),
+        required=os.environ.get("RAPID_LLM_MODEL_DIR") is None,
+        help="HF 格式的 Llama 权重目录(或设置 RAPID_LLM_MODEL_DIR)",
     )
     parser.add_argument("--prompt", default="I believe the meaning of life is,")
     parser.add_argument("--max-length", type=int, default=100)

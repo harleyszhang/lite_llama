@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from lite_llama import DataParallelEngine, SamplingParams
+from rapid_llm import DataParallelEngine, SamplingParams
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 CKPT = str(ROOT / "my_weight" / "Qwen3-0.6B")
@@ -75,7 +75,7 @@ def _graph_probe(rank: int, queue) -> None:
     try:
         import torch
 
-        from lite_llama import LLM
+        from rapid_llm import LLM
 
         # Same discipline as the DP worker: Triton launches resolve pointers
         # in the current device's context, so the probe must move there before

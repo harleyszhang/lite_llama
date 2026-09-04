@@ -70,8 +70,8 @@ def collect(model_dir: str) -> dict:
     first token — and that hole is worth showing rather than hiding: it is the
     contract callers code against.
     """
-    from lite_llama.engine.llm import LLM
-    from lite_llama.engine.sampler import SamplingParams
+    from rapid_llm.engine.llm import LLM
+    from rapid_llm.engine.sampler import SamplingParams
 
     llm = LLM(model=model_dir, max_seq_len=256, max_gpu_num_blocks=2048, use_cuda_graph=False)
     output = llm.generate(
@@ -116,7 +116,7 @@ def _title_bar(draw, fonts, model_name: str):
     draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
     draw.text(
         (12, 9),
-        f"lite_llama  —  logprobs / prompt_logprobs  ({model_name})",
+        f"rapid_llm  —  logprobs / prompt_logprobs  ({model_name})",
         fill=TITLE_FG,
         font=small,
     )

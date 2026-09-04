@@ -22,9 +22,9 @@ from PIL import Image, ImageDraw, ImageFont
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from lite_llama.engine.continuous_engine import ContinuousBatchingEngine  # noqa: E402
-from lite_llama.engine.sampler import SamplingParams  # noqa: E402
-from lite_llama.utils.prompt_templates import get_prompter  # noqa: E402
+from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine  # noqa: E402
+from rapid_llm.engine.sampler import SamplingParams  # noqa: E402
+from rapid_llm.utils.prompt_templates import get_prompter  # noqa: E402
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 
@@ -72,7 +72,7 @@ def record(model_dir: str, max_gen_len: int) -> list[Frame]:
 
     # Instruct checkpoints need their chat template; fed a bare prompt they drift
     # into completion mode and answer with scraped-looking prose, which would put
-    # the model's worst behaviour in the README for no reason. `lite-llama batch`
+    # the model's worst behaviour in the README for no reason. `rapid-llm batch`
     # applies the template too, so this also keeps the GIF honest about the CLI.
     prompter = get_prompter(engine.tokenizer)
 
@@ -131,7 +131,7 @@ def render(frame: Frame, fonts, model_name: str) -> Image.Image:
 
     draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
     draw.text(
-        (12, 9), f"lite-llama  —  continuous batching  ({model_name})", fill=TITLE_FG, font=small
+        (12, 9), f"rapid-llm  —  continuous batching  ({model_name})", fill=TITLE_FG, font=small
     )
     for index, colour in enumerate([(245, 99, 72), (253, 188, 64), (94, 193, 117)]):
         draw.ellipse([W - 78 + index * 18, 11, W - 68 + index * 18, 21], fill=colour)
@@ -139,7 +139,7 @@ def render(frame: Frame, fonts, model_name: str) -> Image.Image:
     y = TITLE_H + PAD
     draw.text(
         (PAD, y),
-        f"$ lite-llama batch --max-num-seqs {MAX_NUM_SEQS} --show-stats",
+        f"$ rapid-llm batch --max-num-seqs {MAX_NUM_SEQS} --show-stats",
         fill=PROMPT_FG,
         font=body,
     )

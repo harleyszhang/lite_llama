@@ -14,14 +14,14 @@ import time
 
 import pytest
 
-from lite_llama.distributed.parallel_state import (
+from rapid_llm.distributed.parallel_state import (
     get_data_parallel_rank,
     get_tensor_model_parallel_rank,
     tensor_model_parallel_broadcast_object_list,
 )
-from lite_llama.engine.sampler import SamplingParams
-from lite_llama.executor.executor import ensure_followers_alive
-from lite_llama.executor.worker import ModelInput, PassKind
+from rapid_llm.engine.sampler import SamplingParams
+from rapid_llm.executor.executor import ensure_followers_alive
+from rapid_llm.executor.worker import ModelInput, PassKind
 from tests.distributed.tp_harness import run_on_tp_ranks
 
 
@@ -41,7 +41,9 @@ def a_plan(slot: int = 0) -> ModelInput:
 
 def _publish_one_plan(rank: int) -> ModelInput:
     """Rank 0 publishes; every rank reports the plan it holds afterwards."""
-    return tensor_model_parallel_broadcast_object_list(a_plan() if get_tensor_model_parallel_rank() == 0 else None)
+    return tensor_model_parallel_broadcast_object_list(
+        a_plan() if get_tensor_model_parallel_rank() == 0 else None
+    )
 
 
 def _drain_a_stream(rank: int) -> int:
@@ -63,7 +65,11 @@ def _drain_a_stream(rank: int) -> int:
 
 def _publish_per_replica(rank: int) -> tuple[int, ...]:
     """Each replica's rank 0 publishes a plan naming its own slots."""
-    plan = a_plan(slot=10 * get_data_parallel_rank()) if get_tensor_model_parallel_rank() == 0 else None
+    plan = (
+        a_plan(slot=10 * get_data_parallel_rank())
+        if get_tensor_model_parallel_rank() == 0
+        else None
+    )
     return tensor_model_parallel_broadcast_object_list(plan).slots
 
 

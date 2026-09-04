@@ -70,13 +70,13 @@ def overlap_axes(out_dir: Path) -> None:
         ),
         (
             "C axis  ·  L2 two-batch overlap   (default OFF)",
-            "batch_overlap/two_batch_overlap.py — LITE_LLAMA_TBO=1",
+            "batch_overlap/two_batch_overlap.py — RAPID_LLM_TBO=1",
             "half A's o_proj all-reduce || half B's attention GEMM",
             "#f7d6e0",
         ),
         (
             "C axis  ·  L3 chunked all-reduce   (default OFF)",
-            "batch_overlap/comm_overlap.py — LITE_LLAMA_COMM_OVERLAP=1",
+            "batch_overlap/comm_overlap.py — RAPID_LLM_COMM_OVERLAP=1",
             "chunk k's all-reduce || chunk k+1's GEMM (rows >= 256)",
             "#fbe4ea",
         ),
@@ -519,7 +519,7 @@ def v4_speed(out_dir: Path) -> None:
     hf = [decode[b]["hf_tpot_ms"] for b in batches]
     x = range(len(batches))
     ax2.bar([i - 0.19 for i in x], hf, width=0.38, color=_GREY, label="transformers")
-    ax2.bar([i + 0.19 for i in x], lite, width=0.38, color=_RED, label="lite_llama")
+    ax2.bar([i + 0.19 for i in x], lite, width=0.38, color=_RED, label="rapid_llm")
     for i, value in enumerate(lite):
         ax2.text(
             i + 0.19,

@@ -23,10 +23,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from lite_llama.engine.continuous_engine import ContinuousBatchingEngine, _decode_work
-from lite_llama.engine.sampler import SamplingParams
-from lite_llama.engine.scheduler import SchedulerConfig
-from lite_llama.executor.worker import PIPELINE_ENV, PassKind
+from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine, _decode_work
+from rapid_llm.engine.sampler import SamplingParams
+from rapid_llm.engine.scheduler import SchedulerConfig
+from rapid_llm.executor.worker import PIPELINE_ENV, PassKind
 
 _EOS = 2
 _WORD = 100  # any token id the stop set does not contain
@@ -168,6 +168,7 @@ def test_every_staged_buffer_is_handed_back():
 
 def test_pipeline_matches_the_synchronous_token_stream():
     """Same script, both loops: the output ids and the finish must agree."""
+
     def run(pipeline: bool) -> ContinuousBatchingEngine:
         engine, _ = _build_engine([[_WORD], [_WORD], [_EOS]], pipeline=pipeline)
         request = engine.add_request("hi")

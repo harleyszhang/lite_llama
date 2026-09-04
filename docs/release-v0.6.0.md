@@ -4,7 +4,7 @@
 
 ## Summary
 
-v0.6.0 完成 KV 缓存的 fp8 路径端到端打通（flashdecoding kernel 内 e4m3 dequant + attention module 接口 + kv_cache_manager fp8 dtype 支持），使 KV 容量翻倍（147K → 282K tokens on A10）。新增 `lite_llama.viz` 模块导出模型结构树和显存预算表。KVCacheManager 新增 watermark 准入控制和 utilization 指标。
+v0.6.0 完成 KV 缓存的 fp8 路径端到端打通（flashdecoding kernel 内 e4m3 dequant + attention module 接口 + kv_cache_manager fp8 dtype 支持），使 KV 容量翻倍（147K → 282K tokens on A10）。新增 `rapid_llm.viz` 模块导出模型结构树和显存预算表。KVCacheManager 新增 watermark 准入控制和 utilization 指标。
 
 ## 1. Feature: FP8 KV Cache (2x capacity)
 
@@ -17,7 +17,7 @@ v0.6.0 完成 KV 缓存的 fp8 路径端到端打通（flashdecoding kernel 内 
 **使用方式:**
 
 ```bash
-python -m lite_llama.cli chat --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype fp8
+python -m rapid_llm.cli chat --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype fp8
 ```
 
 **修复前后对比 (Qwen3-0.6B, A10, batch=4, gen_len=64, greedy):**
@@ -34,10 +34,10 @@ python -m lite_llama.cli chat --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype 
 
 ## 2. Feature: viz.structure (模型结构树)
 
-新增 `lite_llama/tools/profiling/structure.py`，遍历 `nn.Module` 树导出缩进文本树，显示层类型、参数量和 dtype。
+新增 `rapid_llm/tools/profiling/structure.py`，遍历 `nn.Module` 树导出缩进文本树，显示层类型、参数量和 dtype。
 
 ```python
-from lite_llama.tools.profiling import export_structure_tree
+from rapid_llm.tools.profiling import export_structure_tree
 tree = export_structure_tree(model, max_depth=3)
 ```
 
@@ -56,10 +56,10 @@ model: Qwen3Model
 
 ## 3. Feature: viz.memory (显存预算表)
 
-新增 `lite_llama/tools/profiling/memory.py`，从模型配置纯计算得到显存分解（无需 GPU），输出 markdown 表格。
+新增 `rapid_llm/tools/profiling/memory.py`，从模型配置纯计算得到显存分解（无需 GPU），输出 markdown 表格。
 
 ```python
-from lite_llama.tools.profiling import export_memory_budget
+from rapid_llm.tools.profiling import export_memory_budget
 table = export_memory_budget(
     num_layers=28, hidden_size=1024, intermediate_size=3072,
     num_heads=16, num_kv_heads=8, head_dim=64,
@@ -113,5 +113,5 @@ KV cache watermark 和 viz 模块为纯 Python, 无需 GPU 即可验证。
 git pull origin main
 uv pip install -e .
 # 使用 fp8 KV cache
-python -m lite_llama.cli chat --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype fp8
+python -m rapid_llm.cli chat --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype fp8
 ```

@@ -4,7 +4,7 @@
 
 张量并行（TP）把**一个权重矩阵**切到多张卡上，让放不下单卡的大模型跑起来，代价是每个 block 一次 all-reduce。数据并行（DP）解决的是另一个问题：模型单卡放得下，但**请求太多**，一张卡喂不饱吞吐。DP 不切权重，而是把**请求流**分给若干份完整模型副本，每个副本各占一张卡、各跑各的 batch，前向过程里**没有任何集合通信**。
 
-因此两者是正交的、可组合的：`dp_size` 份副本，每份 `tp_size` 张卡，构成一个 `dp_size × tp_size` 的 rank 网格（见 `lite_llama/distributed/parallel_state.py`）。 TP 用延迟换"装得下"，DP 用显存（每卡一份权重）换吞吐。
+因此两者是正交的、可组合的：`dp_size` 份副本，每份 `tp_size` 张卡，构成一个 `dp_size × tp_size` 的 rank 网格（见 `rapid_llm/distributed/parallel_state.py`）。 TP 用延迟换"装得下"，DP 用显存（每卡一份权重）换吞吐。
 
 ![data parallel](./images/data_parallel.gif)
 
@@ -12,7 +12,7 @@
 
 ## 分层结构
 
-实现照搬 vLLM 与 SGLang 的分工，只是缩到 lite_llama 的同步批处理 API 上。三者各司其职，互不知道对方的内部：
+实现照搬 vLLM 与 SGLang 的分工，只是缩到 rapid_llm 的同步批处理 API 上。三者各司其职，互不知道对方的内部：
 
 | 角色 | 本仓库 | vLLM | SGLang |
 | --- | --- | --- | --- |
@@ -114,7 +114,7 @@ python benchmarks/bench_data_parallel.py --model my_weight/Qwen2.5-1.5B-Instruct
 
 ## 当前边界
 
-- **同步 `generate()` 是批 API，流式走 `AsyncDataParallelEngine`。** 两个前端共享同一批副本和同一条线协议：批 API 阻塞到最慢的副本交完那批答案（1 条 prompt 配 4 个副本，3 个空转），流式前端逐请求上报 delta、支持逐请求 abort。`lite-llama serve --data-parallel-size 2` 落在它上面：结果队列由一条**泵线程**排空（`mp.Queue` 的阻塞 `get` 没法被事件循环 await），再按 request_id 投回各协程的事件循环——角色与单引擎前端里工作线程的 publish 半边完全相同。这也是 load-aware balancer 真正有意义的场景：批 API 里所有 prompt 同时到达，"最少在飞"无从谈起。
+- **同步 `generate()` 是批 API，流式走 `AsyncDataParallelEngine`。** 两个前端共享同一批副本和同一条线协议：批 API 阻塞到最慢的副本交完那批答案（1 条 prompt 配 4 个副本，3 个空转），流式前端逐请求上报 delta、支持逐请求 abort。`rapid-llm serve --data-parallel-size 2` 落在它上面：结果队列由一条**泵线程**排空（`mp.Queue` 的阻塞 `get` 没法被事件循环 await），再按 request_id 投回各协程的事件循环——角色与单引擎前端里工作线程的 publish 半边完全相同。这也是 load-aware balancer 真正有意义的场景：批 API 里所有 prompt 同时到达，"最少在飞"无从谈起。
 - **并发上限在建副本时定，不随批大小走。** `max_num_seqs`（默认 32）是常驻引擎的 slot 数，一次发进来 256 条就分批入场。这是服务该有的行为（显存有上限），但离线批处理要吃满卡就得把它开到批的宽度——`DataParallelEngine(..., max_num_seqs=256)`。上面那张表就是这么测的。
 - **文本模型离线批处理。** 多模态的逐请求 processor 输出不走这条路径。
 - **每卡一份完整权重。** 这是 DP 的定义，不是限制——放不下单卡就要叠加 TP （`tensor_parallel_size > 1`），两者按网格组合。

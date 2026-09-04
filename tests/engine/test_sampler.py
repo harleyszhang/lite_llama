@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.engine.sampler import (
+from rapid_llm.engine.sampler import (
     BatchedSamplingParams,
     GeneratedSpan,
     Sampler,
@@ -164,7 +164,7 @@ def greedy_draw_calls(monkeypatch) -> list[int]:
         calls.append(logits.shape[0])
         return greedy_ids(logits, offset)
 
-    monkeypatch.setattr("lite_llama.engine.sampler.greedy_ids", counting)
+    monkeypatch.setattr("rapid_llm.engine.sampler.greedy_ids", counting)
     return calls
 
 

@@ -1,6 +1,6 @@
 """Record the preemption GIF: 3 requests time-share 2 slots by recompute.
 
-Drives the real :class:`~lite_llama.engine.scheduler.Scheduler` with
+Drives the real :class:`~rapid_llm.engine.scheduler.Scheduler` with
 ``enable_preemption=True`` and ``max_num_seqs=3 > num_slots=2``. The row to
 watch is PREEMPTED: each step the youngest decoding request is evicted (KV
 dropped, re-queued for recompute) so a waiting request gets a slot, giving a
@@ -23,8 +23,8 @@ from PIL import Image, ImageDraw, ImageFont
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from lite_llama.engine.sampler import SamplingParams  # noqa: E402
-from lite_llama.engine.scheduler import Request, Scheduler, SchedulerConfig  # noqa: E402
+from rapid_llm.engine.sampler import SamplingParams  # noqa: E402
+from rapid_llm.engine.scheduler import Request, Scheduler, SchedulerConfig  # noqa: E402
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
@@ -102,7 +102,7 @@ def render(frame: Frame, fonts) -> Image.Image:
     draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
     draw.text(
         (12, 9),
-        f"lite-llama  --  preemption / recompute  ({MAX_NUM_SEQS} reqs share {NUM_SLOTS} slots)",
+        f"rapid-llm  --  preemption / recompute  ({MAX_NUM_SEQS} reqs share {NUM_SLOTS} slots)",
         fill=TITLE_FG,
         font=small,
     )
@@ -110,7 +110,7 @@ def render(frame: Frame, fonts) -> Image.Image:
         draw.ellipse([W - 78 + index * 18, 11, W - 68 + index * 18, 21], fill=colour)
 
     y = TITLE_H + PAD
-    draw.text((PAD, y), "$ lite-llama serve --enable-preemption --max-num-seqs 3", fill=PROMPT_FG, font=body)
+    draw.text((PAD, y), "$ rapid-llm serve --enable-preemption --max-num-seqs 3", fill=PROMPT_FG, font=body)
     y += LINE_H + 6
     draw.text(
         (PAD, y),

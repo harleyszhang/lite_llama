@@ -1,6 +1,6 @@
 """Tests for KV cache groups and their hit policies — pure CPU, no GPU.
 
-Covers what :mod:`lite_llama.engine.kv_cache_spec` decides: how far back a
+Covers what :mod:`rapid_llm.engine.kv_cache_spec` decides: how far back a
 prefix is reusable for each attention kind, how a prompt's hash chain projects
 onto groups that page at different sizes, and how the coordinator reduces N
 groups to the one number the scheduler wants.
@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import pytest
 
-from lite_llama.engine.block_pool import BlockPool
-from lite_llama.engine.kv_cache_spec import (
+from rapid_llm.engine.block_pool import BlockPool
+from rapid_llm.engine.kv_cache_spec import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheCoordinator,

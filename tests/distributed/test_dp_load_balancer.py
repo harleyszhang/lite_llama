@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from lite_llama.engine.dp_load_balancer import (
+from rapid_llm.engine.dp_load_balancer import (
     LOAD_BALANCERS,
     CacheAwareBalancer,
     RoundRobinBalancer,
@@ -20,7 +20,7 @@ from lite_llama.engine.dp_load_balancer import (
     TotalTokensBalancer,
     make_load_balancer,
 )
-from lite_llama.engine.prefix_cache import PREFIX_CACHE_BLOCK_SIZE
+from rapid_llm.engine.prefix_cache import PREFIX_CACHE_BLOCK_SIZE
 
 _ALL = [
     RoundRobinBalancer,

@@ -19,7 +19,7 @@ share one. ``--workload`` picks that; running a short-prompt workload against
 
 Two features act at engine-build time rather than through a ``from_pretrained``
 override: ``overlap_off`` disables the L1 cross-stream overlap
-(``LITE_LLAMA_OVERLAP=0``; it is on by default, so this cell measures what it
+(``RAPID_LLM_OVERLAP=0``; it is on by default, so this cell measures what it
 buys) and ``router_fp32_cache`` swaps the MoE router GEMM for the predecessor
 the tier-4 refactor replaced. Each is applied per cell and undone after, so it
 composes with the kwarg features like any other.
@@ -60,7 +60,7 @@ from benchmarks.lib import (
 )
 
 #: Environment variable switching L1 cross-stream overlap (read at engine build).
-OVERLAP_ENV = "LITE_LLAMA_OVERLAP"
+OVERLAP_ENV = "RAPID_LLM_OVERLAP"
 
 #: fp32 weight copies the ``fp32_cache`` router variant keeps, keyed by ``id()``
 #: of the source weight. The dict holds the copy alive, so an id cannot be
@@ -213,13 +213,13 @@ def build_prompts(workload: str, batch: int, shared_sentences: int) -> list[str]
 def _side_effects(features: tuple[str, ...]):
     """Apply the two build-time side-effect features for one cell, undo on exit.
 
-    ``overlap_off`` sets ``LITE_LLAMA_OVERLAP=0`` (the engine reads it when it
+    ``overlap_off`` sets ``RAPID_LLM_OVERLAP=0`` (the engine reads it when it
     is built); ``router_fp32_cache`` swaps ``moe._router_gemm`` for the
     predecessor the tier-4 refactor replaced. Kwarg features are applied by the
     caller through ``FEATURES``, so this wraps only the two that act outside
     ``from_pretrained`` -- and restores whatever they displaced.
     """
-    from lite_llama.modules import moe
+    from rapid_llm.modules import moe
 
     saved_overlap = os.environ.get(OVERLAP_ENV)
     saved_router = moe._router_gemm
@@ -249,7 +249,7 @@ def measure_cell(
     would leave its blocks in a prefix cache and credit the measured run with a
     hit rate the workload never earned.
     """
-    from lite_llama import ContinuousBatchingEngine, SamplingParams
+    from rapid_llm import ContinuousBatchingEngine, SamplingParams
 
     kwargs = dict(BASELINE)
     for name in features:

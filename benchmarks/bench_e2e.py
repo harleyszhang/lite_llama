@@ -77,7 +77,7 @@ def run_lite(args, prompts: list[str]) -> dict:
 
 def verify_graph_matches_eager(args) -> int:
     """短 prompt + 长生成隔离 decode:graph capture 不能改变贪心输出。"""
-    from lite_llama import SamplingParams
+    from rapid_llm import SamplingParams
 
     params = SamplingParams(max_gen_len=args.max_gen_len, **GREEDY_PARAMS)
     outputs = {}
