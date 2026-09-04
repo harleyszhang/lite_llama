@@ -1,0 +1,189 @@
+{
+  "config": {
+    "optimization": "O4 MoE grouped-GEMM autotune collect (A10 tiles vs PRE_HOPPER heuristic)",
+    "switch": "LITE_LLAMA_AUTOTUNE=1(store)|0(heuristic)",
+    "kernel": "native/fused_moe",
+    "inference_mode": "offline kernel microbenchmark (no serving queue)",
+    "command": "benchmarks/kernels/bench_moe_o4.py --json docs/benchmark_logs/moe_o4_20260905_004218.json",
+    "geometry": {
+      "label": "qwen3-30b-a3b",
+      "hidden": 2048,
+      "intermediate": 768,
+      "num_experts": 128,
+      "top_k": 8
+    },
+    "note": "fp8 dequant is already fused in the GEMM mainloop; this A/B isolates the collect round",
+    "timestamp": "2026-09-05T00:42:26",
+    "environment": {
+      "gpu_model": "NVIDIA A10",
+      "gpu_count": 2,
+      "gpu_memory_gib": 22.0,
+      "sm_count": 72,
+      "compute_capability": "sm_86",
+      "driver_version": "550.135",
+      "interconnect_topology": "GPU0\t X \tPHB\t0-63\t0\t\tN/A; GPU1\tPHB\t X \t0-63\t0\t\tN/A",
+      "cuda_version": "12.9",
+      "torch_version": "2.13.0+cu129",
+      "triton_version": "3.7.1",
+      "transformers_version": "5.15.1",
+      "python_version": "3.13.13",
+      "cpu_cores": 64,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    }
+  },
+  "results": {
+    "geomean_speedup": 1.0302,
+    "rows": [
+      {
+        "scheme": "bf16",
+        "tokens": 1,
+        "heuristic_us": 175.1,
+        "heuristic_tile": "16x64",
+        "tuned_us": 175.1,
+        "tuned_tile": "16x64",
+        "tile_changed": true,
+        "speedup": 1.0
+      },
+      {
+        "scheme": "bf16",
+        "tokens": 8,
+        "heuristic_us": 1046.53,
+        "heuristic_tile": "16x64",
+        "tuned_us": 1047.55,
+        "tuned_tile": "16x64",
+        "tile_changed": true,
+        "speedup": 0.999
+      },
+      {
+        "scheme": "bf16",
+        "tokens": 64,
+        "heuristic_us": 2472.96,
+        "heuristic_tile": "16x64",
+        "tuned_us": 2472.96,
+        "tuned_tile": "16x64",
+        "tile_changed": true,
+        "speedup": 1.0
+      },
+      {
+        "scheme": "bf16",
+        "tokens": 512,
+        "heuristic_us": 2768.9,
+        "heuristic_tile": "32x64",
+        "tuned_us": 2771.97,
+        "tuned_tile": "128x128",
+        "tile_changed": true,
+        "speedup": 0.9989
+      },
+      {
+        "scheme": "bf16",
+        "tokens": 4096,
+        "heuristic_us": 9260.03,
+        "heuristic_tile": "64x64",
+        "tuned_us": 9416.19,
+        "tuned_tile": "128x128",
+        "tile_changed": true,
+        "speedup": 0.9834
+      },
+      {
+        "scheme": "fp8_w8a16",
+        "tokens": 1,
+        "heuristic_us": 115.71,
+        "heuristic_tile": "16x64",
+        "tuned_us": 108.54,
+        "tuned_tile": "16x64",
+        "tile_changed": true,
+        "speedup": 1.066
+      },
+      {
+        "scheme": "fp8_w8a16",
+        "tokens": 8,
+        "heuristic_us": 585.73,
+        "heuristic_tile": "16x64",
+        "tuned_us": 574.46,
+        "tuned_tile": "16x64",
+        "tile_changed": true,
+        "speedup": 1.0196
+      },
+      {
+        "scheme": "fp8_w8a16",
+        "tokens": 64,
+        "heuristic_us": 1374.21,
+        "heuristic_tile": "16x64",
+        "tuned_us": 1338.4,
+        "tuned_tile": "16x64",
+        "tile_changed": true,
+        "speedup": 1.0268
+      },
+      {
+        "scheme": "fp8_w8a16",
+        "tokens": 512,
+        "heuristic_us": 1816.06,
+        "heuristic_tile": "32x64",
+        "tuned_us": 1898.5,
+        "tuned_tile": "64x256",
+        "tile_changed": true,
+        "speedup": 0.9566
+      },
+      {
+        "scheme": "fp8_w8a16",
+        "tokens": 4096,
+        "heuristic_us": 9999.36,
+        "heuristic_tile": "64x64",
+        "tuned_us": 7816.19,
+        "tuned_tile": "64x256",
+        "tile_changed": true,
+        "speedup": 1.2793
+      },
+      {
+        "scheme": "int8_w8a16",
+        "tokens": 1,
+        "heuristic_us": 114.69,
+        "heuristic_tile": "16x64",
+        "tuned_us": 107.52,
+        "tuned_tile": "16x64",
+        "tile_changed": true,
+        "speedup": 1.0667
+      },
+      {
+        "scheme": "int8_w8a16",
+        "tokens": 8,
+        "heuristic_us": 585.73,
+        "heuristic_tile": "16x64",
+        "tuned_us": 566.27,
+        "tuned_tile": "16x64",
+        "tile_changed": true,
+        "speedup": 1.0344
+      },
+      {
+        "scheme": "int8_w8a16",
+        "tokens": 64,
+        "heuristic_us": 1378.3,
+        "heuristic_tile": "16x64",
+        "tuned_us": 1320.96,
+        "tuned_tile": "16x64",
+        "tile_changed": true,
+        "speedup": 1.0434
+      },
+      {
+        "scheme": "int8_w8a16",
+        "tokens": 512,
+        "heuristic_us": 1624.06,
+        "heuristic_tile": "32x64",
+        "tuned_us": 1861.15,
+        "tuned_tile": "64x256",
+        "tile_changed": true,
+        "speedup": 0.8726
+      },
+      {
+        "scheme": "int8_w8a16",
+        "tokens": 4096,
+        "heuristic_us": 8310.78,
+        "heuristic_tile": "64x64",
+        "tuned_us": 7159.81,
+        "tuned_tile": "64x256",
+        "tile_changed": true,
+        "speedup": 1.1608
+      }
+    ]
+  }
+}

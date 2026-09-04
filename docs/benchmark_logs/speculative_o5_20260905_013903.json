@@ -1,0 +1,24 @@
+{
+  "config": {
+    "model_dir": "my_weight/Qwen3-0.6B",
+    "max_gen_len": 32,
+    "num_prompts": 4,
+    "timestamp": "2026-09-05T01:39:03"
+  },
+  "results": {
+    "baseline": {
+      "total_tokens": 128,
+      "total_steps": 32,
+      "total_time_s": 0.1529,
+      "tokens_per_second": 837.3
+    },
+    "speculative": {
+      "total_tokens": 44,
+      "total_steps": 11,
+      "total_time_s": 0.0825,
+      "tokens_per_second": 533.2
+    },
+    "speedup": 1.85,
+    "step_reduction": 0.6562
+  }
+}
