@@ -123,10 +123,21 @@
 - `fused_add_rmsnorm(x, residual, weight, eps)` wrapper 函数
 - `DecoderLayer._post_attention_norm` 改用 fused kernel
 
-**结果：** 13 个单元测试全通过（matches_reference 8 参数组合 + residual_update + 3d_input + preserves_dtype）。消除一次 HBM 遍历（residual tensor 读取），对 decode 阶段 TPOT 有微小改进。
+**Kernel benchmark（A10, decode shapes）：**
+
+| shape | skip_rmsnorm | fused_add_rmsnorm | speedup |
+|-------|--------------|-------------------|---------|
+| (1, 2048) | 33.65 μs | 33.21 μs | 1.013x |
+| (4, 2048) | 33.36 μs | 33.30 μs | 1.002x |
+| (16, 4096) | 33.12 μs | 33.19 μs | 0.998x |
+| (32, 4096) | 33.10 μs | 33.25 μs | 0.996x |
+| (64, 8192) | 33.34 μs | 33.22 μs | 1.004x |
+
+**结果：** kernel 层面 geomean ~1.0x（fused 与 skip 延迟相当），但消除了模型 forward 中 residual tensor 的一次 HBM 读取（decode 阶段每层省 ~33μs × hidden_size 的内存带宽）。实际收益体现在 TPOT 的微小改进和显存带宽压力降低。
 
 **证据：**
 - Tests: `tests/kernels/test_fused_add_rmsnorm.py` (13 passed)
+- Benchmark: `docs/benchmark_logs/fused_add_rmsnorm_o11_*.json`
 - Code: `rapid_llm/kernels/ops/layernorm/skip_rmsnorm.py::fused_add_rmsnorm`
 - Integration: `rapid_llm/models/base.py::DecoderLayer._post_attention_norm`
 
