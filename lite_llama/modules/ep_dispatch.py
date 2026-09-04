@@ -39,6 +39,7 @@ Usage:
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 
 import torch
@@ -210,6 +211,18 @@ class AllToAllDispatcher:
         if event is not None:
             handle.events.append(event)
         return handle
+
+
+    def _sm_budget_ctx(self, device):
+        """The SM-budget context for this device's exchanges, or a no-op.
+
+        Returns ``nullcontext`` when SBO is off, so the dense path pays nothing.
+        """
+        from ..batch_overlap.single_batch_overlap import SmBudget, SmBudgetContext, sbo_policy
+
+        if not sbo_policy().enabled:
+            return nullcontext()
+        return SmBudgetContext(SmBudget.split(device))
 
     def combine_b(self, handle: DispatchHandle) -> torch.Tensor:
         """Fence the return exchange; reduce to ``[rows, hidden]``.

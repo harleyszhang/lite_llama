@@ -1352,6 +1352,7 @@ def fused_moe(
             group_k=group_k,
             config=config,
         )
+    return expanded
 
 
 def fused_moe_w8a8_fp8(
