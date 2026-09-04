@@ -1,15 +1,5 @@
 """Fused residual-add + RMSNorm ("skip rmsnorm") in Triton.
 
-``skip_rmsnorm`` returns the new residual (x + residual) and the normed
-output in one launch; passing a zero residual degrades to plain RMSNorm.
-:func:`qk_rmsnorm` normalises a query and a key tensor in a single launch for
-the models that RMSNorm q and k per head before RoPE.
-
-:func:`fused_add_rmsnorm` is the residual-add + RMSNorm fusion: after an
-all-reduce has completed in-place on ``x``, it adds ``residual`` and
-normalises in a single kernel pass — one fewer HBM read of the residual
-tensor compared to calling ``skip_rmsnorm`` separately.
-
 :func:`fused_allreduce_rmsnorm` is the full O11 communication–RMSNorm
 fusion: it decomposes the all-reduce + residual-add + RMSNorm sequence into
 reduce-scatter → residual-add + RMSNorm → all-gather. The norm runs on each
@@ -338,7 +328,7 @@ def fused_allreduce_rmsnorm(partial, residual, weight, eps=1e-5):
     flat = partial.contiguous().view(-1, hidden)
     total_tokens = flat.shape[0]
 
-    if total_tokens % world_size != 0:
+    if total_tokens % world_size != 0 or total_tokens < world_size:
         from ....distributed.parallel_state import tensor_model_parallel_all_reduce
         full = tensor_model_parallel_all_reduce(partial)
         return fused_add_rmsnorm(full, residual, weight, eps)

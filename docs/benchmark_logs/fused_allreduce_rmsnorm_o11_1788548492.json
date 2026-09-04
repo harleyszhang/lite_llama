@@ -1,0 +1,44 @@
+{
+  "benchmark": "fused_allreduce_rmsnorm_o11",
+  "description": "O11 fusion vs baseline on TP=2 A10 (no fallback)",
+  "tp_size": 2,
+  "results": [
+    {
+      "shape": "(4, 2048)",
+      "batch_seq": 4,
+      "hidden": 2048,
+      "baseline_us": 342.469,
+      "fused_us": 3240.161,
+      "speedup": 0.106
+    },
+    {
+      "shape": "(16, 4096)",
+      "batch_seq": 16,
+      "hidden": 4096,
+      "baseline_us": 210.811,
+      "fused_us": 562.807,
+      "speedup": 0.375
+    },
+    {
+      "shape": "(32, 4096)",
+      "batch_seq": 32,
+      "hidden": 4096,
+      "baseline_us": 166.117,
+      "fused_us": 452.836,
+      "speedup": 0.367
+    },
+    {
+      "shape": "(64, 8192)",
+      "batch_seq": 64,
+      "hidden": 8192,
+      "baseline_us": 255.051,
+      "fused_us": 348.605,
+      "speedup": 0.732
+    }
+  ],
+  "summary": {
+    "avg_speedup": 0.395,
+    "max_speedup": 0.732,
+    "min_speedup": 0.106
+  }
+}
