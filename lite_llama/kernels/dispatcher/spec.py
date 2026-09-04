@@ -162,6 +162,21 @@ class KernelSpec:
             dispatch (native baselines register verified).
         priority: Static tie-breaker, higher first, used after perf_key and
             shape preferences; native floors should sit at 0.
+        graph_safe: Whether the implementation may run inside a FULL CUDA graph
+            capture. False for kernels that assemble per-step inputs on the
+            host (Python-side index slicing, ``plan()``-style scheduling): a
+            capture bakes those host values in, and replay would then attend
+            the capture-time rows forever. The runner refuses to capture while
+            a selected decode row is unsafe (see :func:`unsafe_for_graph`);
+            the native data-driven kernels are safe by construction.
+        step_prepare: ``"module.path:attr"`` of a per-step preparation hook,
+            run once per forward step *outside* any graph (vLLM's
+            ``build_metadata``). It receives ``(atten_info, runner)`` and may
+            assemble per-step plan payloads on the host — the runner calls it
+            on every eager decode step when this row wins dispatch, so a
+            backend can hoist per-layer host work (index assembly, wrapper
+            planning) to once per step. ``None`` = the implementation needs
+            no per-step preparation.
     """
 
     name: str
@@ -176,6 +191,8 @@ class KernelSpec:
     layout: LayoutRequirement = field(default=LayoutRequirement())
     golden: GoldenRecord = field(default=GoldenRecord())
     priority: int = 0
+    graph_safe: bool = True
+    step_prepare: str | None = None
 
     def validate(self) -> None:
         """Raise ``ValueError`` on a malformed spec — at registration time."""
@@ -186,7 +203,7 @@ class KernelSpec:
             raise ValueError(f"name prefix {head!r} != backend {self.backend!r} in {self.name!r}")
         if not _OP_RE.match(self.op):
             raise ValueError(f"KernelSpec.op must be a lowercase dotted id, got {self.op!r}")
-        for role, ref in (("target", self.target), ("available", self.available)):
+        for role, ref in (("target", self.target), ("available", self.available), ("step_prepare", self.step_prepare)):
             if ref is not None and not _TARGET_RE.match(ref):
                 raise ValueError(f"KernelSpec.{role} must be 'module:attr', got {ref!r}")
         if self.available is None and self.backend != "native":

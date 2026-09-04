@@ -95,6 +95,13 @@ class _DecodeSession:
         # ``decode_alloc_kv_cache`` grows it in place every step. Aliasing the two
         # would silently turn the prompt lengths into running sequence lengths.
         self._prompt_lens_gpu = prompt_len_tensor.clone().unsqueeze(-1)  # [batch, 1]
+        # Host mirror of ``atten_info.b_seq_len`` for the decode steps: prefill
+        # leaves the GPU lengths at the prompt lengths and every
+        # ``decode_alloc_kv_cache`` grows them in place by one, so this ledger
+        # grows in lockstep on the host. It is what the runner's per-step
+        # prepare hook (``KernelSpec.step_prepare``) reads to build attention
+        # plans without a device sync.
+        self._host_lens_t = torch.tensor(self._prompt_lens, dtype=torch.long)
         # Positions past each sequence's own prompt, i.e. the span the repetition
         # penalty may look at. Precomputed once so the hot loop only slices it.
         self._is_generated = (
@@ -169,6 +176,12 @@ class _DecodeSession:
 
         for step, cur_pos in enumerate(range(self._max_prompt_len, self._total_len), start=1):
             is_prefill = prev_pos == 0
+            if not is_prefill:
+                # Publish the host ledger for this step's decode kernels: the
+                # runner's prepare hook reads it instead of syncing the GPU
+                # lengths. The tensor is mutated in place below, so the
+                # reference stays valid for every later step.
+                engine.model_runner.atten_info.b_seq_len_cpu = self._host_lens_t
             input_ids = self._tokens[:, prev_pos:cur_pos]
             step_positions = self._step_positions(input_ids, prev_pos, is_prefill)
 
@@ -193,6 +206,9 @@ class _DecodeSession:
                 rows = torch.arange(self.batch_size, device=logits.device)
                 logits = logits[rows, self._prompt_lens_gpu.view(-1) - 1]
             self._allocated.append(engine.model_runner.decode_alloc_kv_cache(self.batch_size))
+            # Mirror the in-place growth of atten_info.b_seq_len on the host,
+            # keeping the ledger exactly one step ahead of the next forward.
+            self._host_lens_t += 1
 
             generated = None
             if params.repetition_penalty != 1.0:

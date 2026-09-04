@@ -126,6 +126,16 @@ register(
         layout=PAGED_KV,
         golden=GoldenRecord(verified=True, max_abs_diff=2.0e-2, baseline="native/flash_decoding"),
         priority=UNMEASURED,
+        # decode_attention assembles the page indices with Python-side slicing
+        # over the live lengths and plans the wrapper on every call: captured
+        # into a CUDA graph, both bake the capture-time lengths in and replay
+        # silently attends stale rows. graph_safe=False makes the runner refuse
+        # to capture while this row is chosen (see unsafe_for_graph); the
+        # backend module's paged_kv_indices_gpu + prepare_decode (fed by the
+        # engine's CPU length ledger) cover the eager half of the vLLM-style
+        # fix — fast_decode_plan is what remains for the capture half.
+        graph_safe=False,
+        step_prepare="lite_llama.kernels.backend.flashinfer.attention:prepare_decode",
     )
 )
 
@@ -147,5 +157,9 @@ register(
             verified=False, max_abs_diff=None, baseline="minimal MLA harness reference"
         ),
         priority=UNMEASURED,
+        # Same wrapper family as flashinfer's decode (host-side plan, per-call
+        # scheduling), so the same capture hazard applies: refuse it while
+        # graphs are on.
+        graph_safe=False,
     )
 )

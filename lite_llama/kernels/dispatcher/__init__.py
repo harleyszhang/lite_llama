@@ -19,6 +19,8 @@ from .dispatch import (
     op_backend_env,
     resolve_target,
     set_perf_provider,
+    step_prepare_for,
+    unsafe_for_graph,
 )
 from .registry import REGISTRY, OpRegistry, register
 from .spec import (
@@ -62,4 +64,6 @@ __all__ = [
     "register",
     "resolve_target",
     "set_perf_provider",
+    "step_prepare_for",
+    "unsafe_for_graph",
 ]

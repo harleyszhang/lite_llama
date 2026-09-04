@@ -16,6 +16,7 @@ import re
 import pytest
 
 from lite_llama.kernels.dispatcher import (
+    REGISTRY,
     GoldenRecord,
     KernelSpec,
     LayoutRequirement,
@@ -27,6 +28,8 @@ from lite_llama.kernels.dispatcher import (
     op_backend_env,
     resolve_target,
     set_perf_provider,
+    step_prepare_for,
+    unsafe_for_graph,
 )
 from lite_llama.platform.spec import CapabilityRequirement, PlatformInfo
 
@@ -47,6 +50,22 @@ def _available_yes() -> bool:
 
 def _available_no() -> bool:
     return False
+
+
+def _fake_prepare(atten_info, runner) -> None:
+    return None
+
+
+def _fake_prepare_b(atten_info, runner) -> None:
+    return None
+
+
+try:
+    import flashinfer  # noqa: F401
+
+    _HAS_FLASHINFER = True
+except ImportError:
+    _HAS_FLASHINFER = False
 
 
 def make_reg(*specs: KernelSpec) -> OpRegistry:
@@ -370,3 +389,126 @@ class TestTargetResolution:
         assert dtype_label(torch.bfloat16) == "bf16"
         assert dtype_label(torch.float16) == "fp16"
         assert dtype_label("bf16") == "bf16"  # labels pass through
+
+
+class TestGraphGate:
+    """graph_safe marking + the runner's pre-capture query — the lite_llama
+    analogue of vLLM's AttentionCGSupport check before its first capture."""
+
+    def test_ranked_unsafe_backend_is_reported(self) -> None:
+        # Perf/priority ranking may put an unsafe row first (flashinfer's
+        # measured win over native is exactly the real-world trigger).
+        reg = make_reg(
+            native(),
+            external("ext/decode", op="attention.decode", priority=10, graph_safe=False),
+        )
+        assert dispatch("attention.decode", dtype="bf16", registry=reg).spec.name == "ext/decode"
+        assert unsafe_for_graph("attention.decode", reg) == ("ext/decode",)
+
+    def test_safe_backend_reports_nothing(self) -> None:
+        reg = make_reg(native(), external("ext/decode", op="attention.decode", priority=10))
+        dispatch("attention.decode", dtype="bf16", registry=reg)
+        assert unsafe_for_graph("attention.decode", reg) == ()
+
+    def test_unsafe_rows_of_other_ops_do_not_leak(self) -> None:
+        reg = make_reg(external("ext/other", op="other.op", priority=10, graph_safe=False))
+        dispatch("other.op", dtype="bf16", registry=reg)
+        assert unsafe_for_graph("attention.decode", reg) == ()
+
+    def test_one_name_per_spec_across_dispatch_keys(self) -> None:
+        # The same spec selected under two quantisation schemes is reported
+        # once, not once per dispatch key.
+        reg = make_reg(
+            native(),
+            external(
+                "ext/decode",
+                op="attention.decode",
+                priority=10,
+                schemes=("unquantized", "fp8_kv"),
+                graph_safe=False,
+            ),
+        )
+        dispatch("attention.decode", dtype="bf16", scheme="unquantized", registry=reg)
+        dispatch("attention.decode", dtype="bf16", scheme="fp8_kv", registry=reg)
+        assert unsafe_for_graph("attention.decode", reg) == ("ext/decode",)
+
+
+class TestStepPrepare:
+    """step_prepare_for: the runner's per-step hook lookup — returns the hook
+    only when the dispatch winner declares one, never for a loser."""
+
+    HOOK = "tests.ops.test_dispatch:_fake_prepare"
+    HOOK_B = "tests.ops.test_dispatch:_fake_prepare_b"
+
+    def test_native_winner_without_hook_gives_none(self) -> None:
+        # The floor outranks the hook row: dispatch would run native, so the
+        # hook of the losing row must not fire.
+        reg = make_reg(
+            native(op="attention.decode", priority=10),
+            external(
+                "ext/decode", op="attention.decode", priority=5, step_prepare=self.HOOK
+            ),
+        )
+        assert step_prepare_for("attention.decode", registry=reg) is None
+
+    def test_winning_row_with_hook_is_returned(self) -> None:
+        reg = make_reg(
+            native(op="attention.decode"),
+            external(
+                "ext/decode", op="attention.decode", priority=10, step_prepare=self.HOOK
+            ),
+        )
+        assert step_prepare_for("attention.decode", registry=reg) is _fake_prepare
+
+    def test_pinned_backend_without_hook_gives_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(op_backend_env("attention.decode"), "native")
+        reg = make_reg(
+            native(op="attention.decode"),
+            external(
+                "ext/decode", op="attention.decode", priority=10, step_prepare=self.HOOK
+            ),
+        )
+        assert step_prepare_for("attention.decode", registry=reg) is None
+
+    def test_pinned_backend_with_hook_wins_over_priority(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Pinned to the losing-priority backend: only its rows are ranked, so
+        # its hook is the one that matches what dispatch will actually run.
+        monkeypatch.setenv(op_backend_env("attention.decode"), "flashinfer")
+        reg = make_reg(
+            native(op="attention.decode", priority=10),
+            external(
+                "flashinfer/dec", op="attention.decode", priority=0, step_prepare=self.HOOK
+            ),
+        )
+        assert step_prepare_for("attention.decode", registry=reg) is _fake_prepare
+
+    def test_unavailable_hook_row_is_skipped(self) -> None:
+        reg = make_reg(
+            native(op="attention.decode", priority=10),
+            external(
+                "ext/decode",
+                op="attention.decode",
+                priority=5,
+                step_prepare=self.HOOK,
+                available="tests.ops.test_dispatch:_available_no",
+            ),
+        )
+        assert step_prepare_for("attention.decode", registry=reg) is None
+
+    def test_highest_priority_hook_wins_between_two(self) -> None:
+        reg = make_reg(
+            external("a/dec", op="attention.decode", priority=5, step_prepare=self.HOOK),
+            external("b/dec", op="attention.decode", priority=9, step_prepare=self.HOOK_B),
+        )
+        assert step_prepare_for("attention.decode", registry=reg) is _fake_prepare_b
+
+    @pytest.mark.skipif(_HAS_FLASHINFER, reason="flashinfer installed: the row is available")
+    def test_real_registry_without_flashinfer_gives_none(self) -> None:
+        # The shipped attention.decode rows: flashinfer declares a hook but is
+        # unavailable without the wheel, native needs no hook.
+        assert step_prepare_for("attention.decode") is None
+        assert REGISTRY.implementations("attention.decode")  # rows exist at all

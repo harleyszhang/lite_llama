@@ -210,8 +210,10 @@ def invalidate_cache(op: str | None = None) -> None:
     """Drop the global registry's cached decisions (all, or one op's)."""
     if op is None:
         REGISTRY._decisions.clear()
+        _step_prepare_cache.clear()
     else:
         REGISTRY.notify_change(op)
+        _step_prepare_cache.pop(op, None)
 
 
 def _reject_reason(spec: KernelSpec, key: DispatchKey) -> str | None:
@@ -345,6 +347,87 @@ def dispatch(
     registry._decisions[key] = decision
     _trace(decision)
     return decision
+
+
+def unsafe_for_graph(op: str, registry: OpRegistry = REGISTRY) -> tuple[str, ...]:
+    """Names of ``op``'s selected implementations that must not be graph-captured.
+
+    A FULL CUDA-graph capture records the Python side of a kernel call once and
+    replays it verbatim: an implementation that assembles per-step tensors on
+    the host (index slices, ``plan()``-style scheduling) would bake the
+    capture-time lengths into the graph, and every later step would silently
+    attend the rows captured at warmup. The runner consults this before its
+    first capture and refuses to enable graphs while a chosen decode backend is
+    on the list — the same gate vLLM runs through ``AttentionCGSupport``.
+    """
+    return tuple(
+        sorted(
+            {
+                decision.spec.name
+                for key, decision in registry._decisions.items()
+                if key.op == op and not decision.spec.graph_safe
+            }
+        )
+    )
+
+
+#: Per-op cache of :func:`step_prepare_for` for the global registry; a
+#: registration or perf-provider change clears it (see invalidate_cache).
+_step_prepare_cache: dict[str, Callable | None] = {}
+
+
+def step_prepare_for(op: str, registry: OpRegistry = REGISTRY) -> Callable | None:
+    """The per-step preparation hook of ``op``'s dispatch winner, if it declares one.
+
+    Scans the registered rows (not the cached decisions — the runner asks
+    before any step has run), skips unavailable libraries, honours the
+    per-op/global backend pins, and ranks the survivors with the same order
+    :func:`dispatch` uses. The hook is returned only when the row that wins
+    that ranking declares one — the hook must belong to the backend that will
+    actually run, never to a loser whose plan nobody would read. ``None``
+    covers every other case (native floors need no preparation, and the
+    runner calls this every decode step, so the None path must stay cheap).
+    The winner calls its hook once per eager decode step with
+    ``(atten_info, runner)`` — the same role vLLM's ``build_metadata`` plays,
+    hoisting per-layer host work (index assembly, wrapper planning) to once
+    per step.
+
+    The global registry's result is cached per op and cleared by
+    :func:`invalidate_cache`, so registration and perf-provider swaps keep
+    the answer fresh; a private test registry skips the cache entirely.
+    """
+    if registry is REGISTRY and op in _step_prepare_cache:
+        return _step_prepare_cache[op]
+    forced = _forced_backend(op, None)
+    key = DispatchKey(
+        op=op,
+        dtype="any",
+        scheme="unquantized",
+        shape=(),
+        layout=frozenset(),
+        platform=current_platform().detect(),
+        forced_backend=forced,
+    )
+    best: tuple[tuple, KernelSpec] | None = None
+    for spec in registry.implementations(op):
+        if forced is not None and spec.backend != forced:
+            continue
+        if spec.available is not None:
+            ok, _detail = _check_available(spec.available)
+            if not ok:
+                continue
+        # The synthetic key carries no shape dims, so a perf store keyed on
+        # shape simply misses and every row falls back to static priority —
+        # the right answer for a per-backend (shape-independent) choice.
+        rank = _rank_key(spec, key)
+        if best is None or rank < best[0]:
+            best = (rank, spec)
+    hook = None
+    if best is not None and best[1].step_prepare is not None:
+        hook = resolve_target(best[1].step_prepare)
+    if registry is REGISTRY:
+        _step_prepare_cache[op] = hook
+    return hook
 
 
 def explain(op: str, **key_kwargs: Any) -> str:

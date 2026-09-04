@@ -268,6 +268,12 @@ class SlotBatch:
         self._atten.b_seq_len = rows_len
         self._atten.max_actual_seq_len = max(ends)
         self._atten.is_prefill = False
+        # Host mirror of the row lens (filler included): the runner's per-step
+        # prepare hook reads it instead of syncing the device lengths. The
+        # host plan is the same flatten+pad the device rows just installed.
+        self._atten.b_seq_len_cpu = torch.tensor(
+            self.plan_extend_rows(slots, seq_starts, seq_lens)[1], dtype=torch.long
+        )
         # Row `seq_len - 1` is where this row's fresh K/V lands.
         self._atten.cur_select_index = table[rows_slot, rows_len - 1]
         self._atten.b_start_loc = None
@@ -307,6 +313,10 @@ class SlotBatch:
         self._atten.b_seq_len = self._b_seq_len
         self._atten.max_actual_seq_len = max(seq_lens)
         self._atten.is_prefill = False
+        # Host mirror of the padded lens: same numbers the device lengths
+        # hold (steady steps grew both by one), so the runner's per-step
+        # prepare hook plans without a device sync.
+        self._atten.b_seq_len_cpu = torch.tensor(padded_lens, dtype=torch.long)
         # Row `seq_len - 1` of each slot: where this step's K/V goes.
         self._atten.cur_select_index = table[self._b_req_idx, self._b_seq_len - 1]
         self._atten.b_start_loc = None
