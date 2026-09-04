@@ -1,0 +1,23 @@
+{
+  "config": {
+    "model": "/data/shared/llm_weights/DeepSeek-V4-Flash-6layers-hf-bf16-v2",
+    "batch_size": 8,
+    "gen_len": 128,
+    "iters": 2,
+    "tensor_parallel_size": 2,
+    "hf_overrides": null,
+    "gpu": "NVIDIA A10",
+    "timestamp": "2026-09-04T16:29:52"
+  },
+  "transformers": {
+    "engine": "transformers",
+    "batch_size": 8,
+    "prompt_tokens": 120,
+    "output_tokens": 1114,
+    "ttft_s": 2.0281008388847113,
+    "tpot_ms": 1565.7644585233054,
+    "tps": 0.6386656655517102,
+    "tgs": 5.098513971412128,
+    "latency_s": 218.49503722973168
+  }
+}

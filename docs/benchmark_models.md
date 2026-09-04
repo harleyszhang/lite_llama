@@ -80,64 +80,67 @@ print(triton.testing.do_bench(lambda: w8a16_matmul(x, qw, sc, group_n=128, group
 
 - **TTFT**（首 token 时延，s）= 预填充延迟；
 - **TPOT**（每输出 token 时延，ms）= `(latency - ttft) / (output_len - 1)`；
-- **TGS**（token 生成速度，tokens/s）= `总输出 token / latency`（聚合吞吐）；
-- **TPOT 加速比** = `transformers TPOT / lite_llama TPOT`，标在 lite_llama 行（大于 1 即 lite_llama 更快），单侧跑的组合无对照记 `—`。
+- **TPS**（每请求吞吐，tokens/s）= `1000 / TPOT`，单个请求 decode 阶段每秒生成的 token 数；
+- **TGS**（token 生成速度，tokens/s）= `总输出 token / latency`（全 batch 聚合吞吐）；TP 并行行按 `TGS / 并行度` 折算每卡值；
+- **TTFT / TPOT 加速比** = `transformers 指标 / lite_llama 指标`（两项都是延迟，越低越好）；
+- **TPS 加速比** = `lite_llama TGS / transformers TGS`（吞吐越高越好）；
+- 三列加速比都标在 lite_llama 行（大于 1 即 lite_llama 更快），单侧跑的组合无对照记 `—`。
 
 多模态四行（batch=serial）由 `examples/benchmark_vision.py` 测得：lite_llama 的多模态路径逐请求串行（processor 单请求），lite 侧 decode 走 CUDA graph 重放（视觉 token 在 prefill 后已是 KV cache 行，捕获的 decode 步与纯文本同构）；TTFT/TPOT 为单请求平均、TGS 为串行循环的聚合吞吐，与纯文本行的 batch 并行口径不同，不要直接比较。TP2 行的 lite_llama 侧走 `ContinuousBatchingEngine`（唯一带 plan 广播的执行路径），transformers 侧 `device_map=auto` 把层均摊到同样的两张卡（模型并行），两端硬件一致。
 
-| 模型 | GPU | batch | gen_len | 引擎 | TTFT (s) | TPOT (ms) | TGS (tok/s) | TPOT 加速比 |
-| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |
-| Qwen1.5-0.5B | A10 | 8 | 128 | lite_llama | 0.0180 | 3.04 | 2535.3 | 6.47× |
-| Qwen1.5-0.5B | A10 | 8 | 128 | transformers | 0.0215 | 19.65 | 406.8 | — |
-| Qwen1.5-0.5B | A10 | 16 | 256 | lite_llama | 0.0192 | 3.55 | 4424.8 | 5.64× |
-| Qwen1.5-0.5B | A10 | 16 | 256 | transformers | 0.0238 | 20.02 | 798.4 | — |
-| Qwen2.5-1.5B | A10 | 8 | 128 | lite_llama | 0.0219 | 9.36 | 844.5 | 2.53× |
-| Qwen2.5-1.5B | A10 | 8 | 128 | transformers | 0.0271 | 23.67 | 337.6 | — |
-| Qwen2.5-1.5B | A10 | 16 | 256 | lite_llama | 0.0228 | 8.69 | 1830.1 | 2.79× |
-| Qwen2.5-1.5B | A10 | 16 | 256 | transformers | 0.0289 | 24.21 | 660.4 | — |
-| Qwen2.5-1.5B-Instruct | A10 | 8 | 128 | lite_llama | 0.0216 | 8.24 | 958.8 | 2.93× |
-| Qwen2.5-1.5B-Instruct | A10 | 8 | 128 | transformers | 0.0277 | 24.14 | 331.1 | — |
-| Qwen2.5-1.5B-Instruct | A10 | 16 | 256 | lite_llama | 0.0225 | 8.51 | 1868.2 | 2.78× |
-| Qwen2.5-1.5B-Instruct | A10 | 16 | 256 | transformers | 0.0278 | 23.62 | 677.0 | — |
-| Qwen2.5-3B | A10 | 8 | 128 | lite_llama | 0.0279 | 18.67 | 426.6 | 1.92× |
-| Qwen2.5-3B | A10 | 8 | 128 | transformers | 0.0361 | 35.82 | 223.3 | — |
-| Qwen2.5-3B | A10 | 16 | 256 | lite_llama | 0.0364 | 19.23 | 828.9 | 1.83× |
-| Qwen2.5-3B | A10 | 16 | 256 | transformers | 0.0468 | 35.18 | 454.1 | — |
-| Qwen3-0.6B | A10 | 8 | 128 | lite_llama | 0.0253 | 4.23 | 1820.3 | 6.84× |
-| Qwen3-0.6B | A10 | 8 | 128 | transformers | 0.0317 | 28.94 | 276.2 | — |
-| Qwen3-0.6B | A10 | 16 | 256 | lite_llama | 0.0256 | 4.70 | 3346.7 | 6.10× |
-| Qwen3-0.6B | A10 | 16 | 256 | transformers | 0.0329 | 28.65 | 558.2 | — |
-| Qwen3-0.6B-FP8 | A10 | 8 | 128 | lite_llama | 0.0293 | 4.09 | 1864.5 | 7.10× |
-| Qwen3-0.6B-FP8 | A10 | 8 | 128 | transformers | 0.0311 | 29.08 | 274.9 | — |
-| Qwen3-0.6B-FP8 | A10 | 16 | 256 | lite_llama | 0.0291 | 4.53 | 3460.5 | 6.17× |
-| Qwen3-0.6B-FP8 | A10 | 16 | 256 | transformers | 0.0308 | 27.92 | 572.8 | — |
-| Qwen3-1.7B | A10 | 8 | 128 | lite_llama | 0.0264 | 9.28 | 850.0 | 3.13× |
-| Qwen3-1.7B | A10 | 8 | 128 | transformers | 0.0315 | 29.07 | 275.0 | — |
-| Qwen3-1.7B | A10 | 16 | 256 | lite_llama | 0.0270 | 9.77 | 1626.2 | 3.04× |
-| Qwen3-1.7B | A10 | 16 | 256 | transformers | 0.0342 | 29.68 | 538.8 | — |
-| Qwen3-MoE-Tiny | A10 | 8 | 128 | lite_llama | 0.0059 | 0.93 | 8281.3 | 4.20× |
-| Qwen3-MoE-Tiny | A10 | 8 | 128 | transformers | 0.0063 | 3.90 | 2043.3 | — |
-| Qwen3-MoE-Tiny | A10 | 16 | 256 | lite_llama | 0.0068 | 0.98 | 15934.9 | 4.59× |
-| Qwen3-MoE-Tiny | A10 | 16 | 256 | transformers | 0.0071 | 4.51 | 3540.1 | — |
-| Llama-3.2-3B-Instruct | A10 | 8 | 128 | lite_llama | 0.0254 | 15.41 | 516.4 | 1.64× |
-| Llama-3.2-3B-Instruct | A10 | 8 | 128 | transformers | 0.0309 | 25.33 | 315.3 | — |
-| Llama-3.2-3B-Instruct | A10 | 16 | 256 | lite_llama | 0.0514 | 15.96 | 994.1 | 1.74× |
-| Llama-3.2-3B-Instruct | A10 | 16 | 256 | transformers | 0.0557 | 27.74 | 574.6 | — |
-| Qwen3-8B | A10 | 8 | 128 | lite_llama | 0.0561 | 36.79 | 216.6 | — |
-| Qwen3-8B (TP2) | A10×2 | 16 | 128 | lite_llama | 0.0618 | 41.61 | 383.1 | 1.24× |
-| Qwen3-8B (TP2) | A10×2 | 16 | 128 | transformers | 0.1021 | 51.52 | 308.2 | — |
-| Meta-Llama-3.1-8B-Instruct | A10 | 8 | 128 | lite_llama | 0.0581 | 35.30 | 225.5 | — |
-| Meta-Llama-3.1-8B-Instruct (TP2) | A10×2 | 16 | 128 | lite_llama | 0.0684 | 31.99 | 495.7 | 1.46× |
-| Meta-Llama-3.1-8B-Instruct (TP2) | A10×2 | 16 | 128 | transformers | 0.1327 | 46.82 | 336.9 | — |
-| Qwen3-30B-A3B-Instruct-2507-FP8 (TP2) | A10×2 | 8 | 128 | lite_llama | 0.0829 | 84.03 | 95.2 | — |
-| Qwen3-30B-A3B-Instruct-2507-FP8 (TP2) | A10×2 | 16 | 128 | lite_llama | 0.0838 | 84.22 | 190.0 | — |
-| Qwen3-14B-AWQ | A10 | 8 | 128 | lite_llama | 0.1499 | 43.49 | 180.5 | — |
-| Qwen3-14B-AWQ | A10 | 16 | 128 | lite_llama | 0.2724 | 42.93 | 357.8 | — |
-| Qwen3-14B-AWQ | A10 | 16 | 256 | lite_llama | 0.2808 | 45.01 | 348.4 | — |
-| llava-1.5-7b-hf | A10 | serial | 128 | lite_llama | 0.1599 | 31.72 | 29.3 | 1.15× |
-| llava-1.5-7b-hf | A10 | serial | 128 | transformers | 0.1950 | 36.43 | 25.4 | — |
-| Qwen3-VL-4B-Instruct | A10 | serial | 128 | lite_llama | 0.1296 | 19.44 | 48.7 | 1.72× |
-| Qwen3-VL-4B-Instruct | A10 | serial | 128 | transformers | 0.1442 | 33.47 | 29.0 | — |
+| 模型 | GPU | batch | gen_len | 引擎 | TTFT (s) | TPOT (ms) | TPS (tok/s) | TGS (tok/s) | TTFT 加速比 | TPOT 加速比 | TPS 加速比 |
+| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen1.5-0.5B | A10 | 8 | 128 | lite_llama | 0.0180 | 3.04 | 328.9 | 2535.3 | 1.19× | 6.47× | 6.23× |
+| Qwen1.5-0.5B | A10 | 8 | 128 | transformers | 0.0215 | 19.65 | 50.9 | 406.8 | — | — | — |
+| Qwen1.5-0.5B | A10 | 16 | 256 | lite_llama | 0.0192 | 3.55 | 281.7 | 4424.8 | 1.24× | 5.64× | 5.54× |
+| Qwen1.5-0.5B | A10 | 16 | 256 | transformers | 0.0238 | 20.02 | 50.0 | 798.4 | — | — | — |
+| Qwen2.5-1.5B | A10 | 8 | 128 | lite_llama | 0.0219 | 9.36 | 106.8 | 844.5 | 1.24× | 2.53× | 2.50× |
+| Qwen2.5-1.5B | A10 | 8 | 128 | transformers | 0.0271 | 23.67 | 42.2 | 337.6 | — | — | — |
+| Qwen2.5-1.5B | A10 | 16 | 256 | lite_llama | 0.0228 | 8.69 | 115.1 | 1830.1 | 1.27× | 2.79× | 2.77× |
+| Qwen2.5-1.5B | A10 | 16 | 256 | transformers | 0.0289 | 24.21 | 41.3 | 660.4 | — | — | — |
+| Qwen2.5-1.5B-Instruct | A10 | 8 | 128 | lite_llama | 0.0216 | 8.24 | 121.4 | 958.8 | 1.28× | 2.93× | 2.90× |
+| Qwen2.5-1.5B-Instruct | A10 | 8 | 128 | transformers | 0.0277 | 24.14 | 41.4 | 331.1 | — | — | — |
+| Qwen2.5-1.5B-Instruct | A10 | 16 | 256 | lite_llama | 0.0225 | 8.51 | 117.5 | 1868.2 | 1.24× | 2.78× | 2.76× |
+| Qwen2.5-1.5B-Instruct | A10 | 16 | 256 | transformers | 0.0278 | 23.62 | 42.3 | 677.0 | — | — | — |
+| Qwen2.5-3B | A10 | 8 | 128 | lite_llama | 0.0279 | 18.67 | 53.6 | 426.6 | 1.29× | 1.92× | 1.91× |
+| Qwen2.5-3B | A10 | 8 | 128 | transformers | 0.0361 | 35.82 | 27.9 | 223.3 | — | — | — |
+| Qwen2.5-3B | A10 | 16 | 256 | lite_llama | 0.0364 | 19.23 | 52.0 | 828.9 | 1.29× | 1.83× | 1.83× |
+| Qwen2.5-3B | A10 | 16 | 256 | transformers | 0.0468 | 35.18 | 28.4 | 454.1 | — | — | — |
+| Qwen3-0.6B | A10 | 8 | 128 | lite_llama | 0.0253 | 4.23 | 236.4 | 1820.3 | 1.25× | 6.84× | 6.59× |
+| Qwen3-0.6B | A10 | 8 | 128 | transformers | 0.0317 | 28.94 | 34.6 | 276.2 | — | — | — |
+| Qwen3-0.6B | A10 | 16 | 256 | lite_llama | 0.0256 | 4.70 | 212.8 | 3346.7 | 1.29× | 6.10× | 6.00× |
+| Qwen3-0.6B | A10 | 16 | 256 | transformers | 0.0329 | 28.65 | 34.9 | 558.2 | — | — | — |
+| Qwen3-0.6B-FP8 | A10 | 8 | 128 | lite_llama | 0.0293 | 4.09 | 244.5 | 1864.5 | 1.06× | 7.10× | 6.78× |
+| Qwen3-0.6B-FP8 | A10 | 8 | 128 | transformers | 0.0311 | 29.08 | 34.4 | 274.9 | — | — | — |
+| Qwen3-0.6B-FP8 | A10 | 16 | 256 | lite_llama | 0.0291 | 4.53 | 220.8 | 3460.5 | 1.06× | 6.17× | 6.04× |
+| Qwen3-0.6B-FP8 | A10 | 16 | 256 | transformers | 0.0308 | 27.92 | 35.8 | 572.8 | — | — | — |
+| Qwen3-1.7B | A10 | 8 | 128 | lite_llama | 0.0264 | 9.28 | 107.8 | 850.0 | 1.19× | 3.13× | 3.09× |
+| Qwen3-1.7B | A10 | 8 | 128 | transformers | 0.0315 | 29.07 | 34.4 | 275.0 | — | — | — |
+| Qwen3-1.7B | A10 | 16 | 256 | lite_llama | 0.0270 | 9.77 | 102.4 | 1626.2 | 1.27× | 3.04× | 3.02× |
+| Qwen3-1.7B | A10 | 16 | 256 | transformers | 0.0342 | 29.68 | 33.7 | 538.8 | — | — | — |
+| Qwen3-MoE-Tiny | A10 | 8 | 128 | lite_llama | 0.0059 | 0.93 | 1075.3 | 8281.3 | 1.07× | 4.20× | 4.05× |
+| Qwen3-MoE-Tiny | A10 | 8 | 128 | transformers | 0.0063 | 3.90 | 256.4 | 2043.3 | — | — | — |
+| Qwen3-MoE-Tiny | A10 | 16 | 256 | lite_llama | 0.0068 | 0.98 | 1020.4 | 15934.9 | 1.04× | 4.59× | 4.50× |
+| Qwen3-MoE-Tiny | A10 | 16 | 256 | transformers | 0.0071 | 4.51 | 221.7 | 3540.1 | — | — | — |
+| Llama-3.2-3B-Instruct | A10 | 8 | 128 | lite_llama | 0.0254 | 15.41 | 64.9 | 516.4 | 1.22× | 1.64× | 1.64× |
+| Llama-3.2-3B-Instruct | A10 | 8 | 128 | transformers | 0.0309 | 25.33 | 39.5 | 315.3 | — | — | — |
+| Llama-3.2-3B-Instruct | A10 | 16 | 256 | lite_llama | 0.0514 | 15.96 | 62.7 | 994.1 | 1.08× | 1.74× | 1.73× |
+| Llama-3.2-3B-Instruct | A10 | 16 | 256 | transformers | 0.0557 | 27.74 | 36.0 | 574.6 | — | — | — |
+| Qwen3-8B | A10 | 8 | 128 | lite_llama | 0.0561 | 36.79 | 27.2 | 216.6 | — | — | — |
+| Qwen3-8B (TP2) | A10×2 | 16 | 128 | lite_llama | 0.0618 | 41.61 | 24.0 | 383.1 | 1.65× | 1.24× | 1.24× |
+| Qwen3-8B (TP2) | A10×2 | 16 | 128 | transformers | 0.1021 | 51.52 | 19.4 | 308.2 | — | — | — |
+| Meta-Llama-3.1-8B-Instruct | A10 | 8 | 128 | lite_llama | 0.0581 | 35.30 | 28.3 | 225.5 | — | — | — |
+| Meta-Llama-3.1-8B-Instruct (TP2) | A10×2 | 16 | 128 | lite_llama | 0.0684 | 31.99 | 31.3 | 495.7 | 1.94× | 1.46× | 1.47× |
+| Meta-Llama-3.1-8B-Instruct (TP2) | A10×2 | 16 | 128 | transformers | 0.1327 | 46.82 | 21.4 | 336.9 | — | — | — |
+| Qwen3-30B-A3B-Instruct-2507-FP8 (TP2) | A10×2 | 8 | 128 | lite_llama | 0.0829 | 84.03 | 11.9 | 95.2 | — | — | — |
+| Qwen3-30B-A3B-Instruct-2507-FP8 (TP2) | A10×2 | 16 | 128 | lite_llama | 0.0838 | 84.22 | 11.9 | 190.0 | — | — | — |
+| Qwen3-14B-AWQ | A10 | 8 | 128 | lite_llama | 0.1499 | 43.49 | 23.0 | 180.5 | — | — | — |
+| Qwen3-14B-AWQ | A10 | 16 | 128 | lite_llama | 0.2724 | 42.93 | 23.3 | 357.8 | — | — | — |
+| Qwen3-14B-AWQ | A10 | 16 | 256 | lite_llama | 0.2808 | 45.01 | 22.2 | 348.4 | — | — | — |
+| llava-1.5-7b-hf | A10 | serial | 128 | lite_llama | 0.1599 | 31.72 | 31.5 | 29.3 | 1.22× | 1.15× | 1.15× |
+| llava-1.5-7b-hf | A10 | serial | 128 | transformers | 0.1950 | 36.43 | 27.4 | 25.4 | — | — | — |
+| Qwen3-VL-4B-Instruct | A10 | serial | 128 | lite_llama | 0.1296 | 19.44 | 51.4 | 48.7 | 1.11× | 1.72× | 1.68× |
+| Qwen3-VL-4B-Instruct | A10 | serial | 128 | transformers | 0.1442 | 33.47 | 29.9 | 29.0 | — | — | — |
 
 结论（2026-08-31 重测，torch 2.11.0+cu129 / transformers 5.8.0 / Python 3.12，覆盖受支持的全部架构含多模态）：
 - lite_llama 的 **decode 全面更快** — TPOT 加速比在 **1.15×～7.1×** 之间，模型越大比值越低（0.6B 档 ~6-7×，3B 档收敛到 ~1.6-1.9×，多模态 7B 档 1.15×；模型越大 decode 越偏 compute-bound，两端都吃满算力）；多模态 4B 档（Qwen3-VL）拿到 **1.72×**—decode 步与纯文本同构，CUDA graph 的收益直接兑现；
@@ -168,6 +171,63 @@ python examples/benchmark_vision.py --model my_weight/Qwen3-VL-4B-Instruct
 python examples/benchmark.py --model my_weight/Qwen3-30B-A3B-Instruct-2507-FP8 \
     --batch-size 16 --gen-len 128 --iters 2 --tensor-parallel-size 2 --engine lite_llama
 ```
+
+#### 2×H100 80GB 补测（2026-09-03）
+
+同一套 `examples/benchmark.py` 口径（贪心、两端同一 tokenizer 统计输出 token、自然 EOS 停止、`torch.cuda.synchronize` 计时、取中位数），换到 2×H100 80GB（sm90，torch 2.13.0+cu130 / transformers 5.15.1 / triton 3.7.1 / Python 3.14）。覆盖 modelzoo 里**权重完整且架构受支持**的全部 checkpoint：Qwen2.5-0.5B-Instruct、Qwen3-4B-Thinking-2507（两者 A10 本机无权重），以及 Qwen3-30B-A3B-Instruct-2507（bf16，A10 双卡放不下）与它的 FP8 版。与 A10 表的两点口径差异：bf16 checkpoint 的 transformers 侧改用 `--hf-dtype bf16`（与 lite_llama 加载的 dtype 一致；A10 套件用的是脚本默认 fp16），FP8 checkpoint 的 transformers 侧仍是单侧（原因换了，见下）。
+
+三个加速比列全部是**同一行内对同一 checkpoint 的 HF transformers 基线**的比值（`HF / lite_llama`，大于 1 即 lite_llama 更快），不是跨卡型或跨档位的比较：TTFT 加速比 = HF TTFT / lite TTFT，TPOT 加速比 = HF TPOT / lite TPOT，TGS 加速比 = lite TGS / HF TGS。没有 HF 对照行的档位记 `—`。
+
+| 模型 | GPU | batch | gen_len | 引擎 | TTFT (s) | TPOT (ms) | TPS (tok/s) | TGS (tok/s) | TTFT 加速比 | TPOT 加速比 | TPS 加速比 |
+| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen2.5-0.5B-Instruct | H100 | 8 | 128 | lite_llama | 0.0137 | 1.25 | 800.0 | 5936.5 | 1.40× | 24.98× | 23.11× |
+| Qwen2.5-0.5B-Instruct | H100 | 8 | 128 | transformers | 0.0193 | 31.23 | 32.0 | 256.9 | — | — | — |
+| Qwen2.5-0.5B-Instruct | H100 | 16 | 256 | lite_llama | 0.0140 | 1.34 | 746.3 | 11552.7 | 1.43× | 25.20× | 24.26× |
+| Qwen2.5-0.5B-Instruct | H100 | 16 | 256 | transformers | 0.0200 | 33.65 | 29.7 | 476.2 | — | — | — |
+| Qwen3-4B-Thinking-2507 | H100 | 8 | 128 | lite_llama | 0.0228 | 4.86 | 205.8 | 1601.6 | 1.37× | 8.66× | 8.40× |
+| Qwen3-4B-Thinking-2507 | H100 | 8 | 128 | transformers | 0.0311 | 42.06 | 23.8 | 190.6 | — | — | — |
+| Qwen3-4B-Thinking-2507 | H100 | 16 | 256 | lite_llama | 0.0253 | 5.07 | 197.2 | 3107.8 | 1.31× | 8.83× | 8.68× |
+| Qwen3-4B-Thinking-2507 | H100 | 16 | 256 | transformers | 0.0330 | 44.74 | 22.4 | 358.0 | — | — | — |
+| Qwen3-30B-A3B-Instruct-2507 | H100 | 8 | 128 | lite_llama | 0.0463 | 10.96 | 91.2 | 712.2 | — | — | — |
+| Qwen3-30B-A3B-Instruct-2507-FP8 | H100 | 8 | 128 | lite_llama | 0.0493 | 10.16 | 98.4 | 764.3 | — | — | — |
+| Qwen3-30B-A3B-Instruct-2507 (TP2) | H100×2 | 8 | 128 | lite_llama | 0.0627 | 9.97 | 100.3 | 770.8 | 1.43× | 9.90× | 9.50× |
+| Qwen3-30B-A3B-Instruct-2507 (TP2) | H100×2 | 8 | 128 | transformers | 0.0897 | 98.71 | 10.1 | 81.1 | — | — | — |
+| Qwen3-30B-A3B-Instruct-2507 (TP2) | H100×2 | 16 | 128 | lite_llama | 0.0636 | 11.64 | 85.9 | 1328.3 | 1.29× | 8.52× | 8.22× |
+| Qwen3-30B-A3B-Instruct-2507 (TP2) | H100×2 | 16 | 128 | transformers | 0.0820 | 99.19 | 10.1 | 161.5 | — | — | — |
+| Qwen3-30B-A3B-Instruct-2507-FP8 (TP2) | H100×2 | 8 | 128 | lite_llama | 0.0641 | 10.08 | 99.2 | 761.5 | — | — | — |
+| Qwen3-30B-A3B-Instruct-2507-FP8 (TP2) | H100×2 | 16 | 128 | lite_llama | 0.0674 | 11.23 | 89.0 | 1370.8 | — | — | — |
+
+读法：
+
+- **decode（TPOT）领先 8.5×～25.2×，吞吐（TGS）同量级**：0.5B 档 24.98×/25.20×，4B 档 8.66×/8.83×，30B-A3B bf16 TP2 档 9.90×/8.52×——模型越大比值越低（HF 侧也逐步吃上算力）。A10 同档只有 6.47×/5.64×（0.5B）：两端都换了卡，比值仍放大——lite_llama 的 decode 步已压到接近权重带宽下限（0.5B：1.25 ms，对 0.92 GB 权重 / 3.35 TB/s 的 0.27 ms），而 HF eager decode 的每步固定开销基本不随卡型下降。
+- **TTFT 只领先 1.29×～1.43×**，与 A10 表同量级：prefill 是 compute-bound 的大 GEMM，两端都走 cuBLAS，差距只在调度与 KV 分配开销上，与 decode 的 launch-bound 局面不同。
+- **TGS 与 TPOT 比值接近但不相等**：TGS 的分母是整轮墙钟（含 TTFT 与采样），batch 越大、gen_len 越长，TTFT 的占比越小，两个比值越靠拢（b16/g256 档：0.5B 25.20× 对 24.26×）。
+- **30B-A3B bf16 第一次有了 transformers 对照**：A10 双卡 44 GB 装不下 60 GB 权重，H100 上 `device_map=auto` 摊到两张卡即可跑（HF TPOT 98.71 ms，lite_llama TP2 9.97 ms）。HF 侧跑 MoE 的 128 专家是 Python 循环，这是它 TPOT 的主因，不是硬件差距。
+- **30B 级在单张 H100 上就能跑**：bf16 checkpoint 权重 56.87 GB、FP8 版 29.03 GB，所以多出两行 GPU=H100 的 TP1 档（A10 22 GiB 无此档位）；HF 侧的 allocator warmup 要 ~2× 权重，单卡放不下，所以这两行无对照（记 `—`）。TP2 买到的是 KV 容量而不是速度：bf16 从 13.3 万 token/卡 到 86.6 万 token/卡，TPOT 10.96 → 9.97 ms，与 [quantization.md](quantization.md) 的 30B-A3B 结论一致。TP2 行的 lite_llama 侧走 `ContinuousBatchingEngine`，decode **走 graph**（TP-safe 捕获已落地），与 A10 表的 TP2 eager 口径不同。
+- **FP8 checkpoint 的 transformers 侧仍是单侧，但原因换了**：A10 是反量化后的 ~60 GB bf16 放不下显存；H100 显存够，缺的是 transformers finegrained-fp8 kernel 的依赖（`kernels` 包，不在本项目依赖表里），加载即 ImportError。
+
+> 环境注记：transformers 的 `device_map` 需要 `accelerate`（已在 `requirement.txt`，本次补装到 `.venv`）；缺它时 `examples/benchmark.py` 的 HF 侧直接 ValueError。
+
+复现（`$LITE_LLAMA_MODELZOO` 为权重根目录）：
+
+```bash
+# 小/中模型双引擎两档：
+python examples/benchmark.py --model $LITE_LLAMA_MODELZOO/Qwen/Qwen2___5-0___5B-Instruct \
+    --batch-size 8 --gen-len 128 --iters 2 --hf-dtype bf16
+python examples/benchmark.py --model $LITE_LLAMA_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \
+    --batch-size 16 --gen-len 256 --iters 2 --hf-dtype bf16
+# 30B bf16 单卡 TP1（HF 侧的 allocator warmup 要 ~2× 权重，单卡放不下，故单侧）：
+python examples/benchmark.py --model $LITE_LLAMA_MODELZOO/Qwen/Qwen3-30B-A3B-Instruct-2507 \
+    --batch-size 8 --gen-len 128 --iters 2 --engine lite_llama
+# 30B bf16 双卡 TP2 双引擎对照（HF 走 device_map=auto）：
+python examples/benchmark.py --model $LITE_LLAMA_MODELZOO/Qwen/Qwen3-30B-A3B-Instruct-2507 \
+    --batch-size 16 --gen-len 128 --iters 2 --tensor-parallel-size 2 --hf-dtype bf16
+# 30B FP8 同参数，换 --engine lite_llama（HF 侧缺 fp8 kernel）：
+python examples/benchmark.py --model $LITE_LLAMA_MODELZOO/Qwen3-30B-A3B-Instruct-2507-FP8 \
+    --batch-size 16 --gen-len 128 --iters 2 --tensor-parallel-size 2 --engine lite_llama
+```
+
+原始日志见 `docs/benchmark_logs/bench_Qwen*_20260903_*.json`。
 
 lite_llama 流式输出实录（Qwen2.5-3B，仅演示效果，非并排对比录制）：
 
@@ -264,7 +324,7 @@ PYTHONPATH=. /home/honggao/projects/.venv/bin/python examples/benchmark.py \
     --vllm-gpu-mem-util 0.7
 ```
 
-### DeepSeek-V4-Flash-6layers（DSpark weight-only fp8/MXFP4，TP2，仅 lite_llama 实测）
+### DeepSeek-V4-Flash-6layers（DSpark weight-only fp8/MXFP4，TP2，lite_llama + transformers 实测）
 
 DeepSeek-V4-Flash 官方剪裁的真实权重 checkpoint（22 GB，DSpark 推理格式，非随机初始化），6 层覆盖 V4-Flash 的全部前向算子：层 0-5 的 attention 按 compress_ratios `[0,0,4,128,4,128]` 排布为 SWA、SWA、CSA、HCA、CSA、HCA（滑动窗、压缩注意力、带 hyper-connection 的注意力各两种），`num_hash_layers=3` 使前 3 层 MoE 走 hash 路由（tid2eid 查表）、后 3 层走 score 路由（含 e_score_correction_bias）。量化全部是 weight-only：线性层 fp8 e4m3 权重 + 128×128 e8m0 block scale（`w8a16` kernel 内 dequant），专家权重 MXFP4 e2m1（byte-packed，偶数 K 低 nibble）+ 32 通道 e8m0 scale（`fused_moe` kernel 内解码），运行时激活保持 bf16。22 GB 权重单卡放不下，TP2 每卡 13.74 GiB。
 
@@ -274,25 +334,43 @@ DeepSeek-V4-Flash 官方剪裁的真实权重 checkpoint（22 GB，DSpark 推理
 - `vllm/platforms/cuda.py::support_deep_gemm` 白名单只有 SM90 / SM100 家族 / SM120 家族，DeepGEMM 的 cmake 架构集合（9.0a / 10.0x / 12.0x）与 SM86 交集为空——这是 kernel 支持矩阵限制，不是层数或配置问题（剪到 4 层、改 `num_hidden_layers` 都绕不开 indexer）；
 - 源码仓 vendored 的 `deep_gemm._C` 扩展还是旧 torch ABI 编译（引用 torch 2.13 已删除的 `materialize_cow_storage` 符号），pypi `deep_gemm` 1.0.0 sdist 本机构建亦失败（缺 cutlass 子模块）。
 
-V3 不受影响（MLA 有 Triton 路径，不依赖 DeepGEMM）。因此 V4 的性能对比只有 lite_llama 的实测数字（TP2）。transformers 也拿不出性能数字：HF 加载器不认 DSpark 命名的权重（精度对比时是在内存里逐 key 转换的），且 fp32 CPU 口径与 GPU 吞吐不可比。精度对比的参考实现用 transformers 5.15 的 eager `DeepseekV4ForCausalLM`（下节）。
+V3 不受影响（MLA 有 Triton 路径，不依赖 DeepGEMM）。V4 的性能对比因此是 lite_llama + transformers 两方：transformers 臂先把 DSpark checkpoint 离线反量化成 bf16、按 transformers 模块树重命名后落盘（`benchmarks/accuracy/convert_v4_hf.py`，自包含键映射 + fp8/MXFP4 dequant + 逐专家 w1/w3 fuse 成 `gate_up_proj`，探针断言 / meta 扫描 / 重开核对三重自验证；产物 `/data/shared/llm_weights/DeepSeek-V4-Flash-6layers-hf-bf16-v2`，12 分片 75.6 GiB），GPU 上即以 bf16 原生跑；内存里逐 key 转换 + fp32 CPU 的组合只保留给精度 oracle（下节），性能数字不再依赖它。转换有一个 transformers 5.15 的默认行为要显式绕开：`save_pretrained` 默认 `save_original_format=True`，会把 state_dict 反向转换回 checkpoint 原始键（DSpark 形态），必须传 `save_original_format=False` 才能落出 transformers 原生键的产物。精度对比的参考实现同用 transformers 5.15 的 eager `DeepseekV4ForCausalLM`（下节）。
 
-bench 口径与上表一致（batch=8、gen_len=128、iters=2、bf16 激活、贪心、TP2 双卡），decode 走 eager（`--no-cuda-graph`：V4 每层滑窗/压缩器状态是 Python 侧张量重绑定，CUDA graph 只重放 kernel 不重放属性绑定，捕获即失效）：
+环境与负载（两臂同口径，均在 lite_llama venv：torch 2.13.0+cu129 / transformers 5.15.1 / Python 3.13 / CUDA 12.9；2×A10 22 GiB，sm86，PCIe host bridge 互联；64 核 CPU / 369 GB 内存）：batch=8、gen_len=128、iters=2、bf16 激活、贪心解码、`torch.cuda.synchronize` 计时、取中位数；两臂 decode 都走 eager（lite 臂 `--no-cuda-graph`：V4 每层滑窗/压缩器状态是 Python 侧张量重绑定，CUDA graph 只重放 kernel 不重放属性绑定，捕获即失效；transformers 臂本身就是 eager）。**两臂执行模型不同，数字不构成纯 kernel 对照**：
 
-| 模型 | 层数（attn 排布） | 并行 | 引擎 | TTFT (s) | TPOT (ms) | TGS (tok/s) |
-| --- | --- | --- | --- | ---: | ---: | ---: |
-| DeepSeek-V4-Flash-6layers | 6（SWA×2+CSA×2+HCA×2，3 hash-MoE+3 score-MoE） | TP2 | lite_llama | 0.1333 | 52.520 | 150.59 |
+- **lite_llama**：全 GPU TP2，fp8/MXFP4 weight-only kernel 内 dequant，每卡 13.74 GiB；
+- **transformers**：bf16 全量反量化权重；attention / hyper-connection / 路由 / 共享专家在单卡（cuda:0），routed experts 走 CPU 异构——每层 routed 专家 ~26 GB bf16（`gate_up_proj` [256,8192,4096] + `down_proj` [256,4096,2048]），22 GiB 卡放不下单层，且层内 hyper-connection 融合（attn 输出、hc 参数、mlp 输出在单表达式混合）不容 layer 内跨卡切分，故 monkeypatch `DeepseekV4SparseMoeBlock.forward` 让 routed 激活（每 token 只有 top-6 行）过 PCIe 到 CPU 算完搬回；加载走 `--hf-direct-load`（meta-init + safetensors assign，绕过 from_pretrained 的 DSpark 转换路径）。
 
-V4-Flash 每层都是 256 专家 top-6 路由的 MoE（moe_intermediate 2048、hidden 4096），且 CSA/HCA 层每步还要维护 indexer（index_topk 512）与 compressor 的前缀状态——单层算子密度远高于 V2/V3 的 MoE 层；eager decode 下 6 层的逐层 Python 开销叠加，TPOT 52.5 ms 与 V2-Lite 27 层 eager 时期的 61.9 ms 同量级，主要构成是每层的路由、专家 GEMM（fp8/MXFP4 weight-only dequant）与滑窗状态维护。这是 V4 在 lite_llama 的首次端到端吞吐记录，优化（graph 兼容的滑窗状态重构）留待后续。
+| 引擎 | 执行模型 | TTFT (s) | TPOT (ms) | TPS (tok/s) | TGS (tok/s) | 每卡 TGS (tok/s) | TPOT 加速比 | TGS 加速比 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| lite_llama | 2×A10 TP2 全 GPU，fp8/MXFP4 kernel 内 dequant，eager | 0.1333 | 52.520 | 19.0 | 150.59 | 75.3 | 29.8× | 29.5× |
+| transformers | 1×A10 + CPU：attn/路由/共享专家 GPU，routed experts bf16 CPU 异构，eager | 2.0281 | 1565.764 | 0.64 | 5.10 | 5.10 | — | — |
 
-复现（日志：`docs/benchmark_logs/bench_DeepSeek-V4-Flash-6layers_b8_g128_tp2_20260904_045910.json`）：
+（TPS = 1000/TPOT 每请求口径；TGS = 总输出 token / latency 聚合口径；每卡 TGS：TP2 行按 TGS/2 折算，transformers 臂实际只有 1 张 GPU 参与算力，5.10 即每卡值。加速比 = transformers 指标 / lite_llama 指标，含 CPU offload 代价（TTFT 加速比 15.2×、TPOT 29.8×、TGS 29.5×），不反映纯 kernel 差距。）
+
+V4-Flash 每层都是 256 专家 top-6 路由的 MoE（moe_intermediate 2048、hidden 4096），且 CSA/HCA 层每步还要维护 indexer（index_topk 512）与 compressor 的前缀状态——单层算子密度远高于 V2/V3 的 MoE 层。lite_llama eager decode 下 6 层的逐层 Python 开销叠加，TPOT 52.5 ms 与 V2-Lite 27 层 eager 时期的 61.9 ms 同量级，主要构成是每层的路由、专家 GEMM（fp8/MXFP4 weight-only dequant）与滑窗状态维护；这是 V4 在 lite_llama 的首次端到端吞吐记录，优化（graph 兼容的滑窗状态重构）留待后续。transformers 臂的 TPOT 1565.8 ms 主要耗在每个 decode 步把 routed 激活搬去 CPU、在 CPU 上做 bf16 专家 GEMM（256 选 6 的 grouped GEMM 无 GPU 加速）再搬回，PCIe 往返 + CPU 算力共同拉长步时；TTFT 2.03 s 同构成（prefill 每 token 同样过 CPU 专家栈）。
+
+复现（日志：lite 臂 `docs/benchmark_logs/bench_DeepSeek-V4-Flash-6layers_b8_g128_tp2_20260904_045910.json`，transformers 臂 `bench_DeepSeek-V4-Flash-6layers-hf-bf16-v2_b8_g128_tp2_20260904_162952.json`，均含完整 config 与指标）：
 
 ```bash
-# V4 TP2（lite_llama venv；--no-cuda-graph：V4 的滑窗缓存每步重绑 Python 侧张量，
-# graph 回放不了属性重绑定，decode 走 eager）：
-PYTHONPATH=. /home/honggao/projects/lite_llama/.venv/bin/python examples/benchmark.py \
+cd /home/honggao/projects/lite_llama
+
+# 0) 一次性：DSpark checkpoint -> transformers bf16 落盘（CPU-only，约 2.5 min，产物 75.6 GiB）：
+.venv/bin/python -m benchmarks.accuracy.convert_v4_hf
+
+# 1) lite_llama TP2（--no-cuda-graph：V4 的滑窗缓存每步重绑 Python 侧张量，
+#    graph 回放不了属性重绑定，decode 走 eager）：
+PYTHONPATH=. .venv/bin/python examples/benchmark.py \
   --model /data/shared/llm_weights/DeepSeek-V4-Flash-6layers \
   --batch-size 8 --gen-len 128 --iters 2 --engine lite_llama \
   --tensor-parallel-size 2 --hf-dtype bf16 --no-cuda-graph
+
+# 2) transformers 臂（--hf-direct-load：键已匹配模块树，meta-init + safetensors
+#    assign，跳过 from_pretrained 的 DSpark 转换路径）：
+PYTHONPATH=. .venv/bin/python examples/benchmark.py \
+  --model /data/shared/llm_weights/DeepSeek-V4-Flash-6layers-hf-bf16-v2 \
+  --batch-size 8 --gen-len 128 --iters 2 --engine transformers \
+  --tensor-parallel-size 2 --hf-dtype bf16 --hf-direct-load
 ```
 
 ### 精度差异：V3-4layers 三方对比 & V4-Flash-6layers（lite_llama vs transformers）
@@ -307,7 +385,7 @@ PYTHONPATH=. /home/honggao/projects/lite_llama/.venv/bin/python examples/benchma
 | 130 | 0.992 | 32/32 全对 | 32/32 全对 | 32/32 全对 |
 | 514 | 0.971 | 0.219 @7 | 0.219 @7 | 32/32 全对 |
 
-分叉步的逐 top5 解剖（`benchmarks/analysis_v3_three_way.py`）说明残部分歧是 bf16 数值噪声而非结构差异：
+分叉步的逐 top5 解剖（`benchmarks/accuracy/deepseek.py v3 three-way`）说明残部分歧是 bf16 数值噪声而非结构差异：
 
 - seq 130 三方 32 步完全一致（含 MoE 层完整路由）——路由与 MLA 路径结构等价的直接证据；
 - seq 16 的两处分叉步上，vLLM 自己的 top1 与 top2 logprob 完全相等（step 8：17117 与 48301 均 -3.1553；step 13：260 与 10466 均 -1.1548），三方各自的选择就是平局 tie-break 差异；
@@ -321,7 +399,7 @@ PYTHONPATH=. /home/honggao/projects/lite_llama/.venv/bin/python examples/benchma
 | 256 | 32/32 全对 | 0.981 | 0.486 |
 | 1024 | 12/32（首分歧 @12） | 0.406 | 4.568 |
 
-分叉解剖（`benchmarks/analysis_v4_divergence.py`）：96 步里真正独立的分歧只有 2 处，其余全部是首分歧后上下文分叉的雪崩——
+逐步 margin 核对（compare 落盘的两臂 per-step top5 JSON）：96 步里真正独立的分歧只有 2 处，其余全部是首分歧后上下文分叉的雪崩——
 
 - seq 1024 step 12：lite_llama 的 top1/top2 logprob 完全相等（margin 0.0000，argmax tie-break 取了索引小的 token），HF 侧 margin 仅 0.0709，且 HF 选的 token 就是 lite_llama 分布的 rank-1；
 - seq 64 step 30：双方 margin 0.125 / 0.037，互相落在对方 top-2，logprob 差 0.04；
@@ -331,14 +409,15 @@ PYTHONPATH=. /home/honggao/projects/lite_llama/.venv/bin/python examples/benchma
 
 ```bash
 # V3 三方（前两臂 lite_llama venv 单卡；vLLM 臂在 vllm 源码仓 venv）：
-python benchmarks/accuracy_v3_parity.py
-/home/honggao/projects/open_source/vllm/.venv/bin/python benchmarks/accuracy_v3_vllm.py
-python benchmarks/analysis_v3_three_way.py benchmarks/logs/accuracy_v3_parity_<ts>.json benchmarks/logs/accuracy_v3_vllm_<ts>.json
+python -m benchmarks.accuracy.deepseek v3 parity
+/home/honggao/projects/open_source/vllm/.venv/bin/python -m benchmarks.accuracy.deepseek v3 vllm
+python -m benchmarks.accuracy.deepseek v3 three-way \
+    benchmarks/logs/accuracy_v3_parity_<ts>.json benchmarks/logs/accuracy_v3_vllm_<ts>.json
 # V4 精度对比（lite_llama TP2 双卡；transformers 跑在 CPU，需 ~200 GB 内存做 fp32 转换）：
-python benchmarks/accuracy_v4_parity.py --arm lite
-python benchmarks/accuracy_v4_parity.py --arm hf
-python benchmarks/accuracy_v4_parity.py --compare benchmarks/logs/accuracy_v4_lite_<ts>.json benchmarks/logs/accuracy_v4_hf_<ts>.json
-python benchmarks/analysis_v4_divergence.py benchmarks/logs/accuracy_v4_lite_<ts>.json benchmarks/logs/accuracy_v4_hf_<ts>.json
+python -m benchmarks.accuracy.deepseek v4 lite
+python -m benchmarks.accuracy.deepseek v4 hf
+python -m benchmarks.accuracy.deepseek v4 compare \
+    benchmarks/logs/accuracy_v4_lite_<ts>.json benchmarks/logs/accuracy_v4_hf_<ts>.json
 ```
 
 ## 三 性能优化历史记录
@@ -502,8 +581,8 @@ python scripts/golden_tokens.py --check /tmp/golden.json --cuda-graph
 
 ### 历史吞吐对比总表（旧脚本，仅供参考）
 
-> ⚠️ 数据来源：本表数字来自本文档下方各模型章节的**历史记录**（由仓库作者早前用
-> 旧版 `benchmark.py` 在 3090 上跑出），**并非本次实测**。旧脚本存在方法学问题：
+> 数据来源：本表数字来自本文档下方各模型章节的**历史记录**（由仓库作者早前用
+> 旧版 `benchmark.py` 在 3090 上跑出），**并非本次实测**。环境：趋动云 B1.small（3090 的 1/4 卡）/ B1.big（3090 整卡），当时的软件栈未记录；负载：各章节列出的 prompt 集（变长）× 各档 max_gen_len，单次运行。**该批数字无 JSON 日志留存**（结果仅以文本输出形式记在各章节）。旧脚本存在方法学问题：
 > transformers 被强制忽略 EOS（`eos_token_id=None`）跑满长度，而 lite_llama 会提前
 > 停止，两端工作量并不一致；且仅有单次运行、只统计吞吐、无 TTFT/TPOT。因此这些倍数
 > 仅作趋势参考，请以上方实测表为准。

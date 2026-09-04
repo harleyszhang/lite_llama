@@ -57,6 +57,7 @@ class Metrics:
     output_tokens: int
     ttft_s: float
     tpot_ms: float
+    tps: float
     tgs: float
     latency_s: float
 
@@ -67,8 +68,11 @@ class Metrics:
         output_tokens = round(statistics.median(out_tokens))
         avg_out = output_tokens / batch_size
         tpot_ms = (latency - ttft) / (avg_out - 1) * 1000 if avg_out > 1 else float("nan")
+        # per-request decode throughput; TGS below stays the aggregate over
+        # the whole batch (per-GPU throughput under TP = tgs / tensor_parallel)
+        tps = 1000 / tpot_ms if tpot_ms > 0 else float("nan")
         tgs = output_tokens / latency if latency > 0 else float("nan")
-        return cls(engine, batch_size, prompt_tokens, output_tokens, ttft, tpot_ms, tgs, latency)
+        return cls(engine, batch_size, prompt_tokens, output_tokens, ttft, tpot_ms, tps, tgs, latency)
 
 
 def _sync() -> None:
@@ -154,8 +158,100 @@ def bench_lite_llama(
     return Metrics.from_runs("lite_llama", len(prompts), prompt_tokens, ttfts, latencies, out_tokens)
 
 
+def _rebuild_rope_buffers(model) -> None:
+    """Non-persistent RoPE tables stay meta after a meta init; rebuild them on
+    the module's device so forward sees real inv_freq (deepseek_v4's rotary
+    layers carry them this way)."""
+    try:
+        from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4RotaryEmbedding
+    except ImportError:
+        return
+    for name, module in list(model.named_modules()):
+        if isinstance(module, DeepseekV4RotaryEmbedding):
+            parent_path, _, leaf = name.rpartition(".")
+            parent = model if not parent_path else model.get_submodule(parent_path)
+            new = DeepseekV4RotaryEmbedding(model.config)
+            try:
+                dev = next(parent.parameters()).device
+                if dev.type != "meta":  # pre-dispatch the host params are still meta
+                    new.to(dev)
+            except StopIteration:
+                pass
+            setattr(parent, leaf, new)
+
+
+def _v4_experts_on_cpu(model) -> None:
+    """Everything but the routed experts on one GPU, experts left on CPU.
+
+    A deepseek_v4 layer holds ~26 GB of routed experts alone — triple a
+    22 GiB card — so accelerate-style per-module device maps would have to
+    split inside the layer, and the hook-driven cross-device flow fights the
+    layer's hyper-connection math (attn output, hc params and mlp output are
+    combined in single expressions). Instead: attention, hyper-connections,
+    router and shared expert live on one card with no hook boundaries at all,
+    and the MoE forward is patched to run the routed stack on CPU — the
+    routed payload is top_k rows per token, so the PCIe crossing is small.
+    """
+    from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4SparseMoeBlock
+
+    model.model.embed_tokens.to("cuda:0")
+    model.lm_head.to("cuda:0")
+    model.model.norm.to("cuda:0")
+    model.model.hc_head.to("cuda:0")
+    for block in model.model.layers:
+        block.self_attn.to("cuda:0")
+        block.attn_hc.to("cuda:0")
+        block.ffn_hc.to("cuda:0")
+        block.input_layernorm.to("cuda:0")
+        block.post_attention_layernorm.to("cuda:0")
+        block.mlp.gate.to("cuda:0")
+        block.mlp.shared_experts.to("cuda:0")
+        # block.mlp.experts stays on CPU (bf16, ~26 GB per layer)
+
+    def moe_forward(self, hidden_states, input_ids=None):
+        batch, seq_len, hidden_dim = hidden_states.shape
+        residual = hidden_states
+        flat = hidden_states.view(-1, hidden_dim)
+        if self.is_hash:
+            _, weights, indices = self.gate(hidden_states, input_ids)
+        else:
+            _, weights, indices = self.gate(hidden_states)
+        routed = self.experts(flat.cpu(), indices.cpu(), weights.cpu())
+        routed = routed.view(batch, seq_len, hidden_dim).to(residual.device)
+        return routed + self.shared_experts(residual)
+
+    DeepseekV4SparseMoeBlock.forward = moe_forward
+
+
+def _load_hf_direct(config, model_dir, torch_dtype, max_memory):
+    """Meta-init + safetensors assign + accelerate dispatch, skipping
+    from_pretrained's automatic checkpoint conversions. For checkpoints whose
+    keys already match the module tree: transformers' deepseek_v4 mapping
+    expects the DSpark packing (per-expert w1/w2/w3, fp8 blocks) and fuses
+    experts on load, which a pre-fused gate_up_proj checkpoint collides with."""
+    import safetensors.torch as st
+
+    with torch.device("meta"):
+        model = AutoModelForCausalLM.from_config(config, torch_dtype=torch_dtype)
+    # before loading: accelerate moves every buffer it finds, and a meta
+    # non-persistent rope table has no value to move — rebuild the rotary
+    # modules first so they carry real (CPU) tables
+    _rebuild_rope_buffers(model)
+    # load the shards into one CPU pool and assign; keys are exact, so no
+    # conversion or device_map heuristics are involved
+    state = {}
+    for shard in sorted(Path(model_dir).glob("*.safetensors")):
+        state.update(st.load_file(shard, device="cpu"))
+    model.load_state_dict(state, strict=True, assign=True)
+    if getattr(config, "model_type", "") == "deepseek_v4" and torch.cuda.is_available():
+        _v4_experts_on_cpu(model)
+    else:
+        model.to("cuda:0" if torch.cuda.is_available() else "cpu")
+    return model.eval()
+
+
 def bench_transformers(model_dir, prompts, gen_len, iters, device, dtype="fp16",
-                      hf_overrides=None) -> Metrics:
+                      hf_overrides=None, max_memory=None, direct_load=False) -> Metrics:
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -166,12 +262,20 @@ def bench_transformers(model_dir, prompts, gen_len, iters, device, dtype="fp16",
     # comparisons.
     for field, value in (hf_overrides or {}).items():
         setattr(config, field, value)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir,
-        config=config,
-        torch_dtype={"fp16": torch.float16, "bf16": torch.bfloat16, "auto": "auto"}[dtype],
-        device_map=device,
-    ).eval()
+    torch_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16, "auto": "auto"}[dtype]
+    if torch_dtype == "auto":
+        torch_dtype = None  # fall back to the checkpoint's config dtype
+    if direct_load:
+        model = _load_hf_direct(config, model_dir, torch_dtype, max_memory)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_dir,
+            config=config,
+            torch_dtype=torch_dtype,
+            device_map=device,
+            max_memory=max_memory,
+        ).eval()
+        _rebuild_rope_buffers(model)  # non-persistent rope tables stay meta through from_pretrained too
 
     def generate(max_new_tokens):
         inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
@@ -242,11 +346,11 @@ def _print_report(cfg: dict, results: list[Metrics]) -> None:
           f"  iters={cfg['iters']}  gpu={cfg['gpu']}\n{'=' * 68}")
     if cfg.get("hf_overrides"):
         print(f"hf_overrides={cfg['hf_overrides']}")
-    row = "{:>14}{:>12}{:>12}{:>14}{:>14}"
-    print(row.format("engine", "TTFT (s)", "TPOT (ms)", "TGS (tok/s)", "out_tokens"))
+    row = "{:>14}{:>12}{:>12}{:>12}{:>14}{:>14}"
+    print(row.format("engine", "TTFT (s)", "TPOT (ms)", "TPS (tok/s)", "TGS (tok/s)", "out_tokens"))
     for m in results:
         print(row.format(m.engine, f"{m.ttft_s:.4f}", f"{m.tpot_ms:.3f}",
-                         f"{m.tgs:.2f}", m.output_tokens))
+                         f"{m.tps:.2f}", f"{m.tgs:.2f}", m.output_tokens))
     by_engine = {m.engine: m for m in results}
     lite, hf = by_engine.get("lite_llama"), by_engine.get("transformers")
     if hf is not None and lite is not None and hf.tpot_ms and lite.tpot_ms:
@@ -283,6 +387,24 @@ def main() -> None:
         help="JSON applied over the checkpoint's config on every engine (vLLM "
              "--hf-overrides semantics), e.g. '{\"num_hidden_layers\": 1}' to run a "
              "trimmed stack — the layer-local comparison",
+    )
+    parser.add_argument(
+        "--hf-max-memory", default=None,
+        help="Per-device ceiling for the transformers device_map=auto load, "
+             "comma separated key:value in GPU order (e.g. '0:19GiB,1:19GiB,"
+             "cpu:150GiB'); layers beyond the ceiling offload to the next "
+             "device (cpu:, then disk unless a cpu ceiling is given) — for "
+             "checkpoints bigger than the GPUs combined, where an unrestricted "
+             "fill would OOM the KV and activation workspace",
+    )
+    parser.add_argument(
+        "--hf-direct-load", action="store_true",
+        help="Load the transformers baseline by meta-init + safetensors assign "
+             "+ accelerate dispatch, skipping from_pretrained's automatic "
+             "checkpoint conversions — for checkpoints whose keys already match "
+             "the module tree (deepseek_v4's mapping expects the DSpark packing "
+             "and fuses per-expert w1/w3 on load, colliding with a pre-fused "
+             "gate_up_proj)",
     )
     parser.add_argument(
         "--vllm-gpu-mem-util", type=float, default=0.9,
@@ -331,9 +453,17 @@ def main() -> None:
         # parallelism, transformers' device_map=auto), keeping both sides on
         # identical hardware.
         hf_device = "auto" if args.tensor_parallel_size > 1 else device
+        hf_max_memory = None
+        if args.hf_max_memory:
+            # key:value pairs in GPU order; a cpu: entry caps the offload pool
+            # so nothing spills to disk offload
+            hf_max_memory = {}
+            for part in args.hf_max_memory.split(","):
+                k, _, v = part.strip().partition(":")
+                hf_max_memory[int(k) if k.isdigit() else k] = v.strip()
         results.append(bench_transformers(
             args.model, prompts, args.gen_len, args.iters, hf_device,
-            args.hf_dtype, hf_overrides,
+            args.hf_dtype, hf_overrides, hf_max_memory, args.hf_direct_load,
         ))
     if args.engine in ("all", "vllm"):
         results.append(bench_vllm(
