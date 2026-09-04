@@ -22,6 +22,7 @@ from .base_config import (
     QuantizeMethodBase,
     run_quant_linear,
 )
+from .base_config import expert_scale_parameter, scale_parameter
 from .parameter import RawParameter
 from .utils import quantize_int4_groupwise
 
@@ -89,12 +90,8 @@ class AWQLinearMethod(LinearMethodBase):
         config: AWQConfig = layer.quant  # type: ignore[assignment]
         packed_k = (input_size + _PACK_FACTOR - 1) // _PACK_FACTOR
         layer.weight = RawParameter(torch.empty(output_size, packed_k, dtype=torch.int32))
-        layer.weight_scale = RawParameter(
-            torch.empty(*config.scale_shape(output_size, input_size), dtype=torch.float32)
-        )
-        layer.weight_zeros = RawParameter(
-            torch.empty(*config.scale_shape(output_size, input_size), dtype=torch.float32)
-        )
+        layer.weight_scale = scale_parameter(config.scale_shape(output_size, input_size))
+        layer.weight_zeros = scale_parameter(config.scale_shape(output_size, input_size))
 
     def apply(
         self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
@@ -140,20 +137,20 @@ class AWQMoEMethod(FusedMoEMethodBase):
                     block.num_experts, gate_up_n, gate_up_k // _PACK_FACTOR, dtype=torch.int32
                 )
             ),
-            "gate_up_proj_scale": RawParameter(
-                torch.empty(block.num_experts, gate_up_n, num_groups_gu, dtype=torch.float32)
+            "gate_up_proj_scale": expert_scale_parameter(
+                block.num_experts, (gate_up_n, num_groups_gu)
             ),
-            "gate_up_proj_zeros": RawParameter(
-                torch.empty(block.num_experts, gate_up_n, num_groups_gu, dtype=torch.float32)
+            "gate_up_proj_zeros": expert_scale_parameter(
+                block.num_experts, (gate_up_n, num_groups_gu)
             ),
             "down_proj": RawParameter(
                 torch.empty(block.num_experts, down_n, down_k // _PACK_FACTOR, dtype=torch.int32)
             ),
-            "down_proj_scale": RawParameter(
-                torch.empty(block.num_experts, down_n, num_groups_d, dtype=torch.float32)
+            "down_proj_scale": expert_scale_parameter(
+                block.num_experts, (down_n, num_groups_d)
             ),
-            "down_proj_zeros": RawParameter(
-                torch.empty(block.num_experts, down_n, num_groups_d, dtype=torch.float32)
+            "down_proj_zeros": expert_scale_parameter(
+                block.num_experts, (down_n, num_groups_d)
             ),
         }
 

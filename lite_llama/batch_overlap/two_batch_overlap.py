@@ -223,6 +223,31 @@ class TboSplitter:
             self._half(input_ids, positions, atten_info, mid, rows, padded_len),
         )
 
+    def split_prefill(
+        self, input_ids: torch.Tensor, positions: torch.Tensor, atten_info: AttentionMetadata
+    ) -> tuple[TboHalf, TboHalf]:
+        """Split a prefill grid into two halves by *sequence*, balanced by tokens.
+
+        A prefill row is a whole sequence of ``max_prompt_len`` columns, so the
+        split unit is the sequence, not the token. sglang balances by token
+        count (``_split_array_by_balanced_sum`` over ``extend_lens``) rather
+        than by sequence count, because sequences differ wildly in length and
+        an equal-count split would leave one half doing most of the work. The
+        same padding rule applies: the short half repeats its last row, and
+        ``num_rows`` tells the caller which logits to keep.
+        """
+        num_seqs = input_ids.shape[0]
+        if num_seqs < 2:
+            raise ValueError(f"prefill two-batch overlap needs >= 2 sequences, got {num_seqs}")
+        seq_lens = atten_info.b_seq_len
+        mid = _balanced_split_index(seq_lens) if seq_lens is not None else num_seqs // 2
+        mid = max(1, min(mid, num_seqs - 1))
+        padded_len = max(mid, num_seqs - mid)
+        return (
+            self._half(input_ids, positions, atten_info, 0, mid, padded_len),
+            self._half(input_ids, positions, atten_info, mid, num_seqs, padded_len),
+        )
+
     @staticmethod
     def _half(
         input_ids: torch.Tensor,
@@ -261,15 +286,27 @@ def _narrow_metadata(
     def slice_and_pad(tensor: torch.Tensor | None) -> torch.Tensor | None:
         return None if tensor is None else _pad_rows(tensor[start:stop], padded_len)
 
+    # Prefill carries b_start_loc: each sequence's offset into the flattened
+    # grid. Narrowing shifts the row indices, so the offsets must be rebuilt
+    # from the half's own row numbers rather than sliced from the parent's.
+    b_start_loc = None
+    if meta.b_start_loc is not None:
+        stride = int(meta.b_start_loc[1] - meta.b_start_loc[0]) if len(meta.b_start_loc) > 1 else 0
+        half_rows = torch.arange(padded_len, device=meta.b_start_loc.device, dtype=meta.b_start_loc.dtype)
+        b_start_loc = half_rows * stride
+
     return AttentionMetadata(
         kv_buffer=meta.kv_buffer,
         cur_select_index=slice_and_pad(meta.cur_select_index),
         b_req_tokens_table=meta.b_req_tokens_table,
-        b_start_loc=None,
+        b_start_loc=b_start_loc,
         b_req_idx=slice_and_pad(meta.b_req_idx),
         b_seq_len=slice_and_pad(meta.b_seq_len),
         max_actual_seq_len=meta.max_actual_seq_len,
         is_prefill=meta.is_prefill,
+        b_prefix_len=slice_and_pad(getattr(meta, "b_prefix_len", None)),
+        b_kv_base=slice_and_pad(getattr(meta, "b_kv_base", None)),
+        max_chunk_len=getattr(meta, "max_chunk_len", None),
     )
 
 
@@ -280,11 +317,17 @@ class TwoBatchOverlap:
         self._model = model
         self._timeline = timeline
 
-    def forward(self, halves: tuple[TboHalf, TboHalf]) -> torch.Tensor:
+    def forward(self, halves: tuple[TboHalf, TboHalf], *, prefill: bool = False) -> torch.Tensor:
+        """Interleave the two halves through the whole layer stack.
+
+        ``prefill`` selects the prefill op stream: strict alternation with the
+        shared MLP hiding behind the return exchange, rather than the decode
+        stream's lead of two stages.
+        """
         model = self._model
         device = halves[0].input_ids.device
         timeline = self._timeline or CommStreamPool.for_device(device).timeline
-        strategy = OperationsStrategy.init_new_tbo(model.layers)
+        strategy = OperationsStrategy.init_new_tbo(model.layers, prefill=prefill)
         expert_parallel = any(
             getattr(layer.mlp, "dispatcher", None) is not None for layer in model.layers
         )
@@ -360,3 +403,24 @@ class TwoBatchOverlap:
         state.clear(persistent)
         hidden, _ = skip_rmsnorm(hidden_states, residual, model.norm_weight, model.rms_norm_eps)
         return model.lm_head(hidden)[:num_rows]
+
+
+def _balanced_split_index(seq_lens: torch.Tensor) -> int:
+    """The sequence index that splits total tokens most evenly.
+
+    sglang's ``_split_array_by_balanced_sum``: walk the cumulative sum and take
+    the index where the two sides are closest. Sequences vary widely in length,
+    so splitting by count would hand one half most of the tokens and the
+    overlap would degenerate into waiting for the heavier half.
+    """
+    lens = seq_lens.tolist()
+    total = sum(lens)
+    best_index, best_diff, running = 1, None, 0
+    for i in range(1, len(lens)):
+        running += lens[i - 1]
+        diff = abs(running - (total - running))
+        if best_diff is None or diff <= best_diff:
+            best_diff, best_index = diff, i
+        else:
+            break
+    return best_index

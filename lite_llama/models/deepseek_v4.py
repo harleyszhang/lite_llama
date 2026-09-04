@@ -30,7 +30,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..batch_overlap import current_deferred_ar
-from ..distributed.parallel_state import all_reduce, get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from ..distributed.parallel_state import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from ..kernels import skip_rmsnorm
 from ..modules import SparseMoeBlock
 from ..modules.deepseek_v4.attention import DeepseekV4Attention

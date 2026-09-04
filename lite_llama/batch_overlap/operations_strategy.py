@@ -93,20 +93,25 @@ class OperationsStrategy:
         )
 
     @classmethod
-    def init_new_tbo(cls, layers: Sequence) -> OperationsStrategy:
-        """Build the decode op stream for a whole layer stack.
+    def init_new_tbo(cls, layers: Sequence, *, prefill: bool = False) -> OperationsStrategy:
+        """Build the op stream for a whole layer stack.
 
         Args:
             layers: The decoder layers, in execution order. ``layer_index`` is
                 bound into each layer's attention op here, at build time,
                 because the layers take it as an argument rather than storing it.
+            prefill: Build the prefill stream rather than the decode one. The
+                two differ in lead width and in where the shared MLP sits; see
+                :func:`_ep_moe_prefill_strategy`.
         """
         layer_name = layers[0].__class__.__name__
         builder = _STRATEGY_BY_LAYER.get(layer_name, _layer_strategy)
-        return cls.concat([builder(layer, index) for index, layer in enumerate(layers)])
+        return cls.concat(
+            [builder(layer, index, prefill=prefill) for index, layer in enumerate(layers)]
+        )
 
 
-def _layer_strategy(layer, layer_index: int) -> OperationsStrategy:
+def _layer_strategy(layer, layer_index: int, *, prefill: bool = False) -> OperationsStrategy:
     """Pick the layer's stream from its own op surface.
 
     A MoE layer running expert parallel exposes a ``dispatcher`` on its ``mlp``;
@@ -115,7 +120,11 @@ def _layer_strategy(layer, layer_index: int) -> OperationsStrategy:
     two-segment ping-pong.
     """
     if getattr(layer.mlp, "dispatcher", None) is not None:
-        return _ep_moe_layer_strategy(layer, layer_index)
+        return (
+            _ep_moe_prefill_strategy(layer, layer_index)
+            if prefill
+            else _ep_moe_layer_strategy(layer, layer_index)
+        )
     return _dense_layer_strategy(layer, layer_index)
 
 
@@ -149,4 +158,37 @@ def _ep_moe_layer_strategy(layer, layer_index: int) -> OperationsStrategy:
             layer.op_combine_b,
         ],
         tbo_delta_stages=2,
+    )
+
+
+def _ep_moe_prefill_strategy(layer, layer_index: int) -> OperationsStrategy:
+    """sglang's EP *prefill* stream: shared experts move after the combine.
+
+    Two differences from the decode stream, both from sglang's
+    ``_compute_moe_deepseek_blog_prefill``:
+
+    * ``tbo_delta_stages=0`` rather than 2. Prefill's segments are long enough
+      that a lead would only desynchronise the two halves; strict alternation
+      keeps both a2a exchanges covered by the other half's compute.
+    * ``op_shared_experts`` sits *after* ``op_combine_a`` instead of between the
+      dispatch pair. In prefill the forward exchange is large, so hiding the
+      shared MLP behind the *return* exchange pays more than hiding it behind
+      the forward one.
+    """
+    return OperationsStrategy(
+        operations=[
+            partial(layer.op_attn, layer_index=layer_index),
+            YieldOperation(),
+            layer.op_gate,
+            YieldOperation(),
+            layer.op_dispatch_a,
+            YieldOperation(),
+            layer.op_dispatch_b,
+            layer.op_experts,
+            layer.op_combine_a,
+            YieldOperation(),
+            layer.op_shared_experts,
+            layer.op_combine_b,
+        ],
+        tbo_delta_stages=0,
     )

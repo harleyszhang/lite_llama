@@ -459,6 +459,50 @@ def test_w8a16_fp8_blockwise_matches_reference(M, N, K):
     torch.testing.assert_close(out.float(), ref, rtol=1e-2, atol=1e-2)
 
 
+@pytest.mark.parametrize("M,N,K", [(1, 512, 256), (8, 2048, 2048)])
+def test_w8a16_fp8_blockwise_column_major_scale_matches_row_major(M, N, K):
+    """The kernel addresses scales through their strides, so the column-major
+    grid ``scale_parameter`` allocates at creation time must give identical
+    results to the row-major one -- the layout decision is a performance
+    choice, never a numerical one."""
+    torch.manual_seed(0)
+    x = torch.randn(M, K, device="cuda", dtype=torch.float16) * 0.5
+    w = torch.randn(N, K, device="cuda", dtype=torch.float32) * 0.05
+    qw = w.to(torch.float8_e4m3fn).view(torch.uint8)
+    gn = gk = 128
+    scales_row = torch.rand((N + gn - 1) // gn, (K + gk - 1) // gk, device="cuda") + 0.5
+    # Same logical grid, N axis at stride 1 -- the physical layout SGLang's
+    # ``scale.t().contiguous().t()`` materialises, decided at allocation.
+    scales_col = scales_row.t().contiguous().t()
+    assert scales_col.stride(0) == 1 and not scales_col.is_contiguous()
+
+    out_row = w8a16_matmul(x, qw, scales_row, group_n=gn, group_k=gk)
+    out_col = w8a16_matmul(x, qw, scales_col, group_n=gn, group_k=gk)
+    torch.testing.assert_close(out_col, out_row)
+
+
+@pytest.mark.parametrize("M,N,K", [(1, 512, 256), (8, 2048, 2048)])
+def test_w8a16_fp8_blockwise_column_major_scale_matches_row_major(M, N, K):
+    """The kernel addresses scales through their strides, so the column-major
+    grid ``scale_parameter`` allocates at creation time must give identical
+    results to the row-major one — the layout decision is a performance
+    choice, never a numerical one."""
+    torch.manual_seed(0)
+    x = torch.randn(M, K, device="cuda", dtype=torch.float16) * 0.5
+    w = torch.randn(N, K, device="cuda", dtype=torch.float32) * 0.05
+    qw = w.to(torch.float8_e4m3fn).view(torch.uint8)
+    gn = gk = 128
+    scales_row = torch.rand((N + gn - 1) // gn, (K + gk - 1) // gk, device="cuda") + 0.5
+    # Same logical grid, N axis at stride 1 — the physical layout SGLang's
+    # ``scale.t().contiguous().t()`` materialises, decided at allocation.
+    scales_col = scales_row.t().contiguous().t()
+    assert scales_col.stride(0) == 1 and not scales_col.is_contiguous()
+
+    out_row = w8a16_matmul(x, qw, scales_row, group_n=gn, group_k=gk)
+    out_col = w8a16_matmul(x, qw, scales_col, group_n=gn, group_k=gk)
+    torch.testing.assert_close(out_col, out_row)
+
+
 # --------------------------------------------------------------------------- #
 # w8a16: int8 per-channel
 # --------------------------------------------------------------------------- #

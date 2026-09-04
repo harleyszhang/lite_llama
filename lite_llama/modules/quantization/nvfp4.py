@@ -33,6 +33,7 @@ from .base_config import (
     QuantizeMethodBase,
     run_quant_linear,
 )
+from .base_config import scale_parameter
 from .parameter import RawParameter
 
 
@@ -148,8 +149,8 @@ class NVFP4LinearMethod(LinearMethodBase):
         # uint8, not float8_e4m3fn: the kernel bit-shifts these bytes, and
         # RawParameter keeps the loader from casting them to the activation
         # dtype on the way in.
-        layer.weight_scale = RawParameter(
-            torch.empty(*config.scale_shape(output_size, input_size), dtype=torch.uint8)
+        layer.weight_scale = scale_parameter(
+            config.scale_shape(output_size, input_size), dtype=torch.uint8
         )
         layer.weight_global_scale = RawParameter(torch.empty(1, dtype=torch.float32))
 

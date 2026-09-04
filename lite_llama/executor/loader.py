@@ -77,10 +77,17 @@ def materialise_parameters(
             if param is None:
                 continue
             keep_dtype = isinstance(param, RawParameter) or not param.is_floating_point()
-            new = type(param)(
-                torch.empty(param.shape, dtype=param.dtype if keep_dtype else dtype, device=device),
-                requires_grad=False,
-            )
+            if keep_dtype:
+                # Preserve dtype *and* the kernel-facing layout: scale grids
+                # allocate as column-major views (quantization.base_config's
+                # scale_parameter), and ``torch.empty(shape)`` would flatten
+                # them back to row-major, undoing the allocation-time decision.
+                storage = torch.empty_strided(
+                    param.shape, param.stride(), dtype=param.dtype, device=device
+                )
+            else:
+                storage = torch.empty(param.shape, dtype=dtype, device=device)
+            new = type(param)(storage, requires_grad=False)
             # Attribute carrier as well as storage: the ``weight_loader`` bound at
             # construction must survive into the materialised parameter.
             new.__dict__.update(param.__dict__)
