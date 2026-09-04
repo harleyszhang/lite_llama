@@ -308,7 +308,7 @@ A continuous-batching step can hold up to three passes — prefill, extend, deco
 
 ![L1 cross-stream overlap](./docs/images/overlap_l1.gif)
 
-The GIF is rendered from the engine's own CUDA-event timeline (`LITE_LLAMA_OVERLAP_TIMELINE=1`): the extend forward fills the window on the compute stream while the next pass's upload lands inside it on the copy stream — the intersection is the overlap, not a rendering trick. Measure both sides with `python benchmarks/bench_overlap_l1.py --timeline`; regenerate the picture with `python scripts/gen_overlap_l1_gif.py`.
+The GIF is rendered from the engine's own CUDA-event timeline (`LITE_LLAMA_OVERLAP_TIMELINE=1`): the extend forward fills the window on the compute stream while the next pass's upload lands inside it on the copy stream — the intersection is the overlap, not a rendering trick. Measure the A/B with `python benchmarks/bench_optimizations.py --model-dir CKPT --features overlap_off --greedy --verify` (the `overlap_off` cell against the overlap-on baseline); regenerate the picture with `python scripts/gen_overlap_l1_gif.py`.
 
 ### Decode Host-Overhead Cuts (v0.11.1)
 

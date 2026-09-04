@@ -17,23 +17,37 @@ prompts longer than the token budget, and the prefix cache needs prompts that
 share one. ``--workload`` picks that; running a short-prompt workload against
 ``chunked_prefill`` measures a switch that never engaged.
 
+Two features act at engine-build time rather than through a ``from_pretrained``
+override: ``overlap_off`` disables the L1 cross-stream overlap
+(``LITE_LLAMA_OVERLAP=0``; it is on by default, so this cell measures what it
+buys) and ``router_fp32_cache`` swaps the MoE router GEMM for the predecessor
+the tier-4 refactor replaced. Each is applied per cell and undone after, so it
+composes with the kwarg features like any other.
+
 Usage:
     python benchmarks/bench_optimizations.py --model-dir CKPT --workload short
     python benchmarks/bench_optimizations.py --model-dir CKPT --workload long \
         --features chunked_prefill pipeline --verify
     python benchmarks/bench_optimizations.py --model-dir CKPT --workload shared \
         --combos cuda_graph+prefix_cache --json docs/benchmark_logs/optim.json
+    python benchmarks/bench_optimizations.py --model-dir CKPT \
+        --features overlap_off router_fp32_cache --greedy --verify
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import torch
+import torch.nn.functional as F
 
 from benchmarks.lib import (
     PROMPTS,
@@ -44,6 +58,41 @@ from benchmarks.lib import (
     sampling_params,
     write_json_log,
 )
+
+#: Environment variable switching L1 cross-stream overlap (read at engine build).
+OVERLAP_ENV = "LITE_LLAMA_OVERLAP"
+
+#: fp32 weight copies the ``fp32_cache`` router variant keeps, keyed by ``id()``
+#: of the source weight. The dict holds the copy alive, so an id cannot be
+#: reused under it.
+_FP32_CACHE: dict[int, torch.Tensor] = {}
+
+
+def _patched_router_gemm(variant: str):
+    """A ``_router_gemm`` whose only variant-dependent part is the GEMM itself.
+
+    ``tier4`` is the production path (bf16 operands, fp32 accumulate/output in
+    one cuBLAS GEMM); ``fp32_cache`` is the predecessor it replaced -- a cached
+    fp32 weight copy plus a per-step ``x.float()`` widen and a simt SGEMM. Both
+    emit fp32 logits and pick the same experts, so the A/B isolates the GEMM.
+    """
+
+    def _gemm(x: torch.Tensor, gate_weight: torch.Tensor) -> torch.Tensor:
+        if variant == "tier4":
+            low_prec = gate_weight.dtype in (torch.bfloat16, torch.float16)
+            if gate_weight.is_cuda and low_prec:
+                x_gemm = x if x.dtype == gate_weight.dtype else x.to(gate_weight.dtype)
+                return torch.mm(x_gemm, gate_weight.t(), out_dtype=torch.float32)
+            return F.linear(x.float(), gate_weight.float())
+        if variant == "fp32_cache":
+            cached = _FP32_CACHE.get(id(gate_weight))
+            if cached is None:
+                cached = _FP32_CACHE[id(gate_weight)] = gate_weight.detach().float()
+            return F.linear(x.float(), cached)
+        raise ValueError(f"unknown router variant {variant!r}")
+
+    return _gemm
+
 
 #: The all-off cell every feature is compared against. ``max_num_batched_tokens``
 #: is left at the engine default, which is far above any prompt here, so no chunk
@@ -69,6 +118,12 @@ FEATURES: dict[str, dict[str, Any]] = {
     "async_tokenize": {"async_tokenize": True},
     "fp8_kv": {"kv_cache_dtype": "fp8"},
     "decode_window": {"decode_window_steps": 2},
+    # Side-effect features (no from_pretrained override): _side_effects applies
+    # them at engine-build time. overlap is on by default, so the cell turns it
+    # OFF to measure its contribution; router_fp32_cache swaps the router GEMM
+    # for the predecessor implementation.
+    "overlap_off": {},
+    "router_fp32_cache": {},
 }
 
 #: Features that may legitimately change the generated text.
@@ -79,7 +134,13 @@ FEATURES: dict[str, dict[str, Any]] = {
 #: against 8 without it) -- and admission sets the prefill batch shape, which
 #: this engine's arithmetic is sensitive to. Neither is a regression; reporting
 #: them as failures would hide the failures that are real.
-OUTPUT_SHIFTING_FEATURES: frozenset[str] = frozenset({"fp8_kv", "async_tokenize"})
+#: ``router_fp32_cache`` runs the router GEMM with fp32 operands where tier-4
+#: uses bf16 operands with fp32 accumulate, so the logits can differ in the last
+#: bits and flip a greedy tie -- it picks the same experts, but the decoded text
+#: is not guaranteed bit-identical.
+OUTPUT_SHIFTING_FEATURES: frozenset[str] = frozenset(
+    {"fp8_kv", "async_tokenize", "router_fp32_cache"}
+)
 
 #: Combinations worth measuring: pairs whose mechanisms interact rather than
 #: merely add. ``cuda_graph`` is in most of them because it is the one switch
@@ -148,6 +209,34 @@ def build_prompts(workload: str, batch: int, shared_sentences: int) -> list[str]
     return [f"{prefix}\nQuestion {i}: what does the passage say?" for i in range(batch)]
 
 
+@contextmanager
+def _side_effects(features: tuple[str, ...]):
+    """Apply the two build-time side-effect features for one cell, undo on exit.
+
+    ``overlap_off`` sets ``LITE_LLAMA_OVERLAP=0`` (the engine reads it when it
+    is built); ``router_fp32_cache`` swaps ``moe._router_gemm`` for the
+    predecessor the tier-4 refactor replaced. Kwarg features are applied by the
+    caller through ``FEATURES``, so this wraps only the two that act outside
+    ``from_pretrained`` -- and restores whatever they displaced.
+    """
+    from lite_llama.modules import moe
+
+    saved_overlap = os.environ.get(OVERLAP_ENV)
+    saved_router = moe._router_gemm
+    try:
+        if "overlap_off" in features:
+            os.environ[OVERLAP_ENV] = "0"
+        if "router_fp32_cache" in features:
+            moe._router_gemm = _patched_router_gemm("fp32_cache")
+        yield
+    finally:
+        if saved_overlap is None:
+            os.environ.pop(OVERLAP_ENV, None)
+        else:
+            os.environ[OVERLAP_ENV] = saved_overlap
+        moe._router_gemm = saved_router
+
+
 def measure_cell(
     model_dir: str,
     features: tuple[str, ...],
@@ -166,34 +255,37 @@ def measure_cell(
     for name in features:
         kwargs.update(FEATURES[name])
 
-    engine = ContinuousBatchingEngine.from_pretrained(
-        model=model_dir,
-        max_seq_len=args.max_seq_len,
-        max_num_seqs=args.max_num_seqs,
-        tensor_parallel_size=args.tp,
-        max_gpu_num_blocks=args.kv_blocks,
-        **kwargs,
-    )
     label = "+".join(features) if features else "baseline"
-    try:
-        run_requests(
-            engine, ["Warm up the kernels."], SamplingParams(max_gen_len=4, temperature=0.0)
+    with _side_effects(features):
+        engine = ContinuousBatchingEngine.from_pretrained(
+            model=model_dir,
+            max_seq_len=args.max_seq_len,
+            max_num_seqs=args.max_num_seqs,
+            tensor_parallel_size=args.tp,
+            max_gpu_num_blocks=args.kv_blocks,
+            **kwargs,
         )
-        run = run_requests(engine, prompts, sampling_params(args.max_gen_len, greedy=args.greedy))
-        result = run.result(len(prompts))
-        row = Row(
-            label=label,
-            features=features,
-            ttft_ms=result.ttft_ms,
-            tpot_ms=result.tpot_ms,
-            tps=result.tps,
-            gen_tokens=result.gen_tokens,
-            latency_s=result.total_s,
-            gpus=args.tp,
-        )
-        return row, run.texts
-    finally:
-        engine.shutdown()
+        try:
+            run_requests(
+                engine, ["Warm up the kernels."], SamplingParams(max_gen_len=4, temperature=0.0)
+            )
+            run = run_requests(
+                engine, prompts, sampling_params(args.max_gen_len, greedy=args.greedy)
+            )
+            result = run.result(len(prompts))
+            row = Row(
+                label=label,
+                features=features,
+                ttft_ms=result.ttft_ms,
+                tpot_ms=result.tpot_ms,
+                tps=result.tps,
+                gen_tokens=result.gen_tokens,
+                latency_s=result.total_s,
+                gpus=args.tp,
+            )
+            return row, run.texts
+        finally:
+            engine.shutdown()
 
 
 def parse_cells(args) -> list[tuple[str, ...]]:
