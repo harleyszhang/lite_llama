@@ -413,13 +413,12 @@ benchmarks/ 全部脚本的分工：
 
 | 脚本 | 测什么 |
 |------|--------|
-| [bench_e2e.py](bench_e2e.py) | TTFT/TPOT/TPS 基线，eager vs CUDA graph，附贪心输出一致性断言；`--router-variant` 复用同一入口做 MoE 路由 GEMM 的进程级 A/B |
-| [bench_optimizations.py](bench_optimizations.py) | 特性矩阵：每个引擎开关单独一格再交叉组合，三个 workload 各对准特性的生效条件，`--verify` 逐格比对 greedy 文本 |
+| [bench_e2e.py](bench_e2e.py) | TTFT/TPOT/TPS 基线，eager vs CUDA graph，附贪心输出一致性断言；`--backend` 切换被测系统（lite/hf/vllm）做跨引擎对比 |
+| [bench_optimizations.py](bench_optimizations.py) | 特性矩阵：每个引擎开关单独一格再交叉组合，三个 workload 各对准特性的生效条件，`--verify` 逐格比对 greedy 文本；含两个构建期副作用特性 `overlap_off`（L1 重叠）与 `router_fp32_cache`（路由 GEMM） |
 | [bench_continuous.py](bench_continuous.py) | 连续批处理 vs 静态批处理，离线与偏斜到达两种场景 |
 | [bench_data_parallel.py](bench_data_parallel.py) | DP 两个实验：`--mode scaling` 吞吐扩展（weak/strong scaling，输出逐条 diff 防止速度掩盖错误）· `--mode prefix` 前缀缓存跨副本的命中率与路由质量 |
 | [bench_scheduler.py](../benchmarks/bench_scheduler.py) | 调度器基准入口：`matrix`（特性矩阵）· `serving`（在线量化 × TP/DP × graph，HTTP + SSE）· `diag-prefix` · `diag-preempt` |
 | [bench_quant.py](bench_quant.py) | 离线量化矩阵：每行同时带吞吐与输出偏移，缺一半就不是合格的量化表 |
-| [bench_overlap_l1.py](bench_overlap_l1.py) | L1 copy-stream 重叠开关 A/B，附 timeline 证据 |
 | [bench_observability.py](bench_observability.py) | 每个可观测开关的每 token 开销一行 |
 | [bench_gsm8k_vllm.py](bench_gsm8k_vllm.py) | vllm 侧 GSM8K 对照：同题同判分（复用 tests/evals），与 lite 侧精度直接可比 |
 | [bench_mla.py](bench_mla.py) | MLA KV 经济学：config 解析 KV 几何，同一 workload 量延迟与显存足迹 |
