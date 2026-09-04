@@ -523,16 +523,16 @@ def main() -> int:
     v3_sub.add_parser("parity", help="transformers vs lite_llama over the real checkpoint")
     v3_sub.add_parser("vllm", help="the vLLM vote (run from the vLLM venv)")
     three = v3_sub.add_parser("three-way", help="pairwise greedy agreement from two JSONs")
-    three.add_argument("parity", help="parity JSON (accuracy_v3_parity)")
-    three.add_argument("vllm", help="vLLM JSON (accuracy_v3_vllm)")
+    three.add_argument("parity", help="parity JSON (from the v3 parity subcommand)")
+    three.add_argument("vllm", help="vLLM JSON (from the v3 vllm subcommand)")
 
     v4 = sub.add_parser("v4", help="V4-Flash: fp32 CPU oracle vs lite TP-2")
     v4_sub = v4.add_subparsers(dest="mode", required=True)
     v4_sub.add_parser("lite", help="lite_llama side, TP-2 over the tp harness")
     v4_sub.add_parser("hf", help="transformers reference side, DSpark weights on CPU")
     compare = v4_sub.add_parser("compare", help="greedy agreement and top-5 drift from two JSONs")
-    compare.add_argument("lite", help="lite JSON (accuracy_v4_lite)")
-    compare.add_argument("hf", help="HF JSON (accuracy_v4_hf)")
+    compare.add_argument("lite", help="lite JSON (from the v4 lite subcommand)")
+    compare.add_argument("hf", help="HF JSON (from the v4 hf subcommand)")
 
     args = parser.parse_args()
     return {
