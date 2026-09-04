@@ -19,6 +19,7 @@ from lite_llama.engine.sampler import (
     SamplingParams,
     _distribution_records,
     apply_repetition_penalty,
+    greedy_ids,
     rows_logprobs,
     sample_top_p,
 )
@@ -149,6 +150,64 @@ def test_sampled_temperature_stays_within_vocab():
     assert tokens.shape == (4, 1)
     assert tokens.min() >= 0
     assert tokens.max() < 100
+
+
+# --------------------------------------------------------------------------- #
+# The greedy draw runs only where a row will use it
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def greedy_draw_calls(monkeypatch) -> list[int]:
+    """Count the greedy draws a pass makes, delegating so the output is unchanged."""
+    calls: list[int] = []
+
+    def counting(logits, offset):
+        calls.append(logits.shape[0])
+        return greedy_ids(logits, offset)
+
+    monkeypatch.setattr("lite_llama.engine.sampler.greedy_ids", counting)
+    return calls
+
+
+def test_a_wholly_stochastic_batch_skips_the_greedy_draw(greedy_draw_calls):
+    """No row wants the argmax, so the pass must not compute it.
+
+    The draw is a full-vocabulary reduction, and under TP two collectives on
+    top of it. Running it for a batch that then selects the nucleus draw for
+    every row is waste on every step of a sampling run.
+    """
+    Sampler().sample(torch.randn(4, 100), SamplingParams(temperature=0.7, top_p=0.9))
+    assert greedy_draw_calls == []
+
+
+def test_a_greedy_batch_still_draws_the_argmax(greedy_draw_calls):
+    """Skipping the draw must not skip the greedy path it exists for."""
+    logits = torch.randn(4, 100)
+    tokens = Sampler().sample(logits, SamplingParams(temperature=0.0))
+    assert greedy_draw_calls == [4]
+    assert tokens.flatten().tolist() == logits.argmax(-1).tolist()
+
+
+def test_a_mixed_batch_draws_the_argmax_once(greedy_draw_calls):
+    """Greedy and stochastic rows share one pass, so one argmax covers them all.
+
+    Splitting the batch by configuration would multiply the launches, which is
+    what :class:`BatchedSamplingParams` exists to avoid.
+    """
+    logits = torch.randn(4, 100)
+    params = BatchedSamplingParams.build(
+        [
+            SamplingParams(temperature=0.0),
+            SamplingParams(temperature=0.7, top_p=0.9),
+            SamplingParams(temperature=0.0),
+            SamplingParams(temperature=0.7, top_p=0.9),
+        ],
+        "cpu",
+    )
+    tokens = Sampler().sample_batched(logits, params)
+    assert greedy_draw_calls == [4]
+    # The greedy rows are the argmax; the stochastic ones are free to differ.
+    assert tokens[0].item() == logits[0].argmax().item()
+    assert tokens[2].item() == logits[2].argmax().item()
 
 
 # --------------------------------------------------------------------------- #

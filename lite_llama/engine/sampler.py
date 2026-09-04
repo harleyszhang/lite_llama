@@ -263,6 +263,26 @@ def global_argmax(local_logits: torch.Tensor, vocab_offset: int) -> torch.Tensor
     return tensor_model_parallel_all_gather(candidates).amin(dim=-1, keepdim=True)
 
 
+def greedy_ids(logits: torch.Tensor, offset: int | None) -> torch.Tensor:
+    """Argmax per row, over the whole vocabulary or across its TP split.
+
+    Split out so :meth:`Sampler._draw` calls it only where a row will actually
+    use the result. Computing it unconditionally costs a full-vocabulary argmax
+    per step, and under TP two collectives, for a batch that turns out to be
+    wholly stochastic and throws it away.
+
+    Args:
+        logits: ``[batch, vocab]``, or this rank's slice.
+        offset: This rank's first global token id, ``None`` when TP is off.
+
+    Returns:
+        ``[batch, 1]`` next-token ids.
+    """
+    if offset is None:
+        return torch.argmax(logits, dim=-1, keepdim=True)
+    return global_argmax(logits, offset)
+
+
 def vocab_logsumexp(scaled: torch.Tensor) -> torch.Tensor:
     """``logsumexp`` over a vocabulary split across TP ranks: two scalars per row.
 
@@ -647,21 +667,17 @@ class Sampler:
             logits = apply_repetition_penalty(logits, generated, penalty, offset or 0)
 
         sampled_ids = None
-        if offset is None:
-            greedy_ids = torch.argmax(logits, dim=-1, keepdim=True)
-            if not all_greedy:
+        if not all_greedy:
+            if offset is None:
                 probs = torch.softmax(logits / temperature, dim=-1)
-                if all_top_p_one:
-                    sampled_ids = torch.multinomial(probs, num_samples=1)
-                else:
-                    sampled_ids = sample_top_p(
-                        probs,
-                        top_p,
-                        k=None if needs_full_vocab else _TOP_P_CANDIDATES,
+                sampled_ids = (
+                    torch.multinomial(probs, num_samples=1)
+                    if all_top_p_one
+                    else sample_top_p(
+                        probs, top_p, k=None if needs_full_vocab else _TOP_P_CANDIDATES
                     )
-        else:
-            greedy_ids = global_argmax(logits, offset)
-            if not all_greedy:
+                )
+            else:
                 sampled_ids = sharded_top_p(
                     logits,
                     temperature,
@@ -670,12 +686,14 @@ class Sampler:
                     k=None if needs_full_vocab or all_top_p_one else _TOP_P_CANDIDATES,
                 )
 
+        # The greedy branch is drawn only where a row will use it: a wholly
+        # stochastic batch skips the argmax entirely (see ``greedy_ids``).
         if sampled_ids is None:
-            ids = greedy_ids
+            ids = greedy_ids(logits, offset)
         elif greedy is None:
             ids = sampled_ids
         else:
-            ids = torch.where(greedy, greedy_ids, sampled_ids)
+            ids = torch.where(greedy, greedy_ids(logits, offset), sampled_ids)
 
         if logprobs_ks is None:
             return ids, None
