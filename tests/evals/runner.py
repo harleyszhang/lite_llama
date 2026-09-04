@@ -22,14 +22,17 @@ from tqdm import tqdm
 
 from lite_llama import LLM, SamplingParams
 
-# tests/evals/runner.py -> tests/evals -> tests -> repository root.
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
 
 def resolve_model_dir(model_dir: str) -> Path:
-    """Interpret a config's ``model_dir`` relative to the repository root."""
-    path = Path(model_dir).expanduser()
-    return path if path.is_absolute() else REPO_ROOT / path
+    """The checkpoint a config names, via the suite-wide candidate chain.
+
+    A config names a checkpoint, not necessarily one this machine holds; the
+    shared chain in :mod:`tests.conftest` turns "the base model is not here"
+    into "use the copy that is" instead of skipping the accuracy tier.
+    """
+    from tests.conftest import checkpoint_candidates
+
+    return checkpoint_candidates(model_dir)[0]
 
 
 def kv_cache_tokens(batch_size: int, max_seq_len: int) -> int:

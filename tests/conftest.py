@@ -19,9 +19,14 @@ import torch
 # tests/conftest.py -> tests/ -> repository root.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-#: HuggingFace checkpoint used by the integration tier. Override with
+#: Checkpoint the integration tier uses by default. Override with
 #: ``LITE_LLAMA_TEST_MODEL_DIR`` to point at any other checkpoint.
-DEFAULT_MODEL_DIR = "my_weight/Qwen2.5-0.5B"
+DEFAULT_MODEL_NAME = "Qwen2.5-0.5B"
+
+#: Shared checkpoint root, the same variable the benchmark scripts read. Honoured
+#: here too so a machine that keeps weights outside the repository runs the
+#: integration tier without symlinking them into ``my_weight/``.
+MODELZOO_ENV = "LITE_LLAMA_MODELZOO"
 
 #: Directories whose tests always need a CUDA device.
 _GPU_ONLY_DIRS = ("kernels",)
@@ -49,10 +54,50 @@ def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool 
     return any(relative.parts[:2] == ("tests", d) for d in _GPU_ONLY_DIRS) or None
 
 
+def checkpoint_candidates(reference: str) -> list[Path]:
+    """Every place a checkpoint reference may resolve to, most specific first.
+
+    ``reference`` is a path (absolute, or relative to the repository root) or a
+    bare checkpoint name. The reference itself comes first, then its final
+    component under the shared checkpoint root -- so a machine that keeps weights
+    outside the repository finds them without symlinking them in. Finally
+    ``my_weight/`` is searched for whichever single usable checkpoint it holds: a
+    machine that downloaded ``-Instruct`` where a config names the base model
+    still runs the tier instead of skipping all of it, which is how the failures
+    hiding behind those skips stay visible.
+
+    Public because ``tests/evals`` resolves the checkpoint each of its configs
+    names, and the chain must not be answered in two places.
+    """
+    path = Path(reference).expanduser()
+    candidates = [path if path.is_absolute() else REPO_ROOT / path]
+
+    name = path.name
+    zoo = os.environ.get(MODELZOO_ENV)
+    if zoo:
+        root = Path(zoo).expanduser()
+        candidates += [root / name, *sorted(root.glob(f"*/{name}"))]
+
+    usable = [candidate for candidate in candidates if checkpoint_problem(candidate) is None]
+    if usable:
+        return usable
+    local = sorted(p for p in (REPO_ROOT / "my_weight").glob("*") if checkpoint_problem(p) is None)
+    return local or candidates
+
+
 def _resolve_model_dir() -> Path:
-    """Absolute path of the checkpoint under test, without validating it."""
-    candidate = Path(os.environ.get("LITE_LLAMA_TEST_MODEL_DIR", DEFAULT_MODEL_DIR))
-    return candidate if candidate.is_absolute() else REPO_ROOT / candidate
+    """Absolute path of the checkpoint under test, without validating it.
+
+    An explicit ``LITE_LLAMA_TEST_MODEL_DIR`` is the whole answer: a caller that
+    named a checkpoint does not want a fallback silently substituted for it.
+    Otherwise the first usable candidate, or the first candidate when none is
+    usable -- the caller reports that one's problem rather than testing nothing.
+    """
+    explicit = os.environ.get("LITE_LLAMA_TEST_MODEL_DIR")
+    if explicit:
+        path = Path(explicit)
+        return path if path.is_absolute() else REPO_ROOT / path
+    return checkpoint_candidates(DEFAULT_MODEL_NAME)[0]
 
 
 def checkpoint_problem(path: Path) -> str | None:
