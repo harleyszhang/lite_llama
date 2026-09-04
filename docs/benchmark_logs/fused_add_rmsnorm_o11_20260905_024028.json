@@ -1,0 +1,51 @@
+{
+  "benchmark": "fused_add_rmsnorm_o11",
+  "description": "fused_add_rmsnorm vs skip_rmsnorm on decode shapes",
+  "results": [
+    {
+      "shape": "(1, 2048)",
+      "batch_seq": 1,
+      "hidden": 2048,
+      "skip_rmsnorm_us": 33.65,
+      "fused_add_rmsnorm_us": 33.205,
+      "speedup": 1.013
+    },
+    {
+      "shape": "(4, 2048)",
+      "batch_seq": 4,
+      "hidden": 2048,
+      "skip_rmsnorm_us": 33.356,
+      "fused_add_rmsnorm_us": 33.297,
+      "speedup": 1.002
+    },
+    {
+      "shape": "(16, 4096)",
+      "batch_seq": 16,
+      "hidden": 4096,
+      "skip_rmsnorm_us": 33.123,
+      "fused_add_rmsnorm_us": 33.191,
+      "speedup": 0.998
+    },
+    {
+      "shape": "(32, 4096)",
+      "batch_seq": 32,
+      "hidden": 4096,
+      "skip_rmsnorm_us": 33.101,
+      "fused_add_rmsnorm_us": 33.249,
+      "speedup": 0.996
+    },
+    {
+      "shape": "(64, 8192)",
+      "batch_seq": 64,
+      "hidden": 8192,
+      "skip_rmsnorm_us": 33.341,
+      "fused_add_rmsnorm_us": 33.215,
+      "speedup": 1.004
+    }
+  ],
+  "summary": {
+    "avg_speedup": 1.003,
+    "max_speedup": 1.013,
+    "min_speedup": 0.996
+  }
+}
