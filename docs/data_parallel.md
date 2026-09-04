@@ -8,7 +8,7 @@
 
 ![data parallel](./images/data_parallel.gif)
 
-上图是 8 个请求经 round-robin 派发到 2 个副本：`GPU0` 拿到偶数号请求、`GPU1` 拿到奇数号，两个副本**同时**解码各自的 batch。要看的就是两条泳道并排推进——这份并发就是全部的加速来源。
+上图是 8 个请求经 round-robin 派发到 2 个副本：`GPU0` 拿到偶数号请求、`GPU1` 拿到奇数号，两个副本**同时**解码各自的 batch。两条泳道并排推进——这份并发就是全部的加速来源。
 
 ## 分层结构
 
@@ -20,7 +20,7 @@
 | 负载均衡策略（选哪个副本） | `dp_load_balancer.LoadBalancer` | `DPLBAsyncMPClient` | `LoadBalanceMethod` |
 | 协调器（拉起 worker、路由、回收结果） | `DataParallelEngine` | engine core client | `DataParallelController` |
 
-把"选副本"单独拎成一个策略对象、而不是塞进协调器里，是这次相较早期单体实现的关键改动：路由是**每请求一次**的决策，换一个策略（轮询 → 按 token 数）不动协调器一行代码。
+把"选副本"单独拎成一个策略对象、而不是塞进协调器里，是这次相较早期单体实现的改动：路由是**每请求一次**的决策，换一个策略（轮询 → 按 token 数）不动协调器一行代码。
 
 **一条线协议，两个前端。** `_ReplicaLoop` 收到的消息以打头标签区分来源：`"batch"` 是同步 `generate()` 的调度单位（整批一条应答），`"add"` / `"abort"` 是流式前端 `AsyncDataParallelEngine` 的逐请求通道（每 step 一条 `delta`、结束一条 `finished`，拒绝或失败只报那一个 id）。副本不关心自己被哪种前端持有——两条路径共享同一套记账，只是分组不同，这也是流式前端能在不动副本代码的情况下加进来的原因。
 
@@ -42,7 +42,7 @@
 
 三个策略共享同一个 tie-break（低下标优先），因此冷启动时输出完全一致的 0,1,2… 序列。
 
-**关于 token 估计的诚实契约。** 只有 `total_tokens` 真的读 `estimated_tokens`，它通过类属性 `needs_token_estimate = True` 声明这件事；协调器据此决定要不要花一次 tokenizer 开销。早期实现在这里有两个互相掩盖的问题：`select(estimated_tokens=...)` 的形参**根本没被用过**，而调用方传进去的又是 `len(prompt)`——**字符数当 token 数**。中英混排 1:1、缩进密集的代码 1:6，这个比例本身就不是常数，任何非英文 batch 都会被算错。现在路由层用 tokenizer 一次性数完整批，而不需要估计的策略连 tokenizer 都不加载。
+**token 估计的声明契约。** 只有 `total_tokens` 真的读 `estimated_tokens`，它通过类属性 `needs_token_estimate = True` 声明这件事；协调器据此决定要不要花一次 tokenizer 开销。早期实现在这里有两个互相掩盖的问题：`select(estimated_tokens=...)` 的形参**根本没被用过**，而调用方传进去的又是 `len(prompt)`——**字符数当 token 数**。中英混排 1:1、缩进密集的代码 1:6，这个比例本身就不是常数，任何非英文 batch 都会被算错。现在路由层用 tokenizer 一次性数完整批，而不需要估计的策略连 tokenizer 都不加载。
 
 协调器把每请求的选择**按副本聚回一个子 batch**，这样每个副本仍然只做一次高效的成批前向，而**选择**本身保持逐请求的策略——换 balancer 就换了切分，路由代码一行不动。
 
@@ -81,7 +81,7 @@ Qwen2.5-1.5B-Instruct，2× A10（23 GB），greedy，`max_gen_len=128`，round-
 | DataParallelEngine | 1 | 256 | 2.88 s | 11376 tok/s | 1.00x |
 | DataParallelEngine | 2 | 256 | 1.75 s | **18695 tok/s** | **1.64x** |
 
-两条结论，按实测说：
+两条结论：
 
 1. **weak scaling 拿到满格的 ×2.00（100% 线性）。** 每个副本干一份独立的活、无跨卡通信，这正是 DP 该有的形状：加一张卡，吞吐加一份。IPC 开销可忽略（进程内 `LLM` 与 dp=1 协调器差 2~3%）。
 2. **strong scaling ×1.64（82% 线性）。** 把一个批切成两半，每半仍要各自跑一遍 prefill，且墙钟由**较慢**的那个副本决定；256 条切成 128+128 后单副本已不在最省的工作点，所以拿不到满格的 2×。这不是缺陷，是"切分同一批"这件事的固有上限——想要满格加速就用 weak scaling 的口径（更多并发请求），而不是把小批越切越碎。

@@ -30,10 +30,11 @@ v0.11.5 沿三条轴把「通信时间藏在计算后面」做成可独立开关
 * `overlap.py` — A 轴（host↔device）：`OverlapPolicy` + `StreamPool`（copy stream + pinned staging 环）+ `Timeline`（CUDA event 区间记录，跨 stream 同一时钟）。本轮从 `executor/` 迁入：两条轴同住一个包，`Timeline` 是它们共用的证据设施
 * `operations.py` — stage/yield 交错原语，对齐 sglang 同名文件：`YieldOperation`、`StateDict`（键写一次、pop 后才能重写，`clear(expect_keys)` 校验中间量是否按时释放）、`_StageExecutor` 与 `execute_operations` / `execute_overlapped_operations`
 * `comm_overlap.py` — 通信流底座：`CommStreamPool`（每 device 一条 NCCL 流）、`DeferredArContext`（defer/fence/collecting/drain）、`CommOverlapPolicy`（L3 策略）与 `row_parallel_forward` 单一分发点
-* `two_batch_overlap.py` — L2 executor：`TboSplitter`（两半等长 + KV 元数据窄化，奇数 batch 用重复末行补齐到 `padded_len`，多余行的 logits 由 `num_rows` 丢弃）+ `TwoBatchOverlap`（建两份 `StateDict` 后交给交错执行器）+ `TboPolicy`（含 `capture_eligible`，判定某个 batch 的 graph 是否录交错流）
+* `two_batch_overlap.py` — L2 executor：`TboSplitter`（两半等长 + KV 元数据窄化，奇数 batch 用重复末行补齐到 `padded_len`，多余行的 logits 由 `num_rows` 丢弃）+ `TboPolicy`（含 `capture_eligible`，判定某个 batch 的 graph 是否录交错流）+ `model_forward_maybe_tbo` 统一入口（对齐 sglang 同名函数，调用方传入 `enable_tbo` 策略判定，入口负责执行）：`enable_tbo=True` 走 `_model_forward_tbo` 三段式（`_model_forward_tbo_split_inputs` 拆分 → `execute_overlapped_operations` 交错 → `_model_forward_tbo_merge_outputs` 逐半 head 后拼接）；`enable_tbo=False` 走 `_model_forward_non_tbo`，用 `execute_operations` 串行跑同一份 op 流——两条臂共享一层算子的唯一定义，串行臂就是交错臂的数值参照
 * `operations_strategy.py` — `OperationsStrategy.init_new_tbo` 按 layer 类名分派，收的是各层自己的 bound method：dense 流 `[op_attn, yield, op_mlp]`（delta 0），EP MoE 流 `[op_attn, yield, op_gate, yield, op_dispatch_a, op_shared_experts, yield, op_dispatch_b, op_experts, op_combine_a, yield, op_combine_b]`（delta 2，对齐 sglang 的 decode 策略）；混合栈（dense 前导层 + MoE）取最宽 lead，因为 sglang 的「各层 lead 必须一致」断言建立在它只支持稀疏层 TBO 上
 * `single_batch_overlap.py` — SBO：单 batch 内的 MoE 双流重叠（`SboPolicy` 开关与 `min_rows` 阈值、`SboFlags.enable_dispatch_shared_overlap` 判定、`sbo_alt_stream` 的 compute 侧 alt stream，对齐 sglang 同名文件）
 * 模型侧唯一侵入点：`models/base.py` 的 `DecoderLayer.forward_attn_stage/forward_mlp_stage` 两段拆分（原 `forward` = 两段顺序调用，行为不变；段边界恰好是 o_proj 的行并行 all-reduce），以及同文件上的九个 `op_*` TBO 算子（读 `StateDict`、消费即 pop、结果写新键；EP 那六个转发给 `mlp.op_*`）
+* 接线：`executor/worker.py` 的 decode 步骤走 `ModelRunner.forward_maybe_tbo(enable_tbo=policy.active(...))`（graph 激活时仍走原 `forward` 由 replay 服务），`_run_tbo`（eager 与 graph capture 共用）以 `enable_tbo=True` 调同一入口
 
 ## Feature
 
@@ -41,9 +42,9 @@ v0.11.5 沿三条轴把「通信时间藏在计算后面」做成可独立开关
 
 ```bash
 # TP2 对照（batch 8/16/32：eager on/off 两臂 + graph 参照臂 + graph-captured TBO 臂 + greedy 一致性）
-python benchmarks/bench_overlap_l2.py --timeline
+python -m benchmarks.overlap.levels --level l2 --timeline
 # EP 四臂：V2-Lite TP2 上 EP on/off × TBO on/off（每批带 graph 参照臂）
-python benchmarks/bench_ep_overlap.py --json docs/benchmark_logs/overlap_ep_<ts>.json
+python -m benchmarks.overlap.policies --policy ep_matrix --json docs/benchmark_logs/overlap_ep_<ts>.json
 ```
 
 2×A10 **PCIe** 上 **eager 形态的** TBO 是负收益——但复测把根因修正为 **CPU launch floor，不是「PCIe 不能重叠」**：eager TP2 decode 的 TPOT 由 Python kernel-launch 的 CPU 时间决定（off 臂 GPU util 仅 28.6%），通信原语要在 GPU 上省时间，而瓶颈根本不在 GPU。四臂数据同表发布（`docs/benchmark_logs/overlap_l2_tbo_20260904_014530.json`，timeline 证据沿用 `overlap_l2_tbo_20260904_003941.json`）：
@@ -72,7 +73,7 @@ graph 参照臂与两 eager 臂同负载、同 TP2，唯一差别 `use_cuda_grap
 
 **graph-captured TBO（本版落地，第四臂）**：capture 时由 `TboPolicy.capture_eligible(world_size, batch)` 按 batch 决定形态——达标（≥ min_rows 且多 rank）的 key 录 TBO 交错流，未达标的保持普通 forward，两种形态共存于同一 capture 网格；worker 层零改动（eager 路径照旧在 graph 激活时让位，replay 形态无关）。跨流 event 依赖（`comm.wait_stream(compute)` → NCCL → `event.record(comm)` → fence）全部是 stream capture 合法原语，录成 graph 内的 fork/join 边；TBO forward 的 `drain()` 保证 capture 结束时所有 comm 分支 rejoin，无 uncaptured fork；warmup 3 次 TBO forward 先把 NCCL channel/工作区建好。正确性：TP2 单测里 replay 与 eager TBO **logits 一致**（`torch.allclose` 1e-4），greedy 与 eager 基线同率（28/32，与 eager TBO 完全相同的分歧行）。性能：**launch floor 消除（60.0→9.9-11.2 ms，5.4×），但 interleave 本身在该形状净负**——graph+TBO 比普通 graph 慢 47-61%。机理：该 dense-PCIe 形态下每步 AR 只占 ~3-5%，完美重叠的上限收益小于半批 GEMM 效率损失+交错关键路径+事件 fence 的代价；TBO 不减少总 kernel 工作量，只重排它。
 
-**对标 SGLang 的正收益三前提**：CUDA graph（decode 是 replay，TPOT=GPU 时间）+ EP all-to-all payload 大到值得藏 + 深 compute 模型。graph-captured TBO 已满足前提 (a)（机制、parity、launch floor 消除全部验证），但 (b) 在 dense 1.5B TP2 PCIe 上不成立；EP 四臂（`bench_ep_overlap.py`，V2-Lite TP2）进一步证明 **eager 下 EP 也是负收益**——a2a 的 payload 优势同样被 CPU 地板淹没：
+**对标 SGLang 的正收益三前提**：CUDA graph（decode 是 replay，TPOT=GPU 时间）+ EP all-to-all payload 大到值得藏 + 深 compute 模型。graph-captured TBO 已满足前提 (a)（机制、parity、launch floor 消除全部验证），但 (b) 在 dense 1.5B TP2 PCIe 上不成立；EP 四臂（`overlap/policies.py（ep_matrix）`，V2-Lite TP2）进一步证明 **eager 下 EP 也是负收益**——a2a 的 payload 优势同样被 CPU 地板淹没：
 
 | batch | tp eager | tp+tbo | ep eager | ep+tbo | graph 参照 |
 | --- | --- | --- | --- | --- | --- |
@@ -87,7 +88,7 @@ graph 参照臂与两 eager 臂同负载、同 TP2，唯一差别 `use_cuda_grap
 
 **结论修正（替换旧版「等 NVLink 机器再开」；正收益路径本版已做完并测完）**：TBO + CUDA graph capture 已落地——`CUDAGraphRunner` 接受注入的 step 函数，`ModelRunner.enable_cuda_graph(tbo=True)` 由引擎按 `tbo_policy().enabled` 自动接线。机制成立：capture 无 fork 泄漏、replay 与 eager TBO 数值一致、launch floor 从 eager TBO 的 60 ms 消到 10 ms。但**该形状下 interleave 净负**，本版用一个成本模型把根因钉死并自门控（见下）。
 
-**成本模型根因（本版新增，`benchmarks/probe_tbo_cost_model.py`）**：TBO 把 batch 切两半，每半各自跑一遍 GEMM。decode 小 batch 下 GEMM 是**访存瓶颈**（读权重主导，时间对 M 几乎是平的）：实测 Qwen2.5-1.5B TP2 形状，M=16 与 M=8 的每个 GEMM 耗时几乎相同（o_proj 20.60 vs 20.36 us、down_proj 46.56 vs 46.06 us），所以**切半 = 1.98× 全量**——两半各读一遍权重。整网计算 4.41 ms → 8.75 ms，多出 **+4.35 ms 的重复权重读取**，恰好解释 graph 6.65 ms → graph+TBO 11.44 ms（+4.79 ms）的回归。这个惩罚在 A10 上一直延伸到 M=512（仍 1.26×），因为 A10 算力弱、访存瓶颈区间宽。可藏的 AR 只占 step 的 ~3-5%，永远盖不过翻倍的权重读取——**TBO 在整个访存瓶颈 decode 区间都是净负，这是数学事实，不是调参问题**。
+**成本模型根因（本版新增，`benchmarks/kernels/bench_tbo_cost_model.py`）**：TBO 把 batch 切两半，每半各自跑一遍 GEMM。decode 小 batch 下 GEMM 是**访存瓶颈**（读权重主导，时间对 M 几乎是平的）：实测 Qwen2.5-1.5B TP2 形状，M=16 与 M=8 的每个 GEMM 耗时几乎相同（o_proj 20.60 vs 20.36 us、down_proj 46.56 vs 46.06 us），所以**切半 = 1.98× 全量**——两半各读一遍权重。整网计算 4.41 ms → 8.75 ms，多出 **+4.35 ms 的重复权重读取**，恰好解释 graph 6.65 ms → graph+TBO 11.44 ms（+4.79 ms）的回归。这个惩罚在 A10 上一直延伸到 M=512（仍 1.26×），因为 A10 算力弱、访存瓶颈区间宽。可藏的 AR 只占 step 的 ~3-5%，永远盖不过翻倍的权重读取——**TBO 在整个访存瓶颈 decode 区间都是净负，这是数学事实，不是调参问题**。
 
 **自门控（本版修复，保证永不负收益）**：`TboPolicy.from_env` 的默认激活阈值不再是固定的 8，而是 roofline ridge point（`_ridge_rows`，A10 上 = 520）——GEMM 从访存瓶颈转为计算瓶颈的 batch。低于 ridge，切半翻倍权重读取，TBO 拒绝激活；高于 ridge，GEMM 计算瓶颈、切半不翻倍，TBO 才可能获益。显式 `LITE_LLAMA_TBO_MIN_ROWS` 覆盖该阈值（parity 测试与 benchmark 据此在小 batch 强制开启交错）。这样 `LITE_LLAMA_TBO=1` 再也不会把一个 decode 步拖入灾难性的访存瓶颈区。
 
@@ -95,7 +96,7 @@ graph 参照臂与两 eager 臂同负载、同 TP2，唯一差别 `use_cuda_grap
 
 ```bash
 # EP2 对照（batch 32/64：SBO on/off 两臂 + timeline 重叠证据）
-python benchmarks/bench_overlap_sbo.py --json docs/benchmark_logs/overlap_sbo_<ts>.json
+python -m benchmarks.overlap.policies --policy sbo --json docs/benchmark_logs/overlap_sbo_<ts>.json
 ```
 
 L2 的 TBO 需要两半才能 ping-pong；EP decode 往往只有一个 batch，没有第二半可交错——但 MoE 层内部仍有可重叠的结构：dispatch 的 forward a2a 在线上飞时，shared MLP 可以算。这就是 SBO（sglang 的 `single_batch_overlap.py`），本版新增 `batch_overlap/single_batch_overlap.py` 对齐它。
@@ -106,7 +107,7 @@ L2 的 TBO 需要两半才能 ping-pong；EP decode 往往只有一个 batch，�
 
 另一处如实的边界：sglang 的 `enable_combine_down_gemm_two_stream_overlap`（combine a2a 与 down GEMM 的 tile 级重叠）本版**未实现**。lite_llama 的 `fused_moe` 里 down GEMM（gemm2）按 `sorted_token_ids` 把结果 scattered 写到原始 slot 行，而 `_moe_sum_kernel` 按连续的 token 行读——「某个 GEMM tile 完成」对不上「某个 row block 就绪」，要做 tile 级同步需要额外的 inverse mapping 加原子计数，本版留作后续。已实现的是 sglang 三个重叠里的 dispatch↔shared 那一个。
 
-证据：EP2 单测里 SBO 开关两侧输出一致（`torch.allclose` 2e-2），且 timeline 证明 shared MLP 的区间与 dispatch 交换的区间在同一设备时钟上真相交。eager 轮（`bench_overlap_sbo.py`）实测 1248 个 dispatch region、624 个 shared-MLP region、**198 对真重叠共 78.92 ms**——shared MLP 确实与交换并行。
+证据：EP2 单测里 SBO 开关两侧输出一致（`torch.allclose` 2e-2），且 timeline 证明 shared MLP 的区间与 dispatch 交换的区间在同一设备时钟上真相交。eager 轮（`overlap/policies.py（sbo）`）实测 1248 个 dispatch region、624 个 shared-MLP region、**198 对真重叠共 78.92 ms**——shared MLP 确实与交换并行。
 
 **但 eager 形态兑现不了它**：两臂都跑 eager，TPOT 坐在 Python launch floor 上（~86 ms），78.92 ms 的重叠摊在 624 个 region 里（均摊每层每步 ~0.13 ms），而每层要付两个 event fence 加 `record_stream`——藏住的与付出的同量级，净收益归零。eager benchmark（V2-Lite EP2，gen 64，离线推理口径，`docs/benchmark_logs/overlap_sbo_20260904_040845.json`）：
 
@@ -119,9 +120,9 @@ L2 的 TBO 需要两半才能 ping-pong；EP decode 往往只有一个 batch，�
 
 根因与 L2 eager 臂、EP 四臂完全一致：瓶颈是 CPU launch floor，不是 GPU。SBO 要省的是 GPU 上的交换时间，而 eager 的 TPOT 根本不由 GPU 决定。
 
-**本版修复：EP 保留 CUDA graph**。EP 过去强制关 graph（理由写着「a2a 进 graph 未验证」），但 a2a 走的正是 TBO deferred all-reduce 已经成功捕获的同一套 comm-stream 原语（`wait_stream`→NCCL→`event.record`→fence），交换 buffer 又是等分固定形状、路由 kernel 在 replay 时按真实 id 重算——所以 a2a 完全可以进 graph。本版移除该守卫（`engine/llm_engine.py`），EP decode 不再被 launch floor 拖住：同一 EP2 负载，eager 墙钟 1.96 s → graph 0.62 s（**3.19×**，`benchmarks/probe_ep_graph_parity.py` 四臂对照，证据 `docs/benchmark_logs/ep_sbo_graph_4arm_20260904_051200.log`），且 replay 与 eager 输出一致（parity 由 `tests/distributed/test_ep_engine.py` 的 `ep2_graph` 臂门禁，tie-gap 容差内）。**注意：这不等于 SBO 兑现了收益——同一四臂对照里 SBO 在 graph 下是 -0.2%（详见 SBO 节的争议记录）。**
+**本版修复：EP 保留 CUDA graph**。EP 过去强制关 graph（理由写着「a2a 进 graph 未验证」），但 a2a 走的正是 TBO deferred all-reduce 已经成功捕获的同一套 comm-stream 原语（`wait_stream`→NCCL→`event.record`→fence），交换 buffer 又是等分固定形状、路由 kernel 在 replay 时按真实 id 重算——所以 a2a 完全可以进 graph。本版移除该守卫（`engine/llm_engine.py`），EP decode 不再被 launch floor 拖住：同一 EP2 负载，eager 墙钟 1.96 s → graph 0.62 s（**3.19×**，`benchmarks/overlap/policies.py (ep_matrix)` 四臂对照，证据 `docs/benchmark_logs/ep_sbo_graph_4arm_20260904_051200.log`），且 replay 与 eager 输出一致（parity 由 `tests/distributed/test_ep_engine.py` 的 `ep2_graph` 臂门禁，tie-gap 容差内）。**注意：这不等于 SBO 兑现了收益——同一四臂对照里 SBO 在 graph 下是 -0.2%（详见 SBO 节的争议记录）。**
 
-launch floor 消除后，SBO 藏的交换成为一个 GPU-bound 步里的真实占比，正收益随之出现（`bench_overlap_sbo_graph.py`，EP2 graph，lazy capture，gen 64，离线推理口径，`docs/benchmark_logs/overlap_sbo_graph_20260904.json`）：
+launch floor 消除后，SBO 藏的交换成为一个 GPU-bound 步里的真实占比，正收益随之出现（`overlap/policies.py（sbo --graph）`，EP2 graph，lazy capture，gen 64，离线推理口径，`docs/benchmark_logs/overlap_sbo_graph_20260904.json`）：
 
 | batch | 臂 | TTFT | TPOT | TPS | SBO 变化 | greedy 一致 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -130,7 +131,7 @@ launch floor 消除后，SBO 藏的交换成为一个 GPU-bound 步里的真实�
 | 64 | SBO off | 299.9 ms | 55.40 ms | 1076.5 tok/s | — | — |
 | 64 | SBO on | 302.0 ms | 53.97 ms | 1104.7 tok/s | **+2.6%** | 41/64 |
 
-**上表的 +2.2% / +2.6% 存在争议，不能当作结论用**。同一开关同一负载的多次复测波动很大（+0.9%~+8.1%），而该表取的是 best-of-N——**取最好的一次不是如实报告，是夸大收益**。另一条独立路径的实测给出了相反方向：`benchmarks/probe_ep_graph_parity.py` 的四臂对照（eager/graph × SBO off/on，V2-Lite EP2，gen 24，证据 `docs/benchmark_logs/ep_sbo_graph_4arm_20260904_051200.log`）：
+**上表的 +2.2% / +2.6% 存在争议，不能当作结论用**。同一开关同一负载的多次复测波动很大（+0.9%~+8.1%），而该表取的是 best-of-N——**取最好的一次不是如实报告，是夸大收益**。另一条独立路径的实测给出了相反方向：`benchmarks/overlap/policies.py (ep_matrix)` 的四臂对照（eager/graph × SBO off/on，V2-Lite EP2，gen 24，证据 `docs/benchmark_logs/ep_sbo_graph_4arm_20260904_051200.log`）：
 
 | 臂 | 墙钟 | SBO 效果 |
 | --- | --- | --- |
@@ -180,10 +181,10 @@ launch floor 消除后，SBO 藏的交换成为一个 GPU-bound 步里的真实�
 运行命令：
 
 ```bash
-python benchmarks/bench_tbo_scaling.py \
+python -m benchmarks.overlap.policies --policy scaling \
     --models my_weight/Qwen2.5-1.5B-Instruct --batches 32 128 256 \
     --json docs/benchmark_logs/tbo_scaling_qwen_<ts>.json
-python benchmarks/bench_tbo_scaling.py \
+python -m benchmarks.overlap.policies --policy scaling \
     --models my_weight/Meta-Llama-3.1-8B-Instruct --batches 32 128 256 \
     --kv-blocks 49152 --json docs/benchmark_logs/tbo_scaling_llama8b_<ts>.json
 ```
@@ -239,7 +240,7 @@ Meta-Llama-3.1-8B-Instruct，TP=2：
 
 **结论：重构后的 TBO 在 decode TPOT 上收益不显著——12 个测量点全部落在 ±3% 内，正负交替，且没有随 batch 或模型规模单调改善的趋势。**batch 从 32 加到 256、模型从 1.5B 加到 8B（hidden 1536→4096，AR payload 大 2.7 倍）都没有把收益推出噪声带。另外两个事实值得记住：graph 形态比 eager 快 2-3.5 倍（TPOT 26.45→7.64 ms、30.17→23.46 ms），这才是 decode 上真正值钱的那一刀；TBO 叠在 graph 上也不改变这个量级。
 
-**与成本模型的衔接（必读，避免两节自相矛盾）**：本节 ±3% 的读数与 L2 节的成本模型（切半 1.98× 权重读取）表面冲突，但 doubled 权重读取是 SM 上不可隐藏的实际计算——若 TBO 真的跑了，TPOT 必然上升。本节 TBO on 臂 ≈ off 臂（eager 25.67 vs 26.45、graph 7.66 vs 7.64），说明**该 benchmark 的 TBO 臂很可能没有真正激活交错**（在比较 off vs off）；而 `bench_overlap_l2.py` 显式设 `LITE_LLAMA_TBO_MIN_ROWS=8` 后，同一 batch 32 的 eager TBO 实测 -181%、graph+TBO（batch 16）-72%，与成本模型一致。本版的 ridge 自门控让这个问题不再重要：TBO 只在计算瓶颈区（切半 ~free）激活，访存瓶颈区一律拒绝。
+**与成本模型的衔接（必读，避免两节自相矛盾）**：本节 ±3% 的读数与 L2 节的成本模型（切半 1.98× 权重读取）表面冲突，但 doubled 权重读取是 SM 上不可隐藏的实际计算——若 TBO 真的跑了，TPOT 必然上升。本节 TBO on 臂 ≈ off 臂（eager 25.67 vs 26.45、graph 7.66 vs 7.64），说明**该 benchmark 的 TBO 臂很可能没有真正激活交错**（在比较 off vs off）；而 `overlap/levels.py（L2）` 显式设 `LITE_LLAMA_TBO_MIN_ROWS=8` 后，同一 batch 32 的 eager TBO 实测 -181%、graph+TBO（batch 16）-72%，与成本模型一致。本版的 ridge 自门控让这个问题不再重要：TBO 只在计算瓶颈区（切半 ~free）激活，访存瓶颈区一律拒绝。
 
 #### 重构前的旧数据（仅作历史对照，不要引用）
 
@@ -312,7 +313,7 @@ Meta-Llama-3.1-8B-Instruct，TP=2：
 ### L3 chunked all-reduce
 
 ```bash
-python benchmarks/bench_overlap_l3.py --json --timeline
+python -m benchmarks.overlap.levels --level l3 --json --timeline
 ```
 
 GEMM 输出行分块、每块 GEMM 落地即上通信流（`docs/benchmark_logs/overlap_l3_20260903_215551.json`）：TP2 Qwen2.5-1.5B batch 16，TTFT 33.25→33.07 ms（-0.6%），timeline 记录 224 个 comm region 与 111 对真重叠（9.78 ms）。`L3_MIN_CHUNK_ROWS=256` 行下限：再细的分块在 PCIe 上付更多次小消息固定成本。分发点优先级 TBO > L3（同一 all-reduce 位点不叠加切分），组合矩阵验证退位成立（见下）。
@@ -328,7 +329,7 @@ GEMM 输出行分块、每块 GEMM 落地即上通信流（`docs/benchmark_logs/
 ### L4 tile-signaling
 
 ```bash
-python benchmarks/bench_overlap_l4.py
+python benchmarks/kernels/bench_tile_signal.py
 ```
 
 单卡 kernel 级原语，与互联无关（`docs/benchmark_logs/overlap_l4_20260903_104621.json`）：GEMM→SiLU·mul 逐 tile 流水 vs 串行两 kernel，A10（72 SM）上大形状 +8.0~+13.7%（4096×4480×1536：5.85→5.05 ms），小形状负收益（64×4480×1536：-15.5%）如实入表——persistent kernel 的常驻占用在 tile 少时是纯开销。死锁规避：生产者+消费者 grid 之和 ≤ #SM，host 侧 watchdog 兜底。
@@ -344,7 +345,7 @@ python benchmarks/bench_overlap_l4.py
 ### DP + CUDA Graph（P8）
 
 ```bash
-python benchmarks/bench_dp_graph.py
+python benchmarks/bench_data_parallel.py --mode graph --model my_weight/Qwen3-0.6B
 ```
 
 `docs/benchmark_logs/dp_graph_20260903_143056.json`（Qwen3-0.6B，batch 16/副本，128 步）：
@@ -380,7 +381,7 @@ V4 无公开权重（仅 config.json），用 transformers 5.8 随机初始化�
 
 ### 组合矩阵：L1×L2×L3 八格
 
-`benchmarks/bench_overlap_matrix.py`（`docs/benchmark_logs/overlap_matrix_final.json`，Qwen2.5-1.5B TP2 batch 16，1024 tok/格）：
+`benchmarks/overlap/policies.py (matrix)`（`docs/benchmark_logs/overlap_matrix_final.json`，Qwen2.5-1.5B TP2 batch 16，1024 tok/格）：
 
 | 组合 | TPOT | vs baseline | 输出一致性 |
 | --- | --- | --- | --- |
@@ -426,7 +427,7 @@ LITE_LLAMA_TBO_MIN_ROWS=2 pytest tests/golden/ -q              # 全开：9 pass
 
 ### nsys kernel 级证据
 
-`docs/benchmark_logs/nsys_overlap_report.md`（payload：`benchmarks/nsys_overlap_payload.py`，分析器：`benchmarks/nsys_overlap_report.py`）：
+`docs/benchmark_logs/nsys_overlap_report.md`（同一文件两个模式：`python -m benchmarks.overlap.nsys payload` 跑被 trace 的负载，`python -m benchmarks.overlap.nsys report` 分析两份 kernel trace）：
 
 | trace | gpu | NCCL kernels | hidden under compute |
 | --- | --- | --- | --- |
@@ -479,7 +480,7 @@ TBO+graph capture 落地轮补测（新增 `capture_eligible` 谓词、FakeRunne
 * `docs/images/dp_cuda_graph.png` — DP×Graph TPOT/吞吐
 * `docs/images/deepseek_v4_speed.png` — V4 裁剪版 vs transformers（prefill/decode）
 
-生成：`python benchmarks/plot_overlap_gains.py`（读 JSON logs，图数同源）。
+生成：`python -m benchmarks.overlap.plot`（读 JSON logs，图数同源）。
 
 原理 timeline GIF，生成：`python scripts/gen_overlap_gifs.py`（直接跑引擎收 CUDA-event region，逐帧揭示，底部标注本窗口实测的重叠对数与毫秒数）：
 
