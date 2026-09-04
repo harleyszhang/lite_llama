@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.kernels import qk_rmsnorm, skip_rmsnorm, swiglu_forward, swiglu_forward_fused
+from rapid_llm.kernels import qk_rmsnorm, skip_rmsnorm, swiglu_forward, swiglu_forward_fused
 from tests import reference
 
 _RTOL, _ATOL = 2e-2, 2e-2

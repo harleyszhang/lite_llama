@@ -12,15 +12,15 @@ from __future__ import annotations
 
 import pytest
 
-import lite_llama.kernels.dispatcher as lite_llama_kernels_dispatcher
-from lite_llama.kernels.dispatcher import (
+import rapid_llm.kernels.dispatcher as rapid_llm_kernels_dispatcher
+from rapid_llm.kernels.dispatcher import (
     GoldenRecord,
     KernelSpec,
     LayoutRequirement,
     ShapeConstraint,
     ShapeRequirement,
 )
-from lite_llama.platform.spec import CapabilityRequirement
+from rapid_llm.platform.spec import CapabilityRequirement
 
 
 def spec(**overrides) -> KernelSpec:
@@ -138,7 +138,7 @@ class TestTorchFreeRegistration:
     def test_spec_module_declares_no_torch_import(self) -> None:
         """The ops tier must not add torch to the import graph of its own accord.
 
-        The ``lite_llama`` package root already imports torch via the engine, so
+        The ``rapid_llm`` package root already imports torch via the engine, so
         "torch-free" here means the ops tier itself contributes no new heavy
         imports: spec/registry files may only import stdlib plus the platform
         descriptors. Asserted on the parsed AST so the check cannot be fooled by
@@ -147,7 +147,7 @@ class TestTorchFreeRegistration:
         import ast
         from pathlib import Path
 
-        spec_py = Path(lite_llama_kernels_dispatcher.__file__).parent / "spec.py"
+        spec_py = Path(rapid_llm_kernels_dispatcher.__file__).parent / "spec.py"
         tree = ast.parse(spec_py.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -162,7 +162,7 @@ class TestTorchFreeRegistration:
 
     def test_capability_composes_with_platform(self) -> None:
         """The spec tier reuses platform's requirement type — one vocabulary."""
-        from lite_llama.platform.spec import PlatformInfo, capabilities_match
+        from rapid_llm.platform.spec import PlatformInfo, capabilities_match
 
         s = spec(capability=(CapabilityRequirement("cuda", min_cc=(9, 0)),))
         assert capabilities_match(s.capability, PlatformInfo("cuda", 9, 0, "H100"))

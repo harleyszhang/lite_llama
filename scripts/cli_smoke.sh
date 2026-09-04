@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end CLI smoke test.
 #
-# Runs the ``lite-llama`` CLI against every checkpoint present under my_weight/
+# Runs the ``rapid-llm`` CLI against every checkpoint present under my_weight/
 # and asserts each one emits some text and exits cleanly. This is what should
 # have caught the CUDA-driver-vs-torch mismatch and the earlier CUDA Graph bug.
 #
@@ -120,7 +120,7 @@ _smoke_one() {
         if _is_qwen3_vl "${model_dir}"; then
             vl_prompt='Describe the animal in one sentence.'
         fi
-        if ! "${PY}" -m lite_llama.cli vl-chat \
+        if ! "${PY}" -m rapid_llm.cli vl-chat \
                 --model-dir "${model_dir}" --image "${img}" \
                 --prompt "${vl_prompt}" \
                 --temperature 0.0 --top-p 1.0 --max-gen-len 16 --max-seq-len 2048 \
@@ -129,8 +129,8 @@ _smoke_one() {
         fi
     else
         echo "  [chat] ${name}"
-        if ! LITE_LLAMA_MODEL_DIR="${model_dir}" \
-            "${PY}" -m lite_llama.cli chat \
+        if ! RAPID_LLM_MODEL_DIR="${model_dir}" \
+            "${PY}" -m rapid_llm.cli chat \
                 --temperature 0.0 --top-p 1.0 --max-gen-len 16 --max-seq-len 512 \
                 <<< $'The capital of France is\nexit\n' \
                 >"${log}" 2>"${err}"; then

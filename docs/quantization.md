@@ -1,6 +1,6 @@
 # 量化支持
 
-lite_llama 支持多种权重量化方案，架构与 [sglang](https://github.com/sgl-project/sglang) 对齐，便于扩展。
+rapid_llm 支持多种权重量化方案，架构与 [sglang](https://github.com/sgl-project/sglang) 对齐，便于扩展。
 
 ## 支持的方案
 
@@ -21,7 +21,7 @@ lite_llama 支持多种权重量化方案，架构与 [sglang](https://github.co
 FP8 checkpoint 会从 `config.json` 自动检测：
 
 ```bash
-python -m lite_llama.cli --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8
+python -m rapid_llm.cli --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8
 ```
 
 ### 运行时 INT8 量化
@@ -29,25 +29,25 @@ python -m lite_llama.cli --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8
 加载时把 fp16 checkpoint 量化为 int8：
 
 ```bash
-python -m lite_llama.cli --model-dir my_weight/Qwen3-0.6B --quantization int8
+python -m rapid_llm.cli --model-dir my_weight/Qwen3-0.6B --quantization int8
 ```
 
 ### 真 W8A8 FP8（权重不反量化）
 
 ```bash
-python -m lite_llama.cli --model-dir my_weight/Qwen3-0.6B --quantization fp8
+python -m rapid_llm.cli --model-dir my_weight/Qwen3-0.6B --quantization fp8
 ```
 
 ### FP8 KV Cache（decode 显存减半）
 
 ```bash
-python -m lite_llama.cli --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype fp8
+python -m rapid_llm.cli --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype fp8
 ```
 
 ### NVFP4 仅权重 4-bit
 
 ```bash
-python -m lite_llama.cli --model-dir my_weight/Qwen3-4B --quantization nvfp4
+python -m rapid_llm.cli --model-dir my_weight/Qwen3-4B --quantization nvfp4
 ```
 
 本文所有方案中权重最小的（比 bf16 低 2.85×），但在 H100 上测过的每个 shape 都**比 bf16 慢**——选它之前先读 [NVFP4 仅权重 FP4](#nvfp4-仅权重-fp4) 一节。
@@ -55,7 +55,7 @@ python -m lite_llama.cli --model-dir my_weight/Qwen3-4B --quantization nvfp4
 ## 架构
 
 ```
-lite_llama/modules/quantization/
+rapid_llm/modules/quantization/
 ├── __init__.py            # BASE_QUANTIZATION_METHODS 注册表 + 工厂函数
 ├── base_config.py         # QuantizeMethodBase / LinearMethodBase / FusedMoEMethodBase / QuantizationConfig 抽象基类
 ├── fp8.py                 # Fp8Config + Fp8LinearMethod + Fp8MoEMethod
@@ -73,7 +73,7 @@ lite_llama/modules/quantization/
 
 ### 与 sglang 的对齐表
 
-| lite_llama | sglang equivalent | Notes |
+| rapid_llm | sglang equivalent | Notes |
 | ------------ | ------------------- | ------- |
 | `QuantizationConfig` | `QuantizationConfig` | ABC with `get_quant_method(layer, prefix)` |
 | `LinearMethodBase` | `LinearMethodBase` | `create_weights` + `apply` |
@@ -89,7 +89,7 @@ lite_llama/modules/quantization/
 ### 注册表与配置流转
 
 ```python
-from lite_llama.modules.quantization import (
+from rapid_llm.modules.quantization import (
     BASE_QUANTIZATION_METHODS,
     get_quantization_config,
     get_quant_config_from_hf,
@@ -176,7 +176,7 @@ method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 
 ### 未覆盖的 FP8 checkpoint
 
-- **Qwen3.8-27B-FP8**（`model_type: qwen3_5`，`Qwen3_5ForConditionalGeneration`）：64 层中 48 层是 linear attention（gated-delta-net：conv kernel 4、16 key heads × 128 dim、48 value heads × 128 dim）、每 4 层插一层 full attention，另带 vision tower。`lite_llama/models/` 支持到 qwen3_moe / qwen3_vl，尚无 qwen3_5——需要 linear attention 的 chunked-scan 内核与混合层调度，属新模型实现而非量化路径问题（其 fp8 格式与 30B-A3B 完全一致：e4m3 + 128×128 block scales + dynamic activation）。
+- **Qwen3.8-27B-FP8**（`model_type: qwen3_5`，`Qwen3_5ForConditionalGeneration`）：64 层中 48 层是 linear attention（gated-delta-net：conv kernel 4、16 key heads × 128 dim、48 value heads × 128 dim）、每 4 层插一层 full attention，另带 vision tower。`rapid_llm/models/` 支持到 qwen3_moe / qwen3_vl，尚无 qwen3_5——需要 linear attention 的 chunked-scan 内核与混合层调度，属新模型实现而非量化路径问题（其 fp8 格式与 30B-A3B 完全一致：e4m3 + 128×128 block scales + dynamic activation）。
 - **Qwen3-VL-235B-A22B-Instruct-FP8**：本地副本不完整——index 要求 24 个 shard 仅存在 3 个（22/23/24），且无 config.json（27 GB ≄ ~235 GB），物理上无法加载。
 
 ### 性能说明
@@ -195,7 +195,7 @@ method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 | int8 per-channel | ~23% | Within fp16 divergence range |
 | fp8 W8A8 | ~5% | e4m3's 3 mantissa bits cause earlier divergence |
 
-NVIDIA ModelOpt / TensorRT-LLM 布局，实现于 `lite_llama/kernels/ops/quantization/nvfp4.py`，以 `native/linear_nvfp4` 派发：
+NVIDIA ModelOpt / TensorRT-LLM 布局，实现于 `rapid_llm/kernels/ops/quantization/nvfp4.py`，以 `native/linear_nvfp4` 派发：
 
 - 权重为 fp4-e2m1，每个 `uint8` 字节存两个值（低 nibble = 偶数下标）；
 - 每 16 个连续 `k` 元素一个 fp8-e4m3 block scale，因此 `BLOCK_K` 取 16 的倍数即可让每个 k-tile 都落在同一个 scale 内；
@@ -208,7 +208,7 @@ TP 切分要求每个分片都是 32 的倍数（2 值/字节 × 16 元素 block
 
 sm90（H100）没有 fp4 张量核 MMA，所以它在构造上就是 weight-only：nibble 在寄存器里解包，`tl.dot` 仍以 bf16 运行。Triton 确有 `tl.dot_scaled`（microscaling API，操作数可为 uint8 打包的 fp4），但在没有原生 microscaling 硬件的架构（含 sm90）上它走软件模拟——先把 fp4 upcast 成 bf16 再 dot，与本内核的解包路径等价，拿不到 fp4 MMA 收益；原生 fp4 MMA 要到 Blackwell（sm100）。省下的是字节数，而在 H100 上字节并不是 decode 的瓶颈。
 
-`qwen3-4b/qkv`（N=6144，K=2560），测于 NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7），数据来自 [`bench_quant_gemm_h100_20260903d.json`](benchmark_logs/bench_quant_gemm_h100_20260903d.json)（以 `LITE_LLAMA_AUTOTUNE=0` 运行，即用户没有调优缓存时拿到的启发式 tile）：
+`qwen3-4b/qkv`（N=6144，K=2560），测于 NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7），数据来自 [`bench_quant_gemm_h100_20260903d.json`](benchmark_logs/bench_quant_gemm_h100_20260903d.json)（以 `RAPID_LLM_AUTOTUNE=0` 运行，即用户没有调优缓存时拿到的启发式 tile）：
 
 | M | bf16 | fp8 W8A8 | int4 (awq) | nvfp4 |
 |---|---|---|---|---|
@@ -228,7 +228,7 @@ int4/AWQ 是一个有启发性的对照，但故事不同：它读的权重字�
 
 `W8A8Fp8MoEMethod` 与 `W8A8Int8MoEMethod` 在量化专家权重的同时也量化**激活**（入口 `fused_moe_w8a8_fp8` / `fused_moe_w8a8_int8`）：GEMM1 之前 per-token，silu 输出在 GEMM2 之前 per-row（低于 32 行时两者都融进 GEMM kernel 内部，见 `_INLINE_A_QUANT_MAX_ROWS`），全程不做 host 同步，因此 MoE 层仍可被 graph 捕获。在此之前，`W8A8Fp8MoEMethod.apply` 与 `Fp8MoEMethod.apply` 是同一个函数，`W8A8Int8MoEMethod.apply` 调的是 weight-only 的 `fused_moe`——激活始终是 bf16，W8A8 只是个标签，不是一条路径。
 
-Qwen3-30B-A3B 几何（E=128，top_k=8，hidden 2048，moe_intermediate 768），测于 NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7），数据来自 [`bench_fused_moe_h100_20260902_int4byte.json`](benchmark_logs/bench_fused_moe_h100_20260902_int4byte.json)（以 `LITE_LLAMA_AUTOTUNE=0` 运行，即用户没有调优缓存时拿到的启发式 tile）；int4 列是 byte 布局 + 双 dot kernel（见[下文](#int4-byte-布局与双-dot-kernel)），其余列与 [`bench_fused_moe_h100_20260902_fp8cvt.json`](benchmark_logs/bench_fused_moe_h100_20260902_fp8cvt.json) 一致（t1 档存在 ~8% 的整机漂移，launch-bound 档的格式间差异无意义）。基线与激活 dtype 为 bf16——即该 checkpoint 实际服务的精度（`torch_dtype: bfloat16`）；fp8 W8A16 的 e4m3 加宽在 sm89+ 上走单条硬件 `cvt`（kernel 开关 `FP8_CVT`，修正因子 256 随之消失）。前一天的 fp16 基线测量保留在 [`bench_fused_moe_h100_20260901.json`](benchmark_logs/bench_fused_moe_h100_20260901.json)，同日早间的 [`bench_fused_moe_h100_20260902.json`](benchmark_logs/bench_fused_moe_h100_20260902.json) 是修复中途的快照（其 t1 行与自身消融行矛盾，勿引用）：
+Qwen3-30B-A3B 几何（E=128，top_k=8，hidden 2048，moe_intermediate 768），测于 NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7），数据来自 [`bench_fused_moe_h100_20260902_int4byte.json`](benchmark_logs/bench_fused_moe_h100_20260902_int4byte.json)（以 `RAPID_LLM_AUTOTUNE=0` 运行，即用户没有调优缓存时拿到的启发式 tile）；int4 列是 byte 布局 + 双 dot kernel（见[下文](#int4-byte-布局与双-dot-kernel)），其余列与 [`bench_fused_moe_h100_20260902_fp8cvt.json`](benchmark_logs/bench_fused_moe_h100_20260902_fp8cvt.json) 一致（t1 档存在 ~8% 的整机漂移，launch-bound 档的格式间差异无意义）。基线与激活 dtype 为 bf16——即该 checkpoint 实际服务的精度（`torch_dtype: bfloat16`）；fp8 W8A16 的 e4m3 加宽在 sm89+ 上走单条硬件 `cvt`（kernel 开关 `FP8_CVT`，修正因子 256 随之消失）。前一天的 fp16 基线测量保留在 [`bench_fused_moe_h100_20260901.json`](benchmark_logs/bench_fused_moe_h100_20260901.json)，同日早间的 [`bench_fused_moe_h100_20260902.json`](benchmark_logs/bench_fused_moe_h100_20260902.json) 是修复中途的快照（其 t1 行与自身消融行矛盾，勿引用）：
 
 | tokens | bf16 | fp8 W8A16 | fp8 W8A8 | **int8 W8A8** | int8 W8A16 | int4 |
 |---|---|---|---|---|---|---|
@@ -245,7 +245,7 @@ decode 与 prefill 在这里是两个不同的操作，不平均成一个加速�
 复现（环境与负载见本节开头；日志即上表引用的四份 JSON）：
 
 ```bash
-LITE_LLAMA_AUTOTUNE=0 python benchmarks/kernels/bench_fused_moe.py \
+RAPID_LLM_AUTOTUNE=0 python benchmarks/kernels/bench_fused_moe.py \
     --json docs/benchmark_logs/bench_fused_moe_h100_<date>.json   # 全格式矩阵
 python benchmarks/kernels/bench_fused_moe.py --tune               # tile 扫描（写 ConfigStore，不入库）
 python -m pytest tests/kernels/test_fused_moe.py                  # 格式正确性门
@@ -261,13 +261,13 @@ python -m pytest tests/kernels/test_fused_moe.py                  # 格式正确
 
 ## INT4 byte 布局与双 dot kernel
 
-fused MoE 的 int4 权重存储从 int32 8-nibble 打包换成了 vLLM 的 uint8 byte 布局（`[E, N, K//2]`：byte b 的低 nibble 覆盖 k=2b，高 nibble 覆盖 k=2b+1）。checkpoint 布局不变——GPTQ/AWQ 的 int32 词在加载后由 `repack_int4_experts`（`lite_llama/kernels/ops/quantization/int4_repack.py`）一次性转换，调用点是 vLLM 同名的 `process_weights_after_loading` 钩子（`GptqMoEMethod`/`AwqMoEMethod` 实现，`Model.load_weights` 尾部统一触发；`MoE.quantize_` 的在线量化路径同样收口于此）。
+fused MoE 的 int4 权重存储从 int32 8-nibble 打包换成了 vLLM 的 uint8 byte 布局（`[E, N, K//2]`：byte b 的低 nibble 覆盖 k=2b，高 nibble 覆盖 k=2b+1）。checkpoint 布局不变——GPTQ/AWQ 的 int32 词在加载后由 `repack_int4_experts`（`rapid_llm/kernels/ops/quantization/int4_repack.py`）一次性转换，调用点是 vLLM 同名的 `process_weights_after_loading` 钩子（`GptqMoEMethod`/`AwqMoEMethod` 实现，`Model.load_weights` 尾部统一触发；`MoE.quantize_` 的在线量化路径同样收口于此）。
 
 动机是一次测量的结论：**byte 布局本身不解决问题，vLLM 的复制寻址 idiom 在 Triton 上同样无法向量化**。他们的 kernel（`fused_moe_kernel_gptq_awq`）让逻辑 k 读 byte k//2——每个 byte 出现在它两个 nibble 的行里——非仿射索引使 Triton 的合并分析失效，编译成 128 条标量 `ld.global.b8`。逐字提取该 kernel 到本机同几何实测 13-18 ms/GEMM；vLLM 的生产 int4 走的是 Marlin CUDA kernel，Triton 版只是 fallback。
 
-lite_llama 的 kernel 走另一条路：B 按 `[BLOCK_K//2, BLOCK_N]` **仿射 dense** 加载（向量化、软件流水线保持 `cp.async`），两个 nibble 平面在寄存器分离（`(b & 0xF)` 与 `(b >> 4) & 0xF`，直转 compute_type——[-15,15] 的小整数在 bf16 精确），A 侧以 `tl.split(tl.reshape(a, (BLOCK_M, BLOCK_K//2, 2)))` 拆出偶/奇 k 列，两个半 K dot 之和等价于原全 K dot。`EVEN_K`（K 整除 BLOCK_K 时）免掉 masked load——逐元素谓词同样会把加载拆成标量字节；Qwen3-30B-A3B 的两个 GEMM（K=2048/768）在 BLOCK_K=128 下都满足。
+rapid_llm 的 kernel 走另一条路：B 按 `[BLOCK_K//2, BLOCK_N]` **仿射 dense** 加载（向量化、软件流水线保持 `cp.async`），两个 nibble 平面在寄存器分离（`(b & 0xF)` 与 `(b >> 4) & 0xF`，直转 compute_type——[-15,15] 的小整数在 bf16 精确），A 侧以 `tl.split(tl.reshape(a, (BLOCK_M, BLOCK_K//2, 2)))` 拆出偶/奇 k 列，两个半 K dot 之和等价于原全 K dot。`EVEN_K`（K 整除 BLOCK_K 时）免掉 masked load——逐元素谓词同样会把加载拆成标量字节；Qwen3-30B-A3B 的两个 GEMM（K=2048/768）在 BLOCK_K=128 下都满足。
 
-t4096（最难的档）的演进：int32 格式 1.92 ms → byte 布局 + vLLM 复制寻址 **7.35 ms**（倒退 3.8×，即上面那个 idiom）→ dense 加载 + 双 dot 3.31 ms → `EVEN_K` + nibble 直转 **1.70 ms**。对照 int8 同档 1.15 ms、bf16 1.06 ms：0.54× → 0.62×，中间档（t8/t64/t512）从 1.02-1.11× 提到 1.16-1.72×，t4096 绝对值也首次低于 int32 格式（1916.4 µs）。演进各步的测量环境为 NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1），Qwen3-30B-A3B 几何（E=128，top_k=8，hidden 2048，i=768），token 档 1～4096；终态数字落在 [`bench_fused_moe_h100_20260902_int4byte.json`](benchmark_logs/bench_fused_moe_h100_20260902_int4byte.json) 的 int4 列（中间步骤的数字来自当轮会话测量，未单独成档）。复现：`LITE_LLAMA_AUTOTUNE=0 python benchmarks/kernels/bench_fused_moe.py --json out.json`，int4 正确性门 `python -m pytest tests/kernels/test_fused_moe.py -k int4`。
+t4096（最难的档）的演进：int32 格式 1.92 ms → byte 布局 + vLLM 复制寻址 **7.35 ms**（倒退 3.8×，即上面那个 idiom）→ dense 加载 + 双 dot 3.31 ms → `EVEN_K` + nibble 直转 **1.70 ms**。对照 int8 同档 1.15 ms、bf16 1.06 ms：0.54× → 0.62×，中间档（t8/t64/t512）从 1.02-1.11× 提到 1.16-1.72×，t4096 绝对值也首次低于 int32 格式（1916.4 µs）。演进各步的测量环境为 NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1），Qwen3-30B-A3B 几何（E=128，top_k=8，hidden 2048，i=768），token 档 1～4096；终态数字落在 [`bench_fused_moe_h100_20260902_int4byte.json`](benchmark_logs/bench_fused_moe_h100_20260902_int4byte.json) 的 int4 列（中间步骤的数字来自当轮会话测量，未单独成档）。复现：`RAPID_LLM_AUTOTUNE=0 python benchmarks/kernels/bench_fused_moe.py --json out.json`，int4 正确性门 `python -m pytest tests/kernels/test_fused_moe.py -k int4`。
 
 tile 重扫（12 候选 × 5 token 档）确认现有表仍最优（tier 0 16×128、其余 64×128）：BLOCK_K=256（每 k 迭代 4 个半 K dot，寄存器压力）与 BLOCK_N=256（两个 (BLOCK_K, BLOCK_N) compute_type 平面驻留寄存器）都慢 1.6-2×。t4096 残留的 0.62× 是结构性成本：每 row-block 重读权重 tile 时寄存器 nibble 分离的 ALU 随重读次数线性放大，比 8-bit 格式的单次加宽贵——Triton 上 int4 weight-only 的通病，vLLM 的解法是换 Marlin CUDA kernel，不是换寻址。
 
@@ -287,7 +287,7 @@ dense GEMM 存在同类问题，而且其中只有一个能通过缓存修复。
 
 w4a16 的缺陷修完后，剩下三个可改 fallback 的 kernel——`fp8_matmul`（fp8 W8A8）、`_smoothquant_matmul`（int8 W8A8）、`_w8a16_matmul`（fp8/int8 W8A16）——的 tile 表仍然是 A10 时代的数据（`w8a16` 的 docstring 原话就写着 "measured on an A10"）。对 H100 这张卡它们错在同一个地方：**`BLOCK_N` 128/256 让 grid 饥饿**。N=6144 的 qkv 投影用 256 宽的 N tile 只有 24 个列块，对 132 个 SM——即使 M 方向有块也填不满芯片。窄 tile 的代价（更多 k 循环迭代、每块更少的计算）在 decode 档几乎不存在，因为那时尚未 compute-bound。
 
-扫描覆盖三个 kernel × 两个 Qwen3 几何的五个代表性投影（4b qkv/o/down/gate_up + 30b o/gate_up，N 从 1536 到 19456）× 五个 M 档（1/8/64/512/2048），tile 空间 BLOCK_M 按档 16–256、BLOCK_N 64/128/256、BLOCK_K 128、warps 4/8、stages 3/4/5、GROUP_M 1/8——fp8/int8 各约 3000 个候选、w8a16 1360 个（脚本直调 kernel，绕开 launcher 的 `_launch_config`）。测量环境：NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1），脚本为会话内的临时 sweep 脚本（直调 kernel 逐候选 `do_bench`，未入库）；**全量扫描数据当时写在会话 scratch（`/tmp/sweep_dense.json`、`/tmp/sweep_w16.json`），未归档、已不可复得**——可复得的是结论：每个 kernel 的每档 fallback 取「档内全部候选对全部 shape 无回归、几何均值最优」的配置，已编码进三个 `_launch_config` 的 docstring，终态效果由下方 `bench_quant_gemm.py` 全路径 A/B 验证（复现：`LITE_LLAMA_AUTOTUNE=0 python benchmarks/kernels/bench_quant_gemm.py --json out.json`）。
+扫描覆盖三个 kernel × 两个 Qwen3 几何的五个代表性投影（4b qkv/o/down/gate_up + 30b o/gate_up，N 从 1536 到 19456）× 五个 M 档（1/8/64/512/2048），tile 空间 BLOCK_M 按档 16–256、BLOCK_N 64/128/256、BLOCK_K 128、warps 4/8、stages 3/4/5、GROUP_M 1/8——fp8/int8 各约 3000 个候选、w8a16 1360 个（脚本直调 kernel，绕开 launcher 的 `_launch_config`）。测量环境：NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1），脚本为会话内的临时 sweep 脚本（直调 kernel 逐候选 `do_bench`，未入库）；**全量扫描数据当时写在会话 scratch（`/tmp/sweep_dense.json`、`/tmp/sweep_w16.json`），未归档、已不可复得**——可复得的是结论：每个 kernel 的每档 fallback 取「档内全部候选对全部 shape 无回归、几何均值最优」的配置，已编码进三个 `_launch_config` 的 docstring，终态效果由下方 `bench_quant_gemm.py` 全路径 A/B 验证（复现：`RAPID_LLM_AUTOTUNE=0 python benchmarks/kernels/bench_quant_gemm.py --json out.json`）。
 
 新 fallback 的 kernel 级收益（扫描内新旧行块对比的几何均值）：fp8 W8A8 解码 1.14×/中档 1.07×/prefill 1.21×；int8 W8A8 解码 1.06×/中档 1.03×/prefill 1.25×；w8a16 fp8 解码 1.06×/中档 1.11×/prefill 1.20×。w8a16 的 decode 档 winner 分散在 8 个不同配置上（9 个测试点），说明这一档真实需要按 shape 调优，fallback 只能取无回归面最大的那个；`BLOCK_N=64` 在它的 N=19456 gate_up 上倒退 38%，所以 w8a16 的 decode 档保留 128。
 
@@ -341,10 +341,10 @@ result *= b_scale[None, :]
 
 （表内数字是 new/old 的时长几何均值，<1 为更快。）至此 48 个测试点上共 20 个 scheme 胜场（int8 13、fp8 W8A8 5、fp8 W8A16 2），落在 13 个测试点里——gate_up 全六档、qkv 五档、30b qkv/o 的 m2048 各一；bf16 在其余 35 个测试点上仍是最快行。胜场的带宽门槛分层：int8 W8A8 从 ~44% 的 bf16 带宽占比起赢（qkv m1 1.07×；38.5% 处 0.96× 差一点），fp8 两格式只在 60.9%（gate_up）赢——int8 的 scale 全在 epilogue 且 imma 无 `BLOCK_M >= 64` 门槛，fp8 还驮着 Triton wgmma codegen 与激活量化 pass。
 
-复现（环境：H100 80GB，torch 2.13.0+cu130 / triton 3.7.1；负载：两个 Qwen3 几何的五个真实投影 × 6 个 token 档，`LITE_LLAMA_AUTOTUNE=0`）：
+复现（环境：H100 80GB，torch 2.13.0+cu130 / triton 3.7.1；负载：两个 Qwen3 几何的五个真实投影 × 6 个 token 档，`RAPID_LLM_AUTOTUNE=0`）：
 
 ```bash
-LITE_LLAMA_AUTOTUNE=0 python benchmarks/kernels/bench_quant_gemm.py \
+RAPID_LLM_AUTOTUNE=0 python benchmarks/kernels/bench_quant_gemm.py \
     --json docs/benchmark_logs/bench_quant_gemm_h100_<date>.json
 python -m pytest tests/kernels/test_quantization.py   # epilogue 化的数值等价门（173 个用例）
 ```
@@ -370,7 +370,7 @@ kernel 级的收益要在 e2e 上兑现。第四轮代码对 modelzoo 全部可�
 - **设备：sm90 门槛，A10 恢复实测旧表。** 三个 8-bit kernel 的 launcher 加 `sm_version` 门槛（缓存查询，`has_native_fp8` 同源）：sm90+ 用 H100 表，pre-Hopper 回到被第三次重扫替换掉的 A10 表（sm86 实测，三个 kernel 当年同一张）。`EPILOGUE_SCALE` 同步 gate 到 sm90——A10 保持其 tile 表被测量时的 in-loop kernel 形态，而非未经实测的 epilogue 组合。
 - **shape：检验后否定。** 五个投影（N=1536–19456）按窄（≤2560）/宽（≥6144）分组重析：三个 8-bit kernel 每档两组的 geomean-best 都是同一配置（fp8/w8a8）或差在噪声内（w8a16）——`n` 不是选表的有效输入，这个否定结论写进了 launcher docstring，避免后人重走一遍。
 
-控制行验证（fp8 W8A8、w8a16 fp8 block-scale、smoothquant——本轮未动路径）见 [`bench_quant_gemm_h100_20260903e.json`](benchmark_logs/bench_quant_gemm_h100_20260903e.json) 对 [`..._20260903d.json`](benchmark_logs/bench_quant_gemm_h100_20260903d.json)。测量环境：NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1）；负载：int8 per-channel 补扫 1360 候选（五投影 × 五档，与 launcher 同 EPILOGUE_SCALE 分档），launcher 级 A/B 25 个测试点。复现：kernel 级 `LITE_LLAMA_AUTOTUNE=0 python benchmarks/kernels/bench_quant_gemm.py --json out.json`；e2e 级 `python benchmarks/bench_quant.py --model-dir <ckpt> --schemes int8 --cuda-graph --no-cuda-graph`（int8 per-channel 即 `--quantization int8` 路径）。
+控制行验证（fp8 W8A8、w8a16 fp8 block-scale、smoothquant——本轮未动路径）见 [`bench_quant_gemm_h100_20260903e.json`](benchmark_logs/bench_quant_gemm_h100_20260903e.json) 对 [`..._20260903d.json`](benchmark_logs/bench_quant_gemm_h100_20260903d.json)。测量环境：NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1）；负载：int8 per-channel 补扫 1360 候选（五投影 × 五档，与 launcher 同 EPILOGUE_SCALE 分档），launcher 级 A/B 25 个测试点。复现：kernel 级 `RAPID_LLM_AUTOTUNE=0 python benchmarks/kernels/bench_quant_gemm.py --json out.json`；e2e 级 `python benchmarks/bench_quant.py --model-dir <ckpt> --schemes int8 --cuda-graph --no-cuda-graph`（int8 per-channel 即 `--quantization int8` 路径）。
 
 ### 量化为什么常常比 bf16 慢：roofline 判断
 
@@ -396,7 +396,7 @@ decode graph 过去在 `tp_world_size > 1` 时一律拒绝。现在它们会被�
 
 | 闸门 | 检查内容 | 失败时 |
 |---|---|---|
-| `LITE_LLAMA_TP_CUDA_GRAPH=0` | 总开关（kill-switch） | 转为 eager，并给出警告 |
+| `RAPID_LLM_TP_CUDA_GRAPH=0` | 总开关（kill-switch） | 转为 eager，并给出警告 |
 | grid 一致性 | 对 `(len(batch_sizes), len(seq_len_buckets), hash(grid))` 做 all-reduce | **每个** rank 丢弃自己的 graph |
 | 数值 | 按 `(bs, bucket)` 对比 graph 与 eager 输出，atol 1e-2 | 丢弃 graph，回退 eager |
 
@@ -412,7 +412,7 @@ python -m pytest tests/distributed/test_tp_cuda_graph.py   # TP×graph×quant �
 
 ### 哪个引擎能跑 TP
 
-`LLM`（因此 `TextGenerator`）不能：它的 generate 循环只广播采样出的 token，从不广播步计划，follower rank 会永远等待。它现在对 `tensor_parallel_size > 1` 直接报错，而不是默默在单卡上跑——那是它过去的行为，也正是让某行标注 `tp2` 的基准实际测成 tp1 的原因。请改用 `ContinuousBatchingEngine.from_pretrained(...)`、`lite-llama serve` 或 `lite-llama batch`，它们的 executor 会广播每一步的计划。
+`LLM`（因此 `TextGenerator`）不能：它的 generate 循环只广播采样出的 token，从不广播步计划，follower rank 会永远等待。它现在对 `tensor_parallel_size > 1` 直接报错，而不是默默在单卡上跑——那是它过去的行为，也正是让某行标注 `tp2` 的基准实际测成 tp1 的原因。请改用 `ContinuousBatchingEngine.from_pretrained(...)`、`rapid-llm serve` 或 `rapid-llm batch`，它们的 executor 会广播每一步的计划。
 
 ## 精度
 
@@ -456,7 +456,7 @@ Qwen3-0.6B 的 token 级精度对比（A10，greedy decode，与[性能基准测
 复现：
 
 ```bash
-python scripts/quant_kv_error.py --model-dir $LITE_LLAMA_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \
+python scripts/quant_kv_error.py --model-dir $RAPID_LLM_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \
     --max-gen-len 128 --gsm8k 500 --json docs/benchmark_logs/kv_fp8_error.json
 ```
 

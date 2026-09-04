@@ -50,11 +50,11 @@
       "greedy": true
     },
     "framework_flags": {
-      "LITE_LLAMA_TBO": "per arm",
+      "RAPID_LLM_TBO": "per arm",
       "use_cuda_graph": "per arm",
-      "LITE_LLAMA_OVERLAP": "1 (default, L1 pinned-copy)",
-      "LITE_LLAMA_COMM_OVERLAP": "0 (L3 off)",
-      "LITE_LLAMA_SBO": "0 (SBO off)"
+      "RAPID_LLM_OVERLAP": "1 (default, L1 pinned-copy)",
+      "RAPID_LLM_COMM_OVERLAP": "0 (L3 off)",
+      "RAPID_LLM_SBO": "0 (SBO off)"
     },
     "models": {
       "Meta-Llama-3.1-8B-Instruct": {

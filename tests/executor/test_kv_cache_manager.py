@@ -1,4 +1,4 @@
-"""Tests for :class:`~lite_llama.executor.kv_cache_manager.KVCacheManager`.
+"""Tests for :class:`~rapid_llm.executor.kv_cache_manager.KVCacheManager`.
 
 Pure CPU against a tiny pool: alloc marks rows and debits the counter,
 over-allocation returns None and changes nothing, contiguous allocs
@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.executor.kv_cache_manager import KVCacheManager
+from rapid_llm.executor.kv_cache_manager import KVCacheManager
 
 _BLOCKS = 9
 

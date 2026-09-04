@@ -16,10 +16,10 @@ import time
 import pytest
 import torch
 
-from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
-from lite_llama.engine.llm_engine import LLMEngine
-from lite_llama.engine.sampler import SamplingParams
-from lite_llama.engine.scheduler import SchedulerConfig
+from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+from rapid_llm.engine.llm_engine import LLMEngine
+from rapid_llm.engine.sampler import SamplingParams
+from rapid_llm.engine.scheduler import SchedulerConfig
 
 pytestmark = [pytest.mark.gpu, pytest.mark.weights, pytest.mark.slow]
 

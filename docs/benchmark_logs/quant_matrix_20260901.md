@@ -2,7 +2,7 @@
 
 以下全部数据在一天之内、同一台机器上测得：2× NVIDIA H100 80GB HBM3（sm90，3352 GB/s，989 TFLOP/s dense tensor core，50 MiB L2），torch 2.13.0+cu130、triton 3.7.1、python 3.14.7，commit `v0.8.0-32-g4f256d7`。`deep_gemm` 与 `flashinfer` 均未安装，因此每一行内核数据都是 native Triton 路径。
 
-模型取自 `$LITE_LLAMA_MODELZOO`：
+模型取自 `$RAPID_LLM_MODELZOO`：
 
 | 代号 | Checkpoint | 用途 |
 |---|---|---|
@@ -19,7 +19,7 @@
 
 ### 1.1 量化 dense GEMM
 
-完整表格见 [`bench_quant_gemm_h100_20260901.json`](bench_quant_gemm_h100_20260901.json)（2026-09-02 复测为 [`bench_quant_gemm_h100_20260902.json`](bench_quant_gemm_h100_20260902.json)，数字与首测一致——dense 路径未受后续 fused MoE 改动影响）。一个**测试点**就是一个「模型 × 投影 × token 数 M」的组合：两个模型（Qwen3-4B、Qwen3-30B-A3B）各取 4 个真实投影（qkv / o / gate_up / down），M 取 `{1, 8, 32, 128, 512, 2048}` 六档，2 × 4 × 6 = **48 个测试点**；每点测 7 行实现（6 种格式加 1 行消融），共 336 行。运行时设 `LITE_LLAMA_AUTOTUNE=0`。
+完整表格见 [`bench_quant_gemm_h100_20260901.json`](bench_quant_gemm_h100_20260901.json)（2026-09-02 复测为 [`bench_quant_gemm_h100_20260902.json`](bench_quant_gemm_h100_20260902.json)，数字与首测一致——dense 路径未受后续 fused MoE 改动影响）。一个**测试点**就是一个「模型 × 投影 × token 数 M」的组合：两个模型（Qwen3-4B、Qwen3-30B-A3B）各取 4 个真实投影（qkv / o / gate_up / down），M 取 `{1, 8, 32, 128, 512, 2048}` 六档，2 × 4 × 6 = **48 个测试点**；每点测 7 行实现（6 种格式加 1 行消融），共 336 行。运行时设 `RAPID_LLM_AUTOTUNE=0`。
 
 **48 个测试点中，cuBLAS bf16 在 44 个上最快。**有用的是那 4 个例外：全部集中在 `qwen3-4b/gate_up`（N=19456, K=2560，bf16 权重约 100 MB，是全表最大的权重矩阵）的 M ≤ 128 四档。下表摘出这一投影的三个 M 档，外加 `qkv` 的首尾两档作对照；括号内为相对 bf16 基线的加速比（bf16 耗时 ÷ 该格式耗时），大于 1 快于基线：
 
@@ -60,7 +60,7 @@ prefill（M≥512）算术强度高，是 compute-bound，省字节没用，能�
 
 ### 1.2 Fused MoE
 
-Qwen3-30B-A3B 几何（E=128, top_k=8, h=2048, i=768），bf16 激活，单位 µs，运行时设 `LITE_LLAMA_AUTOTUNE=0`——即用户在没有调优缓存时拿到的启发式 tile。括号内为相对 bf16 基线的加速比（bf16 耗时 ÷ 该格式耗时），大于 1 快于基线；「仅 `moe_align`」是消融行、不含 GEMM 计算，不参与对比；末列旧 tile 是 §1.3 的回归哨兵，其比值就是旧缺陷的量级。数据来自 [`bench_fused_moe_h100_20260902_int4byte.json`](bench_fused_moe_h100_20260902_int4byte.json)：
+Qwen3-30B-A3B 几何（E=128, top_k=8, h=2048, i=768），bf16 激活，单位 µs，运行时设 `RAPID_LLM_AUTOTUNE=0`——即用户在没有调优缓存时拿到的启发式 tile。括号内为相对 bf16 基线的加速比（bf16 耗时 ÷ 该格式耗时），大于 1 快于基线；「仅 `moe_align`」是消融行、不含 GEMM 计算，不参与对比；末列旧 tile 是 §1.3 的回归哨兵，其比值就是旧缺陷的量级。数据来自 [`bench_fused_moe_h100_20260902_int4byte.json`](bench_fused_moe_h100_20260902_int4byte.json)：
 
 | tokens | bf16（基线） | fp8 W8A16 | fp8 W8A8 | int8 W8A8 | int8 W8A16 | int4 | 仅 `moe_align` | bf16 @ 旧 BLOCK_K=32 |
 |---|---|---|---|---|---|---|---|---|
@@ -90,7 +90,7 @@ TFLOP/s 里藏着一个陷阱：Triton 只在 `BLOCK_M ≥ 64` 时才发射 Hopp
 
 batch 4、生成 64 token；KV 容量来自 profiling 而非固定值，因此显存列本身就是测量结果。[A](bench_quant_main_A_h100_20260901.json) · [B/C](bench_quant_main_BC_h100_20260901.json) · [D/E](bench_quant_main_DE_h100_20260901.json) · [F](bench_quant_main_F_h100_20260901.json) · [G](bench_quant_main_G_h100_20260901.json)
 
-五行 `int4` 是 §1.1b 的 `w4a16` tile 修复之后，用相同命令、`LITE_LLAMA_AUTOTUNE=0` 重测的，表格里放的就是重测值：[BC](bench_quant_main_int4fix_BC_h100_20260901.json) · [DE](bench_quant_main_int4fix_DE_h100_20260901.json) · [F](bench_quant_main_int4fix_F_h100_20260901.json)。修复前的数值保留在表下的行注里而没有删——这个差值就是该修复在端到端的量级，也是本节不是单次一致运行的全部原因。
+五行 `int4` 是 §1.1b 的 `w4a16` tile 修复之后，用相同命令、`RAPID_LLM_AUTOTUNE=0` 重测的，表格里放的就是重测值：[BC](bench_quant_main_int4fix_BC_h100_20260901.json) · [DE](bench_quant_main_int4fix_DE_h100_20260901.json) · [F](bench_quant_main_int4fix_F_h100_20260901.json)。修复前的数值保留在表下的行注里而没有删——这个差值就是该修复在端到端的量级，也是本节不是单次一致运行的全部原因。
 
 | 配置 | TTFT ms | TPOT ms | TPS | model GB | KV tok | golden | prefix |
 |---|---|---|---|---|---|---|---|
@@ -148,7 +148,7 @@ batch 4、生成 32 token、`--max-seq-len 2048`。该 checkpoint 没有 golden 
 
 上面各行的量化都是对 bf16 checkpoint 在运行时做的。官方发布的 `Qwen3-30B-A3B-Instruct-2507-FP8` checkpoint（fp8-e4m3 + 128×128 block scales，`quant_method: fp8`）走的是 W8A16 路径——block-scale 权重与 `w8a8_fp8` 期望的 per-channel 布局不匹配——已于 2026-09-01 在全轴矩阵上测完（tp1/tp2 × graph/eager × kv auto/fp8，外加 dp2，并为其记录了 golden 基线）：tp1+graph 得 TPOT 13.16 ms / 285.9 TPS，tp2+graph 得 12.76 ms / 290.3 TPS 且 KV 容量 2.7×；这个尺寸上 CUDA graph 值 4.8×。完整表格与精度列见 [quantization.md § Qwen3-30B-A3B-Instruct-2507-FP8](../quantization.md)，原始 JSON 在 [`bench_quant_Qwen3-30B-A3B-FP8_20260901.json`](bench_quant_Qwen3-30B-A3B-FP8_20260901.json)（数据并行行见加 `-dp` 后缀的文件）。
 
-## 3. 在线矩阵 — `M_MAIN`，`lite-llama serve`
+## 3. 在线矩阵 — `M_MAIN`，`rapid-llm serve`
 
 最多生成 64 token、`max_seq_len` 1024，对 `POST /v1/completions` 施加 1/8/32 三档并发，`temperature=0`。[tp](bench_serving_main_tp_h100_20260901.json) · [dp](bench_serving_main_dp_h100_20260901.json)
 
@@ -216,22 +216,22 @@ batch 4、生成 32 token、`--max-seq-len 2048`。该 checkpoint 没有 golden 
 ## 复现
 
 ```bash
-export LITE_LLAMA_MODELZOO=/mnt/otto-temp/modelzoo_with_full_weights
+export RAPID_LLM_MODELZOO=/mnt/otto-temp/modelzoo_with_full_weights
 
 # 内核层
-LITE_LLAMA_AUTOTUNE=0 python benchmarks/kernels/bench_fused_moe.py --json out.json
+RAPID_LLM_AUTOTUNE=0 python benchmarks/kernels/bench_fused_moe.py --json out.json
 python benchmarks/kernels/bench_fused_moe.py --tune          # 写入 ConfigStore
-LITE_LLAMA_AUTOTUNE=0 python benchmarks/kernels/bench_quant_gemm.py --json out.json
+RAPID_LLM_AUTOTUNE=0 python benchmarks/kernels/bench_quant_gemm.py --json out.json
 python benchmarks/kernels/bench_quant_gemm.py --tune       # 仅 w4a16；见 §1.1b
 
 # 离线
-python benchmarks/bench_quant.py --model-dir $LITE_LLAMA_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \
+python benchmarks/bench_quant.py --model-dir $RAPID_LLM_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \
     --schemes fp8 int4 --tp 1 2 --engine continuous --cuda-graph --no-cuda-graph --skip-hf
 
 # 在线
-python benchmarks/bench_scheduler.py serving --model-dir $LITE_LLAMA_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \
+python benchmarks/bench_scheduler.py serving --model-dir $RAPID_LLM_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \
     --schemes bf16 fp8 int4 --tp 1 2 --concurrency 1 8 32 --max-tokens 64 --max-seq-len 1024
 
 # kv fp8 误差
-python scripts/quant_kv_error.py --model-dir $LITE_LLAMA_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507
+python scripts/quant_kv_error.py --model-dir $RAPID_LLM_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507
 ```

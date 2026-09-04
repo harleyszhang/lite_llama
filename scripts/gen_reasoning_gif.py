@@ -82,10 +82,10 @@ def collect(model_dir: str) -> dict:
     back per step — including the steps where a delta is swallowed whole
     because it might complete a tag.
     """
-    from lite_llama.engine.llm import LLM
-    from lite_llama.engine.reasoning import _OPEN as THINK
-    from lite_llama.engine.reasoning import for_family
-    from lite_llama.engine.sampler import SamplingParams
+    from rapid_llm.engine.llm import LLM
+    from rapid_llm.engine.reasoning import _OPEN as THINK
+    from rapid_llm.engine.reasoning import for_family
+    from rapid_llm.engine.sampler import SamplingParams
 
     prompt = f"User: What is 2+2?\nAssistant: {THINK}\nThe user asks"
     llm = LLM(model=model_dir, max_seq_len=256, max_gpu_num_blocks=2048, use_cuda_graph=False)
@@ -118,7 +118,7 @@ def _title_bar(draw, fonts, model_name: str):
     draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
     draw.text(
         (12, 9),
-        f"lite_llama  —  streaming reasoning parser  ({model_name})",
+        f"rapid_llm  —  streaming reasoning parser  ({model_name})",
         fill=TITLE_FG,
         font=small,
     )

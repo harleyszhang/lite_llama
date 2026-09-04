@@ -1,4 +1,4 @@
-"""Round-trip parity: HF checkpoint in, identical lite_llama parameters out.
+"""Round-trip parity: HF checkpoint in, identical rapid_llm parameters out.
 
 Hand-built HF checkpoints are saved for every registered model family
 and loaded back; each parameter must land in the right place with the
@@ -19,10 +19,10 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
-from lite_llama.executor.loader import materialise_parameters
-from lite_llama.executor.weight_utils import hf_weights_iterator
-from lite_llama.models.config import ModelConfig
-from lite_llama.models.registry import ModelRegistry
+from rapid_llm.executor.loader import materialise_parameters
+from rapid_llm.executor.weight_utils import hf_weights_iterator
+from rapid_llm.models.config import ModelConfig
+from rapid_llm.models.registry import ModelRegistry
 
 _TEXT_BODY = {
     "hidden_size": 64,
@@ -296,7 +296,7 @@ def write_hf_checkpoint(directory: Path, model_type: str) -> tuple[dict, ModelCo
 
 
 def load_lite_model(config: ModelConfig, directory: Path) -> nn.Module:
-    """Build and fill the lite_llama model exactly as ``DefaultModelLoader`` does."""
+    """Build and fill the rapid_llm model exactly as ``DefaultModelLoader`` does."""
     model_cls = ModelRegistry.resolve(config.model_type).load_class()
     model = model_cls(config)
     materialise_parameters(model, "cpu", dtype=config.dtype)
@@ -305,7 +305,7 @@ def load_lite_model(config: ModelConfig, directory: Path) -> nn.Module:
 
 
 def _text_prefix(model_type: str) -> str:
-    """lite_llama parameter prefix of the decoder stack for this architecture."""
+    """rapid_llm parameter prefix of the decoder stack for this architecture."""
     return "language_model." if ModelRegistry.resolve(model_type).is_multimodal else ""
 
 
@@ -442,7 +442,7 @@ def test_decoder_weights_land_in_the_right_place(model_type: str, tmp_path: Path
             continue
 
         # transformers >= 5 stacks the experts into the same ``[E, 2*inter, hidden]``
-        # / ``[E, hidden, inter]`` layout lite_llama uses, so these are identity
+        # / ``[E, hidden, inter]`` layout rapid_llm uses, so these are identity
         # copies. The per-expert layout the published checkpoints ship is covered
         # by ``test_per_expert_checkpoint_matches_the_stacked_one``.
         same(f"{mlp}.gate.weight", f"{lite_mlp}.gate_weight")

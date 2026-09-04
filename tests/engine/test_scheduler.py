@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import pytest
 
-from lite_llama.engine.prefix_cache import PREFIX_CACHE_BLOCK_SIZE
-from lite_llama.engine.sampler import SamplingParams
-from lite_llama.engine.scheduler import (
+from rapid_llm.engine.prefix_cache import PREFIX_CACHE_BLOCK_SIZE
+from rapid_llm.engine.sampler import SamplingParams
+from rapid_llm.engine.scheduler import (
     Request,
     RequestStatus,
     Scheduler,

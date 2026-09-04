@@ -6,7 +6,7 @@
 
 v0.5.0 建立 kernel 自动调优系统：定义 `TuneKey(gpu, op, shape_bucket, dtype)` 稳定契约（v0.6 perf_key 直接引用）、JSON 持久化存储、命中查找逻辑；搜索引擎完成对 fused_moe 和 flash_attn_nopad 的 shape 配置落盘。w4a16 量化 GEMM 重写为 per-group `tl.dot` 版本走 tensor core，精度测试 6/6 PASS。
 
-## 1. Feature: Autotune 基础设施 (`lite_llama/kernels/autotune/`)
+## 1. Feature: Autotune 基础设施 (`rapid_llm/kernels/autotune/`)
 
 **TuneKey 契约 (v0.6 perf_key 基础):**
 
@@ -21,7 +21,7 @@ class TuneKey:
 
 **M 桶化规则:** `[1,16]→16, [17,32]→32, [33,64]→64, [65,128]→128, [129,256]→256, [257,+)→512`
 
-**JSON 落盘格式 (`~/.cache/lite_llama/autotune/fused_moe.json`):**
+**JSON 落盘格式 (`~/.cache/rapid_llm/autotune/fused_moe.json`):**
 
 ```json
 {
@@ -37,13 +37,13 @@ class TuneKey:
 **调用方用法 (一行接入):**
 
 ```python
-from lite_llama.kernels.autotune import get_best_config
+from rapid_llm.kernels.autotune import get_best_config
 config = get_best_config("fused_moe", m=num_tokens, n=N, k=K, dtype="fp16")
 if config is None:
     config = _launch_config(num_tokens, quant_mode)  # heuristic fallback
 ```
 
-**环境变量控制:** `LITE_LLAMA_AUTOTUNE=0` 强制禁用（走启发式），用于 A/B 对比。
+**环境变量控制:** `RAPID_LLM_AUTOTUNE=0` 强制禁用（走启发式），用于 A/B 对比。
 
 ## 2. Feature: Autotune 搜索落盘
 
@@ -59,7 +59,7 @@ if config is None:
 | flash_attn | M64_N128_K128 | BM=64, BN=64 | -- |
 | flash_attn | M512_N128_K128 | BM=128, BN=64 | -- |
 
-共 12 shapes 搜索并落盘到 `~/.cache/lite_llama/autotune/`。
+共 12 shapes 搜索并落盘到 `~/.cache/rapid_llm/autotune/`。
 
 ## 3. Feature: w4a16 tl.dot 重写
 
@@ -87,15 +87,15 @@ if config is None:
 
 | Kernel | 文件 | 搜索空间大小 |
 | -------- | ------ | ------------- |
-| `fused_moe` | `lite_llama/kernels/fused_moe.py` | 432 configs |
-| `flash_attn_nopad` | `lite_llama/kernels/flashattention2_nopad.py` | 72 configs (原 144 组) |
-| `w4a16_matmul` | `lite_llama/kernels/quantization/w4a16.py` | 接入 lookup |
+| `fused_moe` | `rapid_llm/kernels/fused_moe.py` | 432 configs |
+| `flash_attn_nopad` | `rapid_llm/kernels/flashattention2_nopad.py` | 72 configs (原 144 组) |
+| `w4a16_matmul` | `rapid_llm/kernels/quantization/w4a16.py` | 接入 lookup |
 
 ## 5. Chore
 
 | Item | 变更 |
 |------|------|
-| `lite_llama/kernels/*.py` | 全部 docstring 精简为 summary+usage 格式 (-98 行) |
+| `rapid_llm/kernels/*.py` | 全部 docstring 精简为 summary+usage 格式 (-98 行) |
 | `pyproject.toml` | v0.4.0 → v0.5.0 (后续 v0.6 继续 bump) |
 
 ## 6. 测试结果
@@ -110,17 +110,17 @@ if config is None:
 
 | 操作 | 路径 |
 | ------ | ------ |
-| 新建 | `lite_llama/kernels/autotune/__init__.py` |
-| 新建 | `lite_llama/kernels/autotune/config_key.py` |
-| 新建 | `lite_llama/kernels/autotune/config_store.py` |
-| 新建 | `lite_llama/kernels/autotune/lookup.py` |
-| 新建 | `lite_llama/kernels/autotune/searcher.py` |
+| 新建 | `rapid_llm/kernels/autotune/__init__.py` |
+| 新建 | `rapid_llm/kernels/autotune/config_key.py` |
+| 新建 | `rapid_llm/kernels/autotune/config_store.py` |
+| 新建 | `rapid_llm/kernels/autotune/lookup.py` |
+| 新建 | `rapid_llm/kernels/autotune/searcher.py` |
 | 新建 | `scripts/autotune_collect.py` |
 | 新建 | `tests/kernels/test_autotune_store.py` |
 | 新建 | `tests/kernels/test_w4a16_accuracy.py` |
-| 重写 | `lite_llama/kernels/quantization/w4a16.py` |
-| 修改 | `lite_llama/kernels/flashattention2_nopad.py` |
-| 修改 | `lite_llama/kernels/fused_moe.py` |
+| 重写 | `rapid_llm/kernels/quantization/w4a16.py` |
+| 修改 | `rapid_llm/kernels/flashattention2_nopad.py` |
+| 修改 | `rapid_llm/kernels/fused_moe.py` |
 
 ## Upgrade
 
@@ -132,5 +132,5 @@ uv pip install -e .
 python scripts/autotune_collect.py --model-dir /data/shared/llm_weights/Qwen3-0.6B
 
 # 验证命中
-LITE_LLAMA_AUTOTUNE=1 python -m lite_llama.cli chat --model-dir my_weight/Qwen3-0.6B
+RAPID_LLM_AUTOTUNE=1 python -m rapid_llm.cli chat --model-dir my_weight/Qwen3-0.6B
 ```

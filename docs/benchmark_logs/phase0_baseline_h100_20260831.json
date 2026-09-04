@@ -8,7 +8,7 @@
     "l2_mib": 50,
     "software": "torch 2.13.0+cu130, triton 3.7.1, python 3.14.7",
     "commit": "v0.8.0-32-g4f256d7",
-    "modelzoo_env": "LITE_LLAMA_MODELZOO",
+    "modelzoo_env": "RAPID_LLM_MODELZOO",
     "external_backends": {
       "deep_gemm": "not installed",
       "flashinfer": "not installed",
@@ -54,7 +54,7 @@
       "arch": "Qwen3MoeForCausalLM",
       "status": "FAIL",
       "error": "ValueError: unsupported quant_method 'compressed-tensors'; supported: ['awq', 'blockwise_int8', 'fp8', 'gptq', 'int8', 'smoothquant', 'w8a8_fp8', 'w8a8_int8']",
-      "raised_at": "lite_llama/modules/quantization/__init__.py:105 get_quant_config_from_hf",
+      "raised_at": "rapid_llm/modules/quantization/__init__.py:105 get_quant_config_from_hf",
       "note": "Dropped from the later matrices. The checkpoint uses the compressed-tensors serialisation, which has no reader in this repo; adding one is out of scope for this round."
     }
   ],

@@ -44,7 +44,7 @@ FP8，2×H100 装不下。
 | 开关 | 状态 |
 |---|---|
 | CUDA graph | **两种都测**（`--mode both`），eager 与 graph 分别报数 |
-| autotune 缓存 | 关闭（`LITE_LLAMA_AUTOTUNE=0`），走启发式 tile |
+| autotune 缓存 | 关闭（`RAPID_LLM_AUTOTUNE=0`），走启发式 tile |
 | 量化路径 | 无（全部 bf16 权重，避免量化差异混入比值） |
 | prefix cache / chunked prefill | 默认（离线 bench_e2e 口径） |
 | eager↔graph 一致性 | `--verify` 断言贪心输出一致，两侧各 8/8 通过 |
@@ -54,7 +54,7 @@ FP8，2×H100 装不下。
 ## 5. 运行命令
 
 ```bash
-# 单卡矩阵（离线 + 在线）；脚本内部已 export LITE_LLAMA_AUTOTUNE=0
+# 单卡矩阵（离线 + 在线）；脚本内部已 export RAPID_LLM_AUTOTUNE=0
 ./benchmarks/bench_qk_norm_ab.sh fused    docs/benchmark_logs/qk_norm_fusion_ab single
 # 把 models/base.py 的 _project_qkv 切回两次 skip_rmsnorm 后：
 ./benchmarks/bench_qk_norm_ab.sh baseline docs/benchmark_logs/qk_norm_fusion_ab single
@@ -67,7 +67,7 @@ FP8，2×H100 装不下。
 单条离线命令口径：
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 LITE_LLAMA_AUTOTUNE=0 PYTHONPATH=. .venv/bin/python \
+CUDA_VISIBLE_DEVICES=1 RAPID_LLM_AUTOTUNE=0 PYTHONPATH=. .venv/bin/python \
   benchmarks/bench_e2e.py --model-dir <ckpt> --mode both --greedy --verify \
   --batch <b> --max-gen-len 64 --json <out>.json
 ```

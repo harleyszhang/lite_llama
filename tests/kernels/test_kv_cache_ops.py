@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.kernels import update_kv_buffer, update_kv_index
+from rapid_llm.kernels import update_kv_buffer, update_kv_index
 
 
 # --------------------------------------------------------------------------- #

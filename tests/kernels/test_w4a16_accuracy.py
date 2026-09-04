@@ -72,7 +72,7 @@ def test_w4a16_matches_reference(w4a16_problem):
     ref = _reference_w4a16(x, qweight, scales, zeros, group_size)
 
     # Kernel under test
-    from lite_llama.kernels.ops.quantization.w4a16 import w4a16_matmul
+    from rapid_llm.kernels.ops.quantization.w4a16 import w4a16_matmul
 
     got = w4a16_matmul(x, qweight, scales, zeros, group_size=group_size)
 
@@ -100,7 +100,7 @@ def test_w4a16_batch_dimensions():
     scales = torch.randn(n, k // group_size, dtype=torch.float32, device=device).abs() * 0.1
     zeros = torch.zeros(n, k // group_size, dtype=torch.float32, device=device)
 
-    from lite_llama.kernels.ops.quantization.w4a16 import w4a16_matmul
+    from rapid_llm.kernels.ops.quantization.w4a16 import w4a16_matmul
 
     out = w4a16_matmul(x, qweight, scales, zeros, group_size=group_size)
     assert out.shape == (2, 3, n)
@@ -118,7 +118,7 @@ def test_w4a16_with_bias():
     zeros = torch.zeros(n, k // group_size, dtype=torch.float32, device=device)
     bias = torch.ones(n, dtype=torch.float16, device=device)
 
-    from lite_llama.kernels.ops.quantization.w4a16 import w4a16_matmul
+    from rapid_llm.kernels.ops.quantization.w4a16 import w4a16_matmul
 
     out_no_bias = w4a16_matmul(x, qweight, scales, zeros, group_size=group_size)
     out_bias = w4a16_matmul(x, qweight, scales, zeros, group_size=group_size, bias=bias)

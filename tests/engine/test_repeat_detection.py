@@ -13,8 +13,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from lite_llama.engine.stop_criteria import detect_repetition, load_stop_token_ids
-from lite_llama.utils.prompt_templates import PrompterResolver
+from rapid_llm.engine.stop_criteria import detect_repetition, load_stop_token_ids
+from rapid_llm.utils.prompt_templates import PrompterResolver
 
 # --------------------------------------------------------------------- #
 # detect_repetition

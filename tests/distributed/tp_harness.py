@@ -21,8 +21,8 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
-from lite_llama.distributed import parallel_state as ps
-from lite_llama.executor.executor import free_port
+from rapid_llm.distributed import parallel_state as ps
+from rapid_llm.executor.executor import free_port
 
 
 def needs_gpus(count: int):
@@ -96,11 +96,11 @@ def run_on_tp_ranks(
         backend: ``"nccl"`` for the data plane (one device per rank, see
             :func:`needs_gpus`) or ``"gloo"`` for a device-free grid — enough to
             exercise the control plane, which is what
-            :func:`~lite_llama.distributed.parallel_state.broadcast_object` and the
+            :func:`~rapid_llm.distributed.parallel_state.broadcast_object` and the
             executor's plan hand-off live on.
         enable_expert_parallel: Set the EP group state (the TP group doubles as
             the EP group) before the payload runs, so expert-parallel code paths
-            see :func:`~lite_llama.distributed.parallel_state.get_ep_group`.
+            see :func:`~rapid_llm.distributed.parallel_state.get_ep_group`.
 
     Returns:
         One result per global rank, in rank order.

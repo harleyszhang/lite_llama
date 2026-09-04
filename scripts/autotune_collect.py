@@ -37,9 +37,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 import triton
 
-from lite_llama.kernels.dispatcher.autotune import ConfigStore
-from lite_llama.kernels.dispatcher.autotune.config_key import normalize_gpu_name
-from lite_llama.kernels.dispatcher.autotune.searcher import AutotuneSearcher
+from rapid_llm.kernels.dispatcher.autotune import ConfigStore
+from rapid_llm.kernels.dispatcher.autotune.config_key import normalize_gpu_name
+from rapid_llm.kernels.dispatcher.autotune.searcher import AutotuneSearcher
 
 # --------------------------------------------------------------------------- #
 # Shape derivation from model config
@@ -157,7 +157,7 @@ def _w4a16_configs(m: int) -> list[dict]:
 
 def _make_fused_moe_runner(m: int, n: int, k: int):
     """Create a runner function for fused_moe GEMM benchmarking."""
-    from lite_llama.kernels.ops.moe.fused_moe import (
+    from rapid_llm.kernels.ops.moe.fused_moe import (
         _QUANT_NONE,
         _invoke_moe_gemm,
         moe_align_block_size,
@@ -200,7 +200,7 @@ def _make_fused_moe_runner(m: int, n: int, k: int):
 
 def _make_flash_attn_runner(seq_len: int, head_dim: int):
     """Create a runner for flash attention benchmarking."""
-    from lite_llama.kernels.ops.attention.flashattention2_nopad import flash_attention2_nopad_kernel
+    from rapid_llm.kernels.ops.attention.flashattention2_nopad import flash_attention2_nopad_kernel
 
     device = "cuda"
     n_heads = 32
@@ -255,7 +255,7 @@ def _make_w4a16_runner(m: int, n: int, k: int):
     Calls the kernel's own ``_launch`` rather than re-deriving the grid, so the
     config being searched is measured on exactly the launch the runtime makes.
     """
-    from lite_llama.kernels.ops.quantization.w4a16 import _PACK_FACTOR, _launch
+    from rapid_llm.kernels.ops.quantization.w4a16 import _PACK_FACTOR, _launch
 
     device = "cuda"
     group_size = 128

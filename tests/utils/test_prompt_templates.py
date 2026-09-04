@@ -10,7 +10,7 @@ Usage:
 
 from __future__ import annotations
 
-from lite_llama.utils.prompt_templates import ChatPrompter, get_prompter, has_chat_template
+from rapid_llm.utils.prompt_templates import ChatPrompter, get_prompter, has_chat_template
 
 
 class _FakeTokenizer:
@@ -69,14 +69,14 @@ def test_insert_prompt_omits_the_system_message_when_unset():
 # --------------------------------------------------------------------------- #
 def test_cli_build_returns_none_for_the_base_style():
     """Base models take the ``"empty"`` style and get no prompter at all (verbatim)."""
-    from lite_llama.cli import PrompterResolver
+    from rapid_llm.cli import PrompterResolver
 
     assert PrompterResolver.build("empty", _FakeTokenizer()) is None
 
 
 def test_cli_build_uses_a_chat_prompter_for_an_instruct_style():
     """An instruct checkpoint — by name hint — gets its prompts templated."""
-    from lite_llama.cli import PrompterResolver
+    from rapid_llm.cli import PrompterResolver
 
     prompter = PrompterResolver.build("Qwen2.5-1.5B-Instruct", _FakeTokenizer())
     assert isinstance(prompter, ChatPrompter)
@@ -90,6 +90,6 @@ def test_cli_build_returns_none_without_a_hint_or_a_readable_config():
     that used to answer "qwen2" -> chat are gone; the tokenizer's own template
     made them vestigial.)
     """
-    from lite_llama.cli import PrompterResolver
+    from rapid_llm.cli import PrompterResolver
 
     assert PrompterResolver.build("qwen2", _FakeTokenizer()) is None

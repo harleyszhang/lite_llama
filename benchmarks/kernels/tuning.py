@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import torch
 
-from lite_llama.kernels.dispatcher.autotune import TuneKey
+from rapid_llm.kernels.dispatcher.autotune import TuneKey
 
 __all__ = ["TuneResult", "nbytes"]
 

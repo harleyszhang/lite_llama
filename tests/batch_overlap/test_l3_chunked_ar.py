@@ -16,13 +16,13 @@ import os
 
 import torch
 
-from lite_llama.batch_overlap.comm_overlap import (
+from rapid_llm.batch_overlap.comm_overlap import (
     COMM_OVERLAP_ENV,
     L3_CHUNKS_ENV,
     CommStreamPool,
     reset_comm_overlap_policy,
 )
-from lite_llama.modules import RowParallelLinear
+from rapid_llm.modules import RowParallelLinear
 from tests.distributed.tp_harness import needs_gpus, run_on_tp_ranks
 
 #: A size whose GEMM and all-reduce each run ~1-2 ms on an A10: big enough
@@ -36,7 +36,7 @@ def _payload_overlap_evidence(rank: int) -> dict:
     """Run one chunked row-parallel forward and return its overlap numbers."""
     os.environ[COMM_OVERLAP_ENV] = "1"
     os.environ[L3_CHUNKS_ENV] = "2"
-    os.environ["LITE_LLAMA_OVERLAP_TIMELINE"] = "1"
+    os.environ["RAPID_LLM_OVERLAP_TIMELINE"] = "1"
     CommStreamPool.reset()
     reset_comm_overlap_policy()
     device = torch.device("cuda", rank)
@@ -74,7 +74,7 @@ def _payload_overlap_evidence(rank: int) -> dict:
 def _payload_blocking_records_no_comm_region(rank: int) -> str:
     """The control arm: with L3 off there is no comm region to overlap with."""
     os.environ[COMM_OVERLAP_ENV] = "0"
-    os.environ["LITE_LLAMA_OVERLAP_TIMELINE"] = "1"
+    os.environ["RAPID_LLM_OVERLAP_TIMELINE"] = "1"
     CommStreamPool.reset()
     reset_comm_overlap_policy()
     device = torch.device("cuda", rank)

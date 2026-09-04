@@ -3,7 +3,7 @@
 
 标注「已有」「待建」,每条附"为什么 vLLM/SGLang 不会做"。
 
-> **多硬件平台原则**:lite_llama 面向多硬件平台——NVIDIA 全系 GPU(A10/A100 sm80/sm86,H100/H200 sm90,B200 sm100+),并预留 AMD ROCm / CPU 路径(架构维度 A9)。核心论据:kernel 层**纯 Triton**(Triton 前端本身跨 CUDA/ROCm/CPU 后端),没有平台绑定的 C++/CUTLASS 编译。NVIDIA 卡内部再按 SM 版本细分:地基 2 的 `capability` 字段(SM 窗口 + device 过滤)让不同 SM 自动选不同 kernel 实现(如 fp8 tensor core 仅 sm89+,DeepGEMM 仅 sm90+),无 fp8 的卡自动回退到 Triton dequant 路径。开发与验证在 A10(sm86,PCIe 互联)上进行——它是"最低配"场景,能在 A10 上跑通的设计在 H/B 系列及 ROCm/CPU 上必然可用。
+> **多硬件平台原则**:rapid_llm 面向多硬件平台——NVIDIA 全系 GPU(A10/A100 sm80/sm86,H100/H200 sm90,B200 sm100+),并预留 AMD ROCm / CPU 路径(架构维度 A9)。核心论据:kernel 层**纯 Triton**(Triton 前端本身跨 CUDA/ROCm/CPU 后端),没有平台绑定的 C++/CUTLASS 编译。NVIDIA 卡内部再按 SM 版本细分:地基 2 的 `capability` 字段(SM 窗口 + device 过滤)让不同 SM 自动选不同 kernel 实现(如 fp8 tensor core 仅 sm89+,DeepGEMM 仅 sm90+),无 fp8 的卡自动回退到 Triton dequant 路径。开发与验证在 A10(sm86,PCIe 互联)上进行——它是"最低配"场景,能在 A10 上跑通的设计在 H/B 系列及 ROCm/CPU 上必然可用。
 
 ## 功能维度
 
@@ -247,7 +247,7 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
   4. 结果按 key 缓存(lru_cache)+ 记录决策链供 explain
 ```
 
-**确定性来源**:第 2 步的"实测最优"来自 autotune/profiling **预先冻结**的记录(存盘,见地基 3),不是运行时现测——同一 key 永远选同一实现,benchmark/golden/bug 全部可复现。这正是对 sglang selector(多后端可用时甩给用户显式指定)的超越:**lite_llama 用实测记录自动选最快,选完仍确定**。
+**确定性来源**:第 2 步的"实测最优"来自 autotune/profiling **预先冻结**的记录(存盘,见地基 3),不是运行时现测——同一 key 永远选同一实现,benchmark/golden/bug 全部可复现。这正是对 sglang selector(多后端可用时甩给用户显式指定)的超越:**rapid_llm 用实测记录自动选最快,选完仍确定**。
 
 ### 两个必须做对的地方
 
@@ -256,10 +256,10 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
 
 ### 配套设施(直接复用 sglang 思路)
 
-- **强制后端开关**:对标 sglang `SGLANG_FORCE_FUSED_OP_BACKEND`,二分数值 bug 时把整模型钉到 native。两级粒度,越窄越优先——`backend=` 参数 > per-op `LITE_LLAMA_<OP>_BACKEND`(如 `LITE_LLAMA_ATTENTION_DECODE_BACKEND`) > 全局 `LITE_LLAMA_FORCE_BACKEND`。per-op 才是实际需要的粒度:一台机器可能想让 attention 走 flashinfer 而 linear 留在 native Triton GEMM。
+- **强制后端开关**:对标 sglang `SGLANG_FORCE_FUSED_OP_BACKEND`,二分数值 bug 时把整模型钉到 native。两级粒度,越窄越优先——`backend=` 参数 > per-op `RAPID_LLM_<OP>_BACKEND`(如 `RAPID_LLM_ATTENTION_DECODE_BACKEND`) > 全局 `RAPID_LLM_FORCE_BACKEND`。per-op 才是实际需要的粒度:一台机器可能想让 attention 走 flashinfer 而 linear 留在 native Triton GEMM。
 - **调用 trace**(对标 sglang `enable_fused_op_trace`):记录每次调用的 (op, backend, shape/dtype),**直接产出 ops-collector(地基 3 的 collect 阶段)要的真实 shape 清单**。
 - 外部后端各自占一个 `kernels/backend/<backend>/` 包(注册行在 `ops/<group>/__init__.py`,包内是 adapter + INSTALL 元数据),永不进核心依赖。**检测用真 import 而非 `find_spec`**:这些库是编译扩展或 JIT,"目录在"与"这张卡上能加载"是两个问题,dispatch 只关心后者(`backend/availability.py`)。
-- **安装方式不是一句话**:四个后端里只有 flashinfer 是 wheel(`lite-llama[flashinfer]`),DeepGEMM / FlashMLA / DeepEP 是带 submodule 的源码编译(DeepEP 还要先装 NVSHMEM)。所以后三者**不给 extra**——给一个装不了东西的 extra 比不给更误导——安装配方作为数据写在各自包的 `INSTALL` 里,由 `survey()` 打出来。
+- **安装方式不是一句话**:四个后端里只有 flashinfer 是 wheel(`rapid-llm[flashinfer]`),DeepGEMM / FlashMLA / DeepEP 是带 submodule 的源码编译(DeepEP 还要先装 NVSHMEM)。所以后三者**不给 extra**——给一个装不了东西的 extra 比不给更误导——安装配方作为数据写在各自包的 `INSTALL` 里,由 `survey()` 打出来。
 
 ### 落地顺序
 
@@ -314,7 +314,7 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
 
 ## DP 负载均衡策略(P10)
 
-SGLang `DataParallelController.LoadBalanceMethod` 有四种:round-robin / follow-bootstrap-room / 最小总请求数 / 最小总 token 数。lite_llama 在此之上加自有的 **cache-aware 路由**:请求 prefix hash 先查各副本的 prefix cache 命中估计,路由到"命中块数最多"的副本——共享 system prompt 的多轮对话天然聚到同 rank,命中率与负载均衡双收。实现依赖两个前置:地基 1 的 block hash;各副本负载/缓存水位经 observe.metrics 上报给路由层(第十节 Router 是它的多机推广)。
+SGLang `DataParallelController.LoadBalanceMethod` 有四种:round-robin / follow-bootstrap-room / 最小总请求数 / 最小总 token 数。rapid_llm 在此之上加自有的 **cache-aware 路由**:请求 prefix hash 先查各副本的 prefix cache 命中估计,路由到"命中块数最多"的副本——共享 system prompt 的多轮对话天然聚到同 rank,命中率与负载均衡双收。实现依赖两个前置:地基 1 的 block hash;各副本负载/缓存水位经 observe.metrics 上报给路由层(第十节 Router 是它的多机推广)。
 
 ## 并行 module 补齐:QKVParallelLinear / VocabParallelEmbedding / ParallelLMHead + 分布式采样(A11)
 
@@ -332,7 +332,7 @@ SGLang `DataParallelController.LoadBalanceMethod` 有四种:round-robin / follow
 2. **局部 top-k + 小张量 gather**:采样时每 rank 局部 top-k → all_gather 各 rank 的 `(token_id, logprob)` 对(O(k×tp),k=请求的 logprobs 数)→ 全局 argmax/multinomial。**gather 量由 API 的 logprobs 参数决定,与 vocab 无关**。
 3. **tie 共享局部切片**:tie_word_embeddings 时 embed 与 lm_head 是**同一局部参数**;`weights.py` 的 tied 机制从"全量别名"升级为"局部切片别名"。加载路径零新代码:`_SHARD_DIM` 表用 incoming-tensor 表述切分(现有架构),embed/lm_head 各加一条 vocab 维规则,覆盖校验/量化 scale 全复用。
 4. **collective 记账可视化**:切分后每步固定 +2 collective(embed 侧 all_reduce、采样侧标量规约+top-k gather);viz.structure 把 collective 作为一等节点显示(local/full shape + collective 位置 + 每步计数);CUDA Graph(P8)capture 时与主 all-reduce 同组锁步。
-5. **q|kv 两段 fused(非 vLLM 的 q|k|v 三段)**:lite_llama 本就 fused k/v(`weights.py _FUSED_KV`),QKV 合体后仍是两段——`_FUSED_KV` 映射直接复用(HF k_proj/v_proj → qkv_proj 的 kv 段),`_SHARD_DIM` 从"整参一条规则"升级为**段级规则**(q/kv 段各自 head 边界),"每参数恰好覆盖一次"校验不变,不引入 vLLM 的 weight_loader 多切片机制。dense MLP 的 gate/up 同族(MergedColumnParallelLinear,MoE gate_up 已 stacked)列低优先。
+5. **q|kv 两段 fused(非 vLLM 的 q|k|v 三段)**:rapid_llm 本就 fused k/v(`weights.py _FUSED_KV`),QKV 合体后仍是两段——`_FUSED_KV` 映射直接复用(HF k_proj/v_proj → qkv_proj 的 kv 段),`_SHARD_DIM` 从"整参一条规则"升级为**段级规则**(q/kv 段各自 head 边界),"每参数恰好覆盖一次"校验不变,不引入 vLLM 的 weight_loader 多切片机制。dense MLP 的 gate/up 同族(MergedColumnParallelLinear,MoE gate_up 已 stacked)列低优先。
 
 **验收**
 
@@ -403,7 +403,7 @@ o rlap 不止"TP 通信藏进计算"一件事。把所有重叠拆成三条正�
 1. **TP + CUDA Graph**:捕获前 `warmup_collectives()` 把 NCCL 通信器的惰性初始化挪出捕获区;捕获后各 rank 用 `tensor_model_parallel_ranks_agree()` 比对 `crc32` 网格指纹(指纹 `0`=什么都没捕获,即使全体一致也判失败),再各自跑一遍 graph-vs-eager 的 logit 比对并以 min 规约合并——任一 rank 超差则全体退回 eager。replay 判定只读广播来的 `ModelInput`,故不需要每步协商。详见 `docs/tensor_parallel.md` 的「TP × CUDA Graph」节。
 2. **DP + CUDA Graph**:DP 副本互不通信,各自 capture 各自 replay,随常驻引擎循环一同生效。
 
-**实测**(H100×2,Qwen2.5-0.5B,`tests/distributed/test_tp_cuda_graph.py`):bf16 / fp8 / nvfp4 三方案各捕获 8 个 graph,graph 与 eager 的最坏 logit 差 **0.000e+00**,32 步 greedy 逐字节同答。`LITE_LLAMA_TP_CUDA_GRAPH=0` 是 kill-switch,`LITE_LLAMA_TP_GRAPH_CHECK=1` 每步校验两 rank 选中同一 graph。
+**实测**(H100×2,Qwen2.5-0.5B,`tests/distributed/test_tp_cuda_graph.py`):bf16 / fp8 / nvfp4 三方案各捕获 8 个 graph,graph 与 eager 的最坏 logit 差 **0.000e+00**,32 步 greedy 逐字节同答。`RAPID_LLM_TP_CUDA_GRAPH=0` 是 kill-switch,`RAPID_LLM_TP_GRAPH_CHECK=1` 每步校验两 rank 选中同一 graph。
 
 ## 支撑抽象与验证
 
@@ -458,7 +458,7 @@ o rlap 不止"TP 通信藏进计算"一件事。把所有重叠拆成三条正�
 
 ## N-batch 流水线(核心创新)
 
-vLLM/SGLang 的调度器与执行器是严格 1:1 的 request-response——调度一步、执行一步、回传一步。lite_llama 的原创设计是**流水线化**:
+vLLM/SGLang 的调度器与执行器是严格 1:1 的 request-response——调度一步、执行一步、回传一步。rapid_llm 的原创设计是**流水线化**:
 
 | 时刻 | CPU(Scheduler) | GPU(Executor) |
 | --- | --- | --- |
@@ -550,11 +550,11 @@ KV cache 格式:MLA 存的是 latent `c_kv`(`[Skv, L_kv]`)而非完整 K/V(`[Skv
 
 SGLang `enable_dp_attention` 已验证的 DeepSeek 风格并行:attention 部分按请求维 DP——每个 rank 持有自己请求的**完整 KV**(不按 head 切分),attention 全程零 TP all-reduce;MoE 部分跨 rank 聚合走 EP。层间需要 all_gather(进 MoE)/ 分发(回 attention),正好是第四节"通信原语补全"的直接 consumer。
 
-对 MLA 格外划算:latent KV 只有 `L_kv` 维(如 512,对比完整 K/V 的 `N × 2 × P`),DP 各存一份的代价小;换来 attention 免通信、prefill 不做 TP 切分。lite_llama 落点:并行策略进 dispatch key(`(arch, model_type, attention_variant, shape_bucket, dtype)` 加一维 `parallel="tp|dp"`),与 A8 统一接口是同一次改造;依赖本节 MLA 先行。
+对 MLA 格外划算:latent KV 只有 `L_kv` 维(如 512,对比完整 K/V 的 `N × 2 × P`),DP 各存一份的代价小;换来 attention 免通信、prefill 不做 TP 切分。rapid_llm 落点:并行策略进 dispatch key(`(arch, model_type, attention_variant, shape_bucket, dtype)` 加一维 `parallel="tp|dp"`),与 A8 统一接口是同一次改造;依赖本节 MLA 先行。
 
 ## DSA 实现要点
 
-DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是用 latent `c_kv` 做粗粒度打分(MQA over latent),取 top-K 行做细粒度 attention。Lightning Indexer 是 vLLM 对这个 top-K 选择的优化(预排序 + block-level 索引)。lite_llama 的实现路径:
+DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是用 latent `c_kv` 做粗粒度打分(MQA over latent),取 top-K 行做细粒度 attention。Lightning Indexer 是 vLLM 对这个 top-K 选择的优化(预排序 + block-level 索引)。rapid_llm 的实现路径:
 
 1. 先做 MLA 正确性(DeepSeek-V2-Lite 端到端验证)。
 2. 再加 DSA 的 top-K 选择逻辑(单层 harness 验证)。
@@ -567,11 +567,11 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
 
 # 十、服务化与运维
 
-可观测(A7 / 工具模块 F)是引擎内视角;本节补服务外视角——lite_llama 要能当生产服务跑,不只是研究框架。
+可观测(A7 / 工具模块 F)是引擎内视角;本节补服务外视角——rapid_llm 要能当生产服务跑,不只是研究框架。
 
 | 能力 | 做什么 | 借鉴 | 自有设计 |
 | --- | --- | --- | --- |
-| **Prometheus metrics** | `/metrics` 端点暴露 TTFT / TPOT / 队列深度 / KV 占用 / 后端选中率 / overlap 气泡 | vLLM metrics(SRE 导向的标准计数器);SGLang prometheus 输出 | 复用 observe.metrics 的 per-step 数据流;metric 命名与 vLLM 对齐(社区 Grafana 面板直接可用),额外暴露 lite_llama 特有的后端/算子维度 |
+| **Prometheus metrics** | `/metrics` 端点暴露 TTFT / TPOT / 队列深度 / KV 占用 / 后端选中率 / overlap 气泡 | vLLM metrics(SRE 导向的标准计数器);SGLang prometheus 输出 | 复用 observe.metrics 的 per-step 数据流;metric 命名与 vLLM 对齐(社区 Grafana 面板直接可用),额外暴露 rapid_llm 特有的后端/算子维度 |
 | **请求追踪** | 请求全链路 span:enqueue → 调度决策 → forward → 采样 → detokenize → 返回 | OpenTelemetry;vLLM request-level tracing | observe.trace 直接导出 OTLP;trace_id 贯穿 ZMQ 进程边界(第八节跨进程透传) |
 | **Router** | 多实例入口:负载均衡 / 健康检查 / 故障转移 / prefix 感知路由 | SGLang router(Rust 实现);vLLM 生产栈 router(k8s gateway) | **路由决策吃 metrics 反馈**:Router 从各实例 /metrics 拉负载与 cache 水位,把第四节的 cache-aware 路由从引擎内 DP 推广到集群级;纯 Python 单进程实现(不引 Rust 依赖),定位教学级生产化 |
 
@@ -681,9 +681,9 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
 - **feat(已完成)**
   - 地基 2:实际落地形态超出本版"雏形"目标,直接按三层建满
     - `kernels/ops/` 按算子域分组(gemm / attention / moe / layernorm / rope / activation / sampling / kvcache / embeddings / quantization),每组 `__init__.py` 持有该算子全部注册行,共 11 个算子 21 行
-    - `kernels/dispatcher/` 是 torch-free 机制层:KernelSpec 六维声明(available / capability / dtypes+schemes / shape 硬约束+偏好 / layout / golden)+ 注册表 + dispatch 四步(filter → rank → cache → report)。explain 打印逐条拒绝理由与落选者排名,`LITE_LLAMA_KERNEL_TRACE=1` 输出 JSON 决策线
+    - `kernels/dispatcher/` 是 torch-free 机制层:KernelSpec 六维声明(available / capability / dtypes+schemes / shape 硬约束+偏好 / layout / golden)+ 注册表 + dispatch 四步(filter → rank → cache → report)。explain 打印逐条拒绝理由与落选者排名,`RAPID_LLM_KERNEL_TRACE=1` 输出 JSON 决策线
     - `kernels/backend/` 一库一包(flashinfer / deepgemm / flashmla / deepep)+ available() 真 import 检测:缺库是排名事件,不是崩溃
-    - golden gate:未验证(verified=False)的行默认不参与 dispatch,只有显式 `backend=`(参数或 `LITE_LLAMA_*_BACKEND` 环境变量)可越过;flashinfer 的 attention / rmsnorm / rope / sample 行已带 max-abs-diff 记录
+    - golden gate:未验证(verified=False)的行默认不参与 dispatch,只有显式 `backend=`(参数或 `RAPID_LLM_*_BACKEND` 环境变量)可越过;flashinfer 的 attention / rmsnorm / rope / sample 行已带 max-abs-diff 记录
     - 默认全 native:外部行 priority=UNMEASURED(-1) 排在 native(0) 之下,翻盘等 v0.10 冻结实测数据接线
   - A9 Platform 抽象:设备检测 + 能力声明(CapabilityRequirement),dispatch 按 capability 过滤(deepgemm / flashmla 的 sm90+ 窗口在 A10 上被拒),可 mock 测试
   - prefix caching 支持 DP:负载均衡按前缀亲和路由,各副本的 cache 合成一个池
@@ -712,7 +712,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - F6 logprobs / prompt_logprobs
   - A7 运行时可观测性(observe.metrics + observe.trace)+ `/metrics` Prometheus 端点 + OTLP 追踪导出
 - **test**
-  - F1 单层 harness:`lite_llama/tools/harness/` + `scripts/layer_harness.py`——meta 骨架只给指定层材料化存储,权重可来自 checkpoint(只读该层的 key)、transformers 同层镜像或随机;prefill 与 decode 两形态各自对 HF 同层比 max-abs-diff,同时给逐模块 CUDA event 计时、峰值显存与 dispatch 决策(MLA 侧 `MinimalMlaLayer` 继续作 benchmark 载体)
+  - F1 单层 harness:`rapid_llm/tools/harness/` + `scripts/layer_harness.py`——meta 骨架只给指定层材料化存储,权重可来自 checkpoint(只读该层的 key)、transformers 同层镜像或随机;prefill 与 decode 两形态各自对 HF 同层比 max-abs-diff,同时给逐模块 CUDA event 计时、峰值显存与 dispatch 决策(MLA 侧 `MinimalMlaLayer` 继续作 benchmark 载体)
 - **benchmark**
   - (已达成)dispatch 开销:`benchmarks/kernels/bench_dispatch.py`——A10 上首次决策 761 ms(一次性,全在后端检测的 import 上)、换 key 后的 filter+rank 27 us、命中缓存 15 us(其中真正的缓存查找 0.5 us,余下是每次重取的平台快照);调用点在构造期决策一次并存成属性,每步 forward 连这次查找都不做。冻结实测排序相对 v0.9 静态 priority 的端到端差值在噪声内(见下),因为这张 GPU 上实测赢家与静态顺序的首选一致——排序换成实测的意义是"外部后端真快时才翻盘",不是无条件提速
   - (已达成)logprobs / prompt_logprobs 开启后的额外开销:`benchmarks/bench_observability.py`——Qwen3-0.6B batch16 gen128,TPOT 4.75 -> 5.35 ms、吞吐 -10.4%(logprobs=5);prompt_logprobs=5 只压在 prefill 上,TTFT 23 -> 32 ms 而吞吐 -1.5%;两个都开 -12.7%。默认关闭,按请求 opt-in

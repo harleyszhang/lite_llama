@@ -64,7 +64,7 @@ layer is launch-bound. Two rows converging is a reinstated defect.
 What each row measures. The prefix is the registry entry and the ``[label]`` suffix
 names the format: all but two rows are ``native/fused_moe``, because the kernel
 picks the format off ``w1.dtype`` rather than from a spec row (see
-``lite_llama/kernels/ops/moe/__init__.py``), and the exceptions are the two W8A8
+``rapid_llm/kernels/ops/moe/__init__.py``), and the exceptions are the two W8A8
 rows, whose bytes are identical to their weight-only formats':
 
 ``[unquantized]``
@@ -141,20 +141,20 @@ from microbench import Row, Work, bench, device_peaks, metadata, report, require
 from tuning import TuneResult, nbytes
 
 # Importing the facade registers every spec row, so dispatch() below finds them.
-import lite_llama.kernels  # registers the spec rows as a side effect
-import lite_llama.kernels.ops.moe.fused_moe as fused_moe_module
-from lite_llama.kernels.dispatcher import dispatch
-from lite_llama.kernels.dispatcher.autotune import ConfigStore, TuneKey, bucket_m
-from lite_llama.kernels.dispatcher.autotune import reset as autotune_reset
-from lite_llama.kernels.ops.moe.fused_moe import (
+import rapid_llm.kernels  # registers the spec rows as a side effect
+import rapid_llm.kernels.ops.moe.fused_moe as fused_moe_module
+from rapid_llm.kernels.dispatcher import dispatch
+from rapid_llm.kernels.dispatcher.autotune import ConfigStore, TuneKey, bucket_m
+from rapid_llm.kernels.dispatcher.autotune import reset as autotune_reset
+from rapid_llm.kernels.ops.moe.fused_moe import (
     _launch_config,
     fused_moe,
     fused_moe_w8a8_fp8,
     fused_moe_w8a8_int8,
     moe_align_block_size,
 )
-from lite_llama.kernels.ops.quantization import repack_int4_experts
-from lite_llama.modules.quantization.utils import (
+from rapid_llm.kernels.ops.quantization import repack_int4_experts
+from rapid_llm.modules.quantization.utils import (
     quantize_fp8_per_channel,
     quantize_fp8_per_token,
     quantize_int4_groupwise,
@@ -515,16 +515,16 @@ def forced_block_k(block_k: int) -> Iterator[None]:
         "BLOCK_K": block_k,
     }
 
-    previous = os.environ.get("LITE_LLAMA_AUTOTUNE")
-    os.environ["LITE_LLAMA_AUTOTUNE"] = "0"
+    previous = os.environ.get("RAPID_LLM_AUTOTUNE")
+    os.environ["RAPID_LLM_AUTOTUNE"] = "0"
     try:
         yield
     finally:
         fused_moe_module._launch_config = original
         if previous is None:
-            os.environ.pop("LITE_LLAMA_AUTOTUNE", None)
+            os.environ.pop("RAPID_LLM_AUTOTUNE", None)
         else:
-            os.environ["LITE_LLAMA_AUTOTUNE"] = previous
+            os.environ["RAPID_LLM_AUTOTUNE"] = previous
 
 
 # --------------------------------------------------------------------------- #
@@ -714,19 +714,19 @@ def forced_config(config: dict[str, int]) -> Iterator[None]:
     nothing.
     """
     original = fused_moe_module._launch_config
-    previous = os.environ.get("LITE_LLAMA_AUTOTUNE")
+    previous = os.environ.get("RAPID_LLM_AUTOTUNE")
     # ``d`` absorbs the device_index the launcher now passes; ``c`` stays the
     # forced config whatever device is asked about.
     fused_moe_module._launch_config = lambda n, q, r, d=None, c=config: dict(c)
-    os.environ["LITE_LLAMA_AUTOTUNE"] = "0"
+    os.environ["RAPID_LLM_AUTOTUNE"] = "0"
     try:
         yield
     finally:
         fused_moe_module._launch_config = original
         if previous is None:
-            os.environ.pop("LITE_LLAMA_AUTOTUNE", None)
+            os.environ.pop("RAPID_LLM_AUTOTUNE", None)
         else:
-            os.environ["LITE_LLAMA_AUTOTUNE"] = previous
+            os.environ["RAPID_LLM_AUTOTUNE"] = previous
 
 
 def _time_config(
@@ -1031,7 +1031,7 @@ def main() -> None:
                 "table's rows and both ablations shift with them: the narrow-k\n"
                 "ablation in particular is a no-op once a config is stored, because\n"
                 "get_best_config is consulted before the heuristic it patches. Run\n"
-                "with LITE_LLAMA_AUTOTUNE=0 to measure what a user without this cache\n"
+                "with RAPID_LLM_AUTOTUNE=0 to measure what a user without this cache\n"
                 "gets."
             )
         return

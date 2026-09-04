@@ -20,13 +20,13 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-import lite_llama.kernels  # noqa: F401 — import side effect: spec registration
-import lite_llama.kernels.ops as ops_pkg
-from lite_llama.kernels.dispatcher import REGISTRY, dispatch
-from lite_llama.kernels.dispatcher.dispatch import resolve_target
-from lite_llama.kernels.ops import LOGICAL_OPS
-from lite_llama.kernels.ops.gemm.linear import linear_torch
-from lite_llama.modules.quantization.unquant import UnquantizedLinearMethod
+import rapid_llm.kernels  # noqa: F401 — import side effect: spec registration
+import rapid_llm.kernels.ops as ops_pkg
+from rapid_llm.kernels.dispatcher import REGISTRY, dispatch
+from rapid_llm.kernels.dispatcher.dispatch import resolve_target
+from rapid_llm.kernels.ops import LOGICAL_OPS
+from rapid_llm.kernels.ops.gemm.linear import linear_torch
+from rapid_llm.modules.quantization.unquant import UnquantizedLinearMethod
 
 #: resolve_target imports the native Triton modules to prove they are callable;
 #: on a machine without Triton there is nothing to resolve.
@@ -301,7 +301,7 @@ class TestGlueCatalogue:
 
 class TestContractCoverage:
     def test_every_registered_op_is_a_declared_contract(self) -> None:
-        from lite_llama.kernels.ops import is_logical_op
+        from rapid_llm.kernels.ops import is_logical_op
 
         for op in REGISTRY.ops():
             assert is_logical_op(op), f"{op!r} has rows but no ABC"
@@ -373,11 +373,11 @@ class TestRegistryStaysTorchFree:
         for op in REGISTRY.ops():
             for spec in REGISTRY.implementations(op):
                 module, attr = spec.target.split(":")
-                assert module.startswith("lite_llama.kernels."), spec.name
+                assert module.startswith("rapid_llm.kernels."), spec.name
                 if spec.backend == "native":
-                    assert module.startswith("lite_llama.kernels.ops."), spec.name
+                    assert module.startswith("rapid_llm.kernels.ops."), spec.name
                 else:
-                    assert module.startswith("lite_llama.kernels.backend."), spec.name
+                    assert module.startswith("rapid_llm.kernels.backend."), spec.name
                 assert attr.isidentifier()
 
     @pytest.mark.skipif(not TRITON_AVAILABLE, reason="resolving GPU targets requires Triton")

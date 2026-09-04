@@ -24,14 +24,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from microbench import bench, bench_stateful, metadata, verify
 
-import lite_llama.kernels  # registers every spec row
-from lite_llama.kernels.dispatcher import REGISTRY, dispatch
-from lite_llama.kernels.dispatcher.autotune import freeze_record, frozen_store
-from lite_llama.kernels.dispatcher.autotune.config_key import normalize_gpu_name
-from lite_llama.kernels.dispatcher.autotune.frozen import install_frozen_perf_provider
-from lite_llama.kernels.dispatcher.dispatch import resolve_target
-from lite_llama.kernels.dispatcher.spec import KernelSpec
-from lite_llama.platform.spec import PlatformInfo, capabilities_match
+import rapid_llm.kernels  # registers every spec row
+from rapid_llm.kernels.dispatcher import REGISTRY, dispatch
+from rapid_llm.kernels.dispatcher.autotune import freeze_record, frozen_store
+from rapid_llm.kernels.dispatcher.autotune.config_key import normalize_gpu_name
+from rapid_llm.kernels.dispatcher.autotune.frozen import install_frozen_perf_provider
+from rapid_llm.kernels.dispatcher.dispatch import resolve_target
+from rapid_llm.kernels.dispatcher.spec import KernelSpec
+from rapid_llm.platform.spec import PlatformInfo, capabilities_match
 
 #: Same serving geometry as bench_flashinfer.py, so the two tables compare.
 BATCH, Q_HEADS, KV_HEADS, HEAD_DIM = 8, 32, 8, 128

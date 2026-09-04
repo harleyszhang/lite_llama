@@ -19,10 +19,10 @@ from pathlib import Path
 
 import pytest
 
-import lite_llama.kernels  # noqa: F401 — import side effect: native row registration
-from lite_llama.kernels.backend import capability
-from lite_llama.kernels.backend.capability import EXTERNAL_BACKENDS, BackendInstall, library_present
-from lite_llama.kernels.dispatcher import REGISTRY, resolve_target
+import rapid_llm.kernels  # noqa: F401 — import side effect: native row registration
+from rapid_llm.kernels.backend import capability
+from rapid_llm.kernels.backend.capability import EXTERNAL_BACKENDS, BackendInstall, library_present
+from rapid_llm.kernels.dispatcher import REGISTRY, resolve_target
 
 #: Import name each backend module must check, verified against the upstream
 #: install docs. The distribution name and the import name differ for three of
@@ -57,7 +57,7 @@ class TestLibraryPresent:
 
     def test_a_module_that_does_not_exist_is_absent(self) -> None:
         # The everyday case: no wheel, no row, native serves the call.
-        assert library_present("lite_llama_no_such_backend") is False
+        assert library_present("rapid_llm_no_such_backend") is False
 
     def test_a_module_that_raises_on_import_is_absent(self, tmp_path, monkeypatch) -> None:
         """find_spec would say yes here; a compiled backend still would not run.
@@ -94,7 +94,7 @@ class TestLibraryPresent:
 class TestBackendModules:
     @pytest.mark.parametrize("backend", EXTERNAL_BACKENDS)
     def test_module_declares_the_metadata_dispatch_needs(self, backend: str) -> None:
-        module = importlib.import_module(f"lite_llama.kernels.backend.{backend}")
+        module = importlib.import_module(f"rapid_llm.kernels.backend.{backend}")
         assert isinstance(module.INSTALL, BackendInstall)
         assert module.INSTALL.backend == backend, "INSTALL must name its own module"
         assert callable(module.available)
@@ -102,12 +102,12 @@ class TestBackendModules:
     @pytest.mark.parametrize("backend", EXTERNAL_BACKENDS)
     def test_available_answers_a_bool_without_raising(self, backend: str) -> None:
         # Called during dispatch filtering on machines that have none of these.
-        module = importlib.import_module(f"lite_llama.kernels.backend.{backend}")
+        module = importlib.import_module(f"rapid_llm.kernels.backend.{backend}")
         assert isinstance(module.available(), bool)
 
     @pytest.mark.parametrize("backend", EXTERNAL_BACKENDS)
     def test_import_name_matches_upstream(self, backend: str) -> None:
-        module = importlib.import_module(f"lite_llama.kernels.backend.{backend}")
+        module = importlib.import_module(f"rapid_llm.kernels.backend.{backend}")
         assert module.INSTALL.module == IMPORT_NAMES[backend]
 
     def test_importing_the_package_costs_no_third_party_import(self) -> None:
@@ -120,7 +120,7 @@ class TestBackendModules:
         imported a library that *is* installed.
         """
         code = (
-            "import sys, lite_llama.kernels.backend as b; "
+            "import sys, rapid_llm.kernels.backend as b; "
             f"print([m for m in {sorted(IMPORT_NAMES.values())} if m in sys.modules])"
         )
         done = subprocess.run(
@@ -133,14 +133,14 @@ class TestInstallMetadata:
     @pytest.mark.parametrize("backend", EXTERNAL_BACKENDS)
     def test_a_named_extra_exists_in_pyproject(self, backend: str, extras) -> None:
         """An extra in the metadata is a promise `pip install` must be able to keep."""
-        install = importlib.import_module(f"lite_llama.kernels.backend.{backend}").INSTALL
+        install = importlib.import_module(f"rapid_llm.kernels.backend.{backend}").INSTALL
         if install.extra is not None:
             assert install.extra in extras, f"{backend}: extra {install.extra!r} not in pyproject"
             assert extras[install.extra], f"{backend}: extra {install.extra!r} installs nothing"
 
     @pytest.mark.parametrize("backend", EXTERNAL_BACKENDS)
     def test_a_backend_without_an_extra_documents_a_source_build(self, backend: str) -> None:
-        install = importlib.import_module(f"lite_llama.kernels.backend.{backend}").INSTALL
+        install = importlib.import_module(f"rapid_llm.kernels.backend.{backend}").INSTALL
         assert install.extra or install.source_recipe
         assert install.homepage.startswith("https://")
         assert install.requires, "state the hardware/toolchain window in prose too"
@@ -159,7 +159,7 @@ class TestInstallMetadata:
             source_recipe="git clone https://x && pip install -e .",
         )
         line = install.how_to_get_it()
-        assert "pip install lite-llama[both]" in line
+        assert "pip install rapid-llm[both]" in line
         assert "git clone" in line
 
     def test_the_extras_never_reach_the_core_dependencies(self) -> None:
@@ -200,5 +200,7 @@ class TestExternalRowsStayOptional:
         for spec in REGISTRY.specs():
             if spec.backend == "native":
                 continue
-            assert spec.available is not None, f"{spec.name}: non-native row needs an availability check"
+            assert spec.available is not None, (
+                f"{spec.name}: non-native row needs an availability check"
+            )
             assert isinstance(resolve_target(spec.available)(), bool)

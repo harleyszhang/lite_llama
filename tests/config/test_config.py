@@ -1,4 +1,4 @@
-"""CPU-only tests for :class:`~lite_llama.models.config.ModelConfig`.
+"""CPU-only tests for :class:`~rapid_llm.models.config.ModelConfig`.
 
 Tiny HF-style config dicts are written to tmp dirs, so every geometry
 rule — head_dim derivation, GQA defaults, rope theta — is checked
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from lite_llama.models.config import ModelConfig, read_model_type
+from rapid_llm.models.config import ModelConfig, read_model_type
 
 # A Qwen2 body with ``rope_theta`` at the top level, i.e. the transformers 4.x
 # serialisation. transformers 5.x folds it into ``rope_parameters`` on load, which

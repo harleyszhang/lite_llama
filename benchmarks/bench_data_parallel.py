@@ -40,8 +40,8 @@ from benchmarks.lib import (
     timestamped_log_path,
     write_json_log,
 )
-from lite_llama import LLM, DataParallelEngine
-from lite_llama.engine.dp_load_balancer import LOAD_BALANCERS, make_load_balancer
+from rapid_llm import LLM, DataParallelEngine
+from rapid_llm.engine.dp_load_balancer import LOAD_BALANCERS, make_load_balancer
 
 #: Per-mode fallbacks for the knobs ``add_dp_args`` declares without a default, so
 #: an explicit ``--gen-len 128`` under ``--mode prefix`` is honoured rather than

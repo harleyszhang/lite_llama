@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import torch
 
-from lite_llama.engine.stop_criteria import StopCriteria
+from rapid_llm.engine.stop_criteria import StopCriteria
 
 _VOCAB = 32
 _EOS = 7

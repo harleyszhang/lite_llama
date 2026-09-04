@@ -15,7 +15,7 @@ EVAL_CONFIGS ?= models-small.txt
 
 help:
 	@echo "Setup:"
-	@echo "  install       Install lite_llama in editable mode"
+	@echo "  install       Install rapid_llm in editable mode"
 	@echo "  install-dev   Install with dev dependencies and register pre-commit hooks"
 	@echo "  lint          ruff check + ruff format --check"
 	@echo "  format        ruff --fix + ruff format"
@@ -75,10 +75,10 @@ test-fast:
 	$(PYTHON) -m pytest -m "not slow"
 
 test-weights:
-	LITE_LLAMA_TEST_MODEL_DIR=$(MODEL_DIR) $(PYTHON) -m pytest -m weights
+	RAPID_LLM_TEST_MODEL_DIR=$(MODEL_DIR) $(PYTHON) -m pytest -m weights
 
 test-golden:
-	LITE_LLAMA_TEST_MODEL_DIR=$(MODEL_DIR) $(PYTHON) -m pytest tests/golden
+	RAPID_LLM_TEST_MODEL_DIR=$(MODEL_DIR) $(PYTHON) -m pytest tests/golden
 
 # Accuracy tier. Each config names its own checkpoint and skips itself when that
 # checkpoint is absent, so MODEL_DIR does not apply here — pick configs instead.
@@ -88,13 +88,13 @@ test-eval:
 # The scheduler and the HTTP protocol are covered on CPU (fake/stub engines), so
 # this target is useful even without a GPU -- it just skips the tiers it cannot run.
 test-serving:
-	LITE_LLAMA_TEST_MODEL_DIR=$(MODEL_DIR) $(PYTHON) -m pytest \
+	RAPID_LLM_TEST_MODEL_DIR=$(MODEL_DIR) $(PYTHON) -m pytest \
 		tests/engine/test_scheduler.py tests/engine/test_async_engine.py \
 		tests/engine/test_continuous_batching.py tests/entrypoints
 
 coverage:
 	$(PYTHON) -m pytest -m "not gpu and not weights" \
-		--cov=lite_llama --cov-report=term-missing --cov-report=html
+		--cov=rapid_llm --cov-report=term-missing --cov-report=html
 	@echo "HTML report: htmlcov/index.html"
 
 # Re-records the byte-exact baseline. The diff is the *output of the model*, so

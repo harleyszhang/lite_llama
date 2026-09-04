@@ -16,22 +16,22 @@ pytest.importorskip("fastapi", reason="needs the `serve` extra")
 
 from fastapi.testclient import TestClient
 
-from lite_llama.engine.async_engine import StreamedOutput
-from lite_llama.engine.reasoning import _CLOSE as _THINK_CLOSE
-from lite_llama.engine.sampler import PositionLogprobs
-from lite_llama.engine.tool_parser import (
+from rapid_llm.engine.async_engine import StreamedOutput
+from rapid_llm.engine.reasoning import _CLOSE as _THINK_CLOSE
+from rapid_llm.engine.sampler import PositionLogprobs
+from rapid_llm.engine.tool_parser import (
     _DS_ARGS_END,
     _DS_CALLS_BEGIN,
     _DS_CALLS_END,
     _DS_FENCE,
     _DS_HEADER,
 )
-from lite_llama.entrypoints.api_server import (
+from rapid_llm.entrypoints.api_server import (
     ServerConfig,
     build_app,
     parse_sse,
 )
-from lite_llama.tools.observability.metrics import EngineMetrics
+from rapid_llm.tools.observability.metrics import EngineMetrics
 
 pytestmark = pytest.mark.serving
 
@@ -158,7 +158,7 @@ def test_metrics_endpoint_serves_prometheus_text(client):
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
-    assert "lite_llama:num_requests_running" in response.text
+    assert "rapid_llm:num_requests_running" in response.text
 
 
 def test_metrics_endpoint_renders_empty_without_a_registry(engine):
@@ -262,7 +262,7 @@ def test_sampling_fields_reach_the_engine(client, engine):
 
 
 def test_the_protocol_defaults_match_openai_not_the_cli(client, engine):
-    """A wire client expects OpenAI's 1.0/1.0, not lite_llama's own 0.6/0.9."""
+    """A wire client expects OpenAI's 1.0/1.0, not rapid_llm's own 0.6/0.9."""
     client.post("/v1/completions", json={"model": _MODEL, "prompt": "Hello"})
     params = engine.seen[0][1]
 
@@ -415,7 +415,7 @@ def test_two_replicas_build_the_data_parallel_engine(monkeypatch):
     rather than a couple of spot checks. And ``device`` must be absent: a
     replica's device is its position in the grid.
     """
-    from lite_llama.entrypoints import api_server
+    from rapid_llm.entrypoints import api_server
 
     captured: dict = {}
 
@@ -454,7 +454,7 @@ def test_one_replica_still_builds_the_single_process_engine(monkeypatch):
     A data-parallel coordinator of one replica is a whole extra process hop for
     nothing; the default has to stay byte-for-byte the engine it was.
     """
-    from lite_llama.entrypoints import api_server
+    from rapid_llm.entrypoints import api_server
 
     def fake_from_pretrained(model, **kwargs):
         assert "data_parallel_size" not in kwargs

@@ -10,10 +10,10 @@ step no matter how large the vocabulary is, because :func:`global_argmax` exchan
 values per row rather than gathering the logits.
 
 Nothing here is staged. The engine is a real
-:class:`~lite_llama.engine.continuous_engine.ContinuousBatchingEngine` with
+:class:`~rapid_llm.engine.continuous_engine.ContinuousBatchingEngine` with
 ``tensor_parallel_size=2``, so this process *is* rank 0 and the follower is a real
 process on the second GPU; every number comes from a
-:meth:`~lite_llama.tools.observability.CollectiveStats.collect` window wrapped around
+:meth:`~rapid_llm.tools.observability.CollectiveStats.collect` window wrapped around
 :meth:`step`, nested inside a window over the whole run. The one figure that is
 arithmetic rather than measurement is the "if gathered" line, which is what one rank
 would contribute to an all-gather of the logits — the alternative implementation, not
@@ -35,16 +35,16 @@ from PIL import Image, ImageDraw, ImageFont
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from lite_llama.engine.continuous_engine import ContinuousBatchingEngine  # noqa: E402
-from lite_llama.engine.sampler import SamplingParams  # noqa: E402
-from lite_llama.tools.observability import (  # noqa: E402
+from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine  # noqa: E402
+from rapid_llm.engine.sampler import SamplingParams  # noqa: E402
+from rapid_llm.tools.observability import (  # noqa: E402
     Collective,
     CollectiveStats,
     Plane,
     Tally,
     human_bytes,
 )
-from lite_llama.utils.prompt_templates import get_prompter  # noqa: E402
+from rapid_llm.utils.prompt_templates import get_prompter  # noqa: E402
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
@@ -271,7 +271,7 @@ def render(frame: Frame, fonts, model_name: str) -> Image.Image:
     draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
     draw.text(
         (12, 9),
-        f"lite-llama  —  tensor parallelism: what crosses the wire  ({model_name})",
+        f"rapid-llm  —  tensor parallelism: what crosses the wire  ({model_name})",
         fill=TITLE_FG,
         font=small,
     )
@@ -281,7 +281,7 @@ def render(frame: Frame, fonts, model_name: str) -> Image.Image:
     y = TITLE_H + PAD
     draw.text(
         (PAD, y),
-        f"$ lite-llama batch --tensor-parallel-size {TP_SIZE}   # bytes measured on rank 0",
+        f"$ rapid-llm batch --tensor-parallel-size {TP_SIZE}   # bytes measured on rank 0",
         fill=PROMPT_FG,
         font=body,
     )

@@ -10,11 +10,12 @@ Usage:
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 
 import pytest
 
-from lite_llama.kernels.dispatcher.autotune import (
+from rapid_llm.kernels.dispatcher.autotune import (
     ConfigStore,
     TuneKey,
     bucket_m,
@@ -210,14 +211,14 @@ class TestLookup:
     def _setup(self, tmp_path: Path, monkeypatch):
         """Point the lookup module at a temporary store."""
         reset()
-        monkeypatch.setenv("LITE_LLAMA_AUTOTUNE_DIR", str(tmp_path))
-        monkeypatch.setenv("LITE_LLAMA_AUTOTUNE", "1")
+        monkeypatch.setenv("RAPID_LLM_AUTOTUNE_DIR", str(tmp_path))
+        monkeypatch.setenv("RAPID_LLM_AUTOTUNE", "1")
         # Pre-populate the store
         store = ConfigStore(cache_dir=tmp_path)
         key = TuneKey(gpu="test_gpu", op="fused_moe", shape_bucket="M16_N4096_K11008", dtype="fp16")
         store.put(key, {"BLOCK_M": 16, "BLOCK_N": 128}, latency_us=35.0)
         # Patch GPU detection so lookup uses "test_gpu"
-        import lite_llama.kernels.dispatcher.autotune.lookup as lk
+        import rapid_llm.kernels.dispatcher.autotune.lookup as lk
 
         monkeypatch.setattr(lk, "_gpu_name", "test_gpu")
         monkeypatch.setattr(lk, "_store", ConfigStore(cache_dir=tmp_path))
@@ -233,6 +234,80 @@ class TestLookup:
         assert result is None
 
     def test_disabled_by_env(self, monkeypatch):
-        monkeypatch.setenv("LITE_LLAMA_AUTOTUNE", "0")
+        monkeypatch.setenv("RAPID_LLM_AUTOTUNE", "0")
         result = get_best_config("fused_moe", m=4, n=4096, k=11008, dtype="fp16")
         assert result is None
+
+
+# --------------------------------------------------------------------------- #
+# default cache dir: rename compatibility
+# --------------------------------------------------------------------------- #
+
+
+def _fake_home(monkeypatch, config_store, home: Path) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+
+class TestDefaultCacheDir:
+    """``_default_cache_dir`` honours the pre-rename location.
+
+    Explicit env wins; the legacy ``LITE_LLAMA_`` spelling still works
+    (with a deprecation warning); the legacy ``~/.cache/lite_llama``
+    directory is only used when the new one does not exist yet, so
+    measured configs survive the rename without a migration step.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_warn_ledger(self, monkeypatch):
+        from rapid_llm.utils import env_compat
+
+        monkeypatch.setattr(env_compat, "_warned", set())
+
+    def test_explicit_new_env_wins(self, monkeypatch, tmp_path):
+        from rapid_llm.kernels.dispatcher.autotune import config_store
+
+        monkeypatch.setenv("RAPID_LLM_AUTOTUNE_DIR", str(tmp_path))
+        assert config_store._default_cache_dir() == tmp_path
+
+    def test_legacy_env_accepted(self, monkeypatch, tmp_path):
+        from rapid_llm.kernels.dispatcher.autotune import config_store
+
+        monkeypatch.delenv("RAPID_LLM_AUTOTUNE_DIR", raising=False)
+        monkeypatch.setenv("LITE_LLAMA_AUTOTUNE_DIR", str(tmp_path))
+        with pytest.warns(DeprecationWarning, match="LITE_LLAMA_AUTOTUNE_DIR"):
+            assert config_store._default_cache_dir() == tmp_path
+
+    def test_legacy_dir_used_when_only_it_exists(self, monkeypatch, tmp_path):
+        from rapid_llm.kernels.dispatcher.autotune import config_store
+
+        home = tmp_path / "home"
+        legacy = home / ".cache" / "lite_llama" / "autotune"
+        legacy.mkdir(parents=True)
+        _fake_home(monkeypatch, config_store, home)
+        monkeypatch.delenv("RAPID_LLM_AUTOTUNE_DIR", raising=False)
+        monkeypatch.delenv("LITE_LLAMA_AUTOTUNE_DIR", raising=False)
+        assert config_store._default_cache_dir() == legacy
+
+    def test_new_dir_wins_when_both_exist(self, monkeypatch, tmp_path):
+        from rapid_llm.kernels.dispatcher.autotune import config_store
+
+        home = tmp_path / "home"
+        (home / ".cache" / "lite_llama" / "autotune").mkdir(parents=True)
+        new = home / ".cache" / "rapid_llm" / "autotune"
+        new.mkdir(parents=True)
+        _fake_home(monkeypatch, config_store, home)
+        monkeypatch.delenv("RAPID_LLM_AUTOTUNE_DIR", raising=False)
+        monkeypatch.delenv("LITE_LLAMA_AUTOTUNE_DIR", raising=False)
+        assert config_store._default_cache_dir() == new
+
+    def test_new_default_when_neither_exists(self, monkeypatch, tmp_path):
+        from rapid_llm.kernels.dispatcher.autotune import config_store
+
+        home = tmp_path / "home"
+        home.mkdir()
+        _fake_home(monkeypatch, config_store, home)
+        monkeypatch.delenv("RAPID_LLM_AUTOTUNE_DIR", raising=False)
+        monkeypatch.delenv("LITE_LLAMA_AUTOTUNE_DIR", raising=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert config_store._default_cache_dir() == (home / ".cache" / "rapid_llm" / "autotune")

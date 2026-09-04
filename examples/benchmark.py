@@ -1,6 +1,6 @@
-"""Latency/throughput benchmark: lite_llama vs HuggingFace transformers vs vLLM.
+"""Latency/throughput benchmark: rapid_llm vs HuggingFace transformers vs vLLM.
 
-``bench_lite_llama``, ``bench_transformers`` and ``bench_vllm`` time the same
+``bench_rapid_llm``, ``bench_transformers`` and ``bench_vllm`` time the same
 prompts on the same device, then ``_print_report`` diffs per-token latency and
 throughput — one table, not a wall of logs.
 
@@ -23,7 +23,7 @@ from pathlib import Path
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from lite_llama.engine import SamplingParams, TextGenerator
+from rapid_llm.engine import SamplingParams, TextGenerator
 
 warnings.filterwarnings("ignore", category=UserWarning, module="torch._utils")
 
@@ -93,11 +93,11 @@ def _timed(fn) -> tuple[object, float]:
     return out, time.perf_counter() - start
 
 
-def bench_lite_llama(
+def bench_rapid_llm(
     model_dir, prompts, gen_len, iters, device, max_gpu_num_blocks=None,
     tensor_parallel_size=1, hf_overrides=None, use_cuda_graph=True,
 ) -> Metrics:
-    """Measure lite_llama on one (batch_size, gen_len) configuration.
+    """Measure rapid_llm on one (batch_size, gen_len) configuration.
 
     ``tensor_parallel_size`` above 1 routes through the continuous-batching
     engine: it is the only path whose executor broadcasts each step's plan to
@@ -110,7 +110,7 @@ def bench_lite_llama(
     greedy = dict(temperature=0.0, top_p=1.0, repetition_penalty=1.0, stop_on_repeat=False)
 
     if tensor_parallel_size > 1:
-        from lite_llama.engine import ContinuousBatchingEngine
+        from rapid_llm.engine import ContinuousBatchingEngine
 
         engine = ContinuousBatchingEngine.from_pretrained(
             model_dir,
@@ -155,7 +155,7 @@ def bench_lite_llama(
         del gen
     gc.collect()
     torch.cuda.empty_cache()
-    return Metrics.from_runs("lite_llama", len(prompts), prompt_tokens, ttfts, latencies, out_tokens)
+    return Metrics.from_runs("rapid_llm", len(prompts), prompt_tokens, ttfts, latencies, out_tokens)
 
 
 def _rebuild_rope_buffers(model) -> None:
@@ -257,7 +257,7 @@ def bench_transformers(model_dir, prompts, gen_len, iters, device, dtype="fp16",
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"  # correct for decoder-only batched generation
     config = AutoConfig.from_pretrained(model_dir)
-    # The same override the lite_llama side runs under, so a trimmed stack is
+    # The same override the rapid_llm side runs under, so a trimmed stack is
     # measured on identical arithmetic both sides — the point of layer-local
     # comparisons.
     for field, value in (hf_overrides or {}).items():
@@ -311,7 +311,7 @@ def bench_vllm(model_dir, prompts, gen_len, iters, hf_overrides=None,
 
     llm = VllmLLM(
         model=model_dir,
-        max_model_len=2048,  # the ceiling the lite_llama side runs under
+        max_model_len=2048,  # the ceiling the rapid_llm side runs under
         dtype="bfloat16",
         enable_prefix_caching=False,
         gpu_memory_utilization=gpu_memory_utilization,
@@ -352,7 +352,7 @@ def _print_report(cfg: dict, results: list[Metrics]) -> None:
         print(row.format(m.engine, f"{m.ttft_s:.4f}", f"{m.tpot_ms:.3f}",
                          f"{m.tps:.2f}", f"{m.tgs:.2f}", m.output_tokens))
     by_engine = {m.engine: m for m in results}
-    lite, hf = by_engine.get("lite_llama"), by_engine.get("transformers")
+    lite, hf = by_engine.get("rapid_llm"), by_engine.get("transformers")
     if hf is not None and lite is not None and hf.tpot_ms and lite.tpot_ms:
         print(f"\nspeedup vs transformers  TGS {lite.tgs / hf.tgs:.2f}x   "
               f"TPOT {hf.tpot_ms / lite.tpot_ms:.2f}x   TTFT {hf.ttft_s / lite.ttft_s:.2f}x")
@@ -365,7 +365,7 @@ def _print_report(cfg: dict, results: list[Metrics]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--model", default="my_weight/Qwen2.5-1.5B-Instruct",
-                        help="Checkpoint dir (shared by lite_llama and transformers)")
+                        help="Checkpoint dir (shared by rapid_llm and transformers)")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--gen-len", type=int, default=128)
     parser.add_argument("--iters", type=int, default=2, help="Timed repeats (median reported)")
@@ -375,9 +375,9 @@ def main() -> None:
              "checkpoints (on GPUs without native fp8 it dequantises to the config dtype)",
     )
     parser.add_argument(
-        "--engine", choices=["both", "lite_llama", "transformers", "vllm", "all"],
+        "--engine", choices=["both", "rapid_llm", "transformers", "vllm", "all"],
         default="both",
-        help="which side to measure; use lite_llama one-sided for checkpoints whose "
+        help="which side to measure; use rapid_llm one-sided for checkpoints whose "
              "quantisation transformers cannot load here (AWQ needs gptqmodel/autoawq); "
              "vllm runs in whichever interpreter has it installed (its own venv, not "
              "this project's), so it is typically a separate invocation",
@@ -414,13 +414,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--max-gpu-num-blocks", type=int, default=None,
-        help="KV pool size in tokens for lite_llama; profile-based when omitted. "
+        help="KV pool size in tokens for rapid_llm; profile-based when omitted. "
              "Shrink for checkpoints near the device budget (e.g. 16384 for 8B bf16 "
              "on a 22 GiB card, where profiling leaves the pool too small for graph capture)",
     )
     parser.add_argument(
         "--tensor-parallel-size", type=int, default=1,
-        help="GPUs to split the lite_llama replica's weights over (e.g. 2 to fit "
+        help="GPUs to split the rapid_llm replica's weights over (e.g. 2 to fit "
              "an 8B bf16 checkpoint's b16 budget on two 22 GiB cards). Decode keeps "
              "its CUDA graphs under TP: every rank replays the same captured grid "
              "in lockstep, NCCL all-reduce included. The transformers baseline then "
@@ -428,7 +428,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--no-cuda-graph", action="store_true",
-        help="Run lite_llama decode eager instead of replaying captured graphs. "
+        help="Run rapid_llm decode eager instead of replaying captured graphs. "
              "Needed for models whose decode keeps Python-side state (deepseek_v4 "
              "rebinds its sliding-window cache every step, which capture cannot "
              "replay)",
@@ -442,8 +442,8 @@ def main() -> None:
     hf_overrides = json.loads(args.hf_overrides) if args.hf_overrides else None
 
     results: list[Metrics] = []
-    if args.engine in ("both", "all", "lite_llama"):
-        results.append(bench_lite_llama(
+    if args.engine in ("both", "all", "rapid_llm"):
+        results.append(bench_rapid_llm(
             args.model, prompts, args.gen_len, args.iters, device,
             args.max_gpu_num_blocks, args.tensor_parallel_size, hf_overrides,
             use_cuda_graph=not args.no_cuda_graph,

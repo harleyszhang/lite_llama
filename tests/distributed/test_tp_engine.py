@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 import torch.multiprocessing as mp
 
-from lite_llama import SamplingParams
+from rapid_llm import SamplingParams
 from tests.distributed.tp_harness import needs_gpus
 
 pytestmark = [pytest.mark.gpu, pytest.mark.weights, pytest.mark.slow]
@@ -105,7 +105,7 @@ def _probe(spec: dict[str, Any], results: mp.Queue) -> None:
     time out, because a rank that dies during rendezvous takes the group with it.
     """
     try:
-        from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
+        from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 
         engine = ContinuousBatchingEngine.from_pretrained(
             model=spec["model"],
@@ -182,7 +182,7 @@ def _async_probe(spec: dict[str, Any], results: mp.Queue) -> None:
     """Serve :data:`_ONLINE` concurrently from a two-rank async engine.
 
     Online serving puts tensor parallelism somewhere the offline path never does:
-    :class:`~lite_llama.engine.async_engine.AsyncLLMEngine` steps the engine on a
+    :class:`~rapid_llm.engine.async_engine.AsyncLLMEngine` steps the engine on a
     background thread, so every plan broadcast and every NCCL collective is issued
     off the main thread while coroutines register requests concurrently. That the
     ranks stay in step there is a separate fact from the arithmetic, and it is what
@@ -191,7 +191,7 @@ def _async_probe(spec: dict[str, Any], results: mp.Queue) -> None:
     try:
         import asyncio
 
-        from lite_llama.engine.async_engine import AsyncLLMEngine
+        from rapid_llm.engine.async_engine import AsyncLLMEngine
 
         async def serve() -> list[str]:
             engine = AsyncLLMEngine.from_pretrained(
@@ -501,13 +501,13 @@ def test_shutdown_returns_the_process_to_a_world_of_one(model_dir: Path):
     follower processes, so both halves have to go in ``shutdown``. Left
     standing, the stale group makes the next engine in this process — the
     benchmark that measures TP=2 then TP=1, the golden test that loads
-    transformers after lite_llama — read a TP size nobody asked for. The
+    transformers after rapid_llm — read a TP size nobody asked for. The
     probes above cannot catch this: each runs in a spawned process whose
     module state dies with it; only this test holds the engine in the test
     process itself.
     """
-    from lite_llama.distributed import parallel_state as ps
-    from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
+    from rapid_llm.distributed import parallel_state as ps
+    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 
     engine = ContinuousBatchingEngine.from_pretrained(
         model=str(model_dir),

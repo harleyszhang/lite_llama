@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from lite_llama import SamplingParams, TextGenerator
+from rapid_llm import SamplingParams, TextGenerator
 
 pytestmark = [pytest.mark.gpu, pytest.mark.weights]
 

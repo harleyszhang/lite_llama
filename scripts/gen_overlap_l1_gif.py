@@ -1,7 +1,7 @@
 """Record the L1 cross-stream overlap GIF: input uploads overlap the prior forward.
 
-Drives a real :class:`~lite_llama.engine.continuous_engine.ContinuousBatchingEngine`
-with ``LITE_LLAMA_OVERLAP_TIMELINE=1`` over a workload built to contain mixed
+Drives a real :class:`~rapid_llm.engine.continuous_engine.ContinuousBatchingEngine`
+with ``RAPID_LLM_OVERLAP_TIMELINE=1`` over a workload built to contain mixed
 prefill/decode steps (long prompts, a small per-step token budget). Every region
 rendered is a CUDA-event measurement taken from the engine's own timeline: copy
 regions are the pinned-staging H2D uploads issued on the copy stream, compute
@@ -26,7 +26,7 @@ from PIL import Image, ImageDraw, ImageFont
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from lite_llama.batch_overlap.overlap import RegionRecord  # noqa: E402
+from rapid_llm.batch_overlap.overlap import RegionRecord  # noqa: E402
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
@@ -45,10 +45,10 @@ LABEL_W = 110
 
 def record(model_dir: str):
     """Run a small mixed-step workload and return the timeline regions."""
-    os.environ["LITE_LLAMA_OVERLAP"] = "1"
-    os.environ["LITE_LLAMA_OVERLAP_TIMELINE"] = "1"
-    from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
-    from lite_llama.engine.sampler import SamplingParams
+    os.environ["RAPID_LLM_OVERLAP"] = "1"
+    os.environ["RAPID_LLM_OVERLAP_TIMELINE"] = "1"
+    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+    from rapid_llm.engine.sampler import SamplingParams
 
     engine = ContinuousBatchingEngine.from_pretrained(
         model_dir,
@@ -121,7 +121,7 @@ def render(records, t0: float, scale: float, fonts, note: str) -> Image.Image:
     draw = ImageDraw.Draw(canvas)
 
     draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
-    draw.text((12, 9), "lite-llama  —  L1 cross-stream overlap (copy stream vs compute stream)", fill=TITLE_FG, font=small)
+    draw.text((12, 9), "rapid-llm  —  L1 cross-stream overlap (copy stream vs compute stream)", fill=TITLE_FG, font=small)
     for index, colour in enumerate([(245, 99, 72), (253, 188, 64), (94, 193, 117)]):
         draw.ellipse([W - 78 + index * 18, 11, W - 68 + index * 18, 21], fill=colour)
 
@@ -164,7 +164,7 @@ def main() -> int:
     records = record(args.model_dir)
     window, t0, t1, overlapped = window_around_first_overlap(records)
     if not window:
-        print("no timeline regions recorded; is LITE_LLAMA_OVERLAP_TIMELINE=1 reachable?")
+        print("no timeline regions recorded; is RAPID_LLM_OVERLAP_TIMELINE=1 reachable?")
         return 1
     # Present regions relative to the window, so the overlapping forward's
     # bar visibly continues past both edges instead of starting at the origin.

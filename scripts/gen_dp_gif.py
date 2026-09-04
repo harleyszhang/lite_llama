@@ -29,10 +29,10 @@ from PIL import Image, ImageDraw, ImageFont
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from lite_llama.engine.continuous_engine import ContinuousBatchingEngine  # noqa: E402
-from lite_llama.engine.dp_load_balancer import RoundRobinBalancer  # noqa: E402
-from lite_llama.engine.sampler import SamplingParams  # noqa: E402
-from lite_llama.utils.prompt_templates import get_prompter  # noqa: E402
+from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine  # noqa: E402
+from rapid_llm.engine.dp_load_balancer import RoundRobinBalancer  # noqa: E402
+from rapid_llm.engine.sampler import SamplingParams  # noqa: E402
+from rapid_llm.utils.prompt_templates import get_prompter  # noqa: E402
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
@@ -132,7 +132,7 @@ def render(step: int, lanes: list[LaneStep], fonts, model_name: str) -> Image.Im
 
     draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
     draw.text(
-        (12, 9), f"lite-llama  —  data parallelism  ({model_name})", fill=TITLE_FG, font=small
+        (12, 9), f"rapid-llm  —  data parallelism  ({model_name})", fill=TITLE_FG, font=small
     )
     for index, colour in enumerate([(245, 99, 72), (253, 188, 64), (94, 193, 117)]):
         draw.ellipse([W - 78 + index * 18, 11, W - 68 + index * 18, 21], fill=colour)
@@ -140,7 +140,7 @@ def render(step: int, lanes: list[LaneStep], fonts, model_name: str) -> Image.Im
     y = TITLE_H + PAD
     draw.text(
         (PAD, y),
-        f"$ lite-llama batch --data-parallel-size {DP_SIZE}   # round-robin routing",
+        f"$ rapid-llm batch --data-parallel-size {DP_SIZE}   # round-robin routing",
         fill=PROMPT_FG,
         font=body,
     )

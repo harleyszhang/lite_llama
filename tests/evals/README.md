@@ -2,7 +2,7 @@
 
 对齐 vLLM `tests/evals/` 的精度回归套件：数据集 → 提示词 → 生成 → 打分 →
 与 `configs/*.yaml` 里声明的阈值比对。区别只在执行路径 —— vLLM 起一个 server 走
-OpenAI HTTP，lite_llama 没有 server，所以直接驱动离线的 `LLM.generate()`。
+OpenAI HTTP，rapid_llm 没有 server，所以直接驱动离线的 `LLM.generate()`。
 
 目前实现了 GSM8K（小学数学应用题，5-shot，取答案里最后一个整数做精确匹配）。
 
@@ -67,7 +67,7 @@ cache —— 对 server 是对的，对 benchmark 是灾难：prefill 阶段 `lm
 按这个精确上界给，剩下的显存留给 logits。顺带把跑分变成了跨机器可复现的 ——
 profile 出来的大小取决于当时显卡上还驻留着什么。
 
-**采样默认值要关掉。** lite_llama 的 `SamplingParams` 默认
+**采样默认值要关掉。** rapid_llm 的 `SamplingParams` 默认
 `repetition_penalty=1.1`、`stop_on_repeat=True`，这两个都是为交互式聊天准备的
 （小模型容易进复读循环）。评估要的是原始 argmax，两个都开着测的就不是模型本身而是
 解码策略，所以 `runner.greedy_params()` 统一关掉。
@@ -75,10 +75,10 @@ profile 出来的大小取决于当时显卡上还驻留着什么。
 ## 数据集缓存
 
 首次运行会把 GSM8K 的 `train.jsonl` / `test.jsonl` 下到
-`~/.cache/lite_llama/evals/gsm8k/`。两个环境变量可以改这个行为：
+`~/.cache/rapid_llm/evals/gsm8k/`。两个环境变量可以改这个行为：
 
-- `LITE_LLAMA_EVAL_DATA_DIR`：缓存目录；
-- `LITE_LLAMA_EVAL_BASE_URL`：下载源，用于换镜像或离线机器自建服务。
+- `RAPID_LLM_EVAL_DATA_DIR`：缓存目录；
+- `RAPID_LLM_EVAL_BASE_URL`：下载源，用于换镜像或离线机器自建服务。
 
 离线且没有预置缓存时，GPU 层用例 skip 而不是 fail —— 一台连不上网的 CI 机器该报
 "没有数据集"，不该报"模型精度掉了"。

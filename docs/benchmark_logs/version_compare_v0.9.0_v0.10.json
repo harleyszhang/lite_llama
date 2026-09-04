@@ -1,6 +1,6 @@
 {
   "config": {
-    "note": "identical measurement script run against both worktrees; only lite_llama differs",
+    "note": "identical measurement script run against both worktrees; only rapid_llm differs",
     "model": "my_weight/Qwen3-0.6B",
     "batch": 16,
     "gen_len": 128,

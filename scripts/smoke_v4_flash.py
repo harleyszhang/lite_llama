@@ -22,11 +22,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests" / "distr
 
 from tp_harness import needs_gpus, run_on_tp_ranks
 
-from lite_llama.executor.attention_metadata import AttentionMetadata
-from lite_llama.executor.loader import materialise_parameters
-from lite_llama.executor.weight_utils import hf_weights_iterator
-from lite_llama.models.config import ModelConfig
-from lite_llama.models.registry import ModelRegistry
+from rapid_llm.executor.attention_metadata import AttentionMetadata
+from rapid_llm.executor.loader import materialise_parameters
+from rapid_llm.executor.weight_utils import hf_weights_iterator
+from rapid_llm.models.config import ModelConfig
+from rapid_llm.models.registry import ModelRegistry
 
 
 def _v4_payload(rank: int) -> dict:

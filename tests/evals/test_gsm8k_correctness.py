@@ -27,7 +27,7 @@ def test_gsm8k_correctness(config_filename: Path):
     config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
 
     # Configs name their own checkpoint, so the suite-wide `weights` gate (which
-    # only knows about LITE_LLAMA_TEST_MODEL_DIR) is not enough.
+    # only knows about RAPID_LLM_TEST_MODEL_DIR) is not enough.
     model_dir = resolve_model_dir(config["model_dir"])
     problem = checkpoint_problem(model_dir)
     if problem:

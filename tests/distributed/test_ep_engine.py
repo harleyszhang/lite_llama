@@ -9,8 +9,8 @@ across two ranks in three configurations and holds them against each other:
                 :mod:`tests.golden.test_deepseek_v2_tp2` own its correctness);
 * ``ep2``     — ``enable_expert_parallel=True``, experts split whole across the
                 ranks, the ``SparseMoeBlock.forward`` dispatch/combine path;
-* ``ep2_tbo`` — the same, with ``LITE_LLAMA_TBO`` on, so decode runs the
-                :mod:`~lite_llama.batch_overlap.operations_strategy` op stream
+* ``ep2_tbo`` — the same, with ``RAPID_LLM_TBO`` on, so decode runs the
+                :mod:`~rapid_llm.batch_overlap.operations_strategy` op stream
                 (dispatch_a / shared / dispatch_b / experts / combine_a /
                 combine_b) with the two halves' all-to-all exchanges overlapped;
 * ``ep2_graph`` — the same EP forward with decode CUDA graphs on, so the
@@ -40,7 +40,7 @@ Usage:
     pytest tests/distributed/test_ep_engine.py
 
 Needs the DeepSeek-V2-Lite checkpoint under ``my_weight/`` (override with
-``LITE_LLAMA_TEST_DSV2_DIR``) and two CUDA devices.
+``RAPID_LLM_TEST_DSV2_DIR``) and two CUDA devices.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
-from lite_llama import SamplingParams
+from rapid_llm import SamplingParams
 from tests.conftest import REPO_ROOT, checkpoint_problem
 from tests.distributed.tp_harness import needs_gpus
 
@@ -89,7 +89,7 @@ _GREEDY = SamplingParams(
 )
 
 #: Enough prompts that a decode step carries more rows than
-#: ``LITE_LLAMA_TBO_MIN_ROWS`` (set to 2 below), so the ``ep2_tbo`` probe really
+#: ``RAPID_LLM_TBO_MIN_ROWS`` (set to 2 below), so the ``ep2_tbo`` probe really
 #: runs the overlapped op stream rather than silently falling back to eager.
 _PROMPTS = [
     "The capital of France is",
@@ -118,7 +118,7 @@ def _probe(spec: dict[str, Any], results: mp.Queue) -> None:
     """Build one two-rank engine of the requested flavour, answer, report facts.
 
     Runs in a spawned process, so it takes only picklable arguments. The TBO env
-    is set before the engine is built — :func:`~lite_llama.batch_overlap.
+    is set before the engine is built — :func:`~rapid_llm.batch_overlap.
     two_batch_overlap.tbo_policy` reads and caches it on first use in the worker,
     and the follower ranks this process spawns inherit it. A build failure is
     reported as a traceback rather than left to time out: a rank that dies during
@@ -126,9 +126,9 @@ def _probe(spec: dict[str, Any], results: mp.Queue) -> None:
     """
     try:
         if spec["tbo"]:
-            os.environ["LITE_LLAMA_TBO"] = "1"
-            os.environ["LITE_LLAMA_TBO_MIN_ROWS"] = "2"
-        from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
+            os.environ["RAPID_LLM_TBO"] = "1"
+            os.environ["RAPID_LLM_TBO_MIN_ROWS"] = "2"
+        from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 
         engine = ContinuousBatchingEngine.from_pretrained(
             model=spec["model"],
@@ -217,7 +217,7 @@ def _ep_problem(path: Path) -> str | None:
 @pytest.fixture(scope="module")
 def dsv2_dir() -> Path:
     """The checkpoint under test, under the golden gate's no-silent-skip policy."""
-    path = Path(os.environ.get("LITE_LLAMA_TEST_DSV2_DIR", _DSV2))
+    path = Path(os.environ.get("RAPID_LLM_TEST_DSV2_DIR", _DSV2))
     if not path.is_absolute():
         path = REPO_ROOT / path
     problem = _ep_problem(path)

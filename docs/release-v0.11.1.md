@@ -105,12 +105,12 @@ router tier-4 演进的 e2e A/B（Qwen3-30B-A3B-FP8，同一棵树 monkey-patch 
 ## 文件清单
 
 ```text
-lite_llama/modules/moe.py                        优化 A：_gate_weight_fp32 lazy 缓存（后演进为 tier-4 out_dtype GEMM）
-lite_llama/modules/attention.py                  优化 B：_kv_view_pair 身份感知缓存
-lite_llama/executor/executor.py                  死锁修复：销毁顺序 + barrier + 时限 + abandon
-lite_llama/distributed/parallel_state.py         新 API：tensor_model_parallel_barrier / abandon_parallel
-lite_llama/engine/continuous_engine.py           kv_fp8 封装泄漏修复
-lite_llama/kernels/ops/quantization/__init__.py  per_token_group_quant 导出
+rapid_llm/modules/moe.py                        优化 A：_gate_weight_fp32 lazy 缓存（后演进为 tier-4 out_dtype GEMM）
+rapid_llm/modules/attention.py                  优化 B：_kv_view_pair 身份感知缓存
+rapid_llm/executor/executor.py                  死锁修复：销毁顺序 + barrier + 时限 + abandon
+rapid_llm/distributed/parallel_state.py         新 API：tensor_model_parallel_barrier / abandon_parallel
+rapid_llm/engine/continuous_engine.py           kv_fp8 封装泄漏修复
+rapid_llm/kernels/ops/quantization/__init__.py  per_token_group_quant 导出
 pyproject.toml                                   pytest --import-mode=importlib 补回
 tests/golden/test_deepseek_trimmed_parity.py     硬编码路径改相对
 docs/benchmark_logs/optim_ab_h100_20260903.json  A/B benchmark 日志

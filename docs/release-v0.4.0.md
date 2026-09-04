@@ -6,7 +6,7 @@
 
 ## Summary
 
-v0.4.0 建立 lite_llama 的可信基线：量化子系统从 `models/quantization` 迁移到 `modules/quantization`，对齐 sglang 架构、新增 AWQ/GPTQ/W8A8 的 MoE Method 支持（含 INT4 packed weights）；golden 回归门禁升级为显式 UNVERIFIED 状态（不再静默 skip）；TP 模式下的非 greedy 采样 RNG 同步通过 rank0 broadcast 解决。
+v0.4.0 建立 rapid_llm 的可信基线：量化子系统从 `models/quantization` 迁移到 `modules/quantization`，对齐 sglang 架构、新增 AWQ/GPTQ/W8A8 的 MoE Method 支持（含 INT4 packed weights）；golden 回归门禁升级为显式 UNVERIFIED 状态（不再静默 skip）；TP 模式下的非 greedy 采样 RNG 同步通过 rank0 broadcast 解决。
 
 ## 1. Feature: 量化模块架构重构 (sglang aligned)
 
@@ -14,7 +14,7 @@ v0.4.0 建立 lite_llama 的可信基线：量化子系统从 `models/quantizati
 
 | Before (v0.3.x) | After (v0.4.0) |
 | ------------------ | ---------------- |
-| `lite_llama/models/quantization/` (分散式) | `lite_llama/modules/quantization/` (集中式) |
+| `rapid_llm/models/quantization/` (分散式) | `rapid_llm/modules/quantization/` (集中式) |
 | 无 MoE 量化 Method | `AWQMoEMethod`, `GPTQMoEMethod`, `W8A8Fp8MoEMethod`, `W8A8Int8MoEMethod` |
 | `GPTQLinearMethod` 继承自 `AWQLinearMethod` | 独立实现，各有自己的 `create_weights`/`apply` |
 | 无 INT4 MoE 支持 | `fused_moe` kernel 支持 int4 packed weight nibble extraction |
@@ -28,7 +28,7 @@ v0.4.0 建立 lite_llama 的可信基线：量化子系统从 `models/quantizati
 **新架构目录：**
 
 ```
-lite_llama/modules/quantization/
+rapid_llm/modules/quantization/
 ├── __init__.py            # 注册表 + 工厂函数
 ├── base_config.py         # ABC: QuantizationConfig / LinearMethodBase / FusedMoEMethodBase
 ├── fp8.py                 # Fp8Config + Fp8LinearMethod + Fp8MoEMethod
@@ -54,7 +54,7 @@ lite_llama/modules/quantization/
 **使用方式：**
 
 ```python
-from lite_llama.kernels.fused_moe import fused_moe
+from rapid_llm.kernels.fused_moe import fused_moe
 
 out = fused_moe(
     x, w1_packed_int32, w2_packed_int32, topk_weights, topk_ids,
@@ -71,7 +71,7 @@ out = fused_moe(
 **修复后：**
 
 - Golden 测试使用 `xfail(reason="UNVERIFIED: no CUDA device", run=False)` → CI 显示为 xfail（黄色/橙色），**不会**被误认为已验证。
-- 设置 `LITE_LLAMA_GOLDEN_STRICT=1` 时升级为 `strict=True` → hard FAIL。
+- 设置 `RAPID_LLM_GOLDEN_STRICT=1` 时升级为 `strict=True` → hard FAIL。
 - `cases.py` 新增 `CB_CASES`（连续批处理路径）和 `QUANT_CASES` + `QUANT_SCHEMES`（量化路径覆盖）。
 - `scripts/golden_tokens.py` 支持 `--batch-save --models` 多模型批量重录和 `--all-schemes` 全量化方案录制。
 
@@ -79,7 +79,7 @@ out = fused_moe(
 
 ```bash
 # 无 GPU CI 上的表现
-LITE_LLAMA_GOLDEN_STRICT=1 pytest tests/golden/ -v
+RAPID_LLM_GOLDEN_STRICT=1 pytest tests/golden/ -v
 # 输出: XFAIL (UNVERIFIED: no CUDA device) — 非绿色
 
 # 多模型批量重录
@@ -94,12 +94,12 @@ python scripts/golden_tokens.py --batch-save \
 **修复后：** Rank 0 采样后通过 `broadcast_tp(next_token)` 广播给所有 TP rank：
 
 ```python
-# lite_llama/distributed/parallel_state.py
+# rapid_llm/distributed/parallel_state.py
 def broadcast_tp(tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
     """Broadcast tensor from TP-local src to all TP ranks."""
     ...
 
-# lite_llama/engine/llm_engine.py (decode loop)
+# rapid_llm/engine/llm_engine.py (decode loop)
 next_token = engine.sampler.sample(logits, params, generated).reshape(-1)
 if get_tp_world_size() > 1:
     next_token = broadcast_tp(next_token)
@@ -180,8 +180,8 @@ uv pip install -e .
 
 ```python
 # Before (v0.3.x)
-from lite_llama.models.quantization import ...
+from rapid_llm.models.quantization import ...
 
 # After (v0.4.0)
-from lite_llama.modules.quantization import ...
+from rapid_llm.modules.quantization import ...
 ```

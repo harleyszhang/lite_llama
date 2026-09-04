@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from microbench import Row, Work, bench, metadata, report, require_cuda, verify
 
-from lite_llama.kernels.ops.activation.swiglu import swiglu_forward
+from rapid_llm.kernels.ops.activation.swiglu import swiglu_forward
 
 #: Grouped-pid tile sizes, shared by every launch below (bumping these is part
 #: of tuning the kernel, not of running the benchmark).

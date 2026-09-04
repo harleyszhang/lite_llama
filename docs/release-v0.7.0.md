@@ -38,7 +38,7 @@ v0.7.0 升级调度器（参考 vLLM Scheduler v1），引入三项能力：
 **使用方式：**
 
 ```python
-from lite_llama.engine.scheduler import Scheduler, SchedulerConfig
+from rapid_llm.engine.scheduler import Scheduler, SchedulerConfig
 
 config = SchedulerConfig(
     max_seq_len=4096,
@@ -79,7 +79,7 @@ sched = Scheduler(config, num_slots=64)
 **使用方式：**
 
 ```python
-from lite_llama.engine.scheduler import Scheduler, SchedulerConfig
+from rapid_llm.engine.scheduler import Scheduler, SchedulerConfig
 
 config = SchedulerConfig(
     max_seq_len=4096,
@@ -91,7 +91,7 @@ sched = Scheduler(config, num_slots=64)
 print(f"prefix cache hit rate: {sched.prefix_cache_hit_rate:.1%}")
 ```
 
-实现见 [`lite_llama/engine/prefix_cache.py`](../lite_llama/engine/prefix_cache.py)（`PrefixCache` 类：`query` / `register` / `release` + 引用计数驱逐）。
+实现见 [`rapid_llm/engine/prefix_cache.py`](../rapid_llm/engine/prefix_cache.py)（`PrefixCache` 类：`query` / `register` / `release` + 引用计数驱逐）。
 
 ## 3. Feature: Preemption (Recompute Strategy)
 
@@ -176,7 +176,7 @@ print(f"total preemptions: {sched.num_preemptions}")
 
 ## 7. 设计参考 (vLLM)
 
-| lite_llama v0.7 | vLLM 对应 | 说明 |
+| rapid_llm v0.7 | vLLM 对应 | 说明 |
 | ----------------- | ----------- | ------ |
 | `SchedulerConfig.max_chunk_size` | `SchedulerConfig.max_num_batched_tokens` | 控制 prefill 粒度 |
 | `PrefixCache` (block-hash 链式) | `BlockHashType` + `KVCacheManager` prefix cache | 共享前缀 KV 复用 |
@@ -190,7 +190,7 @@ print(f"total preemptions: {sched.num_preemptions}")
 git checkout prefix_caching && uv pip install -e .
 
 # 启用 chunked prefill (默认 512 tokens/chunk)
-lite-llama serve --port 8000  # scheduler 自动使用 chunked prefill
+rapid-llm serve --port 8000  # scheduler 自动使用 chunked prefill
 
 # 启用 prefix caching + 自定义 chunk 大小
 # SchedulerConfig(max_chunk_size=256, enable_prefix_cache=True)

@@ -13,13 +13,13 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
-from lite_llama.tools.observability.metrics import (
+from rapid_llm.tools.observability.metrics import (
     Counter,
     EngineMetrics,
     Gauge,
     Histogram,
 )
-from lite_llama.tools.observability.trace import Tracer
+from rapid_llm.tools.observability.trace import Tracer
 
 
 def test_counter_accumulates_per_label_set():
@@ -76,14 +76,14 @@ def test_observe_finish_records_the_full_latency_breakdown():
 
     text = metrics.render_prometheus()
     # 10 prompt tokens, 4 generated tokens, one eos finish.
-    assert "lite_llama:request_prompt_tokens_count 1" in text
-    assert "lite_llama:prompt_tokens_total 10" in text
-    assert "lite_llama:generation_tokens_total 4" in text
-    assert 'lite_llama:request_success_total{finish_reason="eos"} 1' in text
+    assert "rapid_llm:request_prompt_tokens_count 1" in text
+    assert "rapid_llm:prompt_tokens_total 10" in text
+    assert "rapid_llm:generation_tokens_total 4" in text
+    assert 'rapid_llm:request_success_total{finish_reason="eos"} 1' in text
     # TTFT = first_token - arrival = 1.0s; TPOT = (104 - 101) / (4 - 1) = 1.0s.
     # (The renderer trims integral floats, so the sums render as "1".)
-    assert "lite_llama:time_to_first_token_seconds_sum 1\n" in text
-    assert "lite_llama:time_per_output_token_seconds_sum 1\n" in text
+    assert "rapid_llm:time_to_first_token_seconds_sum 1\n" in text
+    assert "rapid_llm:time_per_output_token_seconds_sum 1\n" in text
 
 
 def test_a_one_token_completion_has_no_tpot_gap():
@@ -105,7 +105,7 @@ def test_queue_time_is_observed_only_when_scheduled():
 
 
 def test_disabled_metrics_are_noops_that_render_nothing(monkeypatch):
-    monkeypatch.setenv("LITE_LLAMA_METRICS", "0")
+    monkeypatch.setenv("RAPID_LLM_METRICS", "0")
     metrics = EngineMetrics.from_env()
 
     assert not metrics.enabled
@@ -115,15 +115,15 @@ def test_disabled_metrics_are_noops_that_render_nothing(monkeypatch):
 
 
 def test_metrics_default_on_and_honour_the_env(monkeypatch):
-    monkeypatch.delenv("LITE_LLAMA_METRICS", raising=False)
+    monkeypatch.delenv("RAPID_LLM_METRICS", raising=False)
     assert EngineMetrics.from_env().enabled
 
-    monkeypatch.setenv("LITE_LLAMA_METRICS", "off")
+    monkeypatch.setenv("RAPID_LLM_METRICS", "off")
     assert not EngineMetrics.from_env().enabled
 
 
 def test_tracer_without_an_endpoint_is_a_noop(monkeypatch):
-    monkeypatch.delenv("LITE_LLAMA_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("RAPID_LLM_OTLP_ENDPOINT", raising=False)
     tracer = Tracer.from_env()
 
     assert not tracer.enabled
@@ -133,7 +133,7 @@ def test_tracer_without_an_endpoint_is_a_noop(monkeypatch):
 
 def test_tracer_with_an_endpoint_but_no_sdk_degrades(monkeypatch):
     """An endpoint without the SDK warns and stays off — never an engine fault."""
-    monkeypatch.setenv("LITE_LLAMA_OTLP_ENDPOINT", "http://localhost:4318")
+    monkeypatch.setenv("RAPID_LLM_OTLP_ENDPOINT", "http://localhost:4318")
     monkeypatch.setitem(sys.modules, "opentelemetry", None)  # force ImportError
 
     tracer = Tracer.from_env()

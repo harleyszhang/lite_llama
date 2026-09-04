@@ -190,7 +190,7 @@ def evaluate_gsm8k(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="GSM8K accuracy evaluation for lite_llama")
+    ap = argparse.ArgumentParser(description="GSM8K accuracy evaluation for rapid_llm")
     ap.add_argument("--model-dir", default="my_weight/Qwen2.5-0.5B")
     ap.add_argument("--num-questions", type=int, default=1319)
     ap.add_argument("--num-shots", type=int, default=5)

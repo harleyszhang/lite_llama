@@ -48,7 +48,7 @@ plan 是 Python 对象而 NCCL 只能搬显存，用它传 plan 就得把每个 
 
 **rendezvous 端口自选**：固定 29500 有两个都表现为"挂在 rendezvous"的坑（同机双引擎撞端口、崩溃残留 socket）。`free_port()` 向内核要空闲端口，放在生产代码里、测试 harness 反过来 import 它，让"怎么选端口"只有一处定义。
 
-`lite_llama/cli.py` 里的镜像进程 TP 路径整段删除；`vl-chat` 的 `--tensor-parallel-size > 1` 改为直接报错退出，而不是留一个"假装 TP"的参数。
+`rapid_llm/cli.py` 里的镜像进程 TP 路径整段删除；`vl-chat` 的 `--tensor-parallel-size > 1` 改为直接报错退出，而不是留一个"假装 TP"的参数。
 
 ### A.4 Feature: A11 并行 module 补齐
 
@@ -70,7 +70,7 @@ plan 是 Python 对象而 NCCL 只能搬显存，用它传 plan 就得把每个 
 
 ![tensor parallel](./images/tensor_parallel.gif)
 
-`with record_collectives() as ledger:` 打开一本账，每个集合通信把自己的 op 与 payload 报进去（`lite_llama/distributed/collective_log.py`）。四个设计点：**窗口式不是全局的**（没人开窗时埋点代价就是一个 `if`）、**窗口可嵌套且事件计入所有打开的窗口**（per-step 套在 whole-run 里，一趟拿两份数据，调用方不做减法）、**plane 是 op 的属性不是调用点的属性**、**记账点在 world-of-one 早退之后**（单卡 no-op collective 不搬字节，记它就是在量调用点而不是量线路）。
+`with record_collectives() as ledger:` 打开一本账，每个集合通信把自己的 op 与 payload 报进去（`rapid_llm/distributed/collective_log.py`）。四个设计点：**窗口式不是全局的**（没人开窗时埋点代价就是一个 `if`）、**窗口可嵌套且事件计入所有打开的窗口**（per-step 套在 whole-run 里，一趟拿两份数据，调用方不做减法）、**plane 是 op 的属性不是调用点的属性**、**记账点在 world-of-one 早退之后**（单卡 no-op collective 不搬字节，记它就是在量调用点而不是量线路）。
 
 实测一次真实 tp=2 运行（Qwen2.5-1.5B-Instruct，4 条 prompt，24 步，rank 0 视角）：
 
@@ -116,7 +116,7 @@ weak scaling 拿到满格 ×2.00（100% 线性）——每个副本干一份独�
 - 删 `skip_rmsnorm_no_view` 及其 kernel（106 行，与主路径重复）、`BackendRegistry.list_all`、`kernels/utils.py::compare_version`、`image_process.py::{load_image_from_base64, vis_images}`（后者用 `os.system` 拼文件名调外部预览器）。
 - `tools/profiling/structure.py` 里躺着两个树渲染器：正确的那个零调用，被调用的那个为每个 grandchild 算出连接符后**丢掉不用**——第二层起没有分支符号，`docs/release-v0.6.0.md` 里记录的输出示例是当前代码画不出来的。改为单一递归，规则只有一条：子节点继承父的 prefix，父后面还有兄弟就加竖线，父已封口就加空隙。
 - `tools/profiling/memory.py` 的 12 字段签名写了三遍 → 收进 `ModelShape` 一处；`total_bytes` 由存储字段改 property（消掉 sum 的第二真相源）；补上 `tie_word_embeddings`——不处理它会让小模型的权重**多报三分之一**。两个模块此前零测试，现有 13 个（树逐 glyph 断言，预算对手算字节数断言）。
-- 清掉 `lite_llama/kernels/` 累积的 lint：pre-commit hook 只跑改动文件，所以未改动文件上新生效的规则长期无人发现，而 `make lint` 是全仓 `ruff check .`——门禁已经悄悄变红。
+- 清掉 `rapid_llm/kernels/` 累积的 lint：pre-commit hook 只跑改动文件，所以未改动文件上新生效的规则长期无人发现，而 `make lint` 是全仓 `ruff check .`——门禁已经悄悄变红。
 
 ## Part B — Kernel Backend Registry（`op_register` 线）
 
@@ -152,13 +152,13 @@ GIF 由 `scripts/gen_backend_registry_gif.py` 驱动**真实 BackendRegistry** �
 
 1. `--op linear`：A10 (sm86) 上 `fp8_native` 探测为 N/A，`triton_quant` 按优先级胜出
 2. `--op attention`：选中 Triton FlashAttention-2，而非 torch SDPA
-3. `LITE_LLAMA_LINEAR_BACKEND=torch_linear`：一个环境变量把箭头钉到 fallback，无需改代码
-4. `LITE_LLAMA_LINEAR_BACKEND=cutlass`：未知后端不崩溃，registry 告警并回退到 triton_quant
+3. `RAPID_LLM_LINEAR_BACKEND=torch_linear`：一个环境变量把箭头钉到 fallback，无需改代码
+4. `RAPID_LLM_LINEAR_BACKEND=cutlass`：未知后端不崩溃，registry 告警并回退到 triton_quant
 
 ### 实测输出（A10, sm86）
 
 ```text
-$ python -c "from lite_llama.kernels.backends import explain_selection; print(explain_selection('linear'))"
+$ python -c "from rapid_llm.kernels.backends import explain_selection; print(explain_selection('linear'))"
 Backend 'linear' selection:
   [fp8_native] pri=110 N/A (Native fp8 tensor cores (sm89+))
   [triton_quant] pri=100 OK (Triton w8a16/w4a16/w8a8/fp8 quantised GEMM)
@@ -197,19 +197,19 @@ Backend 'linear' selection:
 
 | 操作 | 路径 |
 | ------ | ------ |
-| 新建 | `lite_llama/executor/executor.py`（Executor / UniProc / Multiproc / serve_plans） |
-| 新建 | `lite_llama/executor/worker.py`（ModelInput / ModelWorker / PassKind） |
-| 新建 | `lite_llama/modules/vocab_parallel.py`（VocabParallelEmbedding / ParallelLMHead） |
-| 新建 | `lite_llama/kernels/vocab_embedding.py` |
-| 新建 | `lite_llama/distributed/collective_log.py` |
+| 新建 | `rapid_llm/executor/executor.py`（Executor / UniProc / Multiproc / serve_plans） |
+| 新建 | `rapid_llm/executor/worker.py`（ModelInput / ModelWorker / PassKind） |
+| 新建 | `rapid_llm/modules/vocab_parallel.py`（VocabParallelEmbedding / ParallelLMHead） |
+| 新建 | `rapid_llm/kernels/vocab_embedding.py` |
+| 新建 | `rapid_llm/distributed/collective_log.py` |
 | 新建 | `docs/tensor_parallel.md`、`docs/images/tensor_parallel.gif`、`scripts/gen_collective_gif.py` |
 | 新建 | `tests/distributed/{test_tp_engine,test_tp_control_plane,test_parallel_sampling,test_vocab_parallel,test_qkv_parallel,test_collective_log,test_dp_perf,tp_harness}.py` |
 | 新建 | `tests/{executor/test_model_input,entrypoints/test_cli_wiring,tools/test_profiling}.py` |
-| 修改 | `lite_llama/distributed/parallel_state.py`（dp×tp 网格、gloo 组、collective 埋点） |
-| 修改 | `lite_llama/engine/{continuous_engine,data_parallel,async_engine,sampler,llm_engine}.py` |
-| 修改 | `lite_llama/modules/linear.py`（QKVParallelLinear）、`modules/attention.py` |
-| 修改 | `lite_llama/cli.py`（镜像进程模式退场） |
-| 修改 | `lite_llama/tools/profiling/{structure,memory}.py`（树渲染修复 + ModelShape） |
+| 修改 | `rapid_llm/distributed/parallel_state.py`（dp×tp 网格、gloo 组、collective 埋点） |
+| 修改 | `rapid_llm/engine/{continuous_engine,data_parallel,async_engine,sampler,llm_engine}.py` |
+| 修改 | `rapid_llm/modules/linear.py`（QKVParallelLinear）、`modules/attention.py` |
+| 修改 | `rapid_llm/cli.py`（镜像进程模式退场） |
+| 修改 | `rapid_llm/tools/profiling/{structure,memory}.py`（树渲染修复 + ModelShape） |
 | 删除 | `skip_rmsnorm_no_view`、`BackendRegistry.list_all`、`compare_version`、`load_image_from_base64`、`vis_images` |
 
 ## Upgrade
@@ -218,11 +218,11 @@ Backend 'linear' selection:
 git checkout refactor-multi-process-engine && uv pip install -e .
 
 # 张量并行（driver 兼任 rank 0，tp=2 只花两个进程）
-python -m lite_llama.cli chat --model-dir my_weight/Qwen3-8B --tensor-parallel-size 2
+python -m rapid_llm.cli chat --model-dir my_weight/Qwen3-8B --tensor-parallel-size 2
 
 # 数据并行 + 张量并行网格（DP 没有 CLI 入口，走 DataParallelEngine API）
 python - <<'PY'
-from lite_llama import DataParallelEngine, SamplingParams
+from rapid_llm import DataParallelEngine, SamplingParams
 
 with DataParallelEngine(
     model="my_weight/Qwen3-8B",
@@ -237,7 +237,7 @@ PY
 python scripts/gen_collective_gif.py
 
 # 查看后端选择过程（Part B）
-python -c "from lite_llama.kernels.backends import explain_selection; print(explain_selection('linear'))"
+python -c "from rapid_llm.kernels.backends import explain_selection; print(explain_selection('linear'))"
 ```
 
 ## 相关文档

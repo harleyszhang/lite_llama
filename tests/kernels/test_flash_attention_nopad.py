@@ -15,7 +15,7 @@ import math
 import pytest
 import torch
 
-from lite_llama.kernels import flash_attention2_no_pad
+from rapid_llm.kernels import flash_attention2_no_pad
 from tests.reference import varlen_causal_attention
 
 # The kernel keeps an fp32 accumulator, but inputs and the PV product are fp16,
@@ -143,7 +143,7 @@ def test_sequences_do_not_leak_into_each_other():
 
 @pytest.mark.skipif(
     not __import__(
-        "lite_llama.kernels.backend.flashinfer", fromlist=["available"]
+        "rapid_llm.kernels.backend.flashinfer", fromlist=["available"]
     ).available(),
     reason="flashinfer not installed",
 )
@@ -163,7 +163,7 @@ def test_flashinfer_prefill_survives_the_padded_grid(seq_lens):
     on the real rows must still match the reference. Equal lengths used to be
     the only shapes that worked; they still do.
     """
-    from lite_llama.kernels.backend.flashinfer.attention import prefill_attention
+    from rapid_llm.kernels.backend.flashinfer.attention import prefill_attention
 
     width = max(seq_lens)
     rows = len(seq_lens) * width

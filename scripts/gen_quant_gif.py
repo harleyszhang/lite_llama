@@ -54,7 +54,7 @@ def _fonts():
 def _draw_title_bar(draw, fonts):
     _, _, small, _ = fonts
     draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
-    draw.text((12, 9), "lite_llama  —  Quantization Benchmark (A10 GPU)", fill=TITLE_FG, font=small)
+    draw.text((12, 9), "rapid_llm  —  Quantization Benchmark (A10 GPU)", fill=TITLE_FG, font=small)
     for i, colour in enumerate([RED, YELLOW, GREEN]):
         draw.ellipse([W - 78 + i * 18, 11, W - 68 + i * 18, 21], fill=colour)
 
@@ -136,7 +136,7 @@ def _make_bar_frame(fonts, results, highlight_idx) -> Image.Image:
         y += LINE_H
         draw.text((PAD, y), "✓ smoothquant W8A8: 6.7× faster (int8 tensor cores)", fill=(255, 140, 180), font=bold)
         y += LINE_H
-        draw.text((PAD, y), "✓ lite_llama fp16:  6.2× faster than HF transformers", fill=GREEN, font=bold)
+        draw.text((PAD, y), "✓ rapid_llm fp16:  6.2× faster than HF transformers", fill=GREEN, font=bold)
         y += LINE_H
         draw.text((PAD, y), "✓ int8 per-channel:  6.1× faster, saves 1 GB memory", fill=BLUE, font=bold)
         y += LINE_H

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from lite_llama.engine.detokenizer import IncrementalDetokenizer
+from rapid_llm.engine.detokenizer import IncrementalDetokenizer
 
 _SPACE = "\u2581"  # SentencePiece word-start marker
 

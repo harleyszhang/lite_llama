@@ -1,4 +1,4 @@
-"""Single-image chat with :class:`~lite_llama.engine.generator.VisionGenerator`.
+"""Single-image chat with :class:`~rapid_llm.engine.generator.VisionGenerator`.
 
 Builds a :class:`VisionGenerator` over an LLaVA checkpoint, runs one
 image + question turn, and prints the answer — the multimodal smoke
@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch
 from PIL import Image
 
-from lite_llama.engine import SamplingParams, VisionGenerator
+from rapid_llm.engine import SamplingParams, VisionGenerator
 
 checkpoints_dir = "my_weight/llava-1.5-7b-hf"  # 改成自己的存放模型路径
 image_path = "/path/to/your/image.jpg"  # 改成自己的图片路径

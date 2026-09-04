@@ -35,7 +35,7 @@ from benchmarks.lib import (
 )
 
 #: Timeline recording switch; the engine reads it when it is built.
-TIMELINE_ENV = "LITE_LLAMA_OVERLAP_TIMELINE"
+TIMELINE_ENV = "RAPID_LLM_OVERLAP_TIMELINE"
 
 #: Per-GPU throughput is TPS divided by the parallel degree; every arm reports it
 #: beside TTFT / TPOT / TPS.
@@ -187,7 +187,7 @@ def timeline_overlap(
             shared MLP, a chunk's GEMM).
         right: Predicate picking the communication regions it should hide under.
     """
-    from lite_llama.batch_overlap.comm_overlap import CommStreamPool
+    from rapid_llm.batch_overlap.comm_overlap import CommStreamPool
 
     timeline_arm = Arm(
         label=arm.label,
@@ -238,14 +238,14 @@ Switch = tuple[dict[str, str], Callable[[], None] | None, tuple[str, ...]]
 
 def l1_switch(on: bool) -> Switch:
     """L1 pinned-copy overlap; read at engine construction, no cached policy."""
-    return {"LITE_LLAMA_OVERLAP": "1" if on else "0"}, None, ()
+    return {"RAPID_LLM_OVERLAP": "1" if on else "0"}, None, ()
 
 
 def l3_switch(on: bool) -> Switch:
     """L3 chunked all-reduce."""
-    from lite_llama.batch_overlap.comm_overlap import reset_comm_overlap_policy
+    from rapid_llm.batch_overlap.comm_overlap import reset_comm_overlap_policy
 
-    return {"LITE_LLAMA_COMM_OVERLAP": "1" if on else "0"}, reset_comm_overlap_policy, ()
+    return {"RAPID_LLM_COMM_OVERLAP": "1" if on else "0"}, reset_comm_overlap_policy, ()
 
 
 def tbo_switch(on: bool, *, min_rows: int | None = None) -> Switch:
@@ -256,19 +256,19 @@ def tbo_switch(on: bool, *, min_rows: int | None = None) -> Switch:
     small batch has to override the ridge explicitly, or it compares off
     against off.
     """
-    from lite_llama.batch_overlap.two_batch_overlap import reset_tbo_policy
+    from rapid_llm.batch_overlap.two_batch_overlap import reset_tbo_policy
 
-    env = {"LITE_LLAMA_TBO": "1" if on else "0"}
+    env = {"RAPID_LLM_TBO": "1" if on else "0"}
     if min_rows is not None:
-        env["LITE_LLAMA_TBO_MIN_ROWS"] = str(min_rows)
+        env["RAPID_LLM_TBO_MIN_ROWS"] = str(min_rows)
     return env, reset_tbo_policy, ()
 
 
 def sbo_switch(on: bool) -> Switch:
     """SBO: the shared MLP on a side stream beside the dispatch exchange."""
-    from lite_llama.batch_overlap.single_batch_overlap import reset_sbo_policy
+    from rapid_llm.batch_overlap.single_batch_overlap import reset_sbo_policy
 
-    return {"LITE_LLAMA_SBO": "1" if on else "0"}, reset_sbo_policy, ()
+    return {"RAPID_LLM_SBO": "1" if on else "0"}, reset_sbo_policy, ()
 
 
 def sm_budget(on: bool) -> Switch:

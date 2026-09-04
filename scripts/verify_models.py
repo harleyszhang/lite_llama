@@ -13,7 +13,7 @@ import time
 
 
 def run_text(model_dir: str, use_cuda_graph: bool) -> bool:
-    from lite_llama import SamplingParams, TextGenerator
+    from rapid_llm import SamplingParams, TextGenerator
 
     prompts = [
         "The future of artificial intelligence is",
@@ -46,7 +46,7 @@ def run_text(model_dir: str, use_cuda_graph: bool) -> bool:
 def run_vision(model_dir: str) -> bool:
     from PIL import Image
 
-    from lite_llama import SamplingParams, VisionGenerator
+    from rapid_llm import SamplingParams, VisionGenerator
 
     gen = VisionGenerator(checkpoints_dir=model_dir, max_seq_len=2048)
     image = Image.open("images/llava_test/dog.jpeg").convert("RGB")

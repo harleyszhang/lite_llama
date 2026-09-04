@@ -53,7 +53,7 @@ from typing import Any
 import pytest
 import torch.multiprocessing as mp
 
-from lite_llama.executor.cuda_graph import TP_GRAPH_PARITY_ATOL
+from rapid_llm.executor.cuda_graph import TP_GRAPH_PARITY_ATOL
 from tests.distributed.tp_harness import needs_gpus
 
 pytestmark = [pytest.mark.gpu, pytest.mark.weights, pytest.mark.slow]
@@ -104,8 +104,8 @@ def _probe(spec: dict[str, Any], results: mp.Queue) -> None:
     try:
         os.environ.update(spec.get("env", {}))
 
-        from lite_llama import SamplingParams
-        from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
+        from rapid_llm import SamplingParams
+        from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 
         engine = ContinuousBatchingEngine.from_pretrained(
             model=spec["model"],
@@ -284,13 +284,13 @@ def test_graph_and_eager_answer_the_same_tokens(probes, scheme):
 # --------------------------------------------------------------------------- #
 @needs_gpus(2)
 def test_kill_switch_restores_the_eager_path(model_dir):
-    """``LITE_LLAMA_TP_CUDA_GRAPH=0`` must decode eager and still answer.
+    """``RAPID_LLM_TP_CUDA_GRAPH=0`` must decode eager and still answer.
 
     The feature records collectives into a graph, so it needs a way to be turned
     off in the field without a redeploy — and the way has to be verified, since an
     escape hatch is only reached when something is already going wrong.
     """
-    report = _run_probe(model_dir, graph=True, env={"LITE_LLAMA_TP_CUDA_GRAPH": "0"})
+    report = _run_probe(model_dir, graph=True, env={"RAPID_LLM_TP_CUDA_GRAPH": "0"})
     assert not report["installed"], "the kill-switch did not prevent capture"
     assert report["replays"] == 0
     assert all(answer.strip() for answer in report["alone"])
@@ -298,7 +298,7 @@ def test_kill_switch_restores_the_eager_path(model_dir):
 
 @needs_gpus(2)
 def test_lockstep_check_passes_on_every_decode_step(model_dir):
-    """``LITE_LLAMA_TP_GRAPH_CHECK=1`` must run clean, not just be wired up.
+    """``RAPID_LLM_TP_GRAPH_CHECK=1`` must run clean, not just be wired up.
 
     The debug gate all-reduces each rank's graph choice on every step, so it turns
     a divergent choice into a raised error instead of a deadlock. Enabling it here
@@ -310,7 +310,7 @@ def test_lockstep_check_passes_on_every_decode_step(model_dir):
     Kept off by default because it puts a collective on the decode path, which is
     the path graphs exist to shorten.
     """
-    report = _run_probe(model_dir, graph=True, env={"LITE_LLAMA_TP_GRAPH_CHECK": "1"})
+    report = _run_probe(model_dir, graph=True, env={"RAPID_LLM_TP_GRAPH_CHECK": "1"})
     assert report["installed"]
     assert report["replays"] > 0, "the lockstep check never ran: nothing replayed"
     assert all(answer.strip() for answer in report["alone"])

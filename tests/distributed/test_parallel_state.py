@@ -1,4 +1,4 @@
-"""Tests for the DP x TP rank grid in :mod:`lite_llama.distributed.parallel_state`.
+"""Tests for the DP x TP rank grid in :mod:`rapid_llm.distributed.parallel_state`.
 
 Pure CPU: initialise a grid and assert the coordinate maths — distinct
 cells, contiguous TP groups — plus rejection of out-of-range ranks. The
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from lite_llama.distributed import parallel_state as ps
+from rapid_llm.distributed import parallel_state as ps
 from tests.distributed.tp_harness import run_on_tp_ranks
 
 

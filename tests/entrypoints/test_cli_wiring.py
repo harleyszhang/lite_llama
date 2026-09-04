@@ -14,8 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from lite_llama import cli
-from lite_llama.cli import BaseOptions, TextEngineOptions, build_parser
+from rapid_llm import cli
+from rapid_llm.cli import BaseOptions, TextEngineOptions, build_parser
 
 
 @pytest.fixture
@@ -263,7 +263,7 @@ class TestTensorParallelSurface:
     def test_serve_passes_the_process_grid_to_the_server(self, model_dir, monkeypatch):
         pytest.importorskip("fastapi", reason="needs the `serve` extra")
         captured: dict = {}
-        from lite_llama.entrypoints import api_server
+        from rapid_llm.entrypoints import api_server
 
         monkeypatch.setattr(
             api_server, "run_server", lambda config, host, port: captured.update(config=config)
@@ -294,7 +294,7 @@ class TestTensorParallelSurface:
 
     def test_serve_passes_expert_parallel_to_the_server_config(self, model_dir, monkeypatch):
         captured: dict = {}
-        from lite_llama.entrypoints import api_server
+        from rapid_llm.entrypoints import api_server
 
         monkeypatch.setattr(
             api_server, "run_server", lambda config, host, port: captured.update(config=config)
@@ -359,7 +359,7 @@ class TestDataParallelSurface:
     def captured_server(self, monkeypatch):
         pytest.importorskip("fastapi", reason="needs the `serve` extra")
         captured: dict = {}
-        from lite_llama.entrypoints import api_server
+        from rapid_llm.entrypoints import api_server
 
         monkeypatch.setattr(
             api_server, "run_server", lambda config, host, port: captured.update(config=config)

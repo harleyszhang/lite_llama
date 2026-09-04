@@ -20,7 +20,7 @@ import torch
 import triton
 from microbench import run_perf_report
 
-from lite_llama.kernels import grouped_topk, grouped_topk_torch
+from rapid_llm.kernels import grouped_topk, grouped_topk_torch
 
 # --------------------------------------------------------------------------- #
 # Routing geometries: the checkpoints the wrapper actually serves.

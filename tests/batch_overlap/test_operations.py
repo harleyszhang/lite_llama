@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from lite_llama.batch_overlap.operations import (
+from rapid_llm.batch_overlap.operations import (
     StateDict,
     YieldOperation,
     execute_operations,

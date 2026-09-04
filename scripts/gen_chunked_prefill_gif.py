@@ -26,8 +26,8 @@ from PIL import Image, ImageDraw, ImageFont
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from lite_llama.engine.sampler import SamplingParams  # noqa: E402
-from lite_llama.engine.scheduler import (  # noqa: E402
+from rapid_llm.engine.sampler import SamplingParams  # noqa: E402
+from rapid_llm.engine.scheduler import (  # noqa: E402
     Request,
     Scheduler,
     SchedulerConfig,
@@ -139,7 +139,7 @@ def render(frame: Frame, fonts, mode_label: str) -> Image.Image:
     draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
     draw.text(
         (12, 9),
-        f"lite-llama  —  chunked prefill  ({mode_label})",
+        f"rapid-llm  —  chunked prefill  ({mode_label})",
         fill=TITLE_FG,
         font=small,
     )
@@ -148,7 +148,7 @@ def render(frame: Frame, fonts, mode_label: str) -> Image.Image:
 
     y = TITLE_H + PAD
     flag = f"--max-chunk-size {frame.chunk_size}" if frame.chunk_size else "--max-chunk-size 0"
-    draw.text((PAD, y), f"$ lite-llama serve {flag}", fill=PROMPT_FG, font=body)
+    draw.text((PAD, y), f"$ rapid-llm serve {flag}", fill=PROMPT_FG, font=body)
     y += LINE_H + 6
 
     draw.text(

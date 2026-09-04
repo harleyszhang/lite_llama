@@ -33,14 +33,14 @@ class DatasetUnavailable(RuntimeError):
 
 def cache_dir() -> Path:
     """Directory holding downloaded benchmark files."""
-    override = os.environ.get("LITE_LLAMA_EVAL_DATA_DIR")
+    override = os.environ.get("RAPID_LLM_EVAL_DATA_DIR")
     if override:
         return Path(override).expanduser()
-    return Path.home() / ".cache" / "lite_llama" / "evals"
+    return Path.home() / ".cache" / "rapid_llm" / "evals"
 
 
 def _base_url() -> str:
-    return os.environ.get("LITE_LLAMA_EVAL_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+    return os.environ.get("RAPID_LLM_EVAL_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
 
 
 def fetch(name: str, subdir: str) -> Path:
@@ -75,7 +75,7 @@ def fetch(name: str, subdir: str) -> Path:
     except Exception as exc:  # network, DNS, HTTP status, disk
         raise DatasetUnavailable(
             f"cannot obtain {name!r} from {url}: {type(exc).__name__}: {exc}\n"
-            f"Pre-seed the cache at {target} or point LITE_LLAMA_EVAL_BASE_URL "
+            f"Pre-seed the cache at {target} or point RAPID_LLM_EVAL_BASE_URL "
             f"at a reachable mirror."
         ) from exc
 

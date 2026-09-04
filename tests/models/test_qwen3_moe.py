@@ -16,9 +16,9 @@ import json
 import pytest
 import torch
 
-from lite_llama.executor.weight_utils import dequant_block_fp8, hf_weights_iterator
-from lite_llama.models.config import ModelConfig
-from lite_llama.models.qwen3_moe import is_moe_layer
+from rapid_llm.executor.weight_utils import dequant_block_fp8, hf_weights_iterator
+from rapid_llm.models.config import ModelConfig
+from rapid_llm.models.qwen3_moe import is_moe_layer
 
 # --------------------------------------------------------------------------- #
 # FP8 dequantisation
@@ -153,7 +153,7 @@ def test_decoder_sparse_step_skips_layers(tmp_path):
 
 def test_route_matches_hf(tmp_path):
     """``_route`` must reproduce HF's softmax-all -> top-k -> renormalise order."""
-    from lite_llama.modules.moe import SparseMoeBlock
+    from rapid_llm.modules.moe import SparseMoeBlock
 
     torch.manual_seed(0)
     config = _model_config(
@@ -205,7 +205,7 @@ def _prefill_metadata(seq_len: int):
     Prefill does not read the cache, so the buffer's contents do not enter the
     result; it exists because the layers write into it.
     """
-    from lite_llama.executor.model_runner import AttentionMetadata
+    from rapid_llm.executor.model_runner import AttentionMetadata
 
     num_kv_heads, head_dim = _TINY_HF_CONFIG["num_key_value_heads"], _TINY_HF_CONFIG["head_dim"]
     return AttentionMetadata(
@@ -226,8 +226,8 @@ def test_qwen3_moe_logits_parity(tmp_path):
     from transformers import Qwen3MoeConfig as HfConfig
     from transformers import Qwen3MoeForCausalLM
 
-    from lite_llama.executor.loader import materialise_parameters
-    from lite_llama.models.qwen3_moe import Qwen3MoeModel
+    from rapid_llm.executor.loader import materialise_parameters
+    from rapid_llm.models.qwen3_moe import Qwen3MoeModel
 
     torch.manual_seed(42)
     hf_model = Qwen3MoeForCausalLM(HfConfig(**_TINY_HF_CONFIG)).eval()
@@ -296,11 +296,11 @@ def test_qwen3_moe_fp8_forward(tmp_path):
     from transformers import Qwen3MoeConfig as HfConfig
     from transformers import Qwen3MoeForCausalLM
 
-    from lite_llama.executor.loader import materialise_parameters
-    from lite_llama.models.qwen3_moe import Qwen3MoeModel
-    from lite_llama.modules.moe import SparseMoeBlock
-    from lite_llama.modules.quantization import for_runtime_scheme
-    from lite_llama.modules.quantization.w8a8_fp8 import W8A8Fp8Config, W8A8Fp8MoEMethod
+    from rapid_llm.executor.loader import materialise_parameters
+    from rapid_llm.models.qwen3_moe import Qwen3MoeModel
+    from rapid_llm.modules.moe import SparseMoeBlock
+    from rapid_llm.modules.quantization import for_runtime_scheme
+    from rapid_llm.modules.quantization.w8a8_fp8 import W8A8Fp8Config, W8A8Fp8MoEMethod
 
     torch.manual_seed(42)
     hf_model = Qwen3MoeForCausalLM(HfConfig(**_TINY_HF_CONFIG)).eval()

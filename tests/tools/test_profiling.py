@@ -11,7 +11,7 @@ Usage:
 import torch
 import torch.nn as nn
 
-from lite_llama.tools.profiling import (
+from rapid_llm.tools.profiling import (
     ModelShape,
     compute_memory_budget,
     export_memory_budget,

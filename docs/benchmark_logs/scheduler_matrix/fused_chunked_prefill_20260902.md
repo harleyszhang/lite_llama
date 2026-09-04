@@ -2,11 +2,11 @@
 
 设备：2×H100 80GB；模型：Qwen2.5-0.5B-Instruct（24 层，14 Q heads / 2 KV heads）；
 greedy 解码，`max_num_seqs=8`，prefix workload 为 4 组 × 6 请求共享 ~384-token 前缀。
-复现命令（`LITE_LLAMA_FUSED_CHUNK_PREFILL=0` 是 kill-switch，`=1` 为默认）：
+复现命令（`RAPID_LLM_FUSED_CHUNK_PREFILL=0` 是 kill-switch，`=1` 为默认）：
 
 ```bash
 for mode in 0 1; do
-  LITE_LLAMA_FUSED_CHUNK_PREFILL=$mode python benchmarks/bench_scheduler.py matrix \
+  RAPID_LLM_FUSED_CHUNK_PREFILL=$mode python benchmarks/bench_scheduler.py matrix \
       --model-dir <ckpt> --graph --prefix-cache \
       --json docs/benchmark_logs/scheduler_matrix/ab_fused${mode}_graph_prefix.json
 done
@@ -15,7 +15,7 @@ done
 ## 问题：命中了缓存，TTFT 却不降
 
 79% 的 prefix 命中率下 TTFT 与无缓存几乎相同。Timeline 归因（`diag-prefix`
-子命令，`LITE_LLAMA_OVERLAP_TIMELINE=1`）：命中请求的剩余 token 走 EXTEND pass
+子命令，`RAPID_LLM_OVERLAP_TIMELINE=1`）：命中请求的剩余 token 走 EXTEND pass
 ——每 token 一行 decode 风格行、`flash_decoding` kernel（element-wise FMA、
 `num_warps=1`、逐 token 经 `b_req_tokens_table` 间接寻址），而全新 prefill 走
 `flash_attention2_no_pad`（`tl.dot` tensor core、BLOCK_M=64 个 query 共享 KV

@@ -21,8 +21,8 @@ import tempfile
 import pytest
 import torch
 
-from lite_llama.batch_overlap.comm_overlap import CommStreamPool
-from lite_llama.batch_overlap.single_batch_overlap import (
+from rapid_llm.batch_overlap.comm_overlap import CommStreamPool
+from rapid_llm.batch_overlap.single_batch_overlap import (
     SBO_ENV,
     SBO_MIN_ROWS_ENV,
     SboFlags,
@@ -144,7 +144,7 @@ _CONFIG_BODY = {
 
 def _make_config():
     """A ``ModelConfig`` for the MoE body above, from a throwaway config.json."""
-    from lite_llama.models.config import ModelConfig
+    from rapid_llm.models.config import ModelConfig
 
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "config.json")
@@ -176,7 +176,7 @@ def _global_expert_weights(dtype, device, seed: int = 1234):
 
 def _build_sbo_block(device):
     """An EP MoE block with a shared expert; identical weights on both ranks."""
-    from lite_llama.modules.moe import SparseMoeBlock
+    from rapid_llm.modules.moe import SparseMoeBlock
 
     torch.manual_seed(777)  # the shared MLP is replicated, not EP-split
     block = SparseMoeBlock(_make_config()).to(device)
@@ -247,7 +247,7 @@ def _payload_sbo_overlap(rank: int) -> dict:
     """
     os.environ[SBO_ENV] = "1"
     os.environ[SBO_MIN_ROWS_ENV] = "4"
-    os.environ["LITE_LLAMA_OVERLAP_TIMELINE"] = "1"
+    os.environ["RAPID_LLM_OVERLAP_TIMELINE"] = "1"
     reset_sbo_policy()
     device = f"cuda:{rank}"
     block, x = _build_sbo_block(device)
@@ -279,7 +279,7 @@ def _payload_sbo_overlap(rank: int) -> dict:
         if max(spans) > 0.0:
             with_overlap += 1
 
-    os.environ.pop("LITE_LLAMA_OVERLAP_TIMELINE", None)
+    os.environ.pop("RAPID_LLM_OVERLAP_TIMELINE", None)
     return {"overlap_ms": round(best, 3), "rounds": with_overlap}
 
 

@@ -17,7 +17,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from lite_llama.kernels.tile_signal import (
+from rapid_llm.kernels.tile_signal import (
     TileSignalBuffer,
     _tile_signal_consume_kernel,
     default_block_split,
@@ -183,7 +183,7 @@ def test_pipelined_overlap_shows_on_the_timeline():
     the direct device-side evidence that L4 overlaps work rather than merely
     producing correct output.
     """
-    from lite_llama.batch_overlap.overlap import Timeline
+    from rapid_llm.batch_overlap.overlap import Timeline
 
     m, n, k = 4096, 2048, 1536
     a, gate_w, up_w = _problem(m, n, k, torch.bfloat16)

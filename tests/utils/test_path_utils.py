@@ -1,4 +1,4 @@
-"""Tests for :func:`~lite_llama.utils.path_utils.get_model_name_from_path`.
+"""Tests for :func:`~rapid_llm.utils.path_utils.get_model_name_from_path`.
 
 Checkpoint directories keep their parent name and llava checkpoints
 still contain "llava" — the naming rule the registry keys on.
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from lite_llama.utils.path_utils import get_model_name_from_path
+from rapid_llm.utils.path_utils import get_model_name_from_path
 
 
 @pytest.mark.parametrize(

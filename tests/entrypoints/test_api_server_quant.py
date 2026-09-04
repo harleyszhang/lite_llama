@@ -10,7 +10,7 @@ kernels those two chose. All of it is finished before the first request arrives,
 every failure mode here is a *startup* failure: the server either never listens, or
 listens and answers with something the model did not generate.
 
-So this test runs the real thing: ``lite-llama serve`` as a subprocess, real weights
+So this test runs the real thing: ``rapid-llm serve`` as a subprocess, real weights
 quantised at load time, a real socket. It asserts only what such a smoke test can
 honestly assert -- that the server becomes ready, that a completion comes back
 non-empty, and that streaming and non-streaming agree with each other. Whether the
@@ -50,7 +50,7 @@ def _free_port() -> int:
 
 
 class _Server:
-    """A ``lite-llama serve`` subprocess, with its log kept for the failure message.
+    """A ``rapid-llm serve`` subprocess, with its log kept for the failure message.
 
     Started in its own session so that shutting it down takes any follower ranks
     with it; a leaked rank holds GPU memory that the next test discovers as an OOM.
@@ -129,7 +129,7 @@ def quant_server(model_dir: Path, tmp_path_factory: pytest.TempPathFactory):
     argv = [
         sys.executable,
         "-m",
-        "lite_llama.cli",
+        "rapid_llm.cli",
         "serve",
         "--model-dir",
         str(model_dir),

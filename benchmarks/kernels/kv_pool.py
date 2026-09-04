@@ -181,7 +181,7 @@ def _as_cache_dtype(ref: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     if dtype == torch.float16:
         return ref
     if dtype == torch.uint8:
-        from lite_llama.modules.quantization.utils import quantize_fp8_per_tensor
+        from rapid_llm.modules.quantization.utils import quantize_fp8_per_tensor
 
         return quantize_fp8_per_tensor(ref, 1.0)
     return ref.to(dtype)

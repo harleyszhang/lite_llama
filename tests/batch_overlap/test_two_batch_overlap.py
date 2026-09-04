@@ -24,8 +24,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from lite_llama.batch_overlap.comm_overlap import CommStreamPool
-from lite_llama.batch_overlap.two_batch_overlap import (
+from rapid_llm.batch_overlap.comm_overlap import CommStreamPool
+from rapid_llm.batch_overlap.two_batch_overlap import (
     TBO_ENV,
     TBO_MIN_ROWS_ENV,
     TboPolicy,
@@ -33,10 +33,10 @@ from lite_llama.batch_overlap.two_batch_overlap import (
     reset_tbo_policy,
     tbo_policy,
 )
-from lite_llama.executor.attention_metadata import AttentionMetadata
-from lite_llama.executor.cuda_graph import _GraphKey
-from lite_llama.executor.model_runner import ModelRunner
-from lite_llama.executor.slot_batch import SlotBatch
+from rapid_llm.executor.attention_metadata import AttentionMetadata
+from rapid_llm.executor.cuda_graph import _GraphKey
+from rapid_llm.executor.model_runner import ModelRunner
+from rapid_llm.executor.slot_batch import SlotBatch
 from tests.distributed.tp_harness import needs_gpus, run_on_tp_ranks
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -215,7 +215,7 @@ def _payload_parity_and_overlap(rank: int) -> dict:
     """One rank of the parity + overlap payload over a real 2-shard Qwen3."""
     os.environ[TBO_ENV] = "1"
     os.environ[TBO_MIN_ROWS_ENV] = "2"
-    os.environ["LITE_LLAMA_OVERLAP_TIMELINE"] = "1"
+    os.environ["RAPID_LLM_OVERLAP_TIMELINE"] = "1"
     reset_tbo_policy()
     CommStreamPool.reset()
     device = torch.device("cuda", rank)
@@ -298,7 +298,7 @@ def _payload_graph_tbo_replay_parity(rank: int) -> dict:
     """
     os.environ[TBO_ENV] = "1"
     os.environ[TBO_MIN_ROWS_ENV] = "2"
-    os.environ["LITE_LLAMA_OVERLAP_TIMELINE"] = "0"
+    os.environ["RAPID_LLM_OVERLAP_TIMELINE"] = "0"
     reset_tbo_policy()
     CommStreamPool.reset()
 
@@ -359,8 +359,8 @@ def _greedy_tokens(model_dir: str, tbo_on: bool) -> list[list[int]]:
     os.environ[TBO_ENV] = "1" if tbo_on else "0"
     os.environ[TBO_MIN_ROWS_ENV] = "2"
     reset_tbo_policy()  # rank0 process outlives the first arm; followers do not
-    from lite_llama import SamplingParams
-    from lite_llama.engine import ContinuousBatchingEngine
+    from rapid_llm import SamplingParams
+    from rapid_llm.engine import ContinuousBatchingEngine
 
     # No CUDA graph: the policy stands down when one is active, so both arms
     # must run eager decode for the comparison to exercise TBO at all.
@@ -398,8 +398,8 @@ def _greedy_tokens_graph(model_dir: str) -> list[list[int]]:
     os.environ[TBO_ENV] = "1"
     os.environ[TBO_MIN_ROWS_ENV] = "2"
     reset_tbo_policy()
-    from lite_llama import SamplingParams
-    from lite_llama.engine import ContinuousBatchingEngine
+    from rapid_llm import SamplingParams
+    from rapid_llm.engine import ContinuousBatchingEngine
 
     engine = ContinuousBatchingEngine.from_pretrained(
         model_dir,

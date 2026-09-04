@@ -49,10 +49,10 @@ picking a threshold afterwards.
 Usage::
 
     .venv/bin/python scripts/quant_kv_error.py \\
-        --model-dir $LITE_LLAMA_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \\
+        --model-dir $RAPID_LLM_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \\
         --json docs/benchmark_logs/kv_fp8_error_qwen3-4b_20260901.json
 
-    # add the task score (needs the GSM8K cache under ~/.cache/lite_llama/evals)
+    # add the task score (needs the GSM8K cache under ~/.cache/rapid_llm/evals)
     .venv/bin/python scripts/quant_kv_error.py --model-dir ... --gsm8k 200
 """
 
@@ -72,9 +72,9 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lite_llama import LLM, SamplingParams
-from lite_llama.modules.attention import PagedAttention
-from lite_llama.modules.quantization.utils import FP8_E4M3_MAX, quantize_fp8_per_tensor
+from rapid_llm import LLM, SamplingParams
+from rapid_llm.modules.attention import PagedAttention
+from rapid_llm.modules.quantization.utils import FP8_E4M3_MAX, quantize_fp8_per_tensor
 
 #: Smallest e4m3 magnitude with a full 3-bit mantissa. Below it the format is
 #: subnormal and the relative error grows; at ``2**-10`` it underflows to zero.
@@ -253,7 +253,7 @@ class _Probe:
 
     Installed as ``method.quantize_kv = probe``, shadowing the bound class
     method. Swapping the whole ``kv_cache_method`` object would *not* work:
-    :class:`~lite_llama.modules.attention.PagedAttention` copies
+    :class:`~rapid_llm.modules.attention.PagedAttention` copies
     ``method.k_scale`` into ``self.k_scale`` in its constructor, so a replacement
     method installed later would be measured against scales the layer no longer
     reads from it. Wrapping the one function keeps the object — and therefore the
@@ -393,7 +393,7 @@ def token_agreement(
     allocator state and cache size even when the dtype does not.
 
     The comparison is on tokens **re-encoded from the completion text**, not on
-    the ids the engine sampled: :class:`~lite_llama.engine.outputs.RequestOutput`
+    the ids the engine sampled: :class:`~rapid_llm.engine.outputs.RequestOutput`
     carries only text. Re-tokenisation is not a lossless inverse — a divergence
     can shift a token boundary and cost more than one position — so the rate
     below is a *lower* bound on agreement. That is the safe direction for a gate

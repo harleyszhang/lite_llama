@@ -15,9 +15,9 @@ import asyncio
 import pytest
 import torch
 
-from lite_llama.distributed import parallel_state as ps
-from lite_llama.engine.sampler import global_argmax, local_vocab_offset, sharded_top_p
-from lite_llama.tools.observability import (
+from rapid_llm.distributed import parallel_state as ps
+from rapid_llm.engine.sampler import global_argmax, local_vocab_offset, sharded_top_p
+from rapid_llm.tools.observability import (
     Collective,
     CollectiveStats,
     Plane,

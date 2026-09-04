@@ -41,7 +41,7 @@ whole model.
 
 Usage:
     # single axis: which schemes cost what
-    python benchmarks/bench_quant.py --model-dir $LITE_LLAMA_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \
+    python benchmarks/bench_quant.py --model-dir $RAPID_LLM_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \
         --schemes fp16 fp8 int4 nvfp4
 
     # quantisation x TP x graph, both sides on the continuous-batching engine
@@ -85,8 +85,8 @@ _GOLDEN_DIR = Path(__file__).resolve().parent.parent / "tests" / "golden" / "dat
 #: Its job is to turn a wedged rank into a reported failure rather than a hung matrix.
 _SPEC_TIMEOUT_S = 1800.0
 
-#: Model codenames used by ``--all``, relative to ``$LITE_LLAMA_MODELZOO``.
-_MODELZOO_ENV = "LITE_LLAMA_MODELZOO"
+#: Model codenames used by ``--all``, relative to ``$RAPID_LLM_MODELZOO``.
+_MODELZOO_ENV = "RAPID_LLM_MODELZOO"
 _ALL_MODELS = (
     "Qwen/Qwen2___5-0___5B-Instruct",
     "Qwen3/Qwen3-4B-Thinking-2507",
@@ -209,7 +209,7 @@ def _lite_kwargs(
 
 def _golden_texts(generate, cases, penalties) -> dict[str, list[str]]:
     """Replay the recorded golden cases through this engine, keyed as the file is."""
-    from lite_llama import SamplingParams
+    from rapid_llm import SamplingParams
     from tests.golden.cases import case_key
 
     out: dict[str, list[str]] = {}
@@ -225,7 +225,7 @@ def _golden_texts(generate, cases, penalties) -> dict[str, list[str]]:
 def _measure_lite(payload: dict[str, Any]) -> dict[str, Any]:
     """Stream-timed measurement of one in-process engine (TP included)."""
     from benchmarks.lib import LiteBackend, footprint_stats
-    from lite_llama import SamplingParams
+    from rapid_llm import SamplingParams
 
     spec: RunSpec = payload["spec"]
     torch.cuda.reset_peak_memory_stats()
@@ -267,7 +267,7 @@ def _measure_dp(payload: dict[str, Any]) -> dict[str, Any]:
     the aggregate over replicas. TTFT/TPOT are absent because ``generate`` returns
     once, with no per-step callback to time.
     """
-    from lite_llama import DataParallelEngine, SamplingParams
+    from rapid_llm import DataParallelEngine, SamplingParams
 
     spec: RunSpec = payload["spec"]
     prompts = expand_prompts(PROMPTS, payload["batch"] * spec.dp)
@@ -321,8 +321,8 @@ def _measure_cb(payload: dict[str, Any]) -> dict[str, Any]:
     size, so the figure is per-GPU rather than per-model.
     """
     from benchmarks.lib import footprint_stats, run_requests
-    from lite_llama import SamplingParams
-    from lite_llama.engine import ContinuousBatchingEngine
+    from rapid_llm import SamplingParams
+    from rapid_llm.engine import ContinuousBatchingEngine
 
     spec: RunSpec = payload["spec"]
     prompts = expand_prompts(PROMPTS, payload["batch"])
@@ -737,11 +737,11 @@ def main() -> int:
         print("CUDA required", file=sys.stderr)
         return 1
 
-    # The HF row and the lite children import transformers / lite_llama inside
+    # The HF row and the lite children import transformers / rapid_llm inside
     # their processes. A bare interpreter (a container's system python, say)
     # lacks them; failing here names the fix instead of a mid-matrix traceback.
     missing = [
-        name for name in ("transformers", "lite_llama") if importlib.util.find_spec(name) is None
+        name for name in ("transformers", "rapid_llm") if importlib.util.find_spec(name) is None
     ]
     if missing:
         print(

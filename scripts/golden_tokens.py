@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lite_llama import SamplingParams, TextGenerator
+from rapid_llm import SamplingParams, TextGenerator
 from tests.golden.cases import (
     CASES,
     CB_CASES,

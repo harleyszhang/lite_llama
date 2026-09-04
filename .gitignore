@@ -22,7 +22,7 @@ my_weight/
 *.pth
 *.safetensors
 logs/
-lite_llama/logs/
+rapid_llm/logs/
 
 # Scratch output
 images/tmp/

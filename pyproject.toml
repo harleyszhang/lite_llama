@@ -3,9 +3,9 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lite-llama"
+name = "rapid-llm"
 version = "0.11.0"
-description = "A lightweight, Triton-kernel based LLM inference framework for LLaMA / Qwen / LLaVA / Qwen3-VL"
+description = "RapidLLM (Registry · Attention · Pipeline · Inference · Dispatch): a production-grade LLM inference serving framework with pluggable Triton/CUDA kernels for LLaMA / Qwen / LLaVA / Qwen3-VL"
 readme = "README.md"
 requires-python = ">=3.13"
 license = "Apache-2.0"
@@ -42,16 +42,16 @@ dependencies = [
 # Accuracy evaluation: the harness under examples/evaluator (sentence embeddings)
 # and the benchmark suite under tests/evals (YAML model configs).
 eval = ["sentence-transformers>=4.0", "pyyaml>=6.0"]
-# OpenAI-compatible HTTP server (`lite-llama serve`). Optional so that offline
+# OpenAI-compatible HTTP server (`rapid-llm serve`). Optional so that offline
 # generation does not drag a web stack in; the imports live inside
-# lite_llama/entrypoints/api_server.py and name this extra when it is missing.
+# rapid_llm/entrypoints/api_server.py and name this extra when it is missing.
 serve = ["fastapi>=0.110", "uvicorn[standard]>=0.27", "pydantic>=2.0"]
 # OTLP trace export (ROADMAP A7). Optional for the same reason: tracing must not
-# cost offline users an install; lite_llama/observe/trace.py no-ops without it.
+# cost offline users an install; rapid_llm/observe/trace.py no-ops without it.
 trace = ["opentelemetry-sdk>=1.25", "opentelemetry-exporter-otlp-proto-http>=1.25"]
 # External kernel backends (ROADMAP foundation 2). Never core dependencies: a
 # missing library must degrade to the native Triton floor, which is what
-# lite_llama/kernels/backend/<lib>/__init__.py declares available() and dispatch
+# rapid_llm/kernels/backend/<lib>/__init__.py declares available() and dispatch
 # acts on it.
 #
 # Only flashinfer has anything pip can resolve (distribution `flashinfer-python`,
@@ -80,17 +80,17 @@ dev = [
 ]
 
 [project.scripts]
-lite-llama = "lite_llama.cli:main"
+rapid-llm = "rapid_llm.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/harleyszhang/lite_llama"
-Repository = "https://github.com/harleyszhang/lite_llama"
+Homepage = "https://github.com/harleyszhang/rapid_llm"
+Repository = "https://github.com/harleyszhang/rapid_llm"
 
 [tool.setuptools.packages.find]
-include = ["lite_llama*"]
+include = ["rapid_llm*"]
 
 [tool.setuptools.package-data]
-lite_llama = ["py.typed"]
+rapid_llm = ["py.typed"]
 
 # --------------------------------------------------------------------------- #
 # Ruff: linter + formatter (replaces black/isort/flake8)
@@ -127,7 +127,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Triton kernels take many positional pointer/stride arguments and shadow math
 # builtins; benchmark helpers intentionally use star-imports and prints.
-"lite_llama/kernels/*" = ["B905"]
+"rapid_llm/kernels/*" = ["B905"]
 "tests/*" = ["B011"]
 # Preserved teaching material: the authors' Chinese labels use fullwidth
 # punctuation inside string literals, same rationale as the global RUF002/RUF003
@@ -155,7 +155,7 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers --strict-config --import-mode=importlib"
 markers = [
   "gpu: requires a CUDA device (auto-skipped on CPU-only machines; applied automatically to tests/kernels/)",
-  "weights: requires a converted checkpoint (auto-skipped when none is found; override the location with LITE_LLAMA_TEST_MODEL_DIR)",
+  "weights: requires a converted checkpoint (auto-skipped when none is found; override the location with RAPID_LLM_TEST_MODEL_DIR)",
   "slow: takes seconds rather than milliseconds (golden regression); excluded by `make test-fast`",
   "eval: benchmark accuracy run driven by tests/evals/configs (minutes, needs the dataset); run it with `make test-eval`",
   "serving: exercises the async engine or the HTTP API (needs the `serve` extra)",
@@ -172,7 +172,7 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["lite_llama"]
+source = ["rapid_llm"]
 branch = true
 omit = []
 

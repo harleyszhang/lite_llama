@@ -14,11 +14,11 @@ HF_OVERRIDES = {"n_group": 2, "topk_group": 1, "num_experts_per_tok": 2}
 
 
 def main() -> None:
-    from lite_llama.executor.attention_metadata import AttentionMetadata
-    from lite_llama.executor.loader import materialise_parameters
-    from lite_llama.executor.weight_utils import hf_weights_iterator
-    from lite_llama.models.config import ModelConfig
-    from lite_llama.models.registry import ModelRegistry
+    from rapid_llm.executor.attention_metadata import AttentionMetadata
+    from rapid_llm.executor.loader import materialise_parameters
+    from rapid_llm.executor.weight_utils import hf_weights_iterator
+    from rapid_llm.models.config import ModelConfig
+    from rapid_llm.models.registry import ModelRegistry
 
     config = ModelConfig.from_pretrained(CKPT, max_seq_len=2048, hf_overrides=HF_OVERRIDES)
     model = ModelRegistry.resolve("deepseek_v3").load_class()(config)

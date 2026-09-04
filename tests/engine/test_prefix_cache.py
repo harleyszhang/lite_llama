@@ -15,16 +15,16 @@ from __future__ import annotations
 
 import pytest
 
-from lite_llama.engine.kv_cache_spec import FullAttentionSpec, KVCacheConfig, KVCacheGroup
-from lite_llama.engine.prefix_cache import (
+from rapid_llm.engine.kv_cache_spec import FullAttentionSpec, KVCacheConfig, KVCacheGroup
+from rapid_llm.engine.prefix_cache import (
     PREFIX_CACHE_BLOCK_SIZE,
     PrefixCache,
     PrefixCacheStats,
     extend_block_hashes,
     iter_block_hashes,
 )
-from lite_llama.engine.sampler import SamplingParams
-from lite_llama.engine.scheduler import Request, Scheduler, SchedulerConfig
+from rapid_llm.engine.sampler import SamplingParams
+from rapid_llm.engine.scheduler import Request, Scheduler, SchedulerConfig
 
 #: Blocks in a test pool. Big enough that nothing evicts unless a test asks for
 #: pressure, small enough that exhaustion is reachable when one does.

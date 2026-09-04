@@ -14,7 +14,7 @@ import math
 import pytest
 import torch
 
-from lite_llama.kernels import flash_decoding
+from rapid_llm.kernels import flash_decoding
 from tests.reference import paged_decode_attention
 
 # Stage 1 promotes the fp16 qk product to fp32 before summing, so the kernel is
@@ -235,7 +235,7 @@ def test_two_rows_may_share_one_slot():
 # fp8 KV cache (e4m3 bytes in a uint8 container)
 # --------------------------------------------------------------------------- #
 def _quantize_kv(k_cache, v_cache, k_scale=1.0, v_scale=1.0):
-    from lite_llama.modules.quantization.utils import quantize_fp8_per_tensor
+    from rapid_llm.modules.quantization.utils import quantize_fp8_per_tensor
 
     return (
         quantize_fp8_per_tensor(k_cache, k_scale),
@@ -260,9 +260,7 @@ def test_fp8_cache_dequantises_exactly():
     k8, v8 = _quantize_kv(k_cache, v_cache)
     assert k8.dtype == torch.uint8 and k8.shape == k_cache.shape
 
-    out_fp8 = flash_decoding(
-        q, k8, v8, scale, table, b_req_idx, b_seq_len, max(seq_lens)
-    )
+    out_fp8 = flash_decoding(q, k8, v8, scale, table, b_req_idx, b_seq_len, max(seq_lens))
     # Same numerics with the cache widened by torch instead of the kernel.
     out_ref = flash_decoding(
         q,
@@ -287,8 +285,16 @@ def test_fp8_cache_applies_kv_scales():
 
     k8, v8 = _quantize_kv(k_cache, v_cache, k_scale=0.5, v_scale=2.0)
     out = flash_decoding(
-        q, k8, v8, scale, table, b_req_idx, b_seq_len, max(seq_lens),
-        k_scale=0.5, v_scale=2.0,
+        q,
+        k8,
+        v8,
+        scale,
+        table,
+        b_req_idx,
+        b_seq_len,
+        max(seq_lens),
+        k_scale=0.5,
+        v_scale=2.0,
     )
     ref = flash_decoding(
         q,

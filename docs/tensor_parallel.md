@@ -7,13 +7,13 @@
 两者正交，构成 `dp_size × tp_size` 的 rank 网格，见[数据并行](./data_parallel.md)。
 
 ```bash
-python -m lite_llama.cli chat \
+python -m rapid_llm.cli chat \
     --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8 \
     --tensor-parallel-size 2
 ```
 
 ```python
-from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
+from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 
 engine = ContinuousBatchingEngine.from_pretrained(
     "my_weight/Qwen3-8B", tensor_parallel_size=2
@@ -120,10 +120,10 @@ batch-shape stable: 7/9; on a tie: [('batch6', 4), ('mixed', 1)]
 
 ![tensor parallel](./images/tensor_parallel.gif)
 
-所以每个集合通信都会把自己的 op 与 payload 报给一本账（`lite_llama/tools/observability/collective_stats.py`）。记账放在 `tools/observability/` 而不是 `distributed/` 里：`distributed/` 负责跑线路，不负责给线路算账，这样这个包本身不带任何上报机器。
+所以每个集合通信都会把自己的 op 与 payload 报给一本账（`rapid_llm/tools/observability/collective_stats.py`）。记账放在 `tools/observability/` 而不是 `distributed/` 里：`distributed/` 负责跑线路，不负责给线路算账，这样这个包本身不带任何上报机器。
 
 ```python
-from lite_llama.tools.observability import Collective, CollectiveStats
+from rapid_llm.tools.observability import Collective, CollectiveStats
 
 with CollectiveStats.collect() as stats:
     engine.step()
@@ -189,8 +189,8 @@ decode graph 在单卡上录的是一串 kernel；在两卡上还把分片层的
 
 | 环境变量 | 默认 | 作用 |
 |---|---|---|
-| `LITE_LLAMA_TP_CUDA_GRAPH=0` | 未设 | kill-switch，TP 下强制 eager decode，不改代码不重新部署 |
-| `LITE_LLAMA_TP_GRAPH_CHECK=1` | 未设 | 每步 all-reduce 各 rank 选中的 graph（`None` 也有自己的指纹），不一致就抛异常而不是挂死。默认关闭，因为它给 decode 热路径加了一次集合通信，而 graph 存在的目的正是缩短这条路径 |
+| `RAPID_LLM_TP_CUDA_GRAPH=0` | 未设 | kill-switch，TP 下强制 eager decode，不改代码不重新部署 |
+| `RAPID_LLM_TP_GRAPH_CHECK=1` | 未设 | 每步 all-reduce 各 rank 选中的 graph（`None` 也有自己的指纹），不一致就抛异常而不是挂死。默认关闭，因为它给 decode 热路径加了一次集合通信，而 graph 存在的目的正是缩短这条路径 |
 
 实测（Qwen2.5-0.5B、H100×2、`max_seq_len=512` → 8 个 graph）：bf16 / fp8 / nvfp4 三种方案下 graph 引擎与 eager 引擎 32 步 greedy **逐字节一致**（单请求与 3 条 padding 到 batch-4 两种分组都比过）。这里要求逐字节，而 `test_tp_engine.py` 只要求共享前缀，差别是真实的：那边是 1 卡对 2 卡，行并行 GEMM + all-reduce 改变了求和顺序，greedy 平局会翻；这边是 2 卡对同样的 2 卡，只有 launch 来自 Python 还是来自 replay 的区别。
 

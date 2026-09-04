@@ -1,6 +1,6 @@
 """Tests for the physical KV block pool — pure CPU, no GPU or checkpoint.
 
-One class per behaviour of :mod:`lite_llama.engine.block_pool`: the free
+One class per behaviour of :mod:`rapid_llm.engine.block_pool`: the free
 queue's O(1) surgery, reference counting, the LRU order that decides what is
 evicted, hash indexing, and the reset safety check.
 
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from lite_llama.engine.block_pool import (
+from rapid_llm.engine.block_pool import (
     NULL_BLOCK_ID,
     BlockPool,
     FreeBlockQueue,

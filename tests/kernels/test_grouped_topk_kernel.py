@@ -21,7 +21,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lite_llama.kernels.ops.moe.grouped_topk import grouped_topk, grouped_topk_torch
+from rapid_llm.kernels.ops.moe.grouped_topk import grouped_topk, grouped_topk_torch
 from tests.models.test_grouped_topk import _GRID, _assert_same_routing
 
 

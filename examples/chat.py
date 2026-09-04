@@ -1,4 +1,4 @@
-"""Batch text generation with :class:`~lite_llama.engine.generator.TextGenerator`.
+"""Batch text generation with :class:`~rapid_llm.engine.generator.TextGenerator`.
 
 A minimal CLI demo: build a :class:`TextGenerator` over the checkpoint
 named at the top, then generate for a fixed prompt batch (streaming or
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import torch
 
-from lite_llama.engine import SamplingParams, TextGenerator
+from rapid_llm.engine import SamplingParams, TextGenerator
 
 checkpoints_dir = "my_weight/Qwen2.5-0.5B"  # 改成自己的存放模型路径
 

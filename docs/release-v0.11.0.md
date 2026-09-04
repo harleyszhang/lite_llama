@@ -8,7 +8,7 @@ v0.11 交付两条独立主线：KV 显存占用最小的注意力架构 MLA 端
 
 **MLA 端到端（commit b43013c）：** `DeepseekV2Model`（MLA + DeepSeek-MoE）注册进 registry，KV cache 行从「每头两列」泛化为 `(dim,)` 元组——MLA 每 token 只缓存一条 576 维 latent（512 lora + 64 rope），TP 下按 vLLM 的口径在每 rank 复制而非切分。精度验证不依赖人工比对：`tests/golden/test_deepseek_v2_tp2.py` 在 2×A10 上对 transformers 逐 token 比对，门禁不是硬阈值而是从 parity probe 实测校准的 drift 预算——**BOS 排查证明单层 max-abs 超阈可能只是 ULP 算术假热点**（BOS 的 MoE 输出范数是普通 token 的千倍，同相对误差落在 [1024,2048) 桶恰好差 1 个 bf16 ULP=8.0），预算式门禁比「首个超阈层即失败」的硬阈值更贴合实测误差分布。
 
-**acc.divergence（同 commit）：**不止定位第一个超阈层，还做逐层 diff、扰动注入自证、预算式门禁。CLI 挂 `lite-llama acc divergence`，`tools/accuracy/divergence.py` 568 行。
+**acc.divergence（同 commit）：**不止定位第一个超阈层，还做逐层 diff、扰动注入自证、预算式门禁。CLI 挂 `rapid-llm acc divergence`，`tools/accuracy/divergence.py` 568 行。
 
 **F8 流式解析（本版收尾 commit）：** `engine/reasoning.py` + `engine/tool_parser.py` 把 think 标签与 DeepSeek/Qwen 双族 tool 标记从增量 detokenizer 文本里流式拆出。与 vLLM 的差异在两处：解析器**按请求声明**（vLLM/SGLang 都是服务启动时单选一个，一个部署只能服务一种模型），以及流式分块与一次性解析的等价性是**不变式**——parser 层穷举全部 two-cut 切分，server 层再验证流式帧拼接等于一次性 message。
 
@@ -20,7 +20,7 @@ v0.11 交付两条独立主线：KV 显存占用最小的注意力架构 MLA 端
 
 ```bash
 # 双卡 TP=2 起服务
-lite-llama serve --model-dir my_weight/DeepSeek-V2-Lite --tensor-parallel-size 2
+rapid-llm serve --model-dir my_weight/DeepSeek-V2-Lite --tensor-parallel-size 2
 
 # golden 门禁（2×A10，需 checkpoint 在 my_weight/DeepSeek-V2-Lite）
 pytest tests/golden/test_deepseek_v2_tp2.py -q        # 5 passed
@@ -36,11 +36,11 @@ pytest tests/golden/test_deepseek_v2_tp2.py -q        # 5 passed
 
 ```bash
 # 对 HF 逐层 diff，指认第一个发散层
-lite-llama acc divergence --model-dir my_weight/DeepSeek-V2-Lite \
+rapid-llm acc divergence --model-dir my_weight/DeepSeek-V2-Lite \
     --prompt "Explain KV caches." --reference transformers
 
 # 扰动注入自证：给指定层注入已知扰动，工具必须指认回同一层
-lite-llama acc divergence --inject layer=7,scale=1e-2 ...
+rapid-llm acc divergence --inject layer=7,scale=1e-2 ...
 ```
 
 ### F8 reasoning / tool parser（收尾 commit）
@@ -108,7 +108,7 @@ KV 几何（每 token 每层 elements，从 config.json 解析）：V2-Lite MLA 
 
 ```text
 1359 passed, 82 skipped, 11 xfailed in 101s        全量 pytest（serve extra 安装后）
-160 passed, 2 skipped in 140s                       tests/distributed/（2×A10，LITE_LLAMA_TEST_MODEL_DIR=Qwen3-1.7B；
+160 passed, 2 skipped in 140s                       tests/distributed/（2×A10，RAPID_LLM_TEST_MODEL_DIR=Qwen3-1.7B；
                                                    含 shutdown 释放回归测试，撤销修复即失败，已反向验证）
 5 passed in 24s                                    tests/golden/test_deepseek_v2_tp2.py（2×A10 + V2-Lite）
 25 passed                                          tests/engine/test_reasoning.py（含 two-cut 穷举不变式）
@@ -116,22 +116,22 @@ KV 几何（每 token 每层 elements，从 config.json 解析）：V2-Lite MLA 
 41 passed                                          tests/entrypoints/test_api_server.py（含流式==一次性 server 级不变式）
 ```
 
-golden 的 UNVERIFIED 语义与上一版一致：checkpoint 缺失时 xfail 并写明原因，`LITE_LLAMA_GOLDEN_STRICT=1` 时 fail——没有静默变绿。`test_deepseek_v2_tp2.py` 不带共享 `weights` 标记：那个标记绑定 Qwen2.5-0.5B 的共享 fixture，checkpoint 由文件内 fixture 管理，UNVERIFIED 守卫同样由它承担。
+golden 的 UNVERIFIED 语义与上一版一致：checkpoint 缺失时 xfail 并写明原因，`RAPID_LLM_GOLDEN_STRICT=1` 时 fail——没有静默变绿。`test_deepseek_v2_tp2.py` 不带共享 `weights` 标记：那个标记绑定 Qwen2.5-0.5B 的共享 fixture，checkpoint 由文件内 fixture 管理，UNVERIFIED 守卫同样由它承担。
 
 ## 文件清单（相对 v0.10.0，只列主干）
 
 | 操作 | 路径 |
 | ------ | ------ |
-| 新建 | `lite_llama/models/deepseek_v2.py`、`lite_llama/kernels/ops/attention/mla.py`（MLA prefill/decode 算子与参考实现） |
-| 新建 | `lite_llama/tools/accuracy/`（acc.divergence：PrefillCache/Checker/报告） |
-| 新建 | `lite_llama/engine/reasoning.py`、`lite_llama/engine/tool_parser.py`（F8 双 parser） |
-| 修改 | `lite_llama/entrypoints/{protocol,api_server}.py`（reasoning_content / tool_calls / 请求级开关 / 独立 finish 帧） |
-| 修改 | `lite_llama/executor/{kv_cache_manager,model_runner}.py`（KV 行泛化为 `(dim,)` 元组） |
-| 修改 | `lite_llama/modules/{moe,mlp}.py`、`lite_llama/models/config.py`（bf16 dtype 驱动、V2 配置面） |
+| 新建 | `rapid_llm/models/deepseek_v2.py`、`rapid_llm/kernels/ops/attention/mla.py`（MLA prefill/decode 算子与参考实现） |
+| 新建 | `rapid_llm/tools/accuracy/`（acc.divergence：PrefillCache/Checker/报告） |
+| 新建 | `rapid_llm/engine/reasoning.py`、`rapid_llm/engine/tool_parser.py`（F8 双 parser） |
+| 修改 | `rapid_llm/entrypoints/{protocol,api_server}.py`（reasoning_content / tool_calls / 请求级开关 / 独立 finish 帧） |
+| 修改 | `rapid_llm/executor/{kv_cache_manager,model_runner}.py`（KV 行泛化为 `(dim,)` 元组） |
+| 修改 | `rapid_llm/modules/{moe,mlp}.py`、`rapid_llm/models/config.py`（bf16 dtype 驱动、V2 配置面） |
 | 新建 | `benchmarks/bench_mla.py`、`benchmarks/bench_parser.py` |
 | 新建 | `tests/golden/test_deepseek_v2_tp2.py`、`tests/engine/test_{reasoning,tool_parser}.py`、`tests/tools/test_divergence.py` |
 | 新建 | `scripts/dsv2_tp2_parity_probe.py`、`scripts/dsv2_layer_diff.py`（校准与排查探针）、`scripts/gen_reasoning_gif.py`（README gif，真实运行渲染） |
-| 修改 | `lite_llama/executor/executor.py`（shutdown 对称销毁 rank-0 group）、`tests/distributed/test_tp_engine.py`（对应回归测试） |
+| 修改 | `rapid_llm/executor/executor.py`（shutdown 对称销毁 rank-0 group）、`tests/distributed/test_tp_engine.py`（对应回归测试） |
 | 新建 | `docs/benchmark_logs/{mla,parser}_v0.11.json`、`docs/images/reasoning.gif` |
 
 ## Upgrade
@@ -140,7 +140,7 @@ golden 的 UNVERIFIED 语义与上一版一致：checkpoint 缺失时 xfail 并�
 git checkout dev-v0.11 && uv pip install -e .
 
 # MLA 端到端（2 卡）
-lite-llama serve --model-dir my_weight/DeepSeek-V2-Lite --tensor-parallel-size 2
+rapid-llm serve --model-dir my_weight/DeepSeek-V2-Lite --tensor-parallel-size 2
 
 # 请求级解析开关（两个开关独立、可组合）
 curl localhost:8000/v1/chat/completions -d '{

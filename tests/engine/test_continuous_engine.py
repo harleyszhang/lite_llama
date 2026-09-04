@@ -17,11 +17,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lite_llama.engine.async_engine import AsyncLLMEngine
-from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
-from lite_llama.engine.sampler import PositionLogprobs, SamplingParams
-from lite_llama.engine.scheduler import SchedulerConfig
-from lite_llama.executor.worker import PassLogprobs
+from rapid_llm.engine.async_engine import AsyncLLMEngine
+from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+from rapid_llm.engine.sampler import PositionLogprobs, SamplingParams
+from rapid_llm.engine.scheduler import SchedulerConfig
+from rapid_llm.executor.worker import PassLogprobs
 
 _EOS = 2
 _WORD = 100  # any token id the stop set does not contain
@@ -301,12 +301,12 @@ def test_a_finished_request_lands_in_the_metrics():
     engine.step()
 
     text = engine.metrics.render_prometheus()
-    assert 'lite_llama:request_success_total{finish_reason="eos"} 1' in text
-    assert "lite_llama:prompt_tokens_total 3" in text  # the fake prompt is 3 tokens
-    assert "lite_llama:generation_tokens_total 1" in text  # the eos token is not output
-    assert "lite_llama:request_queue_time_seconds_count 1" in text
-    assert "lite_llama:time_to_first_token_seconds_count 1" in text
-    assert "lite_llama:num_requests_running 0" in text  # drained by the end
+    assert 'rapid_llm:request_success_total{finish_reason="eos"} 1' in text
+    assert "rapid_llm:prompt_tokens_total 3" in text  # the fake prompt is 3 tokens
+    assert "rapid_llm:generation_tokens_total 1" in text  # the eos token is not output
+    assert "rapid_llm:request_queue_time_seconds_count 1" in text
+    assert "rapid_llm:time_to_first_token_seconds_count 1" in text
+    assert "rapid_llm:num_requests_running 0" in text  # drained by the end
     engine.shutdown()
 
 
@@ -317,13 +317,13 @@ def test_an_aborted_request_is_counted_without_finishing():
     engine.abort(request.request_id)
 
     text = engine.metrics.render_prometheus()
-    assert 'lite_llama:request_success_total{finish_reason="abort"} 1' in text
+    assert 'rapid_llm:request_success_total{finish_reason="abort"} 1' in text
     assert not engine.has_unfinished_requests()
     engine.shutdown()
 
 
 def test_metrics_can_be_disabled(monkeypatch):
-    monkeypatch.setenv("LITE_LLAMA_METRICS", "0")
+    monkeypatch.setenv("RAPID_LLM_METRICS", "0")
     engine = _build_engine([[_WORD], [_EOS]])
     engine.add_request("hi")
     engine.step()

@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from lite_llama.executor.loader import init_empty_parameters
-from lite_llama.models.config import ModelConfig
-from lite_llama.models.registry import ModelRegistry
+from rapid_llm.executor.loader import init_empty_parameters
+from rapid_llm.models.config import ModelConfig
+from rapid_llm.models.registry import ModelRegistry
 from tests.conftest import REPO_ROOT
 
 #: Scale tables are consumed by the loader, not handed to the model.
@@ -59,7 +59,7 @@ def _adapt_int4_key(key: str) -> str | None:
 
 
 def _candidate_dirs() -> list[Path]:
-    override = os.environ.get("LITE_LLAMA_INDEX_DIRS")
+    override = os.environ.get("RAPID_LLM_INDEX_DIRS")
     if override:
         return [Path(p) for p in override.split(os.pathsep) if p]
     return sorted((REPO_ROOT / "my_weight").glob("*/"))
@@ -116,7 +116,7 @@ def mapping(checkpoint: Path) -> tuple[list[str], dict[str, str | None], set[str
 def _skip_if_none_found() -> None:
     if not _with_index():
         pytest.skip(
-            "no sharded checkpoint found; put one in my_weight/ or set LITE_LLAMA_INDEX_DIRS"
+            "no sharded checkpoint found; put one in my_weight/ or set RAPID_LLM_INDEX_DIRS"
         )
 
 

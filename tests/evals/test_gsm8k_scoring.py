@@ -151,14 +151,14 @@ def test_read_jsonl_skips_comments(tmp_path):
 
 
 def test_cache_dir_honours_the_override(tmp_path, monkeypatch):
-    monkeypatch.setenv("LITE_LLAMA_EVAL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("RAPID_LLM_EVAL_DATA_DIR", str(tmp_path))
     assert dataset.cache_dir() == tmp_path
 
 
 def test_fetch_returns_the_cached_file_without_a_download(tmp_path, monkeypatch):
     """A pre-seeded cache is what makes the harness usable on an offline box."""
-    monkeypatch.setenv("LITE_LLAMA_EVAL_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("LITE_LLAMA_EVAL_BASE_URL", "http://0.0.0.0:1/unreachable")
+    monkeypatch.setenv("RAPID_LLM_EVAL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("RAPID_LLM_EVAL_BASE_URL", "http://0.0.0.0:1/unreachable")
     seeded = tmp_path / "gsm8k" / "test.jsonl"
     seeded.parent.mkdir(parents=True)
     seeded.write_text(json.dumps({"question": "q", "answer": "#### 1"}) + "\n")
@@ -167,8 +167,8 @@ def test_fetch_returns_the_cached_file_without_a_download(tmp_path, monkeypatch)
 
 
 def test_fetch_reports_an_unreachable_source(tmp_path, monkeypatch):
-    monkeypatch.setenv("LITE_LLAMA_EVAL_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("LITE_LLAMA_EVAL_BASE_URL", "http://0.0.0.0:1/unreachable")
+    monkeypatch.setenv("RAPID_LLM_EVAL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("RAPID_LLM_EVAL_BASE_URL", "http://0.0.0.0:1/unreachable")
     with pytest.raises(dataset.DatasetUnavailable, match="cannot obtain"):
         dataset.fetch("test.jsonl", "gsm8k")
 

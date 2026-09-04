@@ -89,7 +89,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--model-dir",
-        default=os.environ.get("LITE_LLAMA_MODEL_DIR", "gpt2"),
+        default=os.environ.get("RAPID_LLM_MODEL_DIR", "gpt2"),
         help="本地权重目录或 HuggingFace 模型名(默认 'gpt2',直接从 hub 拉取)",
     )
     parser.add_argument("--prompt", default="Once upon a time in a distant land,")

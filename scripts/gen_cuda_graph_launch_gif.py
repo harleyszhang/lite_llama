@@ -82,7 +82,7 @@ def _raw_profile(use_cuda_graph: bool, ckpt: str) -> dict:
     """Run profiler, return raw totals (no step isolation)."""
     import torch
 
-    from lite_llama import SamplingParams, TextGenerator
+    from rapid_llm import SamplingParams, TextGenerator
 
     gen = TextGenerator(
         checkpoints_dir=ckpt,
@@ -316,7 +316,7 @@ def _render_frame(
     draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
     draw.text(
         (12, 10),
-        "lite-llama  —  CUDA graph: kernel launch overhead (torch.profiler, Qwen2.5-0.5B, H100)",
+        "rapid-llm  —  CUDA graph: kernel launch overhead (torch.profiler, Qwen2.5-0.5B, H100)",
         fill=TITLE_FG,
         font=small,
     )

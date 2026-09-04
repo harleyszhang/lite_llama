@@ -1,9 +1,9 @@
-"""DeepSeek V4 trimmed checkpoint: lite_llama vs transformers, forward speed.
+"""DeepSeek V4 trimmed checkpoint: rapid_llm vs transformers, forward speed.
 
 V4 ships no public weights, so both arms load the *same* randomly
 initialised trimmed checkpoint built once from transformers 5.8's
 ``DeepseekV4ForCausalLM``. The reference runs its own eager model;
-lite_llama runs its model-runner API with the V4 caches. The trim keeps
+rapid_llm runs its model-runner API with the V4 caches. The trim keeps
 every structural variant (all three attention types, both router
 families) at a size one A10 fits in bf16.
 
@@ -92,14 +92,14 @@ CONFIG = {
 
 
 def _build_pair(workdir: Path):
-    """One checkpoint, both runtimes: HF reference init, lite_llama loads it."""
+    """One checkpoint, both runtimes: HF reference init, rapid_llm loads it."""
     from safetensors.torch import save_file
     from transformers.models.deepseek_v4 import DeepseekV4ForCausalLM
 
-    from lite_llama.executor.loader import materialise_parameters
-    from lite_llama.executor.weight_utils import hf_weights_iterator
-    from lite_llama.models.config import ModelConfig
-    from lite_llama.models.registry import ModelRegistry
+    from rapid_llm.executor.loader import materialise_parameters
+    from rapid_llm.executor.weight_utils import hf_weights_iterator
+    from rapid_llm.models.config import ModelConfig
+    from rapid_llm.models.registry import ModelRegistry
 
     (workdir / "config.json").write_text(json.dumps(CONFIG))
     config = ModelConfig.from_pretrained(workdir, max_seq_len=4096)
@@ -118,7 +118,7 @@ def _build_pair(workdir: Path):
 
 def _lite_meta(batch: int, seq_len: int, *, prefill: bool):
     """Minimal attention metadata, as the M6 tests drive the model."""
-    from lite_llama.executor.attention_metadata import AttentionMetadata
+    from rapid_llm.executor.attention_metadata import AttentionMetadata
 
     meta = AttentionMetadata()
     meta.is_prefill = prefill
@@ -258,7 +258,7 @@ def _lite_greedy(model, ids: torch.Tensor, pos_p: torch.Tensor, steps: int) -> t
 def _parity_suite(hf_model, model, config) -> dict:
     """Greedy agreement from one shared prompt: lite vs HF, and the floor.
 
-    Three runs, one prompt: lite_llama vs the HF bf16 reference (the parity
+    Three runs, one prompt: rapid_llm vs the HF bf16 reference (the parity
     number), and the reference's own fp32 weights against their bf16 cast
     (the noise floor). An untrained checkpoint has flat logit margins, so
     bf16 alone flips a large share of greedy ties — the parity number is

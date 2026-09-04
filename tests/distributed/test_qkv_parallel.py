@@ -15,10 +15,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from lite_llama.distributed import parallel_state as ps
-from lite_llama.models import weights
-from lite_llama.models.base import CausalLM
-from lite_llama.modules import QKVParallelLinear
+from rapid_llm.distributed import parallel_state as ps
+from rapid_llm.models import weights
+from rapid_llm.models.base import CausalLM
+from rapid_llm.modules import QKVParallelLinear
 
 HIDDEN = 32
 HEAD_DIM = 8
@@ -151,7 +151,7 @@ def test_the_ranks_blocks_reassemble_the_checkpoint(grid, tp_size: int, leaf: st
     wrong offset, if the ranks' shares are interleaved the other way round (block-major
     instead of rank-major), or if a rank's slice of the incoming tensor is taken from
     the wrong position. Coverage — that no row of the fused parameter is left unwritten —
-    is checked by :func:`~lite_llama.models.weights.load_weights` itself.
+    is checked by :func:`~rapid_llm.models.weights.load_weights` itself.
     """
     checkpoint = _checkpoint()
     gathered: list[list[torch.Tensor]] = [[], [], []]

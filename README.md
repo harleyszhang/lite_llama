@@ -1,11 +1,11 @@
 <div align="center">
 
-# Litellama
+# RapidLLM
 
 **A light llama-like llm inference framework based on the triton/cuda kernel.**
 
-[![en](https://img.shields.io/badge/lang-en-red.svg)](https://github.com/harleyszhang/lite_llama/blob/main/README.md)
-[![zh](https://img.shields.io/badge/lang-zh-yellow.svg)](https://github.com/harleyszhang/lite_llama/blob/main/README.zh.md)
+[![en](https://img.shields.io/badge/lang-en-red.svg)](https://github.com/harleyszhang/rapid_llm/blob/main/README.md)
+[![zh](https://img.shields.io/badge/lang-zh-yellow.svg)](https://github.com/harleyszhang/rapid_llm/blob/main/README.zh.md)
 ![PyPI - Python Version](https://img.shields.io/badge/python-3.13-blue)
 
 <pre>
@@ -26,15 +26,15 @@
 
 - Up to **6.5×** speedup over HuggingFace `transformers` (Qwen3-0.6B, A10, greedy) — see the [benchmark table](#qwen3-06b-benchmark) below.
 - **Online batch inference with continuous batching**: requests join and leave a running batch, so an arrival never waits for the current generation to finish. On one A10 with Qwen2.5-1.5B-Instruct and requests arriving 250 ms apart, throughput goes from 93 → 644 tok/s (**6.9×**) and mean latency from 19.1 s → 2.3 s (**8.3×**) — see [docs/continuous_batching.md](./docs/continuous_batching.md).
-- **OpenAI-compatible server** (`lite-llama serve`): `/v1/completions` and `/v1/chat/completions` with streaming — the official `openai` client works unchanged. See [docs/online_serving.md](./docs/online_serving.md).
+- **OpenAI-compatible server** (`rapid-llm serve`): `/v1/completions` and `/v1/chat/completions` with streaming — the official `openai` client works unchanged. See [docs/online_serving.md](./docs/online_serving.md).
 - Supports `llama3`, `Qwen2.5/Qwen3`, `Qwen3-MoE`, `LLaVA-1.5`, `Qwen3-VL`; `top-p` / `top-k` sampling and streaming output.
-- **CUDA graph**: decode-stage CUDA graph capture (within batch-size limits), including under tensor parallelism — capture is gated by a grid-agreement all-reduce and a graph-vs-eager numerical check, because a mismatched graph under TP hangs in a collective instead of raising. `LITE_LLAMA_TP_CUDA_GRAPH=0` restores eager.
+- **CUDA graph**: decode-stage CUDA graph capture (within batch-size limits), including under tensor parallelism — capture is gated by a grid-agreement all-reduce and a graph-vs-eager numerical check, because a mismatched graph under TP hangs in a collective instead of raising. `RAPID_LLM_TP_CUDA_GRAPH=0` restores eager.
 - **Attention backends**: `flashattention2`, `flashdecoding` (with `NopadAttention` for unpadded sequences and GQA support). Dynamic KV-cache management via paged `TokenAttention` slots.
 - **Operator fusion**: `silu` multiply, K/V projection fusion, skip-connection + `rmsnorm`. Custom `triton` kernels for `rmsnorm`, `rope`, `softmax`, and element-wise multiply.
 - **Quantization**: W8A16 (fp8/int8), W4A16 (AWQ/GPTQ), SmoothQuant W8A8, fp8 W8A8 (dense + MoE experts), NVFP4 weight-only — up to **6.9×** decode speedup over HF fp16. 4-bit schemes trade speed for footprint on an H100; the per-shape numbers are in [docs/quantization.md](docs/quantization.md).
 - **Tensor Parallelism**: split a 30B MoE model across 2× A10 (24 GB) with one all-reduce per block.
 - **Data Parallelism**: replicate the model across GPUs and route requests between them — **2.00×** throughput on 2 GPUs (100% linear).
-- **Kernel Autotune** (v0.5): offline search persists optimal tile configs per `(GPU, op, shape)` to `~/.cache/lite_llama/autotune/`; kernels auto-load on startup.
+- **Kernel Autotune** (v0.5): offline search persists optimal tile configs per `(GPU, op, shape)` to `~/.cache/rapid_llm/autotune/`; kernels auto-load on startup.
 - **FP8 KV Cache** (v0.6): `--kv-cache-dtype fp8` halves KV memory — **1.91× capacity** (282K vs 148K tokens on A10) with only 9% throughput cost.
 - **Chunked Prefill** (v0.7): long prompts split into 512-token chunks so per-step prefill work is bounded (2000 → 512 tokens, 3.9× lower peak) — decode requests interleave instead of waiting behind a whole prompt.
 - **Prefix Caching** (v0.7): block-hash chained prefix reuse — shared system prompts are prefilled once and reused by later requests; LRU-evicted under capacity pressure (aligned with vLLM's `BlockPool`).
@@ -80,7 +80,7 @@ make test-gpu  # requires CUDA
 
 Point `--model-dir` at a HuggingFace checkpoint directory — the one holding `config.json` and `*.safetensors` — exactly as `modelscope download` leaves it.
 
-There is no conversion step: `config.json` is parsed by `AutoConfig`, and the weights are streamed from the safetensors shards straight into the model, with the K/V projections fused and the MoE experts stacked on the way in (see `lite_llama/models/weights.py`).
+There is no conversion step: `config.json` is parsed by `AutoConfig`, and the weights are streamed from the safetensors shards straight into the model, with the K/V projections fused and the MoE experts stacked on the way in (see `rapid_llm/models/weights.py`).
 
 ```bash
 modelscope download Qwen/Qwen2.5-0.5B         --local-dir my_weight/Qwen2.5-0.5B
@@ -98,7 +98,7 @@ Legacy `pytorch_model*.bin` checkpoints still load; safetensors wins when both a
 Text generation:
 
 ```python
-from lite_llama import TextGenerator, SamplingParams
+from rapid_llm import TextGenerator, SamplingParams
 
 gen = TextGenerator(checkpoints_dir="my_weight/Qwen2.5-0.5B")
 params = SamplingParams(temperature=0.0, max_gen_len=64)
@@ -116,7 +116,7 @@ for step in gen.stream(["The capital of France is"], params):
 
 ```python
 from PIL import Image
-from lite_llama import VisionGenerator, SamplingParams
+from rapid_llm import VisionGenerator, SamplingParams
 
 gen = VisionGenerator(checkpoints_dir="my_weight/llava-1.5-7b-modelscope")
 img = Image.open("docs/images/llava_test/dog.jpeg").convert("RGB")
@@ -129,11 +129,11 @@ print(gen.generate(prompt, [img], SamplingParams(temperature=0.0, max_gen_len=48
 llava-1.5-7b-modelscope default inference:
 
 ```bash
-export LITE_LLAMA_MODEL_DIR=my_weight/Qwen2.5-0.5B
-lite-llama chat                              # interactive multi-turn chat (/clear resets)
-lite-llama serve --port 8000                 # OpenAI-compatible API server
-lite-llama batch --show-stats                # a prompt set through the scheduler
-lite-llama vl-chat --model-dir my_weight/llava-1.5-7b-modelscope \
+export RAPID_LLM_MODEL_DIR=my_weight/Qwen2.5-0.5B
+rapid-llm chat                              # interactive multi-turn chat (/clear resets)
+rapid-llm serve --port 8000                 # OpenAI-compatible API server
+rapid-llm batch --show-stats                # a prompt set through the scheduler
+rapid-llm vl-chat --model-dir my_weight/llava-1.5-7b-modelscope \
                    --image docs/images/dog.jpeg \
                    --prompt "USER: <image>\nWhat animal is this? ASSISTANT:"
 ```
@@ -141,14 +141,14 @@ lite-llama vl-chat --model-dir my_weight/llava-1.5-7b-modelscope \
 llava-1.5-7b-modelscope default inference:
 
 ```bash
-python -m lite_llama.cli chat --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8
+python -m rapid_llm.cli chat --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8
 ```
 
 Qwen3-VL model, single pictures inference:
 
 ```bash
-cd /home/honggao/projects/open_source/lite_llama
-python -m lite_llama.cli vl-chat \
+cd /home/honggao/projects/open_source/rapid_llm
+python -m rapid_llm.cli vl-chat \
     --model-dir my_weight/Qwen3-VL-4B-Instruct \
     --image docs/images/llava_test/dog.jpeg \
     --prompt "What animal is in this picture? Answer in one sentence." \
@@ -159,14 +159,14 @@ Qwen3-VL-4B-Instruct, Multi-image + Sampling mode:
 
 ```bash
 # 多图 + 采样模式
-python -m lite_llama.cli vl-chat \
+python -m rapid_llm.cli vl-chat \
     --model-dir my_weight/Qwen3-VL-4B-Instruct \
     --image docs/images/llava_test/dog.jpeg docs/images/llava_test/dog2.png \
     --prompt "Compare the animals in these pictures." \
     --temperature 0.7 --top-p 0.9
 
 # 默认 prompt(Describe this image.)
-python -m lite_llama.cli vl-chat \
+python -m rapid_llm.cli vl-chat \
     --model-dir my_weight/Qwen3-VL-4B-Instruct \
     --image docs/images/llava_test/extreme_ironing.jpg
 ```
@@ -177,7 +177,7 @@ model replays. Like `chat`, the REPL defaults to eager (one turn in flight
 never amortises capture latency); pass `--cuda-graph` for long replies:
 
 ```bash
-python -m lite_llama.cli vl-chat \
+python -m rapid_llm.cli vl-chat \
     --model-dir my_weight/Qwen3-VL-4B-Instruct \
     --image docs/images/llava_test/dog.jpeg \
     --prompt "What animal is in this picture? Answer in one sentence." \
@@ -198,14 +198,14 @@ After `cli_llava.py` runs successfully, the terminal displays the interface as s
 
 ![llava model streaming output](./docs/images/llava_output2.gif)
 
-For performance test, after changing your model weight path, run `lite_llama/examples/benchmark.py` file directly, it will output the latency and throughput performance comparison between lite_llama and transformers libraries, the result of the first run is not very accurate, so we suggest you to take the second run as a reference. For example, for the Llama-3.2-3B model with `prompt_len = 25`, `batch_size = 12`, and `max_gen_len = 1900`, the result of benchmark:
+For performance test, after changing your model weight path, run `rapid_llm/examples/benchmark.py` file directly, it will output the latency and throughput performance comparison between rapid_llm and transformers libraries, the result of the first run is not very accurate, so we suggest you to take the second run as a reference. For example, for the Llama-3.2-3B model with `prompt_len = 25`, `batch_size = 12`, and `max_gen_len = 1900`, the result of benchmark:
 
 ```bash
-lite_llama inference time: 31.3463 s
+rapid_llm inference time: 31.3463 s
 Transformers inference time: 69.1433 s
-lite_llama throughput: 730.45 tokens/s
+rapid_llm throughput: 730.45 tokens/s
 Transformers throughput: 183.95 tokens/s
-lite_llama per token latency: 1.369015 ms/token
+rapid_llm per token latency: 1.369015 ms/token
 Transformers per token latency: 5.436221 ms/token
 ```
 
@@ -220,8 +220,8 @@ Six requests, three slots. Watch the slot column: when a request finishes, the s
 Serve an OpenAI-compatible API:
 
 ```bash
-pip install 'lite-llama[serve]'
-lite-llama serve --model-dir my_weight/Qwen2.5-1.5B-Instruct --port 8000
+pip install 'rapid-llm[serve]'
+rapid-llm serve --model-dir my_weight/Qwen2.5-1.5B-Instruct --port 8000
 ```
 
 ```bash
@@ -234,7 +234,7 @@ curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 Or drive the engine directly — every prompt is an independent request, and each carries its own sampling parameters:
 
 ```python
-from lite_llama import ContinuousBatchingEngine, SamplingParams
+from rapid_llm import ContinuousBatchingEngine, SamplingParams
 
 engine = ContinuousBatchingEngine.from_pretrained(
     "my_weight/Qwen2.5-1.5B-Instruct", max_num_seqs=16
@@ -251,7 +251,7 @@ Asynchronously, with concurrent coroutines sharing one batch:
 
 ```python
 import asyncio
-from lite_llama import AsyncLLMEngine, SamplingParams
+from rapid_llm import AsyncLLMEngine, SamplingParams
 
 async def main():
     async with AsyncLLMEngine.from_pretrained("my_weight/Qwen2.5-1.5B-Instruct") as engine:
@@ -269,13 +269,13 @@ Where data parallelism replicates the model, **tensor parallelism** splits the w
 
 ```bash
 # 30B MoE on 2x A10
-python -m lite_llama.cli chat \
+python -m rapid_llm.cli chat \
     --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8 \
     --tensor-parallel-size 2
 ```
 
 ```python
-from lite_llama.engine.continuous_engine import ContinuousBatchingEngine
+from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 
 engine = ContinuousBatchingEngine.from_pretrained("my_weight/Qwen3-8B", tensor_parallel_size=2)
 ```
@@ -287,7 +287,7 @@ That last claim is not an argument — it is measured. Every collective reports 
 ![tensor parallel](./docs/images/tensor_parallel.gif)
 
 ```python
-from lite_llama.tools.observability import CollectiveStats
+from rapid_llm.tools.observability import CollectiveStats
 
 with CollectiveStats.collect() as stats:
     engine.step()
@@ -300,7 +300,7 @@ See [docs/tensor_parallel.md](docs/tensor_parallel.md) for the design, the shard
 
 ### Multi-head Latent Attention (v0.11)
 
-DeepSeek-V2-Lite runs end-to-end (`lite-llama serve --model-dir my_weight/DeepSeek-V2-Lite --tensor-parallel-size 2`): every token caches one 576-element latent row (512 lora + 64 rope) instead of per-head K and V, through the same `(dim,)` KV row every other model uses. Under TP the latent is **replicated, not sharded** — it is single-KV-head, so splitting it would leave no rank able to compute attention alone; the consequence is that a per-rank pool IS the whole-model pool, and the benchmark reports it under that convention.
+DeepSeek-V2-Lite runs end-to-end (`rapid-llm serve --model-dir my_weight/DeepSeek-V2-Lite --tensor-parallel-size 2`): every token caches one 576-element latent row (512 lora + 64 rope) instead of per-head K and V, through the same `(dim,)` KV row every other model uses. Under TP the latent is **replicated, not sharded** — it is single-KV-head, so splitting it would leave no rank able to compute attention alone; the consequence is that a per-rank pool IS the whole-model pool, and the benchmark reports it under that convention.
 
 On 2× A10 (batch=8, gen=128, eager decode): TTFT 64.8 ms, TPOT 63.01 ms; KV density **33.6k tokens/GiB** of pool memory vs 9.3k for Qwen3-1.7B's GQA on the same card — the 3.6× is the config-parsed 30.4 vs 112.0 KiB/token showing up in a real pool. `python benchmarks/bench_mla.py` prints the honest version of this table: two models that are not the same size, labeled as such, with the latency columns run on one identical workload.
 
@@ -316,11 +316,11 @@ Prefill closes to parity and passes it at seq 2048 (1.06×); decode is CPU-bound
 
 ### Cross-Stream Overlap (L1)
 
-A continuous-batching step can hold up to three passes — prefill, extend, decode — and each pass needs its input tensors on the GPU. With L1 overlap (on by default, `LITE_LLAMA_OVERLAP=0` to disable) the next pass's upload leaves on a dedicated copy stream while the current forward is still running, so the H2D transfer hides inside the compute instead of serialising behind it. The engine step harvests tokens once at the end rather than synchronising after every pass, which is what makes the overlap structurally possible at all.
+A continuous-batching step can hold up to three passes — prefill, extend, decode — and each pass needs its input tensors on the GPU. With L1 overlap (on by default, `RAPID_LLM_OVERLAP=0` to disable) the next pass's upload leaves on a dedicated copy stream while the current forward is still running, so the H2D transfer hides inside the compute instead of serialising behind it. The engine step harvests tokens once at the end rather than synchronising after every pass, which is what makes the overlap structurally possible at all.
 
 ![L1 cross-stream overlap](./docs/images/overlap_l1.gif)
 
-The GIF is rendered from the engine's own CUDA-event timeline (`LITE_LLAMA_OVERLAP_TIMELINE=1`): the extend forward fills the window on the compute stream while the next pass's upload lands inside it on the copy stream — the intersection is the overlap, not a rendering trick. Measure both sides with `python -m benchmarks.overlap.levels --level l1 --timeline`; regenerate the picture with `python scripts/gen_overlap_l1_gif.py`.
+The GIF is rendered from the engine's own CUDA-event timeline (`RAPID_LLM_OVERLAP_TIMELINE=1`): the extend forward fills the window on the compute stream while the next pass's upload lands inside it on the copy stream — the intersection is the overlap, not a rendering trick. Measure both sides with `python -m benchmarks.overlap.levels --level l1 --timeline`; regenerate the picture with `python scripts/gen_overlap_l1_gif.py`.
 
 ### Decode Host-Overhead Cuts (v0.11.1)
 
@@ -344,21 +344,21 @@ L1 covers the host↔device axis. Three more primitives hide communication and k
 
 ![overlap axes](./docs/images/overlap_axes.png)
 
-**L2 two-batch overlap** (`LITE_LLAMA_TBO=1`, off by default) splits a TP decode step into two halves that ping-pong at layer-segment granularity: while half A's `o_proj` all-reduce is on the comm stream, half B's attention GEMMs hold the SMs.
+**L2 two-batch overlap** (`RAPID_LLM_TBO=1`, off by default) splits a TP decode step into two halves that ping-pong at layer-segment granularity: while half A's `o_proj` all-reduce is on the comm stream, half B's attention GEMMs hold the SMs.
 
 ![L2 two-batch overlap timeline](./docs/images/overlap_l2.gif)
 
 The GIF is the engine's own CUDA-event timeline — two compute lanes for the halves, one comm lane for the deferred reductions, and the red band is their intersection on a single device clock. The overlap does happen: the benchmark's timeline counts 792 intersecting pairs totalling 65.5 ms, and the GIF shows one such window. Eager TBO still loses on 2× A10 PCIe (+134% TPOT), because an eager TP decode step costs ~27 ms of Python launch time that a graphed reference of the same load cuts to 6.2 ms — the primitive saves GPU time inside a step whose cost is CPU time. Graph-captured TBO is now implemented (the engine wires `enable_cuda_graph(tbo=True)` through `TboPolicy.capture_eligible`, per captured batch): replay is numerically identical to the eager interleave and the launch floor drops from 60 ms to ~10 ms — but on this dense 1.5B TP2 PCIe shape the interleave itself is net-negative (+47-61% TPOT vs a plain graph), because the all-reduce it can hide is ~3-5% of the step while the half-batch efficiency it pays is more. The switch stays off by default, and the full four-arm regression is published next to the evidence (`python -m benchmarks.overlap.levels --level l2 --timeline`).
 
-**L3 chunked all-reduce** (`LITE_LLAMA_COMM_OVERLAP=1`, off by default) splits one row-parallel GEMM by rows: chunk k's reduction goes on the wire the moment its GEMM lands, while chunk k+1 computes.
+**L3 chunked all-reduce** (`RAPID_LLM_COMM_OVERLAP=1`, off by default) splits one row-parallel GEMM by rows: chunk k's reduction goes on the wire the moment its GEMM lands, while chunk k+1 computes.
 
 ![L3 chunked all-reduce timeline](./docs/images/overlap_l3.gif)
 
-Row independence is what makes this legal — the sum a chunk reduces is the sum the unsplit GEMM would have produced for those rows. `LITE_LLAMA_L3_MIN_ROWS` (512) plus a 256-row-per-chunk floor keep small GEMMs on the blocking path, where one collective beats two. Prefill is where it earns: TTFT 33.25 → 33.07 ms on a TP2 chunked-prefill load, with 111 real overlaps recorded in the timeline.
+Row independence is what makes this legal — the sum a chunk reduces is the sum the unsplit GEMM would have produced for those rows. `RAPID_LLM_L3_MIN_ROWS` (512) plus a 256-row-per-chunk floor keep small GEMMs on the blocking path, where one collective beats two. Prefill is where it earns: TTFT 33.25 → 33.07 ms on a TP2 chunked-prefill load, with 111 real overlaps recorded in the timeline.
 
-**SBO single-batch overlap** (`LITE_LLAMA_SBO=1`, off by default) covers the case TBO cannot: an EP decode step with only one batch, so no second half to ping-pong against. It overlaps inside the MoE layer instead — the dispatch exchange goes on the wire first, and the shared MLP moves onto an alternate compute stream, so it computes while the tokens travel. Without it the shared MLP runs *after* dispatch, experts and combine, hiding neither exchange. Verified on two ranks: identical output with the switch on and off, and the two regions intersecting on one device clock.
+**SBO single-batch overlap** (`RAPID_LLM_SBO=1`, off by default) covers the case TBO cannot: an EP decode step with only one batch, so no second half to ping-pong against. It overlaps inside the MoE layer instead — the dispatch exchange goes on the wire first, and the shared MLP moves onto an alternate compute stream, so it computes while the tokens travel. Without it the shared MLP runs *after* dispatch, experts and combine, hiding neither exchange. Verified on two ranks: identical output with the switch on and off, and the two regions intersecting on one device clock.
 
-**L4 tile-signaling** (`lite_llama/kernels/tile_signal.py`) works inside one device: a persistent Triton producer publishes each output tile with a release-semantics flag write, and a consumer kernel acquires that flag with a bounded spin, so tile k's SiLU·mul epilogue runs while tile k+1's GEMM is still computing.
+**L4 tile-signaling** (`rapid_llm/kernels/tile_signal.py`) works inside one device: a persistent Triton producer publishes each output tile with a release-semantics flag write, and a consumer kernel acquires that flag with a bounded spin, so tile k's SiLU·mul epilogue runs while tile k+1's GEMM is still computing.
 
 ![L4 tile-signaling timeline](./docs/images/overlap_l4.gif)
 
@@ -372,7 +372,7 @@ Full tables, the nsys kernel-level evidence, and the negative results sit in [do
 
 ### Quantization
 
-lite_llama supports multiple weight quantization schemes (architecture aligned with [sglang](https://github.com/sgl-project/sglang)). See [docs/quantization.md](docs/quantization.md) for the full design and API.
+rapid_llm supports multiple weight quantization schemes (architecture aligned with [sglang](https://github.com/sgl-project/sglang)). See [docs/quantization.md](docs/quantization.md) for the full design and API.
 
 |  Scheme  |  CLI Flag  |  Weight  |  Activation  |  Speedup vs HF  |
 | -------- | ---------- | -------- | ------------ | --------------- |
@@ -395,37 +395,37 @@ numbers behind them, are in [docs/quantization.md](docs/quantization.md); the fu
 **FP8 checkpoint** (auto-detected from `config.json`):
 
 ```bash
-python -m lite_llama.cli chat --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8
+python -m rapid_llm.cli chat --model-dir my_weight/Qwen3-30B-A3B-Instruct-2507-FP8
 ```
 
 **Runtime int8 quantisation** (halve memory of any fp16 model):
 
 ```bash
-python -m lite_llama.cli chat --model-dir my_weight/Qwen2.5-0.5B --quantization int8
+python -m rapid_llm.cli chat --model-dir my_weight/Qwen2.5-0.5B --quantization int8
 ```
 
 **True W8A8 fp8** (no weight dequantisation, per-token fp8 activations):
 
 ```bash
-python -m lite_llama.cli chat --model-dir my_weight/Qwen3-0.6B --quantization fp8
+python -m rapid_llm.cli chat --model-dir my_weight/Qwen3-0.6B --quantization fp8
 ```
 
 **FP8 KV cache** (halve decode memory footprint):
 
 ```bash
-python -m lite_llama.cli chat --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype fp8
+python -m rapid_llm.cli chat --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype fp8
 ```
 
 **Vision-language models** (Qwen3-VL / LLaVA, single GPU):
 
 ```bash
 # Qwen3-VL vision chat
-python -m lite_llama.cli vl-chat \
+python -m rapid_llm.cli vl-chat \
     --model-dir /data/shared/llm_weights/Qwen3-VL-4B-Instruct \
     --image photo.jpg
 
 # LLaVA with INT8 quantisation
-python -m lite_llama.cli vl-chat \
+python -m rapid_llm.cli vl-chat \
     --model-dir /data/shared/llm_weights/llava-hf/llava-1.5-7b-hf \
     --image photo.jpg --quantization int8
 ```
@@ -490,14 +490,14 @@ Where tensor parallelism splits one model across GPUs, data parallelism replicat
 ![data parallel](./docs/images/data_parallel.gif)
 
 ```python
-from lite_llama import DataParallelEngine, SamplingParams
+from rapid_llm import DataParallelEngine, SamplingParams
 
 # Two whole-model replicas, one per GPU; requests routed round-robin.
 with DataParallelEngine(model="my_weight/Qwen2.5-1.5B-Instruct", data_parallel_size=2) as engine:
     outputs = engine.generate(prompts, SamplingParams(temperature=0.0))
 ```
 
-For serving, `lite-llama serve --data-parallel-size 2 --load-balancer total_tokens` swaps in `AsyncDataParallelEngine`, which streams each request's chunks from whichever replica the balancer picks and aborts a request whose connection drops.
+For serving, `rapid-llm serve --data-parallel-size 2 --load-balancer total_tokens` swaps in `AsyncDataParallelEngine`, which streams each request's chunks from whichever replica the balancer picks and aborts a request whose connection drops.
 
 On 2× A10 (Qwen2.5-1.5B-Instruct): **weak scaling 2.00x** (100% linear, 1857 → 3716 tok/s) with byte-identical outputs, and **1.64x** on a fixed 256-prompt batch. Compose it with TP — `data_parallel_size=2, tensor_parallel_size=2` — on a 4-GPU box.
 
@@ -518,7 +518,7 @@ A sampled token on its own tells you what the model said, not how close the call
 The GIF is a real Qwen3-0.6B run (`python scripts/gen_logprobs_gif.py`): position 1 of the prompt shows `' capital'` at -12.8, and the last generated token is a near tie — `' Italy'` at -1.74 beat `' France'` at -1.86, exactly the case a mean-logprob filter is there to catch.
 
 ```python
-from lite_llama import LLM, SamplingParams
+from rapid_llm import LLM, SamplingParams
 
 llm = LLM(model="my_weight/Qwen3-0.6B")
 output = llm.generate(["The capital of France is"], SamplingParams(logprobs=5, prompt_logprobs=5))[0]
@@ -540,23 +540,23 @@ Cost, measured with `python benchmarks/bench_observability.py` (A10, Qwen3-0.6B,
 
 ### Metrics and Tracing
 
-`lite-llama serve` exposes a Prometheus endpoint — request counters, in-flight gauges, and the queue-time / TTFT / TPOT histograms on vLLM's bucket grid. The text format is a few lines per metric, so there is no `prometheus_client` dependency to install:
+`rapid-llm serve` exposes a Prometheus endpoint — request counters, in-flight gauges, and the queue-time / TTFT / TPOT histograms on vLLM's bucket grid. The text format is a few lines per metric, so there is no `prometheus_client` dependency to install:
 
 ```bash
-lite-llama serve --model-dir my_weight/Qwen3-0.6B &
+rapid-llm serve --model-dir my_weight/Qwen3-0.6B &
 curl -s localhost:8000/metrics | grep -A2 time_to_first_token
 ```
 
 ```text
-# HELP lite_llama:time_to_first_token_seconds Arrival to first generated token.
-# TYPE lite_llama:time_to_first_token_seconds histogram
-lite_llama:time_to_first_token_seconds_bucket{le="0.5"} 0
-lite_llama:time_to_first_token_seconds_bucket{le="1"} 3
-lite_llama:time_to_first_token_seconds_sum 1.8414203859865665
-lite_llama:time_to_first_token_seconds_count 3
+# HELP rapid_llm:time_to_first_token_seconds Arrival to first generated token.
+# TYPE rapid_llm:time_to_first_token_seconds histogram
+rapid_llm:time_to_first_token_seconds_bucket{le="0.5"} 0
+rapid_llm:time_to_first_token_seconds_bucket{le="1"} 3
+rapid_llm:time_to_first_token_seconds_sum 1.8414203859865665
+rapid_llm:time_to_first_token_seconds_count 3
 ```
 
-Collection is opt-out (`LITE_LLAMA_METRICS=0`) and tracing is opt-in: set `LITE_LLAMA_OTLP_ENDPOINT=http://localhost:4318` and each request becomes one span carrying its id, prompt and output token counts, and finish reason. Without the endpoint the tracer is a no-op object — nothing is imported, nothing is timed, and the OpenTelemetry SDK stays an optional install. Both together stay inside the 0.5% run-to-run noise of the same benchmark above, because the work is a handful of float additions per request rather than per token.
+Collection is opt-out (`RAPID_LLM_METRICS=0`) and tracing is opt-in: set `RAPID_LLM_OTLP_ENDPOINT=http://localhost:4318` and each request becomes one span carrying its id, prompt and output token counts, and finish reason. Without the endpoint the tracer is a no-op object — nothing is imported, nothing is timed, and the OpenTelemetry SDK stays an optional install. Both together stay inside the 0.5% run-to-run noise of the same benchmark above, because the work is a handful of float additions per request rather than per token.
 
 ### Single-Layer Harness
 
@@ -608,7 +608,7 @@ One-way layers — user code only ever talks to the Facade; plans flow down, tok
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
-│  User Layer        lite-llama CLI (chat / vl-chat / serve / batch) · examples · tests           │
+│  User Layer        rapid-llm CLI (chat / vl-chat / serve / batch) · examples · tests           │
 ├─────────────────────────────────────────────────────────────────────────────────────────────────┤
 │  Facade            LLM · TextGenerator · VisionGenerator · AsyncLLMEngine · DataParallelEngine  │
 ├─────────────────────────────────────────────────────────────────────────────────────────────────┤
@@ -637,7 +637,7 @@ One-way layers — user code only ever talks to the Facade; plans flow down, tok
 The directory below mirrors the upstream layout file-for-file — when reading either codebase, you can go straight to the matching file.
 
 ```text
-lite_llama/
+rapid_llm/
 ├── engine/
 │   ├── llm.py               # LLM entry point
 │   ├── llm_engine.py        # one-shot batch: a single prefill/decode loop
@@ -706,13 +706,13 @@ The per-model files declare only their differences — bias flags, per-head qk-n
 
 ## Citation
 
-If you use Litellama in your research, please cite the following work:
+If you use RapidLLM in your research, please cite the following work:
 
 ```bibtex
-@misc{litellama-2023,
-  author       = {Litellama AI team},
-  title        = {Litellama},
-  howpublished = {\url{https://github.com/harleyszhang/lite_llama}},
+@misc{rapidllm-2023,
+  author       = {RapidLLM AI team},
+  title        = {RapidLLM},
+  howpublished = {\url{https://github.com/harleyszhang/rapid_llm}},
   year         = {2023},
 }
 ```

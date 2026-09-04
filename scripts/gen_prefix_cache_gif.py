@@ -1,6 +1,6 @@
 """Record the prefix-caching GIF: a shared system prompt is prefilled once.
 
-Drives the real :class:`~lite_llama.engine.scheduler.Scheduler` with prefix
+Drives the real :class:`~rapid_llm.engine.scheduler.Scheduler` with prefix
 caching enabled: several requests arrive sharing the same long system prompt,
 differing only in the user question. The thing to look at is the CACHED column:
 the first request prefills the whole prompt and populates the cache; every later
@@ -25,8 +25,8 @@ from PIL import Image, ImageDraw, ImageFont
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from lite_llama.engine.sampler import SamplingParams  # noqa: E402
-from lite_llama.engine.scheduler import Request, Scheduler, SchedulerConfig  # noqa: E402
+from rapid_llm.engine.sampler import SamplingParams  # noqa: E402
+from rapid_llm.engine.scheduler import Request, Scheduler, SchedulerConfig  # noqa: E402
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
@@ -108,12 +108,12 @@ def render(frame: Frame, fonts) -> Image.Image:
     draw = ImageDraw.Draw(canvas)
 
     draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
-    draw.text((12, 9), "lite-llama  —  prefix caching (shared system prompt)", fill=TITLE_FG, font=small)
+    draw.text((12, 9), "rapid-llm  —  prefix caching (shared system prompt)", fill=TITLE_FG, font=small)
     for index, colour in enumerate([(245, 99, 72), (253, 188, 64), (94, 193, 117)]):
         draw.ellipse([W - 78 + index * 18, 11, W - 68 + index * 18, 21], fill=colour)
 
     y = TITLE_H + PAD
-    draw.text((PAD, y), "$ lite-llama serve --enable-prefix-cache", fill=PROMPT_FG, font=body)
+    draw.text((PAD, y), "$ rapid-llm serve --enable-prefix-cache", fill=PROMPT_FG, font=body)
     y += LINE_H + 6
     draw.text(
         (PAD, y),

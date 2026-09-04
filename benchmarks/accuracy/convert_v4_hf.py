@@ -2,7 +2,7 @@
 
 Self-contained on purpose: every DSpark -> transformers key mapping lives in
 :data:`_TOP` / :data:`_LAYER` / :func:`_expert_parts` below (merged from
-``lite_llama.models.deepseek_v4``'s rename tables plus the transformers-dialect
+``rapid_llm.models.deepseek_v4``'s rename tables plus the transformers-dialect
 fixups), so the result cannot silently depend on which rename table an import
 resolves to. fp8 e4m3 linears dequantise with their e8m0 128x128 block scales,
 MXFP4 routed experts are rebuilt one layer at a time into the fused
@@ -10,7 +10,7 @@ MXFP4 routed experts are rebuilt one layer at a time into the fused
 verifies itself three ways: probe asserts on the table, a meta/missing sweep
 over the filled model, and a reopen of the written shards.
 
-    lite_llama venv (CPU only, no GPU needed):
+    rapid_llm venv (CPU only, no GPU needed):
         python -X pycache_prefix=/tmp/pyc_v4conv -m benchmarks.accuracy.convert_v4_hf
 Output: /data/shared/llm_weights/DeepSeek-V4-Flash-6layers-hf-bf16-v2
 """
@@ -140,7 +140,7 @@ def main() -> int:
     from safetensors import safe_open
     from transformers.models.deepseek_v4 import DeepseekV4ForCausalLM
 
-    from lite_llama.models.config import ModelConfig
+    from rapid_llm.models.config import ModelConfig
 
     # 1) table self-check: the exact failures the earlier run hid
     assert hf_key("layers.0.attn.attn_sink") == "model.layers.0.self_attn.sinks"

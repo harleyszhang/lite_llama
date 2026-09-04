@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from lite_llama import SamplingParams, TextGenerator
-from lite_llama.executor.cuda_graph import _GraphKey
+from rapid_llm import SamplingParams, TextGenerator
+from rapid_llm.executor.cuda_graph import _GraphKey
 
 pytestmark = [pytest.mark.gpu, pytest.mark.weights]
 
