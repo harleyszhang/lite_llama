@@ -14,26 +14,45 @@ The split is sglang's: both halves carry the same padded row count
 (:class:`TboSplitter`), so the EP all-to-all is an equal split and a captured
 graph's shapes never drift with the batch's parity. The op stream is the
 layers' own bound methods, ordered by
-:class:`~lite_llama.batch_overlap.operations_strategy.OperationsStrategy`;
-this module only builds the per-half state and runs the two streams.
+:class:`~lite_llama.batch_overlap.operations_strategy.OperationsStrategy`.
+
+The entry is sglang's shape — the caller answers the *policy* question
+(``enable_tbo``), this module owns the *execution* one::
+
+    model_forward_maybe_tbo()
+      ├── enable_tbo=True  → _model_forward_tbo()
+      │     ├── _model_forward_tbo_split_inputs()   # split inputs
+      │     ├── execute_overlapped_operations()     # interleave
+      │     └── _model_forward_tbo_merge_outputs()  # merge outputs
+      └── enable_tbo=False → _model_forward_non_tbo()
+            └── execute_operations()                # serial
+
+Both arms run the *same* op stream, so the serial run is the interleaved
+one's reference: if the ping-pong changed the math, the two disagree.
 
 Usage:
-    halves = TboSplitter().split(input_ids, positions, atten_info)
-    logits = TwoBatchOverlap(model).forward(halves)
+    logits = model_forward_maybe_tbo(
+        model, enable_tbo=True, input_ids=ids, position_ids=pos, atten_info=meta
+    )
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from ..executor.attention_metadata import AttentionMetadata
 from ..kernels import skip_rmsnorm
 from .comm_overlap import CommStreamPool, DeferredArContext, deferred_all_reduce
-from .operations import StateDict, execute_overlapped_operations
+from .operations import (
+    StateDict,
+    execute_operations,
+    execute_overlapped_operations,
+)
 from .operations_strategy import OperationsStrategy
 from .overlap import Timeline
 
@@ -58,7 +77,7 @@ _ROOFLINE_FALLBACK: tuple[float, float] = (200e12, 1.0e12)
 #: A real GEMM reaches only a fraction of peak FLOPS at small ``M``, so the batch
 #: where halving stops doubling the weight read sits *above* the theoretical
 #: ridge ``peak_flops / mem_bw``. This factor covers that gap, calibrated against
-#: ``benchmarks/probe_tbo_cost_model.py``: on an A10 (theoretical ridge ~208) the
+#: ``benchmarks/kernels/bench_tbo_cost_model.py``: on an A10 (theoretical ridge ~208) the
 #: measured split penalty is still 1.98x at batch 16 and 1.26x even at 512, so
 #: the profitable regime starts well past the theoretical ridge.
 _RIDGE_SAFETY: float = 2.5
@@ -73,7 +92,7 @@ def _ridge_rows() -> int:
     batch because reading the weight shard dominates. Splitting the batch into
     two halves then makes each half re-read the same shard, so the pair costs
     ~2x the single full-batch GEMM — measured at 1.98x for Qwen2.5-1.5B TP2 on an
-    A10 (``benchmarks/probe_tbo_cost_model.py``). That doubled weight read is
+    A10 (``benchmarks/kernels/bench_tbo_cost_model.py``). That doubled weight read is
     exactly what swallows the all-reduce TBO hides, which is why TBO is a net
     loss across the whole memory-bound decode range. Above the ridge the GEMM is
     compute-bound, halving keeps total FLOPS constant, and the split is ~free —
@@ -98,7 +117,7 @@ def reset_ridge_cache() -> None:
     _ridge_cache = None
 
 #: State keys that outlive the whole layer stack. Everything else is an
-#: intermediate, and :meth:`TwoBatchOverlap._head` asserts none survived.
+#: intermediate, and :func:`_head` asserts none survived.
 _PERSISTENT_KEYS = (
     "ar",
     "ar_events",
@@ -140,7 +159,9 @@ class TboPolicy:
             min_rows=min_rows,
         )
 
-    def active(self, *, world_size: int, rows: int, graph_active: bool) -> bool:
+    def active(
+        self, *, world_size: int, rows: int, graph_active: bool, expert_parallel: bool = False
+    ) -> bool:
         """Whether a decode step of ``rows`` requests should run overlapped.
 
         ``graph_active`` excludes the graph path: a captured graph replays
@@ -148,17 +169,36 @@ class TboPolicy:
         the step might be served by a graph instead. Graphs *can* carry the
         interleave now (see :meth:`capture_eligible`) — that decision is
         made once, at capture time, not per step.
+
+        ``expert_parallel`` exempts the EP routed path from the ridge floor.
+        The ridge is a dense-TP cost model: what TBO hides is an all-reduce's
+        wire time and what the split costs is a *doubled read of the same
+        weight shard*. An EP step hides an all-to-all instead, and its split
+        duplicates only routed activations — every rank still reads its own
+        ``num_local`` expert shards once no matter how many rows arrive, so
+        the memory-bound split cost is a fraction of the dense one. sglang
+        and DeepSeek show the profitable EP regime starts well below this
+        dense ridge, so gating EP rows on it would turn the feature off
+        everywhere it matters.
         """
+        if expert_parallel:
+            return self.enabled and world_size > 1 and not graph_active and rows >= 2
         return self.enabled and world_size > 1 and not graph_active and rows >= self.min_rows
 
-    def capture_eligible(self, *, world_size: int, batch: int) -> bool:
+    def capture_eligible(
+        self, *, world_size: int, batch: int, expert_parallel: bool = False
+    ) -> bool:
         """Whether a graph of ``batch`` rows should record the TBO interleave.
 
-        Same three conditions as :meth:`active`, judged on the captured batch
+        Same conditions as :meth:`active`, judged on the captured batch
         size at capture time instead of the live row count per step: a replay
         fixes the kernel sequence, so the shape is picked once. Batches below
         ``min_rows`` capture the plain forward and keep their eager floor.
+        An EP grid ignores ``min_rows`` for the same reason :meth:`active`
+        does — the dense ridge does not model the a2a trade-off.
         """
+        if expert_parallel:
+            return self.enabled and world_size > 1 and batch >= 2
         return self.enabled and world_size > 1 and batch >= self.min_rows
 
 
@@ -310,99 +350,207 @@ def _narrow_metadata(
     )
 
 
-class TwoBatchOverlap:
-    """Executor that interleaves two half-batches through the decoder stack."""
+def model_forward_maybe_tbo(
+    model: CausalLM,
+    *,
+    enable_tbo: bool,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    atten_info: AttentionMetadata,
+    prefill: bool = False,
+    timeline: Timeline | None = None,
+) -> torch.Tensor:
+    """Run one step through the layer stack, overlapped or not.
 
-    def __init__(self, model: CausalLM, *, timeline: Timeline | None = None) -> None:
-        self._model = model
-        self._timeline = timeline
+    sglang's entry of the same name: the caller decides ``enable_tbo`` (the
+    scheduler's policy question, :class:`TboPolicy` here) and this function
+    owns the execution one — which op stream runs
+    (:meth:`OperationsStrategy.init_new_tbo`; ``prefill`` selects the stream)
+    and whether one micro-batch threads it alone or two interleave through it.
 
-    def forward(self, halves: tuple[TboHalf, TboHalf], *, prefill: bool = False) -> torch.Tensor:
-        """Interleave the two halves through the whole layer stack.
+    sglang returns both arms' ``(hidden_states, residual)`` and leaves the head
+    to the model wrapper; here the entry owns the head too, so a caller
+    switching arms on the policy sees one output shape either way.
 
-        ``prefill`` selects the prefill op stream: strict alternation with the
-        shared MLP hiding behind the return exchange, rather than the decode
-        stream's lead of two stages.
-        """
-        model = self._model
-        device = halves[0].input_ids.device
-        timeline = self._timeline or CommStreamPool.for_device(device).timeline
-        strategy = OperationsStrategy.init_new_tbo(model.layers, prefill=prefill)
-        expert_parallel = any(
-            getattr(layer.mlp, "dispatcher", None) is not None for layer in model.layers
+    Returns:
+        ``[rows, ..., vocab]`` logits — ``[rows, 1, vocab]`` for a decode step,
+        the prefill grid's shape otherwise — rows in batch order.
+    """
+    inputs = {"input_ids": input_ids, "position_ids": position_ids, "atten_info": atten_info}
+    operations_strategy = OperationsStrategy.init_new_tbo(model.layers, prefill=prefill)
+    if enable_tbo:
+        return _model_forward_tbo(
+            model, inputs, operations_strategy, prefill=prefill, timeline=timeline
         )
+    return _model_forward_non_tbo(model, inputs, operations_strategy, timeline=timeline)
 
-        with deferred_all_reduce(device) as ar:
-            states = [
-                self._initial_state(model, half, ar, timeline, tag, expert_parallel)
-                for half, tag in zip(halves, "ab", strict=True)
-            ]
-            outputs = execute_overlapped_operations(
-                states,
-                [strategy.operations, strategy.operations],
-                delta_stages=[0, strategy.tbo_delta_stages],
+
+def _model_forward_tbo(
+    model: CausalLM,
+    inputs: dict[str, Any],
+    operations_strategy: OperationsStrategy,
+    *,
+    prefill: bool,
+    timeline: Timeline | None,
+) -> torch.Tensor:
+    """The TBO arm: split, interleave, merge — sglang's three sub-steps.
+
+    ``prefill`` selects the prefill op stream: strict alternation with the
+    shared MLP hiding behind the return exchange, rather than the decode
+    stream's lead of two stages.
+    """
+    halves = _model_forward_tbo_split_inputs(inputs, prefill=prefill)
+    device = halves[0].input_ids.device
+    resolved = timeline or CommStreamPool.for_device(device).timeline
+    expert_parallel = _expert_parallel(model)
+    with deferred_all_reduce(device) as ar:
+        states = [
+            _initial_state(
+                model,
+                half.input_ids,
+                half.positions,
+                half.atten_info,
+                ar,
+                resolved,
+                tag,
+                expert_parallel,
             )
-            ar.drain()
-
-        persistent = _PERSISTENT_KEYS + (("moe_ctx",) if expert_parallel else ())
-        return torch.cat(
-            [
-                self._head(model, state, half.num_rows, persistent)
-                for state, half in zip(outputs, halves, strict=True)
-            ],
-            dim=0,
+            for half, tag in zip(halves, "ab", strict=True)
+        ]
+        outputs = execute_overlapped_operations(
+            states,
+            [operations_strategy.operations, operations_strategy.operations],
+            delta_stages=[0, operations_strategy.tbo_delta_stages],
         )
+        ar.drain()
+    return _model_forward_tbo_merge_outputs(model, outputs, halves, expert_parallel)
 
-    def _initial_state(
-        self,
-        model: CausalLM,
-        half: TboHalf,
-        ar: DeferredArContext,
-        timeline: Timeline,
-        tag: str,
-        expert_parallel: bool,
-    ) -> StateDict:
-        """One micro-batch's state: the step's inputs plus the overlap plumbing.
 
-        ``moe_ctx`` is added only when a layer runs expert parallel, so dense
-        and TP-MoE runs never import the MoE module.
-        """
-        hidden_states = model.get_input_embeddings(half.input_ids)
-        initial: dict = {
-            "hidden_states": hidden_states,
-            "residual": None,
-            "position_embeddings": model.rotary_emb(hidden_states, half.positions),
-            "atten_info": half.atten_info,
-            "ar": ar,
-            "ar_events": [],
-            "timeline": timeline,
-            "tag": tag,
-        }
-        if expert_parallel:
-            from ..modules.moe import MoEOpContext  # lazy: dense runs stay kernel-light
+def _model_forward_tbo_split_inputs(
+    inputs: dict[str, Any], *, prefill: bool
+) -> tuple[TboHalf, TboHalf]:
+    """Split the step into two halves — decode by row, prefill by sequence."""
+    splitter = TboSplitter()
+    split = splitter.split_prefill if prefill else splitter.split
+    return split(inputs["input_ids"], inputs["position_ids"], inputs["atten_info"])
 
-            initial["moe_ctx"] = MoEOpContext()
-        return StateDict(initial)
 
-    def _head(
-        self,
-        model: CausalLM,
-        state: StateDict,
-        num_rows: int,
-        persistent: tuple[str, ...],
-    ) -> torch.Tensor:
-        """Final norm and vocabulary projection for one micro-batch.
+def _model_forward_tbo_merge_outputs(
+    model: CausalLM,
+    outputs: Sequence[StateDict],
+    halves: Sequence[TboHalf],
+    expert_parallel: bool,
+) -> torch.Tensor:
+    """Head each half, keep its real rows, and concatenate back to batch order.
 
-        Keeps the first ``num_rows`` logits only: the padded rows a split
-        produced are duplicates, and their predictions must not reach the
-        sampler. ``clear`` then proves the stack released every intermediate —
-        a leftover is an op that skipped its pop.
-        """
-        hidden_states = state.pop("hidden_states")
-        residual = state.pop("residual")
-        state.clear(persistent)
-        hidden, _ = skip_rmsnorm(hidden_states, residual, model.norm_weight, model.rms_norm_eps)
-        return model.lm_head(hidden)[:num_rows]
+    sglang's merge stitches ``(hidden_states, residual)`` by the halves'
+    parent token ranges; the head plays that role against the rows each half
+    kept — the padded rows a split produced are duplicates whose logits must
+    not reach the sampler.
+    """
+    persistent = _PERSISTENT_KEYS + (("moe_ctx",) if expert_parallel else ())
+    return torch.cat(
+        [
+            _head(model, state, half.num_rows, persistent)
+            for state, half in zip(outputs, halves, strict=True)
+        ],
+        dim=0,
+    )
+
+
+def _model_forward_non_tbo(
+    model: CausalLM,
+    inputs: dict[str, Any],
+    operations_strategy: OperationsStrategy,
+    *,
+    timeline: Timeline | None,
+) -> torch.Tensor:
+    """The plain arm: one micro-batch through the same op stream, serially.
+
+    sglang's ``_model_forward_non_tbo``: :func:`execute_operations` runs the
+    stream the interleave would, with nothing beside it. The deferred
+    all-reduce context stays on — the ops fence on it — and with a single
+    stream the fences land where a blocking reduction would have, so the
+    result matches the plain layer-by-layer forward while keeping *one*
+    definition of what a layer does.
+    """
+    device = inputs["input_ids"].device
+    resolved = timeline or CommStreamPool.for_device(device).timeline
+    expert_parallel = _expert_parallel(model)
+    with deferred_all_reduce(device) as ar:
+        state = _initial_state(
+            model,
+            inputs["input_ids"],
+            inputs["position_ids"],
+            inputs["atten_info"],
+            ar,
+            resolved,
+            "a",
+            expert_parallel,
+        )
+        state = execute_operations(state, operations_strategy.operations)
+        ar.drain()
+    persistent = _PERSISTENT_KEYS + (("moe_ctx",) if expert_parallel else ())
+    num_rows = inputs["input_ids"].shape[0]
+    return _head(model, state, num_rows, persistent)
+
+
+def _initial_state(
+    model: CausalLM,
+    input_ids: torch.Tensor,
+    positions: torch.Tensor,
+    atten_info: AttentionMetadata,
+    ar: DeferredArContext,
+    timeline: Timeline,
+    tag: str,
+    expert_parallel: bool,
+) -> StateDict:
+    """One micro-batch's state: the step's inputs plus the overlap plumbing.
+
+    ``moe_ctx`` is added only when a layer runs expert parallel, so dense
+    and TP-MoE runs never import the MoE module.
+    """
+    hidden_states = model.get_input_embeddings(input_ids)
+    initial: dict = {
+        "hidden_states": hidden_states,
+        "residual": None,
+        "position_embeddings": model.rotary_emb(hidden_states, positions),
+        "atten_info": atten_info,
+        "ar": ar,
+        "ar_events": [],
+        "timeline": timeline,
+        "tag": tag,
+    }
+    if expert_parallel:
+        from ..modules.moe import MoEOpContext  # lazy: dense runs stay kernel-light
+
+        initial["moe_ctx"] = MoEOpContext()
+    return StateDict(initial)
+
+
+def _head(
+    model: CausalLM,
+    state: StateDict,
+    num_rows: int,
+    persistent: tuple[str, ...],
+) -> torch.Tensor:
+    """Final norm and vocabulary projection for one micro-batch.
+
+    Keeps the first ``num_rows`` logits only: the padded rows a split
+    produced are duplicates, and their predictions must not reach the
+    sampler. ``clear`` then proves the stack released every intermediate —
+    a leftover is an op that skipped its pop.
+    """
+    hidden_states = state.pop("hidden_states")
+    residual = state.pop("residual")
+    state.clear(persistent)
+    hidden, _ = skip_rmsnorm(hidden_states, residual, model.norm_weight, model.rms_norm_eps)
+    return model.lm_head(hidden)[:num_rows]
+
+
+def _expert_parallel(model: CausalLM) -> bool:
+    """Whether any layer runs MoE over an expert-parallel dispatcher."""
+    return any(getattr(layer.mlp, "dispatcher", None) is not None for layer in model.layers)
 
 
 def _balanced_split_index(seq_lens: torch.Tensor) -> int:

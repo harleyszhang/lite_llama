@@ -23,6 +23,7 @@ import torch
 from ..batch_overlap.overlap import OverlapPolicy, StreamPool, Timeline
 from ..batch_overlap.two_batch_overlap import tbo_policy
 from ..distributed.parallel_state import (
+    expert_parallel_enabled,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_broadcast,
 )
@@ -420,10 +421,10 @@ class ModelWorker:
     ) -> tuple[torch.Tensor | None, tuple[tuple[PositionLogprobs, ...] | None, ...]]:
         """One token for every sequence in the plan.
 
-        With the L2 policy active (tensor parallelism, enough rows, and no
-        graph serving the step), the step runs two-batch overlapped:
+        With the L2 policy active (tensor parallelism, enough rows), the step
+        runs two-batch overlapped through the batch_overlap entry:
         ``begin_decode`` still installs the metadata for the *whole* step
-        first, then the TBO forward splits it into halves whose deferred
+        first, then the overlapped arm splits it into halves whose deferred
         all-reduces ping-pong with each other's compute. Same logits shape,
         same row order, same downstream sampling -- the split is invisible
         past this method.
@@ -440,14 +441,25 @@ class ModelWorker:
         positions = self._slot_batch.seq_lens.view(-1, 1) - 1
 
         with self.timeline.region("forward.decode", "compute"):
-            if tbo_policy().active(
-                world_size=get_tensor_model_parallel_world_size(),
-                rows=rows,
-                graph_active=self._runner.uses_cuda_graph,
-            ):
-                logits = self._runner.forward_tbo(prepared.input_ids, positions)
-            else:
+            if self._runner.uses_cuda_graph:
+                # A captured step replays (or decodes eager) through the plain
+                # forward; capture already decided whether the recorded shape
+                # carries the interleave, so the policy is not re-asked here.
                 logits = self._runner.forward(prepared.input_ids, positions, None)
+            else:
+                # Both arms run the same op stream through the batch_overlap
+                # entry; the policy only decides whether two micro-batches
+                # interleave through it or one threads it alone.
+                logits = self._runner.forward_maybe_tbo(
+                    prepared.input_ids,
+                    positions,
+                    enable_tbo=tbo_policy().active(
+                        world_size=get_tensor_model_parallel_world_size(),
+                        rows=rows,
+                        graph_active=False,
+                        expert_parallel=expert_parallel_enabled(),
+                    ),
+                )
         # Decode never has prompt positions to score: they were all covered
         # during prefill, so the second element is uniformly empty.
         return self._pick(logits[:rows, -1, :], plan.sampled, rows), (None,) * len(plan.slots)

@@ -7,23 +7,6 @@ executor (:mod:`~lite_llama.batch_overlap.operations`) only ever sees a flat op
 list plus the lead width. Nothing here imports a kernel or a model class — the
 strategy is built from the layers it is handed.
 
-Two streams, chosen per layer:
-
-* dense / TP-MoE — ``[op_attn, yield, op_mlp]``, strict alternation
-  (``tbo_delta_stages=0``): one half's deferred o_proj or down_proj all-reduce
-  is covered by the other half's next segment.
-* EP MoE — sglang's decode strategy, ``tbo_delta_stages=2``: the two a2a
-  exchanges each get a yield in front, so while half A's dispatch is on the
-  wire half B runs its gate/shared expert, and while A's combine is on the wire
-  B runs its expert GEMM. ``op_shared_experts`` sits between ``dispatch_a`` and
-  ``dispatch_b`` on purpose — it is the longest compute available while the
-  forward exchange is in flight.
-
-One structural note: lite_llama's ``op_combine_b`` folds the shared expert in
-and returns the layer output, so the EP stream ends there rather than carrying
-sglang's extra ``op_output`` / ``op_comm_postprocess_layer`` stage — five stages
-per layer instead of six, with the same yields in the same places.
-
 Usage:
     strategy = OperationsStrategy.init_new_tbo(model.layers)
     for op in strategy.operations: ...

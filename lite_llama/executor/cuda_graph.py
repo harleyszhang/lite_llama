@@ -209,21 +209,29 @@ class CUDAGraphRunner:
         )
 
     def parity_error(self, vocab_size: int) -> float:
-        """Largest absolute logit difference between this graph and an eager step.
+        """Largest absolute logit difference between this graph and its eager step.
 
-        Both halves run on the same synthetic inputs, so anything beyond floating
-        point reassociation means the graph is not computing what the model does —
-        a stale pointer, an uncaptured buffer, a collective on the wrong stream.
-        Under TP that is worth checking before graphs go live (the same bug with a
-        collective desynchronises the group and hangs). Safe here only because no
-        request exists yet: both forwards scribble low cache rows, as the capture
+        Both halves run on the same synthetic inputs through the *same callable the
+        capture recorded* (:attr:`_step`, not the plain forward), so anything beyond
+        floating point reassociation means the graph is not computing what its step
+        computes — a stale pointer, an uncaptured buffer, a collective on the wrong
+        stream. Under TP that is worth checking before graphs go live (the same bug
+        with a collective desynchronises the group and hangs). Safe here only because
+        no request exists yet: both forwards scribble low cache rows, as the capture
         warmup did, and every row is rewritten before it is read for real.
+
+        The step shape matters: a two-batch-overlap graph splits the batch and runs
+        half-width GEMMs over half-size expert dispatch buffers, so against the
+        plain forward its logits drift by reassociations that a deep stack amplifies
+        past any tolerance. Comparing like with like keeps the gate's signal — a
+        broken capture still fails hard — without punishing the overlap for running
+        a different, equally valid decomposition.
         """
         if self._graph is None or self._output is None:
             raise RuntimeError("capture() must be called before parity_error()")
 
         self._fill_probe_inputs(vocab_size)
-        eager = self.model(self.input_ids, self.position_ids, self.atten_info).float().clone()
+        eager = self._step(self.input_ids, self.position_ids, self.atten_info).float().clone()
         # Replayed directly (not via :meth:`replay`): the buffers already hold the
         # probe values, so a copy onto themselves would add nothing.
         self._graph.replay()
@@ -304,6 +312,9 @@ class CUDAGraphManager:
         # graphs, and under TP a replayed all-reduce deadlocks once followers are
         # in their serve loop.
         self.parity_error: float | None = None
+        # Per-graph parity at the same gate run, keyed "b<batch>@<bucket>" —
+        # the diagnostics a rejected grid needs (which shape, how badly).
+        self.parity_errors: dict[str, float] = {}
         # Read once: consulted on every decode step.
         self._check_lockstep = os.environ.get(_LOCKSTEP_ENV) == "1" and get_tensor_model_parallel_world_size() > 1
 
@@ -416,9 +427,12 @@ class CUDAGraphManager:
         graphs, and a captured all-reduce needs its peers); the result is left in
         :attr:`parity_error`.
         """
-        self.parity_error = max(
-            (runner.parity_error(vocab_size) for runner in self._runners.values()), default=0.0
-        )
+        errors = {
+            f"b{runner.batch_size}@{runner.seq_len_bucket}": runner.parity_error(vocab_size)
+            for runner in self._runners.values()
+        }
+        self.parity_errors = {key: round(value, 6) for key, value in errors.items()}
+        self.parity_error = max(errors.values(), default=0.0)
         return self.parity_error
 
     def discard(self) -> None:
