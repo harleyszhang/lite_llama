@@ -47,7 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 import torch.multiprocessing as mp
 
-from benchmarks.common import (
+from benchmarks.lib import (
     PROMPTS,
     expand_prompts,
     free_gpu,

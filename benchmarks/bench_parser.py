@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import argparse
 import statistics
+import sys
 import time
+from pathlib import Path
 
-from common import write_json_log
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from benchmarks.lib import write_json_log
 from lite_llama.engine.reasoning import _CLOSE as _UNTHINK
 from lite_llama.engine.reasoning import _OPEN as _THINK
 from lite_llama.engine.tool_parser import (

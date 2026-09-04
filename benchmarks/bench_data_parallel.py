@@ -30,7 +30,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.common import (
+from benchmarks.lib import (
     PROMPTS,
     TimedRow,
     add_dp_args,
