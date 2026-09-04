@@ -1,25 +1,16 @@
 """Streaming think-block splitting: one pass, any chunking.
 
-:class:`ReasoningSplitter` eats the incremental detokenizer deltas a sequence
-produces and routes each character to exactly one of two channels —
-``reasoning`` or ``content`` — so the serving layer can expose
-``reasoning_content`` without buffering the whole generation.
+:class:`ReasoningSplitter` eats the incremental detokenizer deltas and routes each
+character to ``reasoning`` or ``content``, so the serving layer can expose
+``reasoning_content`` without buffering the whole generation. The contract the
+design hangs on: feeding a text split at *any* boundaries yields, concatenated,
+exactly what :meth:`ReasoningSplitter.parse` returns in one piece -- bought by
+holding back an ambiguous partial-tag tail and consuming tags the moment they are
+recognised.
 
-The contract the whole design hangs on: feeding the splitter a text split at
-*any* boundaries yields, concatenated, exactly what :meth:`ReasoningSplitter.parse`
-returns for the text in one piece. Two mechanics buy it. A partial-tag suffix
-window — a delta ending mid-tag might complete the closing tag with the next
-delta, so the ambiguous tail is held back until it either completes the tag
-or provably cannot. And the tags themselves are consumed the moment they are
-recognised, never re-emitted.
-
-The splitter is deliberately not a vLLM clone. vLLM's DeepSeek parser treats
-the absence of an opening tag as "the template already opened thinking",
-which is right for R1 and wrong for models that merely *sometimes* emit
-think blocks. :class:`ReasoningSplitter` makes that a constructor choice:
-``starts_inside=True`` is the R1 behaviour (everything up to the closing tag
-is reasoning), the default is pass-through (no opening tag means no reasoning
-section, the text is content).
+Not a vLLM clone: ``starts_inside=True`` is the R1 behaviour (no opening tag means
+the template already opened thinking); the default is pass-through, right for
+models that only *sometimes* emit think blocks.
 
 Usage:
     splitter = ReasoningSplitter()
