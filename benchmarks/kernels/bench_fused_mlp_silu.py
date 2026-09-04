@@ -21,7 +21,7 @@ import triton.language as tl
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from microbench import Row, Work, bench, metadata, report, verify
+from microbench import Row, Work, bench, metadata, report, require_cuda, verify
 
 from lite_llama.kernels.ops.activation.swiglu import swiglu_forward
 
@@ -213,8 +213,7 @@ CASES = [
 
 
 def main() -> None:
-    if not torch.cuda.is_available():
-        raise SystemExit("This benchmark requires a CUDA device.")
+    require_cuda()
     print(metadata())
 
     hidden_size, intermediate_size = 3584, 18944

@@ -20,7 +20,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from microbench import Row, Work, bench, metadata, report
+from microbench import Row, Work, bench, metadata, report, require_cuda
 
 from lite_llama.kernels.ops.quantization import fp8_quantize_per_token, per_token_group_quant
 
@@ -93,8 +93,7 @@ CASES = [("t1 h4096", 1), ("t128 h4096", 128), ("t2048 h4096", 2048)]
 
 
 def main() -> None:
-    if not torch.cuda.is_available():
-        raise SystemExit("This benchmark requires a CUDA device.")
+    require_cuda()
     print(metadata())
 
     rows: list[Row] = []

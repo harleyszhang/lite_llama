@@ -19,7 +19,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from kv_pool import fresh_rows, paged_pool
-from microbench import Row, Work, bench, bench_host, metadata, report, verify
+from microbench import Row, Work, bench, bench_host, metadata, report, require_cuda, verify
 
 # Importing the facade registers every spec row, so dispatch() below finds them.
 import lite_llama.kernels
@@ -233,8 +233,7 @@ def show_dispatch() -> None:
 
 
 def main() -> None:
-    if not torch.cuda.is_available():
-        raise SystemExit("This benchmark requires a CUDA device.")
+    require_cuda()
     torch.set_grad_enabled(False)
 
     print(metadata())

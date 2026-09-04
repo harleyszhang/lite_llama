@@ -3,6 +3,9 @@
 ``bench`` warms, L2-flushes and times with device sync;
 ``bench_stateful`` / ``bench_host`` cover alloc-reset and host-side
 work. ``verify`` gates every result on numerical correctness first.
+``require_cuda`` / ``run_perf_report`` are the shared ``__main__`` pieces the
+entry-point scripts reuse instead of each re-declaring the CUDA guard and the
+plot directory.
 
 Usage:
     from benchmarks.kernels.microbench import bench
@@ -404,3 +407,41 @@ def report(rows: list[Row], *, device: int = 0) -> None:
             "  in L2 so the traffic never reached HBM; a baseline that is not\n"
             "  doing the same operation."
         )
+
+
+# --------------------------------------------------------------------------- #
+# Entry-point helpers
+# --------------------------------------------------------------------------- #
+#: Where the ``triton.testing.perf_report`` benches drop their PNGs: the repo's
+#: ``images/benchmark_result``. Resolved from this file, so every bench saves to
+#: the one directory regardless of the cwd it was launched from.
+PLOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../images/benchmark_result"))
+
+
+def require_cuda() -> None:
+    """Stop with a clear message when there is no CUDA device to time on."""
+    if not torch.cuda.is_available():
+        raise SystemExit("This benchmark requires a CUDA device.")
+
+
+def run_perf_report(
+    bench: Callable[..., object],
+    verify: Callable[[], None] | None = None,
+    *,
+    verify_msg: str = "Verifying correctness:",
+    run_msg: str = "Running benchmark",
+) -> None:
+    """The ``__main__`` every ``@triton.testing.perf_report`` bench repeats.
+
+    Requires CUDA, gates on ``verify`` (correctness before any timing), then runs
+    the decorated ``bench`` and saves its plot to :data:`PLOT_DIR`. ``bench`` is
+    the ``@perf_report``-decorated function; ``verify`` the optional correctness
+    gate. The two messages let each bench keep its own wording.
+    """
+    require_cuda()
+    os.makedirs(PLOT_DIR, exist_ok=True)
+    if verify is not None:
+        print(verify_msg)
+        verify()
+    print(f"\n{run_msg}, saving plot to {PLOT_DIR}")
+    bench.run(print_data=True, save_path=PLOT_DIR)

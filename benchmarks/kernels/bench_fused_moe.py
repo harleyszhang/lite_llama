@@ -137,7 +137,7 @@ import torch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from microbench import Row, Work, bench, device_peaks, metadata, report, verify
+from microbench import Row, Work, bench, device_peaks, metadata, report, require_cuda, verify
 from tuning import TuneResult, nbytes
 
 # Importing the facade registers every spec row, so dispatch() below finds them.
@@ -990,8 +990,7 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    if not torch.cuda.is_available():
-        raise SystemExit("This benchmark requires a CUDA device.")
+    require_cuda()
     torch.set_grad_enabled(False)
 
     geometries = (
