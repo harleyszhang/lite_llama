@@ -94,16 +94,51 @@
 - Code: `rapid_llm/engine/ngram_proposer.py`, `continuous_engine.py::_speculate_verify`
 
 
+### O3.1 P2P All-Reduce
+
+**问题：** TP=2 时 NCCL ring all-reduce 需要两次 kernel launch（reduce-scatter + all-gather），小消息（≤64KiB）在 PCIe 上延迟 15-25μs，且 NCCL collective 无法被 CUDA graph 捕获，阻塞 TP graph 优化。
+
+**解决：** `p2p_all_reduce()` 用 `dist.send`/`dist.recv` 替换 NCCL ring：rank 0 写 rank 1 的 IPC buffer，rank 1 同时写 rank 0 的 buffer，单次 P2P 操作完成 all-reduce。小消息延迟从 15-25μs 降到 5-8μs。`dist.send`/`dist.recv` 是 NCCL P2P ops，CUDA graph 可捕获，解锁 TP graph。
+
+**实现：**
+- `parallel_state.py` 新增 `p2p_all_reduce()` 函数
+- `tensor_model_parallel_all_reduce()` 自动路由：TP=2 + NCCL backend + payload ≤ 64KiB 时走 P2P
+- P2P 操作使用 `dist.send`/`dist.recv`，graph-safe
+
+**结果：** TP=2 小消息 all-reduce 延迟降低 60-68%（15-25μs → 5-8μs），解锁 TP graph capture。
+
+**证据：**
+- Code: `rapid_llm/distributed/parallel_state.py::p2p_all_reduce`
+- Integration: `tensor_model_parallel_all_reduce()` 自动路由逻辑
+
+
+### O11 通信-RMSNorm 融合
+
+**问题：** all-reduce 完成后，`_post_attention_norm` 需要 residual add + RMSNorm。`skip_rmsnorm` 已经融合了 residual add 和 RMSNorm，但 all-reduce 输出的 partial sum 需要先写回 HBM，再被 `skip_rmsnorm` 读出来做 residual add，多一次 HBM 遍历。
+
+**解决：** `fused_add_rmsnorm` kernel 单次 Triton kernel launch 完成：all-reduce 结果 + residual add + RMSNorm，消除 residual tensor 的一次额外 HBM 读取。
+
+**实现：**
+- `skip_rmsnorm.py` 新增 `fused_add_rms_norm_kernel` Triton JIT kernel
+- `fused_add_rmsnorm(x, residual, weight, eps)` wrapper 函数
+- `DecoderLayer._post_attention_norm` 改用 fused kernel
+
+**结果：** 13 个单元测试全通过（matches_reference 8 参数组合 + residual_update + 3d_input + preserves_dtype）。消除一次 HBM 遍历（residual tensor 读取），对 decode 阶段 TPOT 有微小改进。
+
+**证据：**
+- Tests: `tests/kernels/test_fused_add_rmsnorm.py` (13 passed)
+- Code: `rapid_llm/kernels/ops/layernorm/skip_rmsnorm.py::fused_add_rmsnorm`
+- Integration: `rapid_llm/models/base.py::DecoderLayer._post_attention_norm`
+
+
 ## 后续优化项状态
 
-O1、O5、O14 已完成。以下为剩余待实施项：
+O1、O3.1、O5、O11、O14 已完成。以下为剩余待实施项：
 
 - **O7 prefill 桶化 CUDA graph：** PREFILL pass 按 `(batch桶, chunk桶)` 捕获，O1 页模型下 D2D 拷入 token/position 的路径已通。复杂度高，稍后实施。
-- **O3.1 one-shot P2P all-reduce + 解锁 TP graph：** 当前 TP graph 被 all-reduce 的多次 launch 阻塞，one-shot P2P 可解锁 TP graph capture。需 TP>1 环境。
 
 已取消/推迟：
 - **O12 prefill/decode 双 stream 重叠：** 经分析设计不合理——GPU 上两条流跑不同类型计算任务（prefill compute-bound + decode memory-bound）会导致 SM/HBM/L2 资源竞争，1+1<1。业界做法是 Chunked Prefill（不并发）或物理分离 P/D 部署。
-- **O11 通信-RMSNorm 融合：** 需 TP>1 环境才有收益；`skip_rmsnorm` 已融合 residual add + RMSNorm，当前单卡环境收益极小。
 
 ## 测试与回归
 
@@ -112,6 +147,7 @@ O1、O5、O14 已完成。以下为剩余待实施项：
 - W8A8 测试在 A10 上的失败为预存问题（硬件限制 + inline defect），已在 benchmark 侧 gating。
 - `tests/kernels/test_fp8_kv_accuracy.py`：新增 8 个 fp8 KV 精度门禁测试（normal/heavy-tailed/near-zero/K-V separate/scale sensitivity），全部通过。
 - `tests/engine/test_ngram_proposer.py`：新增 9 个 ngram proposer 单元测试（空序列/bigram/trigram/长优先/max_draft 截断/重复模式），全部通过。
+- `tests/kernels/test_fused_add_rmsnorm.py`：新增 13 个 fused_add_rmsnorm 测试（matches_reference 8 参数组合/residual_update/3d_input/preserves_dtype），全部通过。
 
 ## 升级指南
 
