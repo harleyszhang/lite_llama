@@ -1,8 +1,12 @@
 """Performance guard for data parallelism: two replicas must actually serve twice.
 
-Two GPU replicas run the same fixed workload once singly and once in
-parallel; throughput must scale and every prompt must be answered — a
-lower bound, not a microbenchmark.
+Each width serves the same prompt set *per replica*, so the total work grows with
+the replica count and throughput is what scales. Splitting one fixed set instead
+would halve each replica's batch rather than its step count, and a small-model
+decode is bandwidth-bound enough that a batch of 6 costs the same step time as a
+batch of 12 -- that measures flat at 1.0x and is correct behaviour, not a
+serialised coordinator. ``benchmarks/bench_data_parallel.py`` names the two modes
+``weak`` (this one) and ``strong`` (the flat one).
 
 Usage:
     pytest tests/distributed/test_dp_perf.py
@@ -24,8 +28,9 @@ _MAX_SEQ_LEN = 512
 _KV_TOKENS = 4096
 _MAX_GEN = 64
 
-#: Enough requests that per-dispatch overhead is amortised and both replicas stay
-#: busy for the whole measurement; short enough to keep the test under a minute.
+#: The per-replica batch. Enough requests that per-dispatch overhead is amortised
+#: and every replica stays busy for the whole measurement; short enough to keep the
+#: test under a minute. Each width serves this many prompts *per replica*.
 _PROMPTS = [
     "Explain what a GPU does.",
     "Write a short poem about rain.",
@@ -50,12 +55,16 @@ _GREEDY = SamplingParams(temperature=0.0, max_gen_len=_MAX_GEN, repetition_penal
 
 
 def _serve(model_dir: Path, replicas: int) -> tuple[float, int]:
-    """Serve the prompt set on ``replicas`` replicas; return seconds and answers.
+    """Serve one copy of the prompt set per replica; return seconds and answers.
 
-    A short warm-up dispatch first: the first generation on a fresh replica pays
-    for lazily compiled Triton kernels, and charging that to the two-replica run
-    (which pays it twice, in parallel) would measure the compiler.
+    ``max_num_seqs`` stays at the per-replica width, so every replica runs the
+    same batch it would alone and the comparison isolates the second card rather
+    than a change in batch shape. A short warm-up dispatch first: the first
+    generation on a fresh replica pays for lazily compiled Triton kernels, and
+    charging that to the two-replica run (which pays it twice, in parallel) would
+    measure the compiler.
     """
+    prompts = _PROMPTS * replicas
     engine = DataParallelEngine(
         model=str(model_dir),
         data_parallel_size=replicas,
@@ -68,7 +77,7 @@ def _serve(model_dir: Path, replicas: int) -> tuple[float, int]:
         engine.generate(_PROMPTS[:replicas], SamplingParams(temperature=0.0, max_gen_len=4))
 
         started = time.perf_counter()
-        outputs = engine.generate(_PROMPTS, _GREEDY)
+        outputs = engine.generate(prompts, _GREEDY)
         elapsed = time.perf_counter() - started
         return elapsed, sum(1 for output in outputs if output.outputs[0].text.strip())
     finally:
@@ -85,12 +94,18 @@ def scaling(model_dir: Path) -> tuple[tuple[float, int], tuple[float, int]]:
 
 @needs_gpus(2)
 def test_a_second_replica_adds_its_own_throughput(scaling):
-    """The wall clock for a fixed prompt set must drop close to proportionally."""
-    (one_s, _), (two_s, _) = scaling
-    ratio = one_s / two_s
-    print(f"\ndp scaling: {one_s:.2f}s -> {two_s:.2f}s ({ratio:.2f}x)")
+    """Two replicas at the same per-replica width must serve close to twice the requests.
+
+    Judged on requests per second rather than wall clock: the two widths do not do
+    the same amount of work, so only a rate is comparable -- and a rate already
+    rules out "half the work done twice as fast".
+    """
+    (one_s, one_n), (two_s, two_n) = scaling
+    one_rate, two_rate = one_n / one_s, two_n / two_s
+    ratio = two_rate / one_rate
+    print(f"\ndp weak scaling: {one_rate:.1f} -> {two_rate:.1f} req/s ({ratio:.2f}x)")
     assert ratio > _MIN_SCALING, (
-        f"two replicas served the set in {two_s:.2f}s against {one_s:.2f}s on one "
+        f"two replicas served {two_rate:.1f} req/s against {one_rate:.1f} on one "
         f"({ratio:.2f}x, wanted >{_MIN_SCALING}x): the replicas are not running "
         f"concurrently"
     )
@@ -98,6 +113,7 @@ def test_a_second_replica_adds_its_own_throughput(scaling):
 
 @needs_gpus(2)
 def test_both_widths_answered_every_prompt(scaling):
-    """Guards the ratio: half the work done twice as fast is not a speed-up."""
+    """Guards the ratio: a width that dropped prompts would look fast by doing less."""
     for width, (_elapsed, answered) in zip((1, 2), scaling, strict=True):
-        assert answered == len(_PROMPTS), f"dp={width} answered {answered}/{len(_PROMPTS)}"
+        expected = len(_PROMPTS) * width
+        assert answered == expected, f"dp={width} answered {answered}/{expected}"

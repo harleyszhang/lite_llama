@@ -30,6 +30,22 @@ pytestmark = [pytest.mark.gpu, pytest.mark.weights, pytest.mark.slow]
 _DATA_DIR = Path(__file__).parent / "data"
 
 
+def _golden_path(model_dir: Path) -> Path:
+    """The committed baseline for ``model_dir``, under either spelling of its name.
+
+    A shared checkpoint root cannot put ``.`` in a directory name, so the same
+    weights are stored as ``Qwen2___5-0___5B-Instruct`` there and as
+    ``Qwen2.5-0.5B-Instruct`` in a local ``my_weight/``. Both are the same
+    checkpoint, so the baseline recorded under one spelling must serve the
+    other -- looking up only ``model_dir.name`` would skip the gate on a
+    byte-identical copy.
+    """
+    plain = _DATA_DIR / f"{model_dir.name}.json"
+    if plain.is_file():
+        return plain
+    return _DATA_DIR / f"{model_dir.name.replace('.', '___')}.json"
+
+
 def _collect(model_dir: Path, *, use_cuda_graph: bool) -> dict[str, list[str]]:
     """Generate every case/penalty combination on one generator."""
     gen = TextGenerator(
@@ -95,7 +111,7 @@ def test_generation_is_reproducible_within_a_process(eager_outputs, model_dir: P
 
 def test_matches_committed_golden(model_dir: Path, eager_outputs):
     """Compare against the recorded baseline for this checkpoint, if one exists."""
-    golden_path = _DATA_DIR / f"{model_dir.name}.json"
+    golden_path = _golden_path(model_dir)
     if not golden_path.is_file():
         pytest.skip(
             f"no golden baseline for {model_dir.name!r}; record one with:\n"
@@ -115,7 +131,7 @@ def test_matches_committed_golden(model_dir: Path, eager_outputs):
 
 def test_golden_baseline_covers_every_case(model_dir: Path):
     """A stale baseline missing new cases would silently check less than it claims."""
-    golden_path = _DATA_DIR / f"{model_dir.name}.json"
+    golden_path = _golden_path(model_dir)
     if not golden_path.is_file():
         pytest.skip(f"no golden baseline for {model_dir.name!r}")
 

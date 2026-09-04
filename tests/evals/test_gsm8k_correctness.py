@@ -33,13 +33,16 @@ def test_gsm8k_correctness(config_filename: Path):
     if problem:
         pytest.skip(f"{config_filename.stem}: {problem}")
 
-    print(f"\nGSM8K — {config['model_dir']}")
+    print(f"\nGSM8K — {model_dir}")
     print(f"  questions {config['num_questions']}, {config['num_fewshot']}-shot")
     print(f"  threshold {config['accuracy_threshold']} ± {config.get('tolerance', 0.05)}")
 
     try:
+        # The resolved path, not the config's: the chain above may have found
+        # the checkpoint somewhere the config does not name, and evaluating the
+        # unresolved string would load the very directory just reported missing.
         result = evaluate_gsm8k(
-            config["model_dir"],
+            str(model_dir),
             num_questions=config["num_questions"],
             num_shots=config["num_fewshot"],
             max_gen_len=config.get("max_gen_len", 256),

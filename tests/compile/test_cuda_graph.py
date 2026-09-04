@@ -108,23 +108,35 @@ def test_graph_survives_repeat_calls(model_dir: Path):
 
 
 def test_capture_clamps_batch_sizes_to_request_table(model_dir: Path):
-    """Batch sizes above ``max_request_num`` index past ``b_req_tokens_table``.
+    """A batch wider than the block table must never be captured.
 
-    With a 1024-token pool and 512-token sequences the table holds 2 requests,
-    so the manager must skip larger capture batch sizes instead of crashing —
-    and must still capture, and correctly replay, the small ones.
+    ``b_req_tokens_table`` has ``max_request_num`` rows, one per in-flight
+    request. A graph captured for a larger batch bakes a ``b_req_idx`` past the
+    last row, and replaying it reads rows that do not exist -- a corrupted CUDA
+    context rather than a wrong answer. The manager must drop those sizes and
+    still capture, and correctly replay, the ones that fit.
+
+    Asked for directly rather than by shrinking the cache: since the KV cache
+    became paged, a slot's rows are the pages it holds, so the table is sized by
+    in-flight requests and no longer by cache capacity. A small pool bounds how
+    many sequences the scheduler admits, not how wide a graph may be.
     """
     gen = TextGenerator(
         checkpoints_dir=str(model_dir),
         max_seq_len=512,
         device="cuda",
-        use_cuda_graph=True,
-        max_gpu_num_blocks=1024,  # max_request_num = 1024 // 512 = 2
+        use_cuda_graph=False,  # capture by hand below, so the grid is this test's
     )
     try:
-        manager = gen.engine.model_runner._graph_manager
+        runner = gen.engine.model_runner
+        ceiling = runner.max_request_num
+        oversized = ceiling + 50
+        runner.enable_cuda_graph(batch_sizes=(1, 2, 4, oversized))
+
+        manager = runner._graph_manager
         assert manager is not None, "expected at least the small batch sizes to capture"
-        assert all(key.batch_size <= 2 for key in manager._runners)
+        assert oversized not in manager.batch_sizes, "the oversized batch survived the clamp"
+        assert all(key.batch_size <= ceiling for key in manager._runners)
 
         out = gen.generate(
             ["The capital of France is"], SamplingParams(temperature=0.0, max_gen_len=6)
