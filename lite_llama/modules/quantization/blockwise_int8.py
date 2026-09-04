@@ -24,6 +24,7 @@ from .base_config import (
     allocate_linear_weights,
     run_quant_linear,
 )
+from .base_config import column_major_scale
 from .parameter import RawParameter
 from .utils import quantize_int8_groupwise, quantize_int8_per_channel
 
@@ -119,7 +120,7 @@ class BlockInt8LinearMethod(LinearMethodBase):
         cfg: BlockInt8Config = config  # type: ignore[assignment]
         qweight, scale = _quantize_int8(layer.weight.data, cfg.group_k, layer.input_size)
         layer.weight = RawParameter(qweight)
-        layer.weight_scale_inv = RawParameter(scale)
+        layer.weight_scale_inv = RawParameter(column_major_scale(scale))
 
 
 class BlockInt8MoEMethod(FusedMoEMethodBase):
@@ -151,4 +152,4 @@ class BlockInt8MoEMethod(FusedMoEMethodBase):
                 block.experts[name].data, cfg.group_k, block.hidden_size
             )
             block.experts[name] = RawParameter(qweight)
-            block.experts[f"{name}_scale_inv"] = RawParameter(scale)
+            block.experts[f"{name}_scale_inv"] = RawParameter(column_major_scale(scale))

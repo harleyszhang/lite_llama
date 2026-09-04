@@ -19,6 +19,62 @@ from torch import nn
 from .parameter import RawParameter
 
 # --------------------------------------------------------------------------- #
+# Scale-grid allocation
+# --------------------------------------------------------------------------- #
+
+
+def scale_parameter(
+    shape: tuple[int, ...], dtype: torch.dtype = torch.float32
+) -> RawParameter:
+    """Allocate a 2-D scale grid in the physical layout the kernels read.
+
+    Every blockwise dequant kernel addresses scales as ``scale_ptr +
+    (offs_bn // GROUP_N) * stride_sn + k_block * stride_sk``: one row of
+    scales per N-block, stepping along K. Row-major storage makes that
+    N-step a strided jump (``stride_sn = k_blocks``, one cache line per
+    element); allocating the grid K-major and returning the logical
+    ``[n_blocks, k_blocks]`` view puts the N axis at stride 1, so the
+    per-k-step scale row loads contiguously. SGLang's fp8 path materialises
+    the same layout (``scale.t().contiguous().t()``); deciding it here, at
+    allocation, keeps the forward path free of relayout copies and works
+    across backends since every launcher passes the tensor's real strides.
+    """
+    n_blocks, k_blocks = shape
+    return RawParameter(torch.empty(k_blocks, n_blocks, dtype=dtype).t())
+
+
+def expert_scale_parameter(
+    num_experts: int, shape: tuple[int, ...], dtype: torch.dtype = torch.float32
+) -> RawParameter:
+    """Stacked-experts counterpart of :func:`scale_parameter`.
+
+    Logical ``[E, n_blocks, k_blocks]``, physical ``[E, k_blocks, n_blocks]``
+    — the fused grouped-GEMM reads the same per-N-block scale rows the dense
+    kernels do.
+    """
+    n_blocks, k_blocks = shape
+    return RawParameter(
+        torch.empty(num_experts, k_blocks, n_blocks, dtype=dtype).transpose(1, 2)
+    )
+
+
+def column_major_scale(scale: torch.Tensor) -> torch.Tensor:
+    """Relayout a row-major scale grid to the kernel-facing column-major one.
+
+    Runtime-quantisation counterpart of :func:`scale_parameter`: producers
+    that compute scales on the fly (``quantize_from_fp16``) emit them
+    N-contiguous here instead of leaving the layout to chance. Per-channel
+    grids (``[..., N, 1]``) pass through — with a single k-block the two
+    byte orders coincide.
+    """
+    if scale.dim() == 2 and scale.shape[1] > 1:
+        return scale.t().contiguous().t()
+    if scale.dim() == 3 and scale.shape[2] > 1:
+        return scale.transpose(1, 2).contiguous().transpose(1, 2)
+    return scale
+
+
+# --------------------------------------------------------------------------- #
 # Method base classes
 # --------------------------------------------------------------------------- #
 
@@ -115,9 +171,7 @@ def allocate_linear_weights(layer: nn.Module, input_size: int, output_size: int)
     """
     config: QuantizationConfig = layer.quant  # type: ignore[assignment]
     layer.weight = RawParameter(torch.empty(output_size, input_size, dtype=config.storage_dtype))
-    layer.weight_scale_inv = RawParameter(
-        torch.empty(*config.scale_shape(output_size, input_size), dtype=torch.float32)
-    )
+    layer.weight_scale_inv = scale_parameter(config.scale_shape(output_size, input_size))
 
 
 def allocate_expert_weights(block: nn.Module) -> dict[str, nn.Parameter]:
@@ -136,8 +190,8 @@ def allocate_expert_weights(block: nn.Module) -> dict[str, nn.Parameter]:
         weights[name] = RawParameter(
             torch.empty(block.num_experts, n, k, dtype=config.storage_dtype)
         )
-        weights[f"{name}_scale_inv"] = RawParameter(
-            torch.empty(block.num_experts, *config.scale_shape(n, k), dtype=torch.float32)
+        weights[f"{name}_scale_inv"] = expert_scale_parameter(
+            block.num_experts, config.scale_shape(n, k)
         )
     return weights
 

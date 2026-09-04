@@ -59,6 +59,19 @@ _QUANT_INT8_A8 = 6
 #: k-tile of the quantised path: one byte per weight element, k-contiguous, so a
 #: 128-wide tile is one full memory transaction per output channel.
 _QUANT_BLOCK_K = 128
+
+#: (BLOCK_M, BLOCK_N, num_warps) per rows-per-expert tier, per format — the
+#: sweep table documented in :func:`_launch_config`. MXFP4 inherits int4's
+#: tiles: same 4-bit packed B bytes, same nibble-plane epilogue.
+_TIER_TILES: dict[int, tuple[tuple[int, int, int], ...]] = {
+    _QUANT_NONE: ((16, 64, 4), (64, 64, 4), (128, 128, 8), (128, 128, 8)),
+    _QUANT_FP8: ((16, 64, 4), (64, 128, 4), (64, 128, 4), (128, 256, 8)),
+    _QUANT_INT8: ((16, 64, 4), (32, 128, 4), (64, 128, 4), (128, 256, 8)),
+    _QUANT_INT4: ((16, 128, 4), (64, 128, 4), (64, 128, 4), (64, 128, 4)),
+    _QUANT_MXFP4: ((16, 128, 4), (64, 128, 4), (64, 128, 4), (64, 128, 4)),
+    _QUANT_FP8_A8: ((16, 64, 4), (32, 128, 4), (64, 128, 4), (64, 128, 4)),
+    _QUANT_INT8_A8: ((16, 64, 4), (32, 128, 4), (64, 128, 4), (128, 256, 8)),
+}
 _FP8_BIT_TRICK_SCALE_SQ = FP8_E4M3_BIT_TRICK_SCALE * FP8_E4M3_BIT_TRICK_SCALE
 
 #: How many k elements mode 4 may accumulate inside Hopper's fp8 ``wgmma`` before
@@ -733,7 +746,7 @@ def _launch_config(
         "BLOCK_N": block_n,
         "BLOCK_K": _QUANT_BLOCK_K,
         "GROUP_M": 8,
-        "num_warps": 4,
+        "num_warps": num_warps,
         "num_stages": 3,
     }
 
@@ -853,6 +866,8 @@ def _silu_and_mul_kernel(
     stride_xm,
     N,
     LIMIT: tl.constexpr,
+    QUANT_OUT: tl.constexpr,
+    QMAX: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
     """``out = silu(x[:, :N]) * x[:, N:]`` on a contiguous ``[tokens, 2N]`` input.
@@ -1107,6 +1122,7 @@ def _fused_moe(
         act_scale,
         gate_up.stride(0),
         intermediate,
+        LIMIT=float("inf"),
         QMAX=act_qmax,
         QUANT_OUT=act_quant_out if fuse_act_quant else 0,
         BLOCK_N=block_n,
@@ -1240,7 +1256,9 @@ def fused_moe(
     }.get(quant_mode, "fp16")
     config = get_best_config("fused_moe", m=num_tokens, n=two_inter, k=hidden, dtype=dtype_label)
     if config is None:
-        config = _launch_config(num_tokens, quant_mode)
+        config = _launch_config(
+            num_tokens, quant_mode, num_tokens * top_k / num_experts, device.index
+        )
     sorted_ids, expert_ids, num_post = moe_align_block_size(
         topk_ids, config["BLOCK_M"], num_experts
     )
@@ -1251,6 +1269,7 @@ def fused_moe(
         hidden_states,
         w1,
         gate_up,
+        None,  # a_scale: the weight-only path keeps activations at full precision
         w1_scale,
         w1_zeros,
         flat_weights,
@@ -1271,9 +1290,12 @@ def fused_moe(
     _silu_and_mul_kernel[(num_tokens * top_k, triton.cdiv(intermediate, block_n))](
         gate_up,
         act,
+        None,  # no activation scale on the weight-only path (QUANT_OUT=0)
         gate_up.stride(0),
         intermediate,
         LIMIT=swiglu_limit,
+        QUANT_OUT=0,
+        QMAX=0.0,
         BLOCK_N=block_n,
         num_warps=4,
     )
@@ -1295,30 +1317,40 @@ def fused_moe(
             _invoke_moe_gemm(
                 act[start:stop],
                 w2,
-                topk_weights,
-                topk_ids,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                w1_zeros=w1_zeros,
-                w2_zeros=w2_zeros,
+                expanded[start:stop],
+                None,
+                w2_scale,
+                w2_zeros,
+                flat_weights,
+                sorted_ids,
+                expert_ids,
+                num_post,
+                1,
+                mul_routed_weight=True,
+                quant_mode=quant_mode,
                 group_n=group_n,
                 group_k=group_k,
-                act_quant=None,
+                config=config,
             )
             event.record()
     else:
         _invoke_moe_gemm(
             act,
             w2,
-            topk_weights,
-            topk_ids,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            w1_zeros=w1_zeros,
-            w2_zeros=w2_zeros,
+            expanded,
+            None,
+            w2_scale,
+            w2_zeros,
+            flat_weights,
+            sorted_ids,
+            expert_ids,
+            num_post,
+            1,
+            mul_routed_weight=True,
+            quant_mode=quant_mode,
             group_n=group_n,
             group_k=group_k,
-            act_quant=None,
+            config=config,
         )
 
 

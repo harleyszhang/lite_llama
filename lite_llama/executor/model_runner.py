@@ -11,7 +11,6 @@ Usage:
 from __future__ import annotations
 
 import os
-
 from collections.abc import Callable
 from typing import Any
 
@@ -19,7 +18,11 @@ import torch
 import torch.nn as nn
 
 from ..batch_overlap.two_batch_overlap import TboSplitter, TwoBatchOverlap, tbo_policy
-from ..distributed.parallel_state import tensor_model_parallel_all_reduce_min, divide, get_tensor_model_parallel_world_size
+from ..distributed.parallel_state import (
+    divide,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce_min,
+)
 from ..kernels import update_kv_index
 from ..models.config import ModelConfig
 from ..models.registry import ModelRegistry, ModelSpec
@@ -28,7 +31,6 @@ from .attention_metadata import AttentionMetadata
 from .cuda_graph import (
     DEFAULT_BATCH_SIZES,
     DEFAULT_SEQ_LEN_BUCKETS,
-    TP_GRAPH_PARITY_ATOL,
     CUDAGraphManager,
     estimate_capture_workspace,
 )
@@ -411,6 +413,8 @@ class ModelRunner:
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
         atten_info: AttentionMetadata,
+        *,
+        prefill: bool = False,
     ) -> torch.Tensor:
         """The interleave itself: split into halves, ping-pong, concat back.
 
@@ -420,9 +424,17 @@ class ModelRunner:
         surface). They differ only in where the metadata comes from, so the
         captured arm cannot drift from the eager reference it is tested
         against.
+
+        ``prefill`` splits by sequence with a token-balanced cut and runs the
+        prefill op stream; a decode step splits by row.
         """
-        halves = TboSplitter().split(input_ids, position_ids, atten_info)
-        return TwoBatchOverlap(self.model).forward(halves)
+        splitter = TboSplitter()
+        halves = (
+            splitter.split_prefill(input_ids, position_ids, atten_info)
+            if prefill
+            else splitter.split(input_ids, position_ids, atten_info)
+        )
+        return TwoBatchOverlap(self.model).forward(halves, prefill=prefill)
 
     def _tbo_step(self) -> Callable[[torch.Tensor, torch.Tensor, AttentionMetadata], torch.Tensor]:
         """The step shape a TBO graph records: split, interleave, concat."""
@@ -466,6 +478,34 @@ class ModelRunner:
             shape :meth:`forward` returns for the step.
         """
         return self._run_tbo(input_ids, position_ids, self.atten_info)
+
+    def forward_tbo_prefill(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        logits_positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """One prefill pass in two interleaved halves.
+
+        Splits the grid by *sequence* with sglang's token-balanced cut, so a
+        batch of uneven prompts does not hand one half most of the work. The
+        prefill op stream alternates strictly (no lead) and hides the shared
+        MLP behind the return exchange.
+
+        Args:
+            input_ids: ``[num_seqs, max_prompt_len]`` the padded prompt grid.
+            position_ids: Same shape, absolute positions.
+            logits_positions: Per-sequence position whose logits to keep.
+
+        Returns:
+            The same shape :meth:`forward` returns for a prefill.
+        """
+        out = self._run_tbo(input_ids, position_ids, self.atten_info, prefill=True)
+        if logits_positions is not None:
+            # Each half dropped its padded rows, so the kept positions are the
+            # caller's, re-indexed against the concatenated halves.
+            return out[:, logits_positions, :] if out.dim() == 3 else out
+        return out
 
     def forward(
         self,

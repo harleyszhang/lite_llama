@@ -23,6 +23,7 @@ from .base_config import (
     LinearMethodBase,
     QuantizationConfig,
     QuantizeMethodBase,
+    expert_scale_parameter,
 )
 from .fp8 import FP8_BLOCK, Fp8LinearMethod, Fp8MoEMethod
 from .parameter import RawParameter
@@ -84,18 +85,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             "gate_up_proj": RawParameter(
                 torch.empty(block.num_experts, gate_up_n, gate_up_k // 8, dtype=torch.int32)
             ),
-            "gate_up_proj_scale_inv": RawParameter(
-                torch.empty(
-                    block.num_experts, gate_up_n, gate_up_k // MXFP4_GROUP, dtype=torch.float32
-                )
+            "gate_up_proj_scale_inv": expert_scale_parameter(
+                block.num_experts, (gate_up_n, gate_up_k // MXFP4_GROUP)
             ),
             "down_proj": RawParameter(
                 torch.empty(block.num_experts, down_n, down_k // 8, dtype=torch.int32)
             ),
-            "down_proj_scale_inv": RawParameter(
-                torch.empty(
-                    block.num_experts, down_n, down_k // MXFP4_GROUP, dtype=torch.float32
-                )
+            "down_proj_scale_inv": expert_scale_parameter(
+                block.num_experts, (down_n, down_k // MXFP4_GROUP)
             ),
         }
 
