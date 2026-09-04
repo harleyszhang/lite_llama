@@ -2,31 +2,36 @@
 
 ### 量化内核性能（W8A16 / W4A16 / SmoothQuant）
 
-以下为量化 Triton 内核在 A10 (24 GB, SM86) 上的 `triton.testing.do_bench` 实测结果。基准为 cuBLAS fp16 `F.linear`；加速来自减半（或减至 1/4）的 HBM 权重读取量。
+两台设备分开记，因为**同一格式在两台机器上可以给出相反的结论**：A10（sm86）的 HBM 约 600 GB/s，decode 档几乎全程在等显存，省下的字节直接兑现；H100（sm90）有 3.35 TB/s，bf16 在中尺寸投影上只占峰值带宽的 43.5%，内核根本没在等显存，反量化的 ALU 开销就是纯增量成本。两节的 shape 也不同（A10 是合成方阵，H100 是 checkpoint 的真实投影），**绝对值不要跨表比较**，只读各表内的相对位置。
 
-#### W8A16 (fp8-e4m3, 128×128 block scales)
+#### A10 (24 GB, SM86)
+
+以下为量化 Triton 内核在 `A10` 上的 `triton.testing.do_bench` 实测结果（2026-08-22 口径、合成 shape）。环境：NVIDIA A10 24GB（sm86，~600 GB/s HBM），当时的软件栈为 torch 2.11.0+cu129 / triton 3.6.0 / python 3.12；负载：合成方阵 shape（下表 M×N×K 列），`triton.testing.do_bench` 口径。**该批数字早于 JSON 环境日志功能，无独立日志留存**（数字仅见于本节表格）。此后内核经过多轮改动（v0.6 重写、`FP8_CVT` 硬件 `cvt` 分叉、0903 按 H100 扫描重定 tile fallback），**A10 未复测**，绝对值仅供参考，下面的 roofline 判据仍然成立。
+
+##### W8A16 (fp8-e4m3, 128×128 block scales)
 
 | Shape (M×N×K) | fp16 (ms) | w8a16 (ms) | 加速比 | 场景 |
-|---------------|-----------|------------|--------|------|
+| --------------- | ----------- | ------------ | -------- | ------ |
 | 1×4096×4096 | 0.086 | 0.053 | **1.62×** | decode |
 | 1×11008×4096 | 0.199 | 0.116 | **1.71×** | decode (MLP up) |
 | 8×4096×4096 | 0.084 | 0.051 | **1.65×** | decode batch |
 | 64×4096×4096 | 0.091 | 0.055 | **1.64×** | small prefill |
 | 512×4096×4096 | 0.191 | 0.280 | 0.68× | prefill (compute-bound) |
 
-结论：decode 阶段（M≤64）稳定 **1.6–1.7× 加速**；prefill 阶段（M≥512）内核为 compute-bound，fp8 路径无优势（此时应回退到 cuBLAS fp16）。
+判据（roofline）与 H100 矩阵一致，但 **W8A16 这一行的胜负在两台机器上是反的**。decode（M≤64）算术强度低、卡在 HBM 带宽上，W8A16 把权重字节减半直接缩短搬运，在 A10（~600 GB/s）稳定 1.6–1.7×；prefill（M≥512）算术强度高、卡在算力上，W8A16 反量化后走 fp16-rate dot，算力上限就是 cuBLAS fp16 同档，省下的字节不在瓶颈上，于是 0.68×——此时应回退 cuBLAS fp16。同一格式到 H100 上 decode 档反而输（qkv 的 M=1/8/32 为 0.76–0.79×；24 个 decode 测试点里只有 qwen3-4b/gate_up 的两个还赢，1.21–1.22×，见[下文](#h100-80-gb-sm90)）：3.35 TB/s 的带宽让 bf16 只占峰值 43.5%（gate_up 才到 60.9%），内核没在等显存，删字节省不下时间。A10（sm86）没有原生 fp8 GEMM，所以真 W8A8（激活也量化）在这里只能付量化开销、拿不到 MMA 收益；完整的「量化什么时候赢/输」推导见 [quantization.md](quantization.md) 的 roofline 一节与 [quant_matrix_20260901.md](benchmark_logs/quant_matrix_20260901.md) §1.1a。
 
-#### W4A16 (int4, group_size=128)
+##### W4A16 (int4, group_size=128)（初版内核，勿引用）
 
-| Shape (M×N×K) | fp16 (ms) | w4a16 (ms) | 加速比 | 备注 |
-|---------------|-----------|------------|--------|------|
-| 1×4096×4096 | 0.086 | 0.176 | 0.49× | 未优化 |
-| 8×4096×4096 | 0.084 | 0.311 | 0.27× | 未优化 |
-| 64×4096×4096 | 0.091 | 0.832 | 0.11× | 未优化 |
+| Shape (M×N×K) | fp16 (ms) | w4a16 (ms) | 加速比 | 场景 |
+| --------------- | ----------- | ------------ | -------- | ------ |
+| 1×4096×4096 | 0.085 | 0.056 | **1.53×** | decode |
+| 8×4096×4096 | 0.084 | 0.042 | **2.01×** | decode batch |
+| 64×4096×4096 | 0.090 | 0.062 | **1.45×** | small prefill |
+| 512×4096×4096 | 0.192 | 0.430 | 0.45× | prefill (compute-bound) |
 
-> ⚠️ W4A16 内核当前为功能实现，尚未做 tile 级优化（逐元素 unpack + outer product）。
-> 后续计划：向量化 unpack、`tl.dot` 替代 outer product、autotuning。
-> 内存节省仍然有效：30B 模型 int4 权重仅占 ~15 GB（fp16 需 ~61 GB）。
+结论：decode 阶段（M≤64）**1.4–2.0× 加速**——内核走 per-group `tl.dot` tensor core（v0.5 重写，`lite_llama/kernels/ops/quantization/w4a16.py`），权重读取量减至 1/4；prefill 阶段（M≥512）compute-bound，int4 路径无优势，与 W8A16 同一结论。
+
+tile 配置来自 autotune 落盘表（`~/.cache/lite_llama/autotune/w4a16_matmul.json`，A10 实测）：M≤16 → `BLOCK_M=16/BLOCK_N=64/num_stages=4`，M=64 → `BLOCK_M=64/BLOCK_N=64/num_stages=4`；表未命中时 `w4a16_matmul._heuristic_config` 兜底（同一组 A10 sweep 的最优档）。内存节省仍然有效：30B 模型 int4 权重仅占 ~15 GB（fp16 需 ~61 GB）。
 
 #### SmoothQuant W8A8 (dynamic per-token)
 
@@ -35,12 +40,50 @@
 | 8×256×512 | — | ✓ | — | 精度验证通过 |
 | 64×2048×2048 | — | ✓ | — | 精度验证通过 |
 
-精度：相对 fp32 参考的相对误差 < 2%（含激活 + 权重量化双重噪声）。
+精度：相对 fp32 参考的相对误差 < 2%（含激活 + 权重量化双重噪声）。A10 上只做了精度验证（shape 太小，性能读数无意义）；它的性能行就是[下文 H100 矩阵](#h100-80-gb-sm90)的 `int8 W8A8` 列——同一个内核（int8 权重 + 内核内 per-token int8 激活量化）。
+
+#### H100 (80 GB, SM90)
+
+测于 NVIDIA H100 80GB HBM3（3352 GB/s 峰值带宽、989 TFLOP/s dense tensor core），torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7，2026-09-03 口径，数据来自 [`bench_quant_gemm_h100_20260903d.json`](benchmark_logs/bench_quant_gemm_h100_20260903d.json)，以 `LITE_LLAMA_AUTOTUNE=0` 运行——即用户没有调优缓存时拿到的启发式 tile。shape 是两个 checkpoint 的四个真实投影（qwen3-4b：hidden 2560 / intermediate 9728；qwen3-30b-a3b：hidden 2048 / moe_intermediate 768）× 6 个 token 档（1/8/32/128/512/2048）= 48 个测试点 × 6 个 scheme。括号内为相对 bf16 的加速比（bf16 耗时 ÷ 该格式耗时），大于 1 即快于基线。
+
+##### 中尺寸投影：qwen3-4b/qkv（N=6144, K=2560）
+
+| M | bf16 | fp8 W8A16 | fp8 W8A8 | int8 W8A8 | int4 (awq) | nvfp4 |
+|---|---|---|---|---|---|---|
+| 1 | 21.6 µs | 28.2 (0.77×) | 22.0 (0.98×) | **20.2 (1.07×)** | 29.8 (0.72×) | 49.1 (0.44×) |
+| 8 | 21.4 | 27.2 (0.79×) | 22.6 (0.95×) | **20.7 (1.03×)** | 29.4 (0.73×) | 48.7 (0.44×) |
+| 32 | 21.7 | 28.4 (0.76×) | 23.4 (0.93×) | **21.3 (1.02×)** | 38.7 (0.56×) | 50.6 (0.43×) |
+| 128 | 21.5 | 49.6 (0.43×) | 27.3 (0.79×) | 24.1 (0.89×) | 58.2 (0.37×) | 67.9 (0.32×) |
+| 512 | 30.7 | 81.7 (0.38×) | 37.5 (0.82×) | **30.5 (1.01×)** | 137.5 (0.22×) | 219.2 (0.14×) |
+| 2048 | 90.8 | 252.2 (0.36×) | 93.5 (0.97×) | **73.7 (1.23×)** | 512.2 (0.18×) | 728.4 (0.12×) |
+
+##### 最大权重投影：qwen3-4b/gate_up（N=19456, K=2560，bf16 权重 ~100 MB）
+
+| M | bf16 | fp8 W8A16 | fp8 W8A8 | int8 W8A8 | int4 (awq) | nvfp4 |
+|---|---|---|---|---|---|---|
+| 1 | 48.8 | 40.4 (1.21×) | 34.2 (1.43×) | **33.5 (1.46×)** | 61.3 (0.80×) | 117.4 (0.42×) |
+| 8 | 49.0 | 40.0 (1.22×) | 35.0 (1.40×) | **34.1 (1.44×)** | 60.3 (0.81×) | 118.2 (0.41×) |
+| 32 | 50.4 | 57.7 (0.87×) | **36.3 (1.39×)** | 36.7 (1.38×) | 112.4 (0.45×) | 122.8 (0.41×) |
+| 128 | 50.2 | 142.5 (0.35×) | 50.1 (1.00×) | **44.5 (1.13×)** | 168.4 (0.30×) | 187.0 (0.27×) |
+| 512 | 81.7 | 211.5 (0.39×) | 82.1 (0.99×) | **67.7 (1.21×)** | 412.4 (0.20×) | 647.4 (0.13×) |
+| 2048 | 304.1 | 789.8 (0.39×) | 276.5 (1.10×) | **210.5 (1.45×)** | 1560.5 (0.19×) | 2254.2 (0.13×) |
+
+##### 胜负统计与判据
+
+- **48 个测试点里 cuBLAS bf16 在 35 个最快**；剩下 13 个有量化行反超，共 20 个 scheme 胜场（int8 W8A8 13 / fp8 W8A8 5 / fp8 W8A16 2），集中在 gate_up 全部 6 档、qwen3-4b/qkv 的 5 档与 30B 的两个 prefill 测试点。int8 W8A8 在 gate_up 六个档上跑 1.46× / 1.44× / 1.38× / 1.13× / 1.21× / 1.45×——**它的胜场活过了 prefill**。
+- 门槛按格式分：**int8 W8A8 从 bf16 占峰值 HBM ~44% 起就赢**（qkv M=1 实测 43.5% → 1.07×；30B/qkv 的 38.5% 差一点没赢），fp8 W8A8 与 fp8 W8A16 只在最顶端（gate_up 的 60.9%）赢。int8 门槛更低的原因：scale 全在 epilogue，且 imma 没有 `BLOCK_M ≥ 64` 门槛；fp8 行要付 Triton 的 wgmma codegen 加一个每 token 激活量化 pass（JSON 的 `ablation` 行单独隔离了后者）。
+- decode（M≤32）对 bf16 的几何均值差距：int8 W8A8 1.16×、fp8 W8A8 1.29×、**w4a16 1.65×**、w8a16 1.71×、nvfp4 2.83×——这是唯一可能有量化行 outright 赢的区间，因为 M=1 对整张权重矩阵只有 ~2 FLOP/byte，而 H100 的 ridge 在 ~295。int4 的 decode 列要软着读：同一 launch config 在 m=1 的 run-to-run 波动是 22–30 µs。
+- prefill（M≥512）算术强度越过 ridge，cuBLAS 开始真正吃 tensor core（m=2048 各投影 390–766 TFLOP/s，中尺寸投影 ~73% 峰值）。epilogue-scale 修复把 fp8 W8A8 的差距拉到 1.34×、int8 W8A8 到 1.12×（两者 outright 赢 gate_up 与 qkv），weight-only 行仍被解包循环钉死：w4a16 4.45×、w8a16 2.70×、nvfp4 6.58×。
+- **W4A16 现状**（对照上面 A10 那张初版内核表，那张表勿引用）：decode（M≤32）0.35–0.88×（M=1/8 档 0.50–0.88×，M=32 档掉到 0.35–0.86×；最高 30B/down 的 M=8 0.88×）、prefill（M≥512）0.17–0.47×。内核 docstring 记录了同 shape 家族（N=K=4096）的重写前后：m=1 从 33.9 → 23.2 µs（cuBLAS fp16 23.1 µs，即打平）、m=64 从 49.9 → 31.1 µs。它也是五个 dense 量化内核里唯一读 autotune store 的，`--tune` 后 m≥512 还能再快 13–25%。
+- **NVFP4 48 个测试点全输**（包括那 13 个有别的量化行赢的），是结论不是 bug：e2m1 解包每权重元素约 10 条整数运算，比它省下的字节贵一个数量级——读作显存的价格。
+- 与 A10 的关键差异：同一个 W8A16 格式，A10 上 decode 稳定赢 1.6–1.7×，H100 上 24 个 decode 测试点只赢 2 个（都在 gate_up，1.21–1.22×）、qkv 档输到 0.76–0.79×——A10 的 600 GB/s 让 bf16 自己就卡在带宽上，删字节直接省时间；H100 的 bf16 只占峰值 43.5%，内核没在等显存。反过来 H100 有 sm90 的 fp8 `wgmma`（`BLOCK_M ≥ 64` 才发射）与 int8 `imma`（`BLOCK_M=16` 起可用），所以真 W8A8 两行在 H100 才有胜机（int8 decode 赢 6/24、fp8 W8A8 赢 3/24，全在 bf16 带宽占比高的投影），而这两行在 A10（sm86 无原生 fp8 GEMM）上付的是纯开销。
 
 #### 量化算子精度汇总
 
+精度与设备无关（只取决于量化粒度与反量化路径）：
+
 | 量化方案 | 相对误差 (vs fp32) | 权重内存节省 |
-|----------|-------------------|-------------|
+| ---------- | ------------------- | ------------- |
 | fp8 blockwise (128×128) | < 0.04% | 2× |
 | int8 per-channel | < 0.03% | 2× |
 | int4 group-wise (AWQ/GPTQ) | < 5% | 4× |
@@ -49,34 +92,53 @@
 复现：
 
 ```bash
-# 内核精度测试
-python -m pytest tests/kernels/test_quantization.py -v
+# 内核精度测试（两台设备同一套用例）
+python -m pytest tests/kernels/test_quantization.py tests/kernels/test_w4a16_accuracy.py -v
+
+# 先把 w4a16 的 tile 配置调到本机（落盘 ~/.cache/lite_llama/autotune/）
+python scripts/autotune_collect.py --ops w4a16_matmul \
+    --extra-shape 1x4096x4096 --extra-shape 8x4096x4096 \
+    --extra-shape 64x4096x4096 --extra-shape 512x4096x4096
 
 # 性能基准
 python -c "
 import torch, triton
-from lite_llama.kernels.quantization import w8a16_matmul
+from lite_llama.kernels.ops.quantization import w8a16_matmul, w4a16_matmul
 M, N, K = 1, 4096, 4096
 x = torch.randn(M, K, device='cuda', dtype=torch.float16)
 qw = torch.randn(N, K, device='cuda').to(torch.float8_e4m3fn).view(torch.uint8)
 sc = torch.ones(32, 32, device='cuda')
-print(triton.testing.do_bench(lambda: w8a16_matmul(x, qw, sc, group_n=128, group_k=128)))
+print('w8a16', triton.testing.do_bench(lambda: w8a16_matmul(x, qw, sc, group_n=128, group_k=128)))
+
+q4 = torch.randint(-2**31, 2**31 - 1, (N, K // 8), device='cuda', dtype=torch.int32)
+s4 = torch.rand(N, K // 128, device='cuda') * 0.02
+z4 = torch.randint(0, 16, (N, K // 128), device='cuda').float()
+w = torch.randn(N, K, device='cuda', dtype=torch.float16)
+print('fp16 ', triton.testing.do_bench(lambda: torch.nn.functional.linear(x, w)))
+print('w4a16', triton.testing.do_bench(lambda: w4a16_matmul(x, q4, s4, z4, group_size=128)))
 "
+
+# H100 口径：全格式矩阵（48 个测试点 × 6 scheme，真实投影 shape）
+LITE_LLAMA_AUTOTUNE=0 python benchmarks/kernels/bench_quant_gemm.py \
+    --json docs/benchmark_logs/bench_quant_gemm_h100_20260903d.json
+LITE_LLAMA_AUTOTUNE=0 python benchmarks/kernels/bench_quant_gemm.py --tokens 1 32 2048   # 只测自己服务的宽度
+python benchmarks/kernels/bench_quant_gemm.py --tune --dry-run                          # int4 tile 搜索（唯一读缓存的内核）
 ```
 
 ## 二 模型 e2e benchmark 汇总
 
 两节都是**离线推理（offline inference）口径**：全部 prompt 一次性提交、跑完收工，没有 serving 层的请求排队与连续到达。端到端性能从两个互补视角评估：
+
 1. lite_llama 与 HF transformers 同口径对照，回答"比裸 transformers 快多少"；
 2. lite_llama 自己关/开 CUDA graph 对照，回答"graph 优化本身值多少"。
 
 测试 1：lite_llama 默认启用 CUDA graph（TextGenerator 和 VisionGenerator 的 use_cuda_graph 均为 True—多模态的 decode 步骤与纯文本结构相同，视觉 token 在 prefill 之后也只是一行普通的 KV cache）。所以两表的 lite_llama 数字同源—只是 gen_len 与 TPOT 统计方式不同（整体摊销中位数 vs 逐步间隔均值），数字接近而不相等，各按原口径保留。
 
-两节的测试矩阵相同：单卡 A10 22 GiB 放得下的全部 checkpoint，纯文本（四种架构 × bf16/FP8/AWQ）以 batch 并行口径测，多模态（llava / qwen3_vl）以逐请求串行口径测（表一末尾 batch=serial 的行）；单卡放不下的 8B b16 档用 `--tensor-parallel-size 2` 开双卡 TP 测（表一中 GPU=A10×2 的行，decode 走 eager—NCCL 集合通信不能进 graph 捕获）。未包含：**Qwen2.5-0.5B**（本机无权重，历史数字见 git 历史）、**Qwen-1_8B**（第一代 `qwen` model_type，不在支持列表，加载即被 registry 拒绝）、**Qwen3-30B-A3B 的 b16 checkpoint 与 Qwen3-Next-80B**（双卡放不下，需 4 卡级 TP；30B-A3B 的 FP8 版 30.5 GB 已用 TP2 补测，见上表）、**Qwen3-MoE-Tiny**（2 层 4 专家的玩具 checkpoint，fp32 存储 547 MB，数字仅证明 qwen3_moe 架构与 fused_moe kernel 在三层 dispatch 下端到端可用，不代表 MoE 吞吐量级）。
+两节的测试矩阵相同：单卡 A10 22 GiB 放得下的全部 checkpoint，纯文本（四种架构 × bf16/FP8/AWQ）以 batch 并行口径测，多模态（llava / qwen3_vl）以逐请求串行口径测（表一末尾 batch=serial 的行）；单卡放不下的 8B b16 档用 `--tensor-parallel-size 2` 开双卡 TP 测（表一中 GPU=A10×2 的行，decode 走 eager——当时 TP 路径尚不能捕获 graph；连续批处理引擎的 TP-safe 捕获落地后该限制已解除，见下文 H100 补测）。当时未包含、现已在 2×H100 上补齐的：**Qwen2.5-0.5B-Instruct**（A10 本机无权重）、**Qwen3-30B-A3B 的 b16 checkpoint**（A10 双卡放不下；H100 单卡即可）、**Qwen3-4B-Thinking-2507**（A10 无权重）——见两节各自的 H100 补测小节。仍未包含：**Qwen-1_8B**（第一代 `qwen` model_type，不在支持列表，加载即被 registry 拒绝）、**Qwen3-Next-80B**（双卡放不下，需 4 卡级 TP）、**Qwen3-MoE-Tiny**（2 层 4 专家的玩具 checkpoint，fp32 存储 547 MB，数字仅证明 qwen3_moe 架构与 fused_moe kernel 在三层 dispatch 下端到端可用，不代表 MoE 吞吐量级）。
 
 ### lite_llama vs HF transformers（examples/benchmark.py）
 
-下表是用重构后的 `examples/benchmark.py` **实测**得到的结果（贪心解码、两端同一 tokenizer 统计输出 token、两端自然 EOS 停止、`torch.cuda.synchronize` 计时、取中位数）。指标口径对齐 vLLM/SGLang serving benchmark：
+**测试环境**：单卡 NVIDIA A10 24GB（sm86，~600 GB/s），torch 2.11.0+cu129 / transformers 5.8.0 / Python 3.12（2026-08-31 重测）；TP2 行为 2×A10。**推理负载**：`examples/benchmark.py` 的 PROMPTS 扩到 batch 8（gen_len 128）或 batch 16（gen_len 256），贪心解码、两端同一 tokenizer 统计输出 token、两端自然 EOS 停止、`torch.cuda.synchronize` 计时、取中位数；lite_llama 默认启用 CUDA graph，HF 侧 sdpa attention。**日志**：每行对应一份 `docs/benchmark_logs/bench_<模型>_b<batch>_g<gen>_<日期>_<时间>.json`（如 `bench_Qwen2.5-1.5B-Instruct_b8_g128_20260831_200147.json`，含完整 config 与环境 meta）。指标口径对齐 vLLM/SGLang serving benchmark：
 
 - **TTFT**（首 token 时延，s）= 预填充延迟；
 - **TPOT**（每输出 token 时延，ms）= `(latency - ttft) / (output_len - 1)`；
@@ -143,10 +205,11 @@ print(triton.testing.do_bench(lambda: w8a16_matmul(x, qw, sc, group_n=128, group
 | Qwen3-VL-4B-Instruct | A10 | serial | 128 | transformers | 0.1442 | 33.47 | 29.9 | 29.0 | — | — | — |
 
 结论（2026-08-31 重测，torch 2.11.0+cu129 / transformers 5.8.0 / Python 3.12，覆盖受支持的全部架构含多模态）：
+
 - lite_llama 的 **decode 全面更快** — TPOT 加速比在 **1.15×～7.1×** 之间，模型越大比值越低（0.6B 档 ~6-7×，3B 档收敛到 ~1.6-1.9×，多模态 7B 档 1.15×；模型越大 decode 越偏 compute-bound，两端都吃满算力）；多模态 4B 档（Qwen3-VL）拿到 **1.72×**—decode 步与纯文本同构，CUDA graph 的收益直接兑现；
 - 8B 级 TP2 双卡档同样领先（Qwen3-8B 1.24×、Llama-3.1-8B 1.46×，两端都在同样的两张卡上），说明 TP 切分 + eager decode 在通信开销下仍保住优势；
-- 聚合吞吐 TGS 同步放大。每组配置两端输出 token 数一致，工作量对等
-- **TTFT** 绝对值小（纯文本 6～50 ms），lite_llama 普遍略优但 run-to-run 抖动明显，不逐行解读；多模态 TTFT（129～200 ms）含视觉塔前向，lite_llama 优 1.11×～1.22×。原始日志见 `docs/benchmark_logs/bench_*.json`（每份含完整 config）。
+- 聚合吞吐 TGS 同步放大，TPS 加速比 **1.15×～6.8×**（与 TPOT 同向、略低——TTFT 摊进总时延）。每组配置两端输出 token 数一致，工作量对等。
+- **TTFT** 绝对值小（纯文本 6～50 ms），加速比 **1.04×～1.94×**，lite_llama 普遍略优但 run-to-run 抖动明显，不逐行解读；多模态 TTFT（129～200 ms）含视觉塔前向，lite_llama 优 1.11×～1.22×。原始日志见 `docs/benchmark_logs/bench_*.json`（每份含完整 config）。
 - 30B 级 MoE（Qwen3-30B-A3B-FP8，TP2 eager decode）：TPOT ~84 ms 与 batch 8/16 无关（~3B 激活参数 + top-8 专家权重读取，A10 带宽主导），batch 8→16 吞吐线性放大（95→190 tok/s）说明带宽还有余量；权重 29.06 GB 分两卡后每卡仍有 ~6 GB KV（104,528 token/卡）。transformers 侧无法对照（fp8 反量化为 bf16 需 ~60 GB，双卡 44 GB 放不下），同 14B-AWQ 一样记 lite_llama 单侧。
 
 > 本节表中未出现的组合：**8B 级 b16 单卡档**的 KV 预算（16×2048 token ≈ 4.8 GiB + 16 GiB 权重）超出 22 GiB—已用 `--tensor-parallel-size 2` 双卡 TP 补上（GPU=A10×2 行）；**8B 级 b8 档的 transformers 侧**因 transformers 5.8 的 `caching_allocator_warmup` 需要约双倍模型显存，单卡放不下（b16 双卡档已补测，b8 不再用双卡测以保持与 lite_llama 单卡 graph 行的硬件口径一致）；**14B-AWQ 的 transformers 侧**因 AWQ 反量化需要 gptqmodel/autoawq（未安装）标为 lite_llama 单侧。
@@ -235,7 +298,7 @@ lite_llama 流式输出实录（Qwen2.5-3B，仅演示效果，非并排对比�
 
 ### eager vs CUDA graph（benchmarks/bench_e2e.py）
 
-batch 8、greedy、`max_gen_len=256`、A10 22 GiB、torch 2.11.0+cu129 / triton 3.6.0 / Python 3.12，`--mode both` 同时测 eager 与 CUDA graph。一次覆盖全部四种受支持架构、三条优化路径与两个多模态模型（多模态为 8 请求串行口径：TTFT 取每请求首 token 均值、TPS 为串行循环聚合吞吐）：
+**测试环境**：单卡 NVIDIA A10 22 GiB（sm86），torch 2.11.0+cu129 / triton 3.6.0 / Python 3.12（2026-08-31）。**推理负载**：batch 8、greedy、`max_gen_len=256`，`--mode both` 同时测 eager 与 CUDA graph；多模态为 8 请求串行口径（TTFT 取每请求首 token 均值、TPS 为串行循环聚合吞吐）。**日志**：`docs/benchmark_logs/bench_e2e_<模型>_b<batch>_g<gen>_<版本>.json`（如 `bench_e2e_Qwen2.5-1.5B_b8_g128_v09_release.json`，含环境 meta）。一次覆盖全部四种受支持架构、三条优化路径与两个多模态模型：
 
 | 模型 | 架构 / 优化 | TTFT (ms) | TPOT eager (ms) | TPOT graph (ms) | graph 加速 | TPS (tok/s) |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -270,7 +333,7 @@ PYTHONPATH=. python benchmarks/bench_e2e.py \
     --model-dir my_weight/Qwen3-VL-4B-Instruct --greedy      # 多模态（自动切串行口径）
 ```
 
-### DeepSeek 多层栈三方对比（含 MoE，examples/benchmark.py，lite_llama vs transformers vs vLLM）
+### DeepSeek 多层推理三方对比（含 MoE，examples/benchmark.py，lite_llama vs transformers vs vLLM）
 
 DeepSeek-V2/V3 的前若干层是 dense、之后才是 MoE（V2-Lite `first_k_dense_replace=1`：层 0 dense、层 1-26 MoE；V3 `first_k_dense_replace=3`：层 0-2 dense、层 3 起 MoE）。**单层 benchmark 只跑到 dense 层、完全跳过稀疏路由，没有意义**，故本节一律跑多层、覆盖到 MoE 层：三方（lite_llama / HF transformers / vLLM）同一批 prompt、同一口径（贪心、`torch.cuda.synchronize` 计时、取中位数、离线一次性提交）对比 MLA + MoE 的实际 decode 性能。两个 checkpoint 取自共享权重盘：
 
@@ -318,12 +381,20 @@ for eng in lite_llama transformers vllm; do
 done
 # 可选：lite_llama 一次运行前加 LITE_LLAMA_PIPELINE=1 启用 O2 launch/harvest 管线
 # （稳态 24.6ms/step phase 口径；它会延迟一步处理 stop，是部署选项而非默认）。
-# V3 四层三方（单卡，一次 --engine all；vLLM 侧降 gpu_memory_utilization 给 MLA workspace 留空间）：
-PYTHONPATH=. /home/honggao/projects/.venv/bin/python examples/benchmark.py \
+# V3 四层三方（双 venv 分臂，单卡）：lite_llama + transformers 在 lite_llama venv：
+for eng in lite_llama transformers; do
+  PYTHONPATH=. /home/honggao/projects/lite_llama/.venv/bin/python examples/benchmark.py \
     --model /data/shared/llm_weights/DeepSeek-V3-4layers-MTP-BF16 \
-    --batch-size 8 --gen-len 128 --iters 2 --engine all --hf-dtype bf16 \
-    --hf-overrides '{"n_group":2,"topk_group":1,"num_experts_per_tok":2}' \
-    --vllm-gpu-mem-util 0.7
+    --batch-size 8 --gen-len 128 --iters 2 --engine $eng --hf-dtype bf16 \
+    --hf-overrides '{"n_group":2,"topk_group":1,"num_experts_per_tok":2}'
+done
+# vLLM 在源码仓 venv（PATH 需含其 bin，flashinfer JIT 要 ninja；gpu_mem_util 0.7 给 MLA workspace 留空间）：
+export PATH=/home/honggao/projects/open_source/vllm/.venv/bin:$PATH
+PYTHONPATH=. /home/honggao/projects/open_source/vllm/.venv/bin/python examples/benchmark.py \
+  --model /data/shared/llm_weights/DeepSeek-V3-4layers-MTP-BF16 \
+  --batch-size 8 --gen-len 128 --iters 2 --engine vllm --hf-dtype bf16 \
+  --hf-overrides '{"n_group":2,"topk_group":1,"num_experts_per_tok":2}' \
+  --vllm-gpu-mem-util 0.7
 ```
 
 ### DeepSeek-V4-Flash-6layers（DSpark weight-only fp8/MXFP4，TP2，lite_llama + transformers 实测）
@@ -436,7 +507,7 @@ prompts: List[str] = [
     """A brief message congratulating the team on the launch:
 
     Hi everyone,
-    
+
     I just """,
     # Few shot prompt (providing a few examples before asking model to complete more);
     "Roosevelt was the first president of the United States, he has",
@@ -557,7 +628,7 @@ eager 路径的 GPU 计算本身没有变化，TPOT 从 15.04 ms 降到 13.55 ms
 1. **Qwen3-VL 的 RoPE base 错了 500 倍**。transformers 5.x 只在 `rope_parameters` 里写 `rope_theta`，而多模态路径的旧配置是 `LlamaConfig.from_dict(config.text_config.to_dict())`，读不到顶层 `rope_theta` 就退到 dataclass 默认值 **10000.0**，而 checkpoint 声明的是 **5,000,000**。在 201 token 的纯文本 prompt 上与 HF `Qwen3VLForConditionalGeneration` 对照 logits：
 
    | rope_theta | 与 HF 的平均 cosine | 最小 cosine | top-1 一致率 |
-   |------------|---------------------|--------------|--------------|
+   | ------------ | --------------------- | -------------- | -------------- |
    | 10000（旧，默认值） | 0.928 | **−0.195** | 99.50% |
    | 5e6（新，读配置） | **0.99973** | **0.982** | **100%** |
 
@@ -715,6 +786,7 @@ prompts: List[str] = [
 ```
 
 `max_gen_len = 2000` 时, benchmark 性能测试运行结果:
+
 ```bash
 lite_llama inference time: 34.9293 s
 Transformers inference time: 31.6787 s
@@ -777,6 +849,7 @@ Transformers per token latency: 5.807474 ms/token
 ```
 
 `batch_size = 16` 时的提示词
+
 ```bash
 prompts: List[str] = [
     "I believe the meaning of life is to find happiness in the simple things. but how to achieve the meaning of life?",
