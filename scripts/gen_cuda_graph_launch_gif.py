@@ -1,18 +1,20 @@
 """Animate eager vs CUDA-graph decode from real torch.profiler data.
 
-Profiles Qwen2.5-0.5B-Instruct in both modes, isolates one mid-run window per
-mode, and renders an animated timeline showing:
+Profiles Qwen2.5-0.5B-Instruct in both modes, isolates ONE decode step per mode
+holding the *same* kernels, and renders an animated timeline. Both modes run the
+same forward, so the step's kernel count and GPU busy time match (327 kernels,
+~1020 µs of GPU work); what differs is how that work is dispatched:
 
-- **Eager**: one gap-delimited window. A >30 µs gap splits a decode step, so this
-  is a *fragment* of a step (~29 kernels, not the full ~378): 28 individual
-  ``cudaLaunchKernel`` calls, each followed by a tiny 1–2 µs GPU kernel, with the
-  GPU idle ~90 % of the window waiting for the next dispatch.
-- **Graph**: one full step between two ``cudaGraphLaunch`` calls — a single launch
-  replays ~285 kernels back-to-back; GPU idle drops to ~17 %.
+- **Eager**: 327 individual kernel launches, one per kernel. The GPU sits idle
+  between them, so the step takes ~16 ms of wall time for ~1 ms of GPU work —
+  occupancy ~6 %.
+- **Graph**: one ``cudaGraphLaunch`` replays the captured bulk back-to-back, plus
+  a few individual launches for the work that stays outside the captured region.
+  The same ~1 ms of GPU work finishes in ~1.2 ms of wall time — occupancy ~84 %.
 
-The two tracks are therefore comparable in GPU occupancy (10 % vs 83 %), not in
-kernel count. Per-step totals (``~378`` vs ``~379`` kernels, ``~1200`` vs
-``~1184`` µs of GPU busy) are printed by :func:`collect_data` instead.
+Launch counting covers both CUDA APIs: Triton kernels go through the driver API
+(``cuLaunchKernelEx``, category ``cuda_driver``), so counting only
+``cuda_runtime`` under-reports eager's launches by ~5x and hides the point.
 
 Usage::
 
@@ -23,9 +25,11 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -64,6 +68,16 @@ GRAPH_ACCENT = (94, 193, 117)  # green for graph annotations
 # ---------------------------------------------------------------------------
 # Profiling
 # ---------------------------------------------------------------------------
+#: Eager has no per-step marker, so a step is cut out at the run's largest GPU gaps.
+#: The workload below generates 8 decode tokens, hence 8 cuts; the modal-segment
+#: filter in :func:`profile_mode` makes the result insensitive to this number.
+_N_STEP_CUTS = 8
+
+#: Smallest segment counted as a decode step (this checkpoint runs ~327 kernels per
+#: step; prefill and tail fragments are far smaller or far larger).
+_MIN_STEP_KERNELS = 100
+
+
 def _raw_profile(use_cuda_graph: bool, ckpt: str) -> dict:
     """Run profiler, return raw totals (no step isolation)."""
     import torch
@@ -94,8 +108,15 @@ def _raw_profile(use_cuda_graph: bool, ckpt: str) -> dict:
     prof.export_chrome_trace(str(trace_path))
 
     events = json.loads(trace_path.read_text())["traceEvents"]
+    # Both CUDA APIs: torch ops launch through the runtime API (cudaLaunchKernel /
+    # cudaLaunchKernelExC) while Triton kernels go through the driver API
+    # (cuLaunchKernelEx, category cuda_driver). Counting only cuda_runtime misses
+    # the Triton majority — 535 of 2647 launches — and would understate eager's
+    # per-step dispatch count by ~5x.
     launches = [
-        e for e in events if e.get("cat") == "cuda_runtime" and "LaunchKernel" in e.get("name", "")
+        e
+        for e in events
+        if e.get("cat") in ("cuda_runtime", "cuda_driver") and "LaunchKernel" in e.get("name", "")
     ]
     graph_launches = [
         e for e in events if e.get("cat") == "cuda_runtime" and "GraphLaunch" in e.get("name", "")
@@ -114,81 +135,112 @@ def _raw_profile(use_cuda_graph: bool, ckpt: str) -> dict:
     }
 
 
-def profile_mode(use_cuda_graph: bool, ckpt: str, kps_ref: int = 0) -> dict:
-    """Profile one mode.  *kps_ref* is the graph mode's kernels-per-step
-    (used only in eager mode to estimate the decode step count)."""
+def profile_mode(use_cuda_graph: bool, ckpt: str, step_kernels_ref: int = 0) -> dict:
+    """Profile one mode and isolate ONE decode step for the timeline.
+
+    *step_kernels_ref* is the eager step's kernel count; graph mode takes the same
+    number of kernels so both tracks hold one identical step's worth of work.
+    """
     raw = _raw_profile(use_cuda_graph, ckpt)
     kernels = raw["kernels"]
     launches = raw["launches"]
     graph_launches = raw["graph_launches"]
 
-    # --- Isolate ONE step for the visualisation timeline. ---
     if graph_launches:
-        i = min(2, len(graph_launches) - 2)
-        lo, hi = graph_launches[i]["ts"], graph_launches[i + 1]["ts"]
-        step_kernels = [k for k in kernels if lo <= k["ts"] < hi]
-        step_launches = [graph_launches[i]]
+        # Graph: a step starts at a cudaGraphLaunch. A launch-to-launch window is not
+        # the step, though — part of each step (KV index update, sampling) runs outside
+        # the captured region, so that window cuts mid-step (21 of this checkpoint's 24
+        # layers). Take the eager step's kernel count from the launch instead: same
+        # forward, same kernels, and the whole-run totals agree to 0.3 %.
+        n = step_kernels_ref or len(kernels) // max(len(graph_launches), 1)
+        i = min(2, len(graph_launches) - 1)
+        first = next((j for j, k in enumerate(kernels) if k["ts"] >= graph_launches[i]["ts"]), 0)
+        # Slide the start forward until the window holds exactly one cudaGraphLaunch.
+        # A step's out-of-capture work runs adjacent to its replay, so a window anchored
+        # exactly on the launch reaches into the next one and would show two markers.
+        start = first
+        for j in range(first, max(first, len(kernels) - n)):
+            window = kernels[j : j + n]
+            if not window:
+                break
+            w_lo, w_hi = window[0]["ts"], window[-1]["ts"] + window[-1]["dur"]
+            if sum(1 for e in graph_launches if w_lo - 5 <= e["ts"] < w_hi) == 1:
+                start = j
+                break
+        step_kernels = kernels[start : start + n]
         n_steps = len(graph_launches)
     else:
-        # Eager: gap-based clusters for visualisation only.
-        clusters: list[list] = []
-        current: list = []
-        for k in kernels:
-            if current and k["ts"] - (current[-1]["ts"] + current[-1]["dur"]) > 30.0:
-                clusters.append(current)
-                current = []
-            current.append(k)
-        if current:
-            clusters.append(current)
-        decode_clusters = [c for c in clusters if len(c) >= 20]
-        mid = min(2, len(decode_clusters) - 1) if decode_clusters else 0
-        step_kernels = decode_clusters[mid] if decode_clusters else []
-        if step_kernels:
-            lo = step_kernels[0]["ts"]
-            hi = step_kernels[-1]["ts"] + step_kernels[-1]["dur"]
-            step_launches = [e for e in launches if lo - 5 <= e["ts"] < hi]
-        else:
-            lo = hi = 0.0
-            step_launches = []
-        # Estimate step count from graph-mode reference.
-        kps = kps_ref if kps_ref > 0 else (len(step_kernels) or 1)
-        n_steps = max(1, round(len(kernels) / kps))
+        # Eager: no launch marker, so a step is delimited by the run's largest GPU gaps
+        # (the inter-step CPU work: sampling, scheduler, readback). A fixed gap
+        # threshold cannot separate them — intra-step gaps reach 100 µs too — so cut at
+        # the N largest gaps and keep the modal segment size, which is one full decode
+        # step: every per-layer kernel appears once per layer in it.
+        gaps = sorted(
+            (kernels[i + 1]["ts"] - (kernels[i]["ts"] + kernels[i]["dur"]), i)
+            for i in range(len(kernels) - 1)
+        )
+        cuts = sorted(i for _, i in gaps[-_N_STEP_CUTS:])
+        bounds = [0, *(i + 1 for i in cuts), len(kernels)]
+        segs = [kernels[a:b] for a, b in itertools.pairwise(bounds) if b - a >= _MIN_STEP_KERNELS]
+        sizes = Counter(len(s) for s in segs)
+        step_kernels = next(s for s in segs if len(s) == sizes.most_common(1)[0][0])
+        n_steps = len(segs)
 
-    avg_step_gpu = raw["total_gpu_us"] / max(n_steps, 1)
+    lo = step_kernels[0]["ts"]
+    hi = step_kernels[-1]["ts"] + step_kernels[-1]["dur"]
+    busy = sum(k["dur"] for k in step_kernels)
 
     return {
         "mode": "graph" if use_cuda_graph else "eager",
         "lo_us": lo,
         "hi_us": hi,
         "step_kernels": step_kernels,
-        "step_launches": step_launches,
+        "step_launches": [e for e in launches if lo - 5 <= e["ts"] < hi],
         "n_kernels": len(step_kernels),
-        "n_launches": len(step_launches),
-        "span_us": hi - lo if step_kernels else 0,
-        "gpu_busy_us": sum(k["dur"] for k in step_kernels),
-        "avg_step_gpu_busy_us": round(avg_step_gpu, 1),
+        "n_launches": len([e for e in launches if lo - 5 <= e["ts"] < hi]),
+        "n_graph_launches": len([e for e in graph_launches if lo - 5 <= e["ts"] < hi]),
+        "span_us": hi - lo,
+        "gpu_busy_us": busy,
+        "occupancy_pct": busy / (hi - lo) * 100 if hi > lo else 0.0,
         "total_kernels": len(kernels),
         "n_steps": n_steps,
     }
 
 
 def collect_data(ckpt: str) -> tuple[dict, dict]:
-    """Profile both modes and return (eager, graph) dicts."""
-    # Profile graph first — its kernels-per-step anchors the eager estimate.
-    print("profiling graph mode ...")
-    graph = profile_mode(True, ckpt)
-    kps = graph["total_kernels"] // max(graph["n_steps"], 1)
+    """Profile both modes and return (eager, graph) dicts.
+
+    Eager goes first: its step kernel count is what the graph window is sized to,
+    so the two tracks are guaranteed to hold the same work.
+    """
+    print("profiling eager mode ...")
+    eager = profile_mode(False, ckpt)
     print(
-        f"  {graph['total_kernels']} total kernels, {graph['n_steps']} steps, "
-        f"~{kps} kernels/step, avg step GPU busy {graph['avg_step_gpu_busy_us']:.0f} µs"
+        f"  {eager['total_kernels']} kernels total, {eager['n_steps']} steps; one step = "
+        f"{eager['n_kernels']} kernels, {eager['n_launches']} launches, "
+        f"{eager['span_us']:.0f} µs wall, {eager['gpu_busy_us']:.0f} µs GPU busy "
+        f"({eager['occupancy_pct']:.0f} %)"
     )
 
-    print("profiling eager mode ...")
-    eager = profile_mode(False, ckpt, kps_ref=kps)
+    print("profiling graph mode ...")
+    graph = profile_mode(True, ckpt, step_kernels_ref=eager["n_kernels"])
     print(
-        f"  {eager['total_kernels']} total kernels, ~{eager['n_steps']} steps, "
-        f"{eager['n_launches']} launches/step (isolated), "
-        f"avg step GPU busy {eager['avg_step_gpu_busy_us']:.0f} µs"
+        f"  {graph['total_kernels']} kernels total, {graph['n_steps']} steps; one step = "
+        f"{graph['n_kernels']} kernels, {graph['n_graph_launches']} cudaGraphLaunch + "
+        f"{graph['n_launches'] - graph['n_graph_launches']} launches outside the capture, "
+        f"{graph['span_us']:.0f} µs wall, {graph['gpu_busy_us']:.0f} µs GPU busy "
+        f"({graph['occupancy_pct']:.0f} %)"
+    )
+
+    if eager["n_kernels"] != graph["n_kernels"]:
+        raise AssertionError(
+            f"step kernel counts diverged: eager {eager['n_kernels']} vs graph "
+            f"{graph['n_kernels']} — the two tracks would not be comparable"
+        )
+    print(
+        f"  same {eager['n_kernels']} kernels both sides; wall time "
+        f"{eager['span_us'] / max(graph['span_us'], 1):.1f}x, occupancy "
+        f"{eager['occupancy_pct']:.0f} % vs {graph['occupancy_pct']:.0f} %"
     )
     return eager, graph
 
@@ -219,19 +271,29 @@ def _normalise(eager: dict, graph: dict) -> tuple[list, list, float]:
     # Use the eager span as the common scale so the graph step visibly
     # finishes earlier within the same window.
     span = max(eager["span_us"], graph["span_us"])
+
+    def _lane(d: dict, kernels: list, launches: list) -> dict:
+        return {
+            "kernels": kernels,
+            "launches": launches,
+            "span": d["span_us"],
+            "gpu_busy": d["gpu_busy_us"],
+            "occupancy": d["occupancy_pct"],
+            "n_launches": d["n_launches"],
+            "n_graph_launches": d["n_graph_launches"],
+            "label": (
+                f"eager ({d['n_launches']} launches)"
+                if d["mode"] == "eager"
+                else (
+                    f"graph ({d['n_graph_launches']} graph launch + "
+                    f"{d['n_launches'] - d['n_graph_launches']} outside)"
+                )
+            ),
+        }
+
     return (
-        {
-            "kernels": e_kernels,
-            "launches": e_launches,
-            "span": eager["span_us"],
-            "avg_step_gpu_busy": eager["avg_step_gpu_busy_us"],
-        },
-        {
-            "kernels": g_kernels,
-            "launches": g_launches,
-            "span": graph["span_us"],
-            "avg_step_gpu_busy": graph["avg_step_gpu_busy_us"],
-        },
+        _lane(eager, e_kernels, e_launches),
+        _lane(graph, g_kernels, g_launches),
         span,
     )
 
@@ -274,8 +336,8 @@ def _render_frame(
 
     # Draw lane labels and separators
     for name, y, accent in [
-        ("eager (28 launches)", lane_y["eager"], EAGER_ACCENT),
-        ("graph (1 launch)", lane_y["graph"], GRAPH_ACCENT),
+        (eager_norm["label"], lane_y["eager"], EAGER_ACCENT),
+        (graph_norm["label"], lane_y["graph"], GRAPH_ACCENT),
     ]:
         draw.text((PAD, y + LANE_H // 2 - 9), name, fill=accent, font=bold)
         draw.line([LABEL_W, y + LANE_H, W - PAD, y + LANE_H], fill=AXIS_FG)
@@ -314,12 +376,17 @@ def _render_frame(
     gh = LANE_H - 28
     g = graph_norm
     if graph_launched:
-        # Single green launch bar
+        # The cudaGraphLaunch in green; the launches for the work that stays outside
+        # the captured region in amber — the same colour eager uses, because they are
+        # individual dispatches too.
         for l in g["launches"]:
             x0 = LABEL_W + l["ts"] * scale
-            x1 = x0 + max(l["dur"] * scale, 6.0)
-            draw.rectangle([x0, gy, x1, gy + gh], fill=GRAPH_LAUNCH_FG)
-            if x1 - x0 > 60:
+            x1 = x0 + max(l["dur"] * scale, 3.0)
+            is_graph_launch = "GraphLaunch" in l.get("name", "")
+            draw.rectangle(
+                [x0, gy, x1, gy + gh], fill=GRAPH_LAUNCH_FG if is_graph_launch else LAUNCH_FG
+            )
+            if is_graph_launch and x1 - x0 > 60:
                 draw.text((x0 + 4, gy + 4), "cudaGraphLaunch", fill=BG, font=small)
 
         # Packed kernels
@@ -328,8 +395,16 @@ def _render_frame(
             x1 = x0 + max(k["dur"] * scale, 1.5)
             draw.rectangle([x0, gy + 4, x1, gy + gh - 4], fill=KERNEL_FG)
 
-    # Time axis ticks
-    tick_step = 50.0 if common_span > 200 else 20.0
+    # Time axis ticks — pick a step that keeps the axis to ~8-12 ticks whatever the
+    # span (an eager step is ~16 ms, a graph step ~1.2 ms).
+    tick_step = next(
+        (
+            s
+            for s in (20.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2000.0, 5000.0)
+            if common_span / s <= 12
+        ),
+        5000.0,
+    )
     tick = 0.0
     axis_y = lane_y["graph"] + LANE_H
     while tick <= common_span:
@@ -338,17 +413,15 @@ def _render_frame(
         draw.text((x - 16, axis_y + 6), f"{tick:.0f}µs", fill=DIM, font=small)
         tick += tick_step
 
-    # Stats footer — show avg GPU busy per step (same for both modes).
-    e_avg = e.get("avg_step_gpu_busy", 0)
-    g_avg = g.get("avg_step_gpu_busy", 0)
-
+    # Stats footer: same kernels both sides, so the difference is span and occupancy.
     footer_y = H - PAD - LINE_H
     draw.text(
         (PAD, footer_y),
-        f"eager: {n_eager_shown} CPU launches (fragment), "
-        f"GPU busy/step {e_avg:.0f}µs    |    "
-        f"graph: 1 launch, {n_graph_kernels_shown}/{len(g['kernels'])} kernels shown, "
-        f"GPU busy/step {g_avg:.0f}µs",
+        f"eager: {len(e['kernels'])} kernels, {e['n_launches']} launches, "
+        f"{e['span']:.0f}µs wall, GPU busy {e['gpu_busy']:.0f}µs ({e['occupancy']:.0f}%)"
+        f"    |    "
+        f"graph: {len(g['kernels'])} kernels, {g['n_graph_launches']} cudaGraphLaunch, "
+        f"{g['span']:.0f}µs wall, GPU busy {g['gpu_busy']:.0f}µs ({g['occupancy']:.0f}%)",
         fill=DIM,
         font=small,
     )
@@ -371,18 +444,22 @@ def build_gif(
 
     n_eager_total = len(e_norm["kernels"])
     n_graph_total = len(g_norm["kernels"])
+    # A step holds ~327 kernels, so reveal in chunks: one kernel per frame would be
+    # a 327-frame GIF.
+    eager_step = max(1, n_eager_total // 12)
+    graph_step = max(1, n_graph_total // 12)
 
     frames: list[Image.Image] = []
 
-    # Phase 1: eager launches appear one by one (show the CPU dispatch pain)
-    for n in range(1, n_eager_total + 1):
+    # Phase 1: eager launches and kernels accumulate, showing the CPU dispatch cost
+    for n in range(eager_step, n_eager_total + eager_step, eager_step):
         frames.append(
             _render_frame(
                 e_norm,
                 g_norm,
                 common_span,
                 fonts,
-                n_eager_shown=n,
+                n_eager_shown=min(n, n_eager_total),
                 n_graph_kernels_shown=0,
                 graph_launched=False,
             )
@@ -402,10 +479,7 @@ def build_gif(
             graph_launched=True,
         )
     )
-    # Reveal graph kernels in chunks of ~20
-    step = max(1, n_graph_total // 10)
-    for n in range(step, n_graph_total + step, step):
-        n_show = min(n, n_graph_total)
+    for n in range(graph_step, n_graph_total + graph_step, graph_step):
         frames.append(
             _render_frame(
                 e_norm,
@@ -413,7 +487,7 @@ def build_gif(
                 common_span,
                 fonts,
                 n_eager_shown=n_eager_total,
-                n_graph_kernels_shown=n_show,
+                n_graph_kernels_shown=min(n, n_graph_total),
                 graph_launched=True,
             )
         )
