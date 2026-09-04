@@ -519,7 +519,7 @@ def _fused_moe_kernel(
                 # otherwise fail to compile every quantised expert GEMM. The
                 # e4m3 bit trick lands in fp16 by construction and its values
                 # carry 4 significant bits, so the extra hop to bf16 is exact.
-                if QUANT_MODE == 4:
+                if QUANT_MODE == 5:
                     # W8A8 fp8: nothing is widened to compute_type at all. Both
                     # operands stay 8-bit into the dot, and Triton decides from
                     # BLOCK_M whether that becomes an fp8 wgmma or an fp16
@@ -533,7 +533,7 @@ def _fused_moe_kernel(
                     else:
                         a = dequant_fp8e4m3(a)
                         b = dequant_fp8e4m3(b)
-                elif QUANT_MODE == 5:
+                elif QUANT_MODE == 6:
                     # W8A8 int8: both operands stay int8 into the dot and the
                     # integer tensor cores accumulate in int32, which is exact.
                     # No capability split: the imma path exists from Turing on,
@@ -576,7 +576,7 @@ def _fused_moe_kernel(
                 # fp32 multiply-add has to fold in once per k-tile.
                 if not SCALE_HOISTED:
                     b_scale = tl.load(b_scale_ptrs + ((k * BLOCK_K) // GROUP_K) * stride_bsk)
-                if QUANT_MODE == 4:
+                if QUANT_MODE == 5:
                     # Hopper's fp8 wgmma accumulates at reduced precision inside
                     # the instruction, and Triton's sm90 default lets that run
                     # unbounded. ``K_PROMOTE`` caps how many k elements may
@@ -589,7 +589,7 @@ def _fused_moe_kernel(
                         accumulator += (
                             tl.dot(a, b, max_num_imprecise_acc=K_PROMOTE) * b_scale[None, :]
                         )
-                elif QUANT_MODE == 5:
+                elif QUANT_MODE == 6:
                     if SCALE_HOISTED:
                         # out_dtype is spelled, not defaulted: the default is
                         # fp32, and tl.dot asserts the accumulator's dtype equals
@@ -604,7 +604,7 @@ def _fused_moe_kernel(
             b_ptrs += BLOCK_K * stride_bk
         a_ptrs += BLOCK_K * stride_ak
 
-    if QUANT_MODE == 5 and SCALE_HOISTED:
+    if QUANT_MODE == 6 and SCALE_HOISTED:
         accumulator = acc_int.to(tl.float32)
 
     if QUANT_MODE != 0 and SCALE_HOISTED:
@@ -614,7 +614,7 @@ def _fused_moe_kernel(
         # scale tensor at all, so hoisting is meaningless rather than free there.
         accumulator *= b_scale[None, :]
     accumulator *= DEQUANT_SCALE
-    if QUANT_MODE == 4 or QUANT_MODE == 5:
+    if QUANT_MODE == 5 or QUANT_MODE == 6:
         if A_QUANT:
             # The scale is a register this kernel derived; multiplying here is
             # one instruction and no memory traffic. ``a_scale_ptr`` is unused.
