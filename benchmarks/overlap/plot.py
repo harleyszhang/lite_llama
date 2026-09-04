@@ -20,7 +20,7 @@ Figures (docs/images/):
     deepseek_v4_speed.png          — V4 trimmed vs transformers, prefill and decode
 
 Usage:
-    python benchmarks/plot_overlap_gains.py [--out-dir docs/images]
+    python -m benchmarks.overlap.plot [--out-dir docs/images]
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 LOGS = REPO / "docs" / "benchmark_logs"
 
 _GREEN, _RED, _BLUE, _GREY = "#2a9d8f", "#e76f51", "#264653", "#8d99ae"

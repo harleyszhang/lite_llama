@@ -43,6 +43,13 @@ class Backend(ABC):
         """The completions of the last :meth:`measure`; empty for text-less backends."""
         return []
 
+    def timeline_summary(self) -> str:
+        """The engine's CUDA-event region table, the overlap benches' evidence.
+
+        Empty for backends with no engine timeline (HF, vLLM).
+        """
+        return ""
+
     def close(self) -> None:
         """Return the GPU memory. Required before building a second backend in the
         same process, or its KV budget profiles as zero."""
@@ -131,6 +138,9 @@ class EngineBackend(Backend):
 
     def texts(self) -> list[str]:
         return self._texts
+
+    def timeline_summary(self) -> str:
+        return self._engine.timeline_summary()
 
     def close(self) -> None:
         self._engine.shutdown()
@@ -422,6 +432,7 @@ def make_backend(
     *,
     use_cuda_graph: bool = True,
     tensor_parallel_size: int = 1,
+    continuous: bool = False,
     image_path: str | None = None,
     max_gpu_num_blocks: int | None = None,
     **engine_kwargs,
@@ -429,7 +440,10 @@ def make_backend(
     """Pick the measurement strategy for a checkpoint and parallelism.
 
     ``tp > 1`` goes to :class:`EngineBackend` (only the continuous-batching path
-    broadcasts each step's plan); a multimodal checkpoint goes to
+    broadcasts each step's plan), and so does ``continuous=True``: the overlap
+    benches need the continuous engine on one GPU as well, because the
+    copy-stream overlap and its CUDA-event timeline live in the worker rather
+    than in ``TextGenerator``. A multimodal checkpoint goes to
     :class:`VisionBackend`; everything else to :class:`LiteBackend`.
 
     ``max_gpu_num_blocks`` is not forwarded to the multimodal path: visual tokens
@@ -443,7 +457,7 @@ def make_backend(
         if not image_path:
             raise ValueError(f"{model_dir} is a multimodal checkpoint and needs image_path")
         return VisionBackend(model_dir, use_cuda_graph, image_path, **engine_kwargs)
-    if tensor_parallel_size > 1:
+    if tensor_parallel_size > 1 or continuous:
         return EngineBackend(
             model_dir,
             tensor_parallel_size=tensor_parallel_size,

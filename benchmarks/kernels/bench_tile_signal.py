@@ -12,7 +12,7 @@ PCIe note: L4 is intra-device kernel overlap — it does not touch the
 interconnect, so these numbers say nothing about NVLink.
 
 Usage:
-    python benchmarks/bench_overlap_l4.py --timeline
+    python benchmarks/kernels/bench_tile_signal.py --timeline
 """
 
 from __future__ import annotations
@@ -24,9 +24,9 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from benchmarks.common import require_gpus, timestamped_log_path, write_json_log
+from benchmarks.lib import require_gpus, timestamped_log_path, write_json_log
 from lite_llama.batch_overlap.overlap import Timeline
 from lite_llama.kernels.tile_signal import (
     TileSignalBuffer,
@@ -127,7 +127,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.json is None:
         args.json = timestamped_log_path(
-            Path(__file__).resolve().parent.parent / "docs" / "benchmark_logs", "overlap_l4"
+            Path(__file__).resolve().parents[2] / "docs" / "benchmark_logs", "overlap_l4"
         )
 
     require_gpus(1)
