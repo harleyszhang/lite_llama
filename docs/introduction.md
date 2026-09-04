@@ -4,32 +4,34 @@ lite_llama 是一个基于 Triton 内核的轻量级 LLM 推理框架。本文�
 
 ## 目录
 
-- [一、项目定位与快速上手](#一项目定位与快速上手)
-  - [1.1 它是什么，不是什么](#11-它是什么不是什么)
-  - [1.2 五分钟跑通：从安装到第一条生成](#12-五分钟跑通从安装到第一条生成)
-- [二、总体架构：五层单向依赖](#二总体架构五层单向依赖)
-- [三、目录与文件逐一解析](#三目录与文件逐一解析)
-  - [3.1 engine/ 引擎层](#31-engine-引擎层)
-  - [3.2 executor/ 执行层](#32-executor-执行层)
-  - [3.3 kernels/ 内核层](#33-kernels-内核层)
-  - [3.4 models/ 与 modules/ 模型层](#34-models-与-modules-模型层)
-  - [3.5 其余支撑包](#35-其余支撑包)
-- [四、关键机制的数学表达](#四关键机制的数学表达)
-  - [4.1 词表并行采样：每行两个标量](#41-词表并行采样每行两个标量)
-  - [4.2 KV cache 容量预算](#42-kv-cache-容量预算)
-  - [4.3 decode 内核的 roofline 检查](#43-decode-内核的-roofline-检查)
-- [五、初始化流程（端到端）](#五初始化流程端到端)
-- [六、推理流程](#六推理流程)
-  - [6.1 一次性批处理](#61-一次性批处理)
-  - [6.2 连续批处理](#62-连续批处理)
-  - [6.3 三种 KV 布局的取舍](#63-三种-kv-布局的取舍)
-- [七、基准测试体系](#七基准测试体系)
-  - [7.1 两层测量口径](#71-两层测量口径)
-  - [7.2 怎么跑](#72-怎么跑)
-  - [7.3 测量纪律](#73-测量纪律)
-- [八、关键设计方法汇总](#八关键设计方法汇总)
-- [九、特性概览和边界](#九特性概览和边界)
-- [参考资料](#参考资料)
+- [lite\_llama 源码导读：从一次 HTTP 请求到一个 Triton kernel](#lite_llama-源码导读从一次-http-请求到一个-triton-kernel)
+  - [目录](#目录)
+  - [一、项目定位与快速上手](#一项目定位与快速上手)
+    - [1.1 它是什么，不是什么](#11-它是什么不是什么)
+    - [1.2 五分钟跑通：从安装到第一条生成](#12-五分钟跑通从安装到第一条生成)
+  - [二、总体架构：五层单向依赖](#二总体架构五层单向依赖)
+  - [三、目录与文件逐一解析](#三目录与文件逐一解析)
+    - [3.1 engine/ 引擎层](#31-engine-引擎层)
+    - [3.2 executor/ 执行层](#32-executor-执行层)
+    - [3.3 kernels/ 内核层](#33-kernels-内核层)
+    - [3.4 models/ 与 modules/ 模型层](#34-models-与-modules-模型层)
+    - [3.5 其余支撑包](#35-其余支撑包)
+  - [四、机制的数学表达](#四机制的数学表达)
+    - [4.1 词表并行采样：每行两个标量](#41-词表并行采样每行两个标量)
+    - [4.2 KV cache 容量预算](#42-kv-cache-容量预算)
+    - [4.3 decode 内核的 roofline 检查](#43-decode-内核的-roofline-检查)
+  - [五、初始化流程（端到端）](#五初始化流程端到端)
+  - [六、推理流程](#六推理流程)
+    - [6.1 一次性批处理（`LLM.generate`，离线）](#61-一次性批处理llmgenerate离线)
+    - [6.2 连续批处理（`ContinuousBatchingEngine`，在线，核心路径）](#62-连续批处理continuousbatchingengine在线核心路径)
+    - [6.3 三种 KV 布局的取舍](#63-三种-kv-布局的取舍)
+  - [七、基准测试体系](#七基准测试体系)
+    - [7.1 两层测量口径](#71-两层测量口径)
+    - [7.2 怎么跑](#72-怎么跑)
+    - [7.3 测量纪律](#73-测量纪律)
+  - [八、设计方法汇总](#八设计方法汇总)
+  - [九、特性概览和边界](#九特性概览和边界)
+  - [参考资料](#参考资料)
 
 ## 一、项目定位与快速上手
 
@@ -37,7 +39,7 @@ lite_llama 是一个基于 Triton 内核的轻量级 LLM 推理框架。本文�
 
 lite_llama 是一个**基于 Triton 内核的轻量级 LLM 推理框架**（见 [pyproject.toml](../pyproject.toml)），支持 LLaMA3 / Qwen2.5 / Qwen3 / Qwen3-MoE / LLaVA-1.5 / Qwen3-VL，要求 Python 3.13+，运行依赖只有 torch、triton、transformers、safetensors 四项。文件与类命名对齐 vLLM（`model_runner.py` ↔ `v1/worker/gpu_model_runner.py`、`continuous_engine.py` + `scheduler.py` ↔ `v1/engine/` + `v1/core/sched/`、`entrypoints/` ↔ `entrypoints/openai/`），量化子包的文件布局对齐 sglang，两个项目的代码可以对照阅读。整个框架约 2.3 万行 Python，从 HTTP 请求到 Triton kernel 是同一条代码路径：没有为多进程重写一份逻辑，也没有按运行模式切换的隐藏分支。
 
-它不是训练框架，也不是内核研究框架，而是把「服务一个 LLaMA 结构的模型」这条路径走完整：调度、分页 KV、量化、多卡、可观测。一个推理框架该有的组件它都有，而每个组件都小到能读完，这正是它适合作为源码教材的原因。
+它不是训练框架，也不是内核研究框架，而是把「服务一个 LLaMA 结构的模型」这条路径走完整：调度、分页 KV、量化、多卡、可观测。一个推理框架该有的组件它都有，每个组件的体量也小到可以通读。
 
 ### 1.2 五分钟跑通：从安装到第一条生成
 
@@ -69,7 +71,7 @@ outputs = llm.generate(prompts, sampling_params)   # -> list[RequestOutput]
 
 CLI 的默认参数来自 `lite_llama/cli.py` 的 `COMMON_OPTIONS`：temperature 0.6、top-p 0.9、repetition_penalty 1.1。取值依据是：小参数 base 模型在 fp16 argmax 平局（约 0.02 logit gap）下容易滑入重复死循环，1.1 的轻量惩罚是更安全的出厂行为，传 1.0 可显式关闭。CUDA graph 的缺省值按命令区分：`batch` / `serve` 吞吐场景默认捕获，`chat` / `vl-chat` REPL 默认 eager，因为单轮对话只有一步在飞，摊不平捕获延迟。
 
-**小结**：运行依赖四项、无权重转换步骤、一条命令进 REPL 或服务。入口只有两个引擎（1.2 的 `LLM` 与 `lite-llama` CLI），下一节讲它们下面是什么。
+**小结**：运行依赖四项、无权重转换步骤、一条命令进 REPL 或服务。入口只有两个引擎（1.2 的 `LLM` 与 `lite-llama` CLI）。
 
 ## 二、总体架构：五层单向依赖
 
@@ -131,15 +133,15 @@ graph TB
     class DSP,OPS,BE kern
 ```
 
-**核心抽象是「计划即数据」**：`ContinuousBatchingEngine` 把每一步要执行的工作描述成一个纯数据的 [ModelInput](../lite_llama/executor/worker.py)，字段全是 int 元组加冻结的 `SamplingParams`，整体可 pickle，再交给 [Executor](../lite_llama/executor/executor.py) 执行，拿回采样出的 token。这个设计带来三个直接结果：
+**计划即数据**：`ContinuousBatchingEngine` 把每一步要执行的工作描述成一个纯数据的 [ModelInput](../lite_llama/executor/worker.py)，字段全是 int 元组加冻结的 `SamplingParams`，整体可 pickle，再交给 [Executor](../lite_llama/executor/executor.py) 执行，拿回采样出的 token。这个设计带来三个直接结果：
 
 1. **引擎层不持有设备状态**：引擎只操作 Python 数据结构，不持有任何 GPU 资源句柄；请求加入或结束时，不需要释放或失效任何设备侧对象。
 2. **TP 只有一条代码路径**：rank 0 计算一次计划，经 gloo 广播（pickle 对象，几百字节），所有 rank 执行同一份 `ModelWorker.execute`。早期方案是各 rank 从广播的 prompt 各自推导 batch，任何一处推导分歧都会让 NCCL 集合通信形状不一致而挂死，而且难以排查。现在决策只做一次、原样分发，分歧在结构上不可能发生。
 3. **布局靠推导，不靠传输**：position ids、KV 网格宽度、CUDA graph 的 padding、采样参数行，都由各 rank 从 `(slots, seq_starts, seq_lens)` 按相同规则在本地推导。控制面流量因此恒定，不随 batch 大小或序列长度增长。
 
-依赖方向为什么必须单向？看一个反例：如果 kernels/ 反过来 import 了 executor/ 的张量布局约定，内核微基准就必须先构造整个 ModelRunner 才能测一个算子，「只测操作本身」的测量纪律（第 7.3 节）直接做不成。同理，dispatcher/ 模块 import 不触发 torch 加载，注册表才能在秒级完成冷启动；engine/ 不持有设备资源，请求进出才不需要失效任何设备侧对象。每一层的独立性，都在为上一层的可测试性买单。
+依赖方向必须单向。反例：如果 kernels/ 反过来 import 了 executor/ 的张量布局约定，内核微基准就必须先构造整个 ModelRunner 才能测一个算子，「只测操作本身」的测量纪律（第 7.3 节）直接做不成。同理，dispatcher/ 模块 import 不触发 torch 加载，注册表才能在秒级完成冷启动；engine/ 不持有设备资源，请求进出才不需要失效任何设备侧对象。每一层的独立性，都在为上一层的可测试性买单。
 
-**小结**：五层、单向依赖、一个核心抽象（计划即数据）。它换来的是单代码路径的 TP、恒定的控制面流量和可以脱离框架测量的内核。下面按目录逐文件展开。
+**小结**：五层、单向依赖、一个核心抽象（计划即数据）。它换来的是单代码路径的 TP、恒定的控制面流量和可以脱离框架测量的内核。
 
 ## 三、目录与文件逐一解析
 
@@ -208,7 +210,7 @@ backend/    "外部库"   flashinfer / deepgemm / flashmla / deepep, 每包含 I
 - **tools/**：observability/collective_stats.py 提供集合通信台账，每次集合操作上报字节数，按数据面 / 控制面分别记账，统计窗口基于 contextvar，可嵌套。借助它，「词表并行采样每步只传 2·batch 个标量」是一个可实测验证的结论而非设计声明。profiling/ 提供不依赖 GPU 的静态显存预算和模型结构树渲染。
 - **utils/**：prompt_templates 是模板处理的唯一入口，instruct 模型套用 tokenizer 自带的 chat_template，base 模型直传；CLI / serve / batch 共享同一个 `PrompterResolver`，避免多处维护各自一套的模板规则。另有 logger（彩色短级别名）、path_utils、image_process（LLaVA 图像处理）。
 
-## 四、关键机制的数学表达
+## 四、机制的数学表达
 
 三个机制各配一个公式：采样的通信量、KV 的容量、decode 内核的物理上限。变量一律映射到 config.json 键名或代码变量。
 
@@ -238,7 +240,7 @@ $$\mathrm{logsumexp}(x) \;=\; m + \log\sum_{j} e^{x_j - m}, \qquad m = \max_j x_
 
 其中 $s$ 是标量字节数（fp32 为 4）。以 Qwen2.5-0.5B（$V \approx 15.2$ 万）、$B=8$ 计：all-gather 约 4.9 MB，两标量方案 64 B，差 $V/2 \approx 7.6$ 万倍。这个结论可以用 `tools/observability/collective_stats.py` 的集合通信台账实测复现，而不是设计声明。
 
-top-p 的候选池同样与词表无关：每个 rank 取本地 top-$k$，再做 all-gather。全局 top-$k$ 必然落在这个并集里，理由不难想：一个进入全局 top-$k$ 的 token，在全局至多有 $k-1$ 个 token 排在它前面，因此在它自己的 rank 上也至多 $k-1$ 个，必进本地 top-$k$。通信量 $O(B \cdot k \cdot tp)$，对应 sampler.py 的 nucleus 采样分支（sampler.py:294）。
+top-p 的候选池同样与词表无关：每个 rank 取本地 top-$k$，再做 all-gather。全局 top-$k$ 必然落在这个并集里，理由是一个进入全局 top-$k$ 的 token，在全局至多有 $k-1$ 个 token 排在它前面，因此在它自己的 rank 上也至多 $k-1$ 个，必进本地 top-$k$。通信量 $O(B \cdot k \cdot tp)$，对应 sampler.py 的 nucleus 采样分支（sampler.py:294）。
 
 ### 4.2 KV cache 容量预算
 
@@ -276,7 +278,7 @@ $$\text{bytes} = N_{\text{cached}} \cdot 2 \cdot n_{kv} \cdot d_{\text{head}} \c
 
 算术强度 $I = \text{FLOPs}/\text{bytes}$ 与机器平衡点 $r = \text{TFLOP/s} \div \text{GB/s}$ 比较：$I < r$ 即带宽受限。A10 的峰值为 125 TFLOP/s、600 GB/s（microbench.py:32；`device_peaks` 的带宽由显存时钟 × 位宽 × 2 推得），平衡点 $r \approx 208$ FLOP/byte，而 decode 的 $I$ 通常只有个位数。也就是说，优化方向是少读字节（fp8 KV），而不是省 FLOPs。
 
-`report()` 打印每行的 %tc / %bw（相对张量核 / 带宽峰值的百分比），任何一行超过 100% 按**违规**处理而非胜利，按这个顺序排查（microbench.py:377）：单位因子、FLOP/字节公式、被内核跳过的功（掩码尾块、提前退出）、常驻 L2 没碰 HBM 的工作集、跑的不是同一操作的基线。7.3 节展开测量纪律。
+`report()` 打印每行的 %tc / %bw（相对张量核 / 带宽峰值的百分比），任何一行超过 100% 都按违规处理、不当作达标，按这个顺序排查（microbench.py:377）：单位因子、FLOP/字节公式、被内核跳过的功（掩码尾块、提前退出）、常驻 L2 没碰 HBM 的工作集、跑的不是同一操作的基线。7.3 节展开测量纪律。
 
 **小结**：三个公式各管一件事：采样通信量决定 TP 扩展性（4.1），KV 预算决定并发上限（4.2），roofline 决定优化方向（4.3）。三条都能落到实测，分别有集合通信台账、启动日志（`KV-cache profiling: total=… peak=… -> N cache tokens`）和微基准的 %bw 列。
 
@@ -416,13 +418,18 @@ benchmarks/ 全部脚本的分工：
 | [bench_e2e.py](bench_e2e.py) | TTFT/TPOT/TPS 基线，eager vs CUDA graph，附贪心输出一致性断言；`--backend` 切换被测系统（lite/hf/vllm）做跨引擎对比 |
 | [bench_optimizations.py](bench_optimizations.py) | 特性矩阵：每个引擎开关单独一格再交叉组合，三个 workload 各对准特性的生效条件，`--verify` 逐格比对 greedy 文本；含两个构建期副作用特性 `overlap_off`（L1 重叠）与 `router_fp32_cache`（路由 GEMM） |
 | [bench_continuous.py](bench_continuous.py) | 连续批处理 vs 静态批处理，离线与偏斜到达两种场景 |
-| [bench_data_parallel.py](bench_data_parallel.py) | DP 两个实验：`--mode scaling` 吞吐扩展（weak/strong scaling，输出逐条 diff 防止速度掩盖错误）· `--mode prefix` 前缀缓存跨副本的命中率与路由质量 |
+| [bench_data_parallel.py](bench_data_parallel.py) | DP 三个实验：`--mode scaling` 吞吐扩展（weak/strong scaling，输出逐条 diff 防止速度掩盖错误）· `--mode prefix` 前缀缓存跨副本的命中率与路由质量 · `--mode graph` DP×CUDA graph 四格矩阵（TPOT、capture 代价、显存增量） |
 | [bench_scheduler.py](../benchmarks/bench_scheduler.py) | 调度器基准入口：`matrix`（特性矩阵）· `serving`（在线量化 × TP/DP × graph，HTTP + SSE）· `diag-prefix` · `diag-preempt` |
 | [bench_quant.py](bench_quant.py) | 离线量化矩阵：每行同时带吞吐与输出偏移，缺一半就不是合格的量化表 |
+| [overlap/levels.py](../benchmarks/overlap/levels.py) | 重叠原语基准入口：`--level l1/l2/l3`（copy-stream 上传 / 双批重叠 / 分块 all-reduce），附 timeline 证据 |
+| [overlap/policies.py](../benchmarks/overlap/policies.py) | 重叠策略基准入口：`--policy sbo/ep_tbo/ep_matrix/prefill/scaling/matrix` |
 | [bench_observability.py](bench_observability.py) | 每个可观测开关的每 token 开销一行 |
-| [bench_gsm8k_vllm.py](bench_gsm8k_vllm.py) | vllm 侧 GSM8K 对照：同题同判分（复用 tests/evals），与 lite 侧精度直接可比 |
 | [bench_mla.py](bench_mla.py) | MLA KV 经济学：config 解析 KV 几何，同一 workload 量延迟与显存足迹 |
 | [bench_parser.py](bench_parser.py) | 推理/工具解析器的每 token CPU 成本（流式增量口径） |
+| [accuracy/deepseek.py](accuracy/deepseek.py) | DeepSeek 裁剪版精度对比：`v3 parity/vllm/three-way`（V3-4layers，transformers / lite_llama / vLLM 三方贪心一致率）· `v4 lite/hf/compare`（V4-Flash，TP2 vs fp32 CPU 参考，贪心一致率 + top-5 漂移） |
+| [accuracy/dspark_to_hf.py](accuracy/dspark_to_hf.py) | DSpark checkpoint -> transformers 权重装载，V4 fp32 CPU 参考侧使用 |
+| [accuracy/convert_v4_hf.py](accuracy/convert_v4_hf.py) | 一次性转换：DSpark V4 -> bf16 HF safetensors，`AutoModelForCausalLM` 直接加载 |
+| [accuracy/gsm8k_vllm.py](accuracy/gsm8k_vllm.py) | GSM8K vLLM 对照臂，与 tests/evals/gsm8k.py 同 prompt、同评分 |
 | [lib/](lib/) | 共享库：workloads（工作负载）· metrics（TTFT/TPOT/TPS 口径）· backends（被测系统 ABC + 工厂）· utils（显存足迹、JSON 落盘、表格）· dp（DP 脚手架） |
 | kernels/microbench.py | 微基准 harness：三种计时器 + 正确性门 + SOL 报告 |
 | kernels/kv_pool.py | 分页 KV 池 fixture（7.3 节的四个属性） |
@@ -454,7 +461,7 @@ benchmarks/ 全部脚本的分工：
 
 **小结**：测量体系与 dispatch 构成闭环。微基准产出带 `max_abs_diff` 的实测行，冻结后成为 dispatch 排序的第一键，`explain()` 让每次选择可追责；这套纪律的直接产出，就是 docs/benchmark_logs/ 下按 `(GPU, 模型, batch, gen_len)` 归档的 JSON。
 
-## 八、关键设计方法汇总
+## 八、设计方法汇总
 
 | 设计方法 | 具体体现 |
 |----------|----------|

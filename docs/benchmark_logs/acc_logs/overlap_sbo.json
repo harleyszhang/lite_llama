@@ -1,0 +1,47 @@
+{
+  "config": {
+    "batches": [
+      32,
+      64
+    ],
+    "kv_blocks": null,
+    "json": "benchmarks/logs/overlap_sbo.json",
+    "timestamp": "2026-09-04T04:08:40"
+  },
+  "results": {
+    "batches": {
+      "32": {
+        "tpot_ms": {
+          "sbo_off": 86.025582478633,
+          "sbo_on": 86.57922932789438
+        },
+        "ttft_ms": {
+          "sbo_off": 169.40346360206604,
+          "sbo_on": 169.64048147201538
+        },
+        "tps": {
+          "sbo_off": 366.4303514310318,
+          "sbo_on": 363.0757067478047
+        },
+        "tpot_improvement_pct": -0.64
+      },
+      "64": {
+        "tpot_ms": {
+          "sbo_off": 87.40364180670844,
+          "sbo_on": 87.44347663152784
+        },
+        "ttft_ms": {
+          "sbo_off": 301.2930788099766,
+          "sbo_on": 301.3960272073746
+        },
+        "tps": {
+          "sbo_off": 702.1639629563372,
+          "sbo_on": 702.8808869483248
+        },
+        "tpot_improvement_pct": -0.05
+      }
+    },
+    "timeline": "dispatch regions 1300, shared-MLP regions 650; 361 overlapping pairs totalling 106.53 ms of overlap",
+    "note": "SBO moves the shared MLP onto an alternate stream so it computes while the routed path's dispatch exchange is on the wire; the timeline counts the intersecting pairs. Both arms run eager because EP forces graphs off, so their TPOTs sit on the Python launch floor and the exchange SBO can hide is a small share of a step. Greedy divergences between the arms are the bf16 reduction-order noise the EP arms already show."
+  }
+}

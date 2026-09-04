@@ -1,0 +1,65 @@
+{
+  "config": {
+    "policy": "ep_tbo",
+    "models": [
+      "my_weight/DeepSeek-V2-Lite"
+    ],
+    "batches": [
+      128
+    ],
+    "batch": 16,
+    "gen": 64,
+    "gen_len": 32,
+    "prompt_len": 512,
+    "tp": 2,
+    "kv_blocks": 65536,
+    "min_rows": 8,
+    "arms": [
+      "eager_off",
+      "eager_on",
+      "graph_off",
+      "graph_on"
+    ],
+    "graph": false,
+    "part": "all",
+    "v4_rebuild": false,
+    "repeat": 2,
+    "json": "/home/honggao/projects/lite_llama/docs/benchmark_logs/overlap_ep_tbo_20260904_123821.json",
+    "timestamp": "2026-09-04T12:40:28",
+    "environment": {
+      "gpu_model": "NVIDIA A10",
+      "gpu_count": 2,
+      "gpu_memory_gib": 22.0,
+      "sm_count": 72,
+      "compute_capability": "sm_86",
+      "driver_version": "550.135",
+      "interconnect_topology": "GPU0\t X \tPHB\t0-63\t0\t\tN/A; GPU1\tPHB\t X \t0-63\t0\t\tN/A",
+      "cuda_version": "12.9",
+      "torch_version": "2.13.0+cu129",
+      "triton_version": "3.7.1",
+      "transformers_version": "5.15.1",
+      "python_version": "3.13.13",
+      "cpu_cores": 64,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    }
+  },
+  "results": {
+    "batches": {
+      "128": {
+        "tbo_off": {
+          "ttft_ms": 289.9,
+          "tpot_ms": 87.588,
+          "tps": 714.8,
+          "tgs_per_gpu": 357.4
+        },
+        "tbo_on": {
+          "ttft_ms": 286.78,
+          "tpot_ms": 162.949,
+          "tps": 389.4,
+          "tgs_per_gpu": 194.7
+        }
+      }
+    },
+    "note": "EP MoE + large batch + TBO, both arms under a captured graph: a big dispatch/combine all-to-all whose wire time TBO hides behind the other micro-batch's compute, with the launch floor removed by replay. min_rows is forced low so the interleave is captured at the bench batches."
+  }
+}

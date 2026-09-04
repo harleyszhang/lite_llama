@@ -1,0 +1,149 @@
+{
+  "config": {
+    "models": [
+      "my_weight/Meta-Llama-3.1-8B-Instruct"
+    ],
+    "batches": [
+      32,
+      128,
+      256
+    ],
+    "gen_len": 64,
+    "prompt_len": 64,
+    "tp": 2,
+    "kv_blocks": 49152,
+    "arms": [
+      "eager_off",
+      "eager_on",
+      "graph_off",
+      "graph_on"
+    ],
+    "json": "benchmarks/logs/tbo_scaling_llama8b.json"
+  },
+  "results": {
+    "environment": {
+      "gpu_model": "NVIDIA A10",
+      "gpu_count": 2,
+      "gpu_memory_gib": 22.0,
+      "sm_count": 72,
+      "compute_capability": "sm_86",
+      "driver_version": "550.135",
+      "interconnect": "\t\u001b[4mGPU0\tGPU1\tCPU Affinity\tNUMA Affinity\tGPU NUMA ID\u001b[0m\nGPU0\t X \tPHB\t0-63\t0\t\tN/A\nGPU1\tPHB\t X \t0-63\t0\t\tN/A",
+      "cuda_version": "12.9",
+      "torch_version": "2.13.0+cu129",
+      "triton_version": "3.7.1",
+      "transformers_version": "5.15.1",
+      "python_version": "3.13.13",
+      "cpu_cores": 64,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    },
+    "workload": {
+      "batch_sizes": [
+        32,
+        128,
+        256
+      ],
+      "prompt_len": 64,
+      "gen_len": 64,
+      "tensor_parallel_size": 2,
+      "kv_blocks": 49152,
+      "greedy": true
+    },
+    "framework_flags": {
+      "LITE_LLAMA_TBO": "per arm",
+      "use_cuda_graph": "per arm",
+      "LITE_LLAMA_OVERLAP": "1 (default, L1 pinned-copy)",
+      "LITE_LLAMA_COMM_OVERLAP": "0 (L3 off)",
+      "LITE_LLAMA_SBO": "0 (SBO off)"
+    },
+    "models": {
+      "Meta-Llama-3.1-8B-Instruct": {
+        "model_type": "llama",
+        "hidden_size": 4096,
+        "num_hidden_layers": 32,
+        "num_attention_heads": 32,
+        "intermediate_size": 14336
+      }
+    },
+    "results": {
+      "Meta-Llama-3.1-8B-Instruct_b32": {
+        "eager_off": {
+          "ttft_ms": 76.02,
+          "tpot_ms": 30.167,
+          "tps": 1036.1,
+          "tgs_per_gpu": 518.1
+        },
+        "eager_on": {
+          "ttft_ms": 76.12,
+          "tpot_ms": 30.678,
+          "tps": 1019.5,
+          "tgs_per_gpu": 509.7
+        },
+        "graph_off": {
+          "ttft_ms": 76.31,
+          "tpot_ms": 23.462,
+          "tps": 1317.3,
+          "tgs_per_gpu": 658.7
+        },
+        "graph_on": {
+          "ttft_ms": 77.04,
+          "tpot_ms": 23.606,
+          "tps": 1309.1,
+          "tgs_per_gpu": 654.5
+        }
+      },
+      "Meta-Llama-3.1-8B-Instruct_b128": {
+        "eager_off": {
+          "ttft_ms": 281.28,
+          "tpot_ms": 36.973,
+          "tps": 3137.9,
+          "tgs_per_gpu": 1569.0
+        },
+        "eager_on": {
+          "ttft_ms": 280.4,
+          "tpot_ms": 36.622,
+          "tps": 3165.9,
+          "tgs_per_gpu": 1582.9
+        },
+        "graph_off": {
+          "ttft_ms": 280.45,
+          "tpot_ms": 35.872,
+          "tps": 3224.4,
+          "tgs_per_gpu": 1612.2
+        },
+        "graph_on": {
+          "ttft_ms": 281.63,
+          "tpot_ms": 36.129,
+          "tps": 3202.4,
+          "tgs_per_gpu": 1601.2
+        }
+      },
+      "Meta-Llama-3.1-8B-Instruct_b256": {
+        "eager_off": {
+          "ttft_ms": 283.28,
+          "tpot_ms": 38.93,
+          "tps": 3134.3,
+          "tgs_per_gpu": 1567.1
+        },
+        "eager_on": {
+          "ttft_ms": 282.79,
+          "tpot_ms": 38.69,
+          "tps": 3152.9,
+          "tgs_per_gpu": 1576.5
+        },
+        "graph_off": {
+          "ttft_ms": 283.36,
+          "tpot_ms": 37.746,
+          "tps": 3226.8,
+          "tgs_per_gpu": 1613.4
+        },
+        "graph_on": {
+          "ttft_ms": 283.59,
+          "tpot_ms": 38.735,
+          "tps": 3148.8,
+          "tgs_per_gpu": 1574.4
+        }
+      }
+    }
+  }
+}

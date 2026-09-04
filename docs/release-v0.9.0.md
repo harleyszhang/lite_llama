@@ -112,7 +112,7 @@ golden 门禁在 overlap 默认开启下通过：prepared 路径与 inline 路�
 | 修改 | `lite_llama/executor/slot_batch.py`（prepare-path helpers：`flatten_extend_rows` / `plan_extend_rows` / `pad_decode_rows`） |
 | 修改 | `lite_llama/executor/worker.py`（`_PreparedPass` + `prepare()` + 三个 `_forward_*` 消费 prepared 并记录 timeline） |
 | 修改 | `lite_llama/engine/continuous_engine.py`（step 改 deferred harvest，一步一次同步） |
-| 修改 | `benchmarks/bench_overlap_l1.py`（长短不齐的长 prompt 负载 + token 预算参数） |
+| 修改 | `benchmarks/overlap/levels.py (L1)`（长短不齐的长 prompt 负载 + token 预算参数） |
 | 修改 | `tests/utils/test_prompt_templates.py`、`tests/models/test_checkpoint_index.py`（测试债修复） |
 | 新建 | `scripts/gen_overlap_l1_gif.py`、`docs/images/overlap_l1.gif` |
 | 新建 | `docs/benchmark_logs/bench_overlap_l1_v09.json`、`bench_e2e_Qwen2.5-1.5B_b8_g128_v09_release.json` |
@@ -125,10 +125,10 @@ golden 门禁在 overlap 默认开启下通过：prepared 路径与 inline 路�
 git checkout release-v0.9.0 && uv pip install -e .
 
 # overlap 默认开启；关闭对照
-LITE_LLAMA_OVERLAP=0 python benchmarks/bench_overlap_l1.py
+LITE_LLAMA_OVERLAP=0 python -m benchmarks.overlap.levels --level l1
 
 # 录制 timeline 证据（copy/compute 泳道相交）
-LITE_LLAMA_OVERLAP_TIMELINE=1 python benchmarks/bench_overlap_l1.py --timeline
+LITE_LLAMA_OVERLAP_TIMELINE=1 python -m benchmarks.overlap.levels --level l1 --timeline
 
 # 重新生成上面的 GIF
 python scripts/gen_overlap_l1_gif.py

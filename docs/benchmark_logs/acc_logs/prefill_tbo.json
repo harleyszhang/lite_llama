@@ -1,0 +1,94 @@
+{
+  "config": {
+    "batches": [
+      8,
+      32
+    ],
+    "prompt_len": 512,
+    "gen_len": 32,
+    "json": "benchmarks/logs/prefill_tbo.json",
+    "timestamp": "2026-09-04T11:43:20",
+    "environment": {
+      "gpu_model": "NVIDIA A10",
+      "gpu_count": 2,
+      "gpu_memory_gib": 22.0,
+      "sm_count": 72,
+      "compute_capability": "sm_86",
+      "driver_version": "550.135",
+      "interconnect_topology": "GPU0\t X \tPHB\t0-63\t0\t\tN/A; GPU1\tPHB\t X \t0-63\t0\t\tN/A",
+      "cuda_version": "12.9",
+      "torch_version": "2.13.0+cu129",
+      "triton_version": "3.7.1",
+      "transformers_version": "5.15.1",
+      "python_version": "3.13.13",
+      "cpu_cores": 64,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    }
+  },
+  "results": {
+    "environment": {
+      "gpu_model": "NVIDIA A10",
+      "gpu_count": 2,
+      "gpu_memory_gib": 22.0,
+      "sm_count": 72,
+      "compute_capability": "sm_86",
+      "driver_version": "550.135",
+      "interconnect_topology": "GPU0\t X \tPHB\t0-63\t0\t\tN/A; GPU1\tPHB\t X \t0-63\t0\t\tN/A",
+      "cuda_version": "12.9",
+      "torch_version": "2.13.0+cu129",
+      "triton_version": "3.7.1",
+      "transformers_version": "5.15.1",
+      "python_version": "3.13.13",
+      "cpu_cores": 64,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    },
+    "workload": {
+      "model": "my_weight/DeepSeek-V2-Lite",
+      "batch_sizes": [
+        8,
+        32
+      ],
+      "prompt_len": 512,
+      "gen_len": 32,
+      "tensor_parallel_size": 2,
+      "expert_parallel": true,
+      "greedy": true
+    },
+    "framework_flags": {
+      "LITE_LLAMA_TBO": "per arm",
+      "LITE_LLAMA_SBO": "per arm",
+      "NCCL_MAX_CTAS": "20 when SM budget on",
+      "use_cuda_graph": "False (EP + prefill)"
+    },
+    "results": {
+      "batch8": {
+        "baseline": {
+          "error": "failed"
+        },
+        "prefill_tbo": {
+          "error": "failed"
+        },
+        "sm_budget": {
+          "error": "failed"
+        },
+        "tbo+sm_budget": {
+          "error": "failed"
+        }
+      },
+      "batch32": {
+        "baseline": {
+          "error": "failed"
+        },
+        "prefill_tbo": {
+          "error": "failed"
+        },
+        "sm_budget": {
+          "error": "failed"
+        },
+        "tbo+sm_budget": {
+          "error": "failed"
+        }
+      }
+    }
+  }
+}

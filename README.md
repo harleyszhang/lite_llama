@@ -320,7 +320,7 @@ A continuous-batching step can hold up to three passes — prefill, extend, deco
 
 ![L1 cross-stream overlap](./docs/images/overlap_l1.gif)
 
-The GIF is rendered from the engine's own CUDA-event timeline (`LITE_LLAMA_OVERLAP_TIMELINE=1`): the extend forward fills the window on the compute stream while the next pass's upload lands inside it on the copy stream — the intersection is the overlap, not a rendering trick. Measure the A/B with `python benchmarks/bench_optimizations.py --model-dir CKPT --features overlap_off --greedy --verify` (the `overlap_off` cell against the overlap-on baseline); regenerate the picture with `python scripts/gen_overlap_l1_gif.py`.
+The GIF is rendered from the engine's own CUDA-event timeline (`LITE_LLAMA_OVERLAP_TIMELINE=1`): the extend forward fills the window on the compute stream while the next pass's upload lands inside it on the copy stream — the intersection is the overlap, not a rendering trick. Measure both sides with `python -m benchmarks.overlap.levels --level l1 --timeline`; regenerate the picture with `python scripts/gen_overlap_l1_gif.py`.
 
 ### Decode Host-Overhead Cuts (v0.11.1)
 
@@ -348,7 +348,7 @@ L1 covers the host↔device axis. Three more primitives hide communication and k
 
 ![L2 two-batch overlap timeline](./docs/images/overlap_l2.gif)
 
-The GIF is the engine's own CUDA-event timeline — two compute lanes for the halves, one comm lane for the deferred reductions, and the red band is their intersection on a single device clock. The overlap does happen: the benchmark's timeline counts 792 intersecting pairs totalling 65.5 ms, and the GIF shows one such window. Eager TBO still loses on 2× A10 PCIe (+134% TPOT), because an eager TP decode step costs ~27 ms of Python launch time that a graphed reference of the same load cuts to 6.2 ms — the primitive saves GPU time inside a step whose cost is CPU time. Graph-captured TBO is now implemented (the engine wires `enable_cuda_graph(tbo=True)` through `TboPolicy.capture_eligible`, per captured batch): replay is numerically identical to the eager interleave and the launch floor drops from 60 ms to ~10 ms — but on this dense 1.5B TP2 PCIe shape the interleave itself is net-negative (+47-61% TPOT vs a plain graph), because the all-reduce it can hide is ~3-5% of the step while the half-batch efficiency it pays is more. The switch stays off by default, and the full four-arm regression is published next to the evidence (`python benchmarks/bench_overlap_l2.py --timeline`).
+The GIF is the engine's own CUDA-event timeline — two compute lanes for the halves, one comm lane for the deferred reductions, and the red band is their intersection on a single device clock. The overlap does happen: the benchmark's timeline counts 792 intersecting pairs totalling 65.5 ms, and the GIF shows one such window. Eager TBO still loses on 2× A10 PCIe (+134% TPOT), because an eager TP decode step costs ~27 ms of Python launch time that a graphed reference of the same load cuts to 6.2 ms — the primitive saves GPU time inside a step whose cost is CPU time. Graph-captured TBO is now implemented (the engine wires `enable_cuda_graph(tbo=True)` through `TboPolicy.capture_eligible`, per captured batch): replay is numerically identical to the eager interleave and the launch floor drops from 60 ms to ~10 ms — but on this dense 1.5B TP2 PCIe shape the interleave itself is net-negative (+47-61% TPOT vs a plain graph), because the all-reduce it can hide is ~3-5% of the step while the half-batch efficiency it pays is more. The switch stays off by default, and the full four-arm regression is published next to the evidence (`python -m benchmarks.overlap.levels --level l2 --timeline`).
 
 **L3 chunked all-reduce** (`LITE_LLAMA_COMM_OVERLAP=1`, off by default) splits one row-parallel GEMM by rows: chunk k's reduction goes on the wire the moment its GEMM lands, while chunk k+1 computes.
 
@@ -505,7 +505,7 @@ Each replica can also replay a captured decode graph. A replica is tp=1, so no c
 
 ![DP x CUDA graph](./docs/images/dp_cuda_graph.png)
 
-Qwen3-0.6B, batch 16 per replica, 128 steps: TPOT 25.9 → 5.2 ms per replica (**-80%**) and 618 → 6162 tok/s aggregate (**5.1×**) at DP2, with the +2.4 s capture cost and the per-GPU memory delta recorded in the log. `python benchmarks/bench_dp_graph.py` reproduces it; `tests/engine/test_dp_cuda_graph.py` asserts both replicas hold captured graphs and agree greedily.
+Qwen3-0.6B, batch 16 per replica, 128 steps: TPOT 25.9 → 5.2 ms per replica (**-80%**) and 618 → 6162 tok/s aggregate (**5.1×**) at DP2, with the +2.4 s capture cost and the per-GPU memory delta recorded in the log. `python benchmarks/bench_data_parallel.py --mode graph --model my_weight/Qwen3-0.6B` reproduces it; `tests/engine/test_dp_cuda_graph.py` asserts both replicas hold captured graphs and agree greedily.
 
 ## Observability
 

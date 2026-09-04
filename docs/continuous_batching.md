@@ -53,7 +53,7 @@ engine._harvest(batch, next_token)        # 3. 读回 token、detokenize、退�
 
 - 申请一个请求的 cache = host 侧 pop 一个槽位号；
 - 释放 = host 侧 push 回去；
-- `update_kv_index` 这个 kernel 从 decode 路径上彻底消失；
+- `update_kv_index` 这个 kernel 从 decode 路径上消失；
 - 永不碎片化，且**不需要抢占**：槽位容量等于上下文窗口，准入时保证 `prompt + 生成上限 ≤ max_seq_len`，所以在跑的请求绝不可能中途 KV 不够。
 
 代价写在明面上：一个槽位不管用不用都占满 `max_seq_len` 行，并发上限因此是 `gpu_num_blocks // max_seq_len`。分页分配器在显存密度上更优，一次性批处理路径（prompt 全部已知）继续用它。
@@ -75,11 +75,11 @@ cur_select_index = table[self._b_req_idx, self._b_seq_len - 1]   # 纯设备 gat
 
 decode graph 是按固定的 `(batch_size, seq_len_bucket)` 网格 capture 的，而连续批处理产生的 batch 大小是负载决定的——batch 7 直接掉回 eager，graph 的收益就没了。 `SlotBatch._pad` 把 batch 补到下一个已 capture 的尺寸，多出来的填充行指向一个 **保留槽位**，其 logits 被丢弃。
 
-填充行的长度取整批的最大长度，这样每一行每步都恰好 +1，上面那条"集合不变就原地自增"的快路径才不会被填充行破坏。保留槽位的 KV 行在初始化时清零：填充行读它不影响任何真实行（没有 kernel 跨 batch 行做归约），但一池 NaN 会让之后任何一次 debug 都在骗人。
+填充行的长度取整批的最大长度，这样每一行每步都恰好 +1，上面那条"集合不变就原地自增"的快路径才不会被填充行破坏。保留槽位的 KV 行在初始化时清零：填充行读它不影响任何真实行（没有 kernel 跨 batch 行做归约），但一池 NaN 会污染之后每一次 debug 的读数。
 
 ## 一个真实的 bug：按 batch 位置索引槽位
 
-这个特性开发中最值钱的一次发现。`flash_decoding` 原本这样取一行的 KV 历史：
+`flash_decoding` 原本这样取一行的 KV 历史：
 
 ```python
 k_loc = tl.load(b_req_tokens_table + stride_req_to_tokens_b * batch_pid + offs_n_new, ...)
@@ -113,11 +113,11 @@ Qwen2.5-1.5B-Instruct，单卡 A10（23 GB），greedy，`max_gen_len=256`，16 
 | online，每 250 ms 到达一个 | 一次性（只能串行） | 41.6 s | 93 tok/s | 19145 ms |
 | online，每 250 ms 到达一个 | 连续 | **6.04 s** | **644 tok/s** | **2309 ms** |
 
-三条结论，都按实测说，不夸大：
+三条结论：
 
-1. **在线到达是主战场：吞吐 ×6.9，平均延迟 ×8.3。** 这就是"online batch inference" 与"continuous batching"合起来买到的东西。
+1. **在线到达是主战场：吞吐 ×6.9，平均延迟 ×8.3。** 这就是 online batch inference 与 continuous batching 叠加的收益。
 2. **offline 且所有请求长度相近时，两者持平（×1.01）。** 请求同时结束，一次性批处理本来就没浪费，这时连续批处理不该有收益——有的话反而说明测量有问题。
-3. **offline 长短混合时，墙钟只快 ×1.07，但平均延迟好 ×3.6，且省下 2688 个没人要的 token（一次性路径 69% 的产出是多余的）。** 墙钟提升有限是因为在 A10 上这个 batch 宽度下 decode 受权重带宽支配，batch 从 16 缩到 4 每步耗时几乎不变；收益体现在短请求早 3.6 倍拿到结果、以及槽位提前腾出来接新活。
+3. **offline 长短混合时，墙钟只快 ×1.07，但平均延迟好 ×3.6，且省下 2688 个没人要的 token（一次性路径 69% 的产出是多余的）。** 墙钟提升有限是因为在 A10 上这个 batch 宽度下 decode 受权重带宽支配，batch 从 16 缩到 4 每步耗时几乎不变；收益体现在短请求早 3.6 倍拿到结果、以及槽位提前释放、承接新请求。
 
 复现：
 

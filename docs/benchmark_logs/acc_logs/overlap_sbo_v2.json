@@ -1,0 +1,71 @@
+{
+  "config": {
+    "batches": [
+      32,
+      64
+    ],
+    "kv_blocks": null,
+    "json": "benchmarks/logs/overlap_sbo_v2.json",
+    "timestamp": "2026-09-04T04:58:10",
+    "environment": {
+      "gpu_model": "NVIDIA A10",
+      "gpu_count": 2,
+      "gpu_memory_gib": 22.0,
+      "sm_count": 72,
+      "compute_capability": "sm_86",
+      "driver_version": "550.135",
+      "interconnect_topology": "GPU0\t X \tPHB\t0-63\t0\t\tN/A; GPU1\tPHB\t X \t0-63\t0\t\tN/A",
+      "cuda_version": "12.9",
+      "torch_version": "2.13.0+cu129",
+      "triton_version": "3.7.1",
+      "transformers_version": "5.15.1",
+      "python_version": "3.13.13",
+      "cpu_cores": 64,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    }
+  },
+  "results": {
+    "batches": {
+      "32": {
+        "tpot_ms": {
+          "sbo_off": 85.07098624157527,
+          "sbo_on": 87.54520609028755
+        },
+        "ttft_ms": {
+          "sbo_off": 170.14193907380104,
+          "sbo_on": 170.8996817469597
+        },
+        "tps": {
+          "sbo_off": 370.36676324162244,
+          "sbo_on": 360.1647409370998
+        },
+        "tgs_per_gpu": {
+          "sbo_off": 185.2,
+          "sbo_on": 180.1
+        },
+        "tpot_improvement_pct": -2.91
+      },
+      "64": {
+        "tpot_ms": {
+          "sbo_off": 146.5979719327556,
+          "sbo_on": 89.39922062887086
+        },
+        "ttft_ms": {
+          "sbo_off": 298.93241450190544,
+          "sbo_on": 299.19711500406265
+        },
+        "tps": {
+          "sbo_off": 428.332155969871,
+          "sbo_on": 689.5519290306349
+        },
+        "tgs_per_gpu": {
+          "sbo_off": 214.2,
+          "sbo_on": 344.8
+        },
+        "tpot_improvement_pct": 39.02
+      }
+    },
+    "timeline": "dispatch regions 1300, shared-MLP regions 650; 237 overlapping pairs totalling 92.00 ms of overlap",
+    "note": "SBO moves the shared MLP onto an alternate stream so it computes while the routed path's dispatch exchange is on the wire; the timeline counts the intersecting pairs. Both arms here run eager, so their TPOTs sit on the Python launch floor and the exchange SBO can hide is a small share of a step \u2014 the overlap is real but the gain does not show in TPOT. EP now keeps its graphs, so bench_overlap_sbo_graph.py re-runs the same arms launch-floor-free where the overlap pays. Greedy divergences between the arms are the bf16 reduction-order noise the EP arms already show."
+  }
+}

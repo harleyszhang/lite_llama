@@ -1,0 +1,51 @@
+{
+  "config": {
+    "batches": [
+      64
+    ],
+    "kv_blocks": null,
+    "json": "benchmarks/logs/overlap_sbo_v3.json",
+    "timestamp": "2026-09-04T05:02:22",
+    "environment": {
+      "gpu_model": "NVIDIA A10",
+      "gpu_count": 2,
+      "gpu_memory_gib": 22.0,
+      "sm_count": 72,
+      "compute_capability": "sm_86",
+      "driver_version": "550.135",
+      "interconnect_topology": "GPU0\t X \tPHB\t0-63\t0\t\tN/A; GPU1\tPHB\t X \t0-63\t0\t\tN/A",
+      "cuda_version": "12.9",
+      "torch_version": "2.13.0+cu129",
+      "triton_version": "3.7.1",
+      "transformers_version": "5.15.1",
+      "python_version": "3.13.13",
+      "cpu_cores": 64,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    }
+  },
+  "results": {
+    "batches": {
+      "64": {
+        "tpot_ms": {
+          "sbo_off": 84.1552077068223,
+          "sbo_on": 89.6736520623404
+        },
+        "ttft_ms": {
+          "sbo_off": 298.8417334854603,
+          "sbo_on": 300.4427179694176
+        },
+        "tps": {
+          "sbo_off": 731.342021908378,
+          "sbo_on": 686.395203886383
+        },
+        "tgs_per_gpu": {
+          "sbo_off": 365.7,
+          "sbo_on": 343.2
+        },
+        "tpot_improvement_pct": -6.56
+      }
+    },
+    "timeline": "dispatch regions 1300, shared-MLP regions 650; 1271 overlapping pairs totalling 424.01 ms of overlap",
+    "note": "SBO moves the shared MLP onto an alternate stream so it computes while the routed path's dispatch exchange is on the wire; the timeline counts the intersecting pairs. Both arms here run eager, so their TPOTs sit on the Python launch floor and the exchange SBO can hide is a small share of a step \u2014 the overlap is real but the gain does not show in TPOT. EP now keeps its graphs, so bench_overlap_sbo_graph.py re-runs the same arms launch-floor-free where the overlap pays. Greedy divergences between the arms are the bf16 reduction-order noise the EP arms already show."
+  }
+}

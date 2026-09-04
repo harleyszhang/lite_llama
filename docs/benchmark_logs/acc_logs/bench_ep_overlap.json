@@ -1,0 +1,43 @@
+{
+  "config": {
+    "json": "benchmarks/logs/bench_ep_overlap.json",
+    "timestamp": "2026-09-04T00:32:33"
+  },
+  "results": {
+    "batches": {
+      "16": {
+        "tpot_ms": {
+          "ep=off tbo=off": 61.49708302248092,
+          "ep=off tbo=on": 129.41300443240576,
+          "ep=on tbo=off": 82.97575052295413,
+          "ep=on tbo=on": 180.01092591929057,
+          "graph_reference": 25.073315593458357
+        },
+        "ttft_ms": {
+          "ep=off tbo=off": 64.21805173158646,
+          "ep=off tbo=on": 62.62534484267235,
+          "ep=on tbo=off": 104.5408844947815,
+          "ep=on tbo=on": 105.17578572034836,
+          "graph_reference": 66.24375283718109
+        }
+      },
+      "64": {
+        "tpot_ms": {
+          "ep=off tbo=off": 64.09176332609994,
+          "ep=off tbo=on": 134.68317054803407,
+          "ep=on tbo=off": 92.6663904554314,
+          "ep=on tbo=on": 178.32997104241736,
+          "graph_reference": 34.48264667439082
+        },
+        "ttft_ms": {
+          "ep=off tbo=off": 103.52076217532158,
+          "ep=off tbo=on": 104.13946211338043,
+          "ep=on tbo=off": 297.80878871679306,
+          "ep=on tbo=on": 298.63471165299416,
+          "graph_reference": 104.42202538251877
+        }
+      }
+    },
+    "note": "four eager arms + a graphed TP2 reference per batch; the eager quadruple sits on the Python launch floor the reference escapes (TP graph capture, 3e4d3deb), so eager TBO \u2014 and eager EP a2a \u2014 pays its scheduling cost against a floor the graph never sees; the profitable TBO shape is graph-captured, which the policy does not support yet"
+  }
+}
