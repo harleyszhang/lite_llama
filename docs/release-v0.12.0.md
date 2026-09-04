@@ -114,20 +114,38 @@
 
 ### O11 通信-RMSNorm 融合
 
-**问题：** all-reduce 完成后，`_post_attention_norm` 需要 residual add + RMSNorm。`skip_rmsnorm` 已经融合了 residual add 和 RMSNorm，但 all-reduce 输出的 partial sum 需要先写回 HBM，再被 `skip_rmsnorm` 读出来做 residual add，多一次 HBM 遍历。
-
-**解决：** `fused_add_rmsnorm` kernel 单次 Triton kernel launch 完成：all-reduce 结果 + residual add + RMSNorm，消除 residual tensor 的一次额外 HBM 读取。
+**问题：** all-reduce 完成后，`_post_attention_norm` 需要 residual add + RMSNorm。设计目标是将 all-reduce 分解为 reduce-scatter → RMSNorm → all-gather，让 norm 计算与 all-gather 通信重叠。
 
 **实现：**
-- `skip_rmsnorm.py` 新增 `fused_add_rms_norm_kernel` Triton JIT kernel
-- `fused_add_rmsnorm(x, residual, weight, eps)` wrapper 函数
-- `DecoderLayer._post_attention_norm` 改用 fused kernel
+- `fused_allreduce_rmsnorm(partial, residual, weight, eps)` 函数：
+  1. reduce-scatter：每个 rank 拿到自己那块 token 的跨 rank 求和结果
+  2. residual add + RMSNorm：每个 rank 只算自己的 chunk
+  3. all-gather：拼回完整的 normed output
+- `fused_add_rmsnorm` 作为 fallback（TP=1 或 token 数不整除时）
+- `_skip_allreduce` ContextVar 让 row-parallel linear 跳过 all-reduce
 
-**结果：** 13 个单元测试全通过（matches_reference 8 参数组合 + residual_update + 3d_input + preserves_dtype）。消除一次 HBM 遍历（residual tensor 读取），对 decode 阶段 TPOT 有微小改进。
+**Kernel benchmark 结果（TP=2, A10）：**
+
+| shape | baseline (μs) | O11 fusion (μs) | speedup |
+|-------|---------------|-----------------|--------|
+| (4, 2048) | 342.47 | 3240.16 | 0.106x |
+| (16, 4096) | 210.81 | 562.81 | 0.375x |
+| (32, 4096) | 166.12 | 452.84 | 0.367x |
+| (64, 8192) | 255.05 | 348.61 | 0.732x |
+
+**结论：** O11 fusion 在 TP=2 A10 上比 baseline 慢 2.5x-9.4x。原因：
+1. **两次通信 vs 一次**：reduce-scatter + all-gather 的延迟开销 > 单次 NCCL all-reduce
+2. **没有通信-计算重叠**：当前实现是串行的（reduce-scatter → norm → all-gather），未利用异步重叠
+3. **小消息场景**：TP=2 时消息量小（4KB-1MB），通信延迟主导，无法用计算掩盖
+
+**适用场景：** O11 在以下条件下可能有效：
+- TP>2（如 TP=4/8），reduce-scatter + all-gather 可分摊
+- 大消息（prefill 阶段），通信延迟可被计算掩盖
+- 实现异步通信-计算重叠（需要 CommStreamPool 基础设施）
 
 **证据：**
-- Tests: `tests/kernels/test_fused_add_rmsnorm.py` (13 passed)
-- Code: `rapid_llm/kernels/ops/layernorm/skip_rmsnorm.py::fused_add_rmsnorm`
+- Benchmark: `docs/benchmark_logs/fused_allreduce_rmsnorm_o11_*.json`
+- Code: `rapid_llm/kernels/ops/layernorm/skip_rmsnorm.py::fused_allreduce_rmsnorm`
 - Integration: `rapid_llm/models/base.py::DecoderLayer._post_attention_norm`
 
 
