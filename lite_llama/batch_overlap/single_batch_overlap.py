@@ -232,3 +232,85 @@ def compute_overlap_args(
         stream=stream,
     )
     return CombineOverlapArgs(overlap=True, down_args=down_args, stream=stream), down_args
+
+
+# --------------------------------------------------------------------------- #
+# SM budget: the piece DeepEP provides and NCCL can also do
+# --------------------------------------------------------------------------- #
+
+#: NCCL caps its own CTAs (thread blocks, which is what occupies SMs) through
+#: these two environment variables. DeepEP exposes the same knob as
+#: ``Buffer.set_num_sms``; NCCL does not have a per-call API, so the budget is
+#: set around the exchange instead of on it.
+NCCL_MAX_CTAS_ENV = "NCCL_MAX_CTAS"
+NCCL_MIN_CTAS_ENV = "NCCL_MIN_CTAS"
+
+
+@dataclass
+class SmBudget:
+    """A split of the device's SMs between communication and compute.
+
+    sglang gets this from DeepEP (``Buffer.set_num_sms`` pins the exchange's
+    CTAs, ``deep_gemm.set_num_sms`` pins the GEMM's). NCCL has no per-call API
+    but reads ``NCCL_MAX_CTAS`` / ``NCCL_MIN_CTAS`` at communicator setup, so
+    :class:`SmBudgetContext` sets them around the exchange. The compute side is
+    bounded by the kernel's own grid, which the caller passes to its launch.
+
+    Attributes:
+        total_sms: SMs on the device.
+        comm_sms: SMs budgeted to the exchange.
+        compute_sms: The remainder, for the GEMM.
+    """
+
+    total_sms: int
+    comm_sms: int
+    compute_sms: int
+
+    @classmethod
+    def split(cls, device: str | torch.device, comm_sms: int = 20) -> SmBudget:
+        """Budget ``comm_sms`` to the exchange and the rest to compute.
+
+        vLLM's DBO default is 20 CTAs for communication; the exchange is
+        bandwidth-bound and needs few SMs, while the GEMM wants everything
+        left over. Budgeting more than half the device to communication would
+        starve the compute it is supposed to overlap with.
+        """
+        total = torch.cuda.get_device_properties(device).multi_processor_count
+        comm = max(1, min(comm_sms, total // 2))
+        return cls(total_sms=total, comm_sms=comm, compute_sms=total - comm)
+
+
+class SmBudgetContext:
+    """Set NCCL's CTA cap around an exchange, then restore it.
+
+    NCCL reads these variables when it sets up a communicator, so the budget
+    takes effect for exchanges issued inside the context. Restoring on exit
+    keeps later collectives (the dense all-reduce, for instance) at full width.
+
+    Usage:
+        budget = SmBudget.split(device, comm_sms=20)
+        with SmBudgetContext(budget):
+            dispatcher.dispatch_a(...)   # exchange capped at 20 CTAs
+        # GEMM launches outside, using budget.compute_sms for its grid
+    """
+
+    def __init__(self, budget: SmBudget) -> None:
+        self._budget = budget
+        self._saved: dict[str, str | None] = {}
+
+    def __enter__(self) -> SmBudget:
+        for name, value in (
+            (NCCL_MAX_CTAS_ENV, str(self._budget.comm_sms)),
+            (NCCL_MIN_CTAS_ENV, str(self._budget.comm_sms)),
+        ):
+            self._saved[name] = os.environ.get(name)
+            os.environ[name] = value
+        return self._budget
+
+    def __exit__(self, *exc_info) -> None:
+        for name, value in self._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        self._saved.clear()
