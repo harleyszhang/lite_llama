@@ -114,3 +114,80 @@ for name, pred in (
             f"  {name:<24s} n={len(sel):2d}  TPS geo={geo([r[2] for r in sel]):.4f}  "
             f"latency geo={geo([r[3] for r in sel]):.4f}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# Parallel side: TP2 (bench_optimizations) and DP2 (bench_data_parallel)
+# --------------------------------------------------------------------------- #
+def dp_json(variant: str, tag: str):
+    hits = sorted((D / f"dp2_{tag}_{variant}").glob("*.json"))
+    with open(hits[-1], encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+print()
+print("=" * 100)
+print("TP2 bench_optimizations --tp 2 (baseline cell = eager, cuda_graph cell = graph)")
+print("=" * 100)
+print(
+    f"{'model':<24s}{'cell':<14s}{'TPOT base':>11s}{'TPOT fused':>11s}"
+    f"{'TPOT r':>8s}{'TPS/GPU base':>13s}{'TPS/GPU fused':>14s}{'r':>8s}"
+)
+print("-" * 100)
+tp_rows = []
+for tag in ONLINE:
+    base, fused = load(f"tp2_{tag}_baseline.json"), load(f"tp2_{tag}_fused.json")
+    for bc, fc in zip(base["results"], fused["results"], strict=True):
+        r_tpot = fc["tpot_ms"] / bc["tpot_ms"]
+        r_gpu = fc["tps_per_gpu"] / bc["tps_per_gpu"]
+        tp_rows.append((tag, bc["label"], r_tpot, r_gpu))
+        print(
+            f"{tag:<24s}{bc['label']:<14s}{bc['tpot_ms']:>11.2f}{fc['tpot_ms']:>11.2f}"
+            f"{r_tpot:>8.3f}{bc['tps_per_gpu']:>13.1f}{fc['tps_per_gpu']:>14.1f}{r_gpu:>8.3f}"
+        )
+
+print()
+print("=" * 100)
+print("DP2 bench_data_parallel --mode scaling --dp 2 (weak scaling)")
+print("=" * 100)
+print(
+    f"{'model':<24s}{'row':<26s}{'TPS base':>10s}{'TPS fused':>11s}{'r':>8s}"
+    f"{'TPS/GPU base':>13s}{'TPS/GPU fused':>14s}{'r':>8s}"
+)
+print("-" * 100)
+dp_rows = []
+for tag in ONLINE:
+    base, fused = dp_json("baseline", tag), dp_json("fused", tag)
+    for bc, fc in zip(base["results"], fused["results"], strict=True):
+        r_tps = fc["tps"] / bc["tps"]
+        r_gpu = fc["tps_per_gpu"] / bc["tps_per_gpu"]
+        dp_rows.append((tag, bc["label"], r_tps, r_gpu))
+        print(
+            f"{tag:<24s}{bc['label']:<26s}{bc['tps']:>10.1f}{fc['tps']:>11.1f}{r_tps:>8.3f}"
+            f"{bc['tps_per_gpu']:>13.1f}{fc['tps_per_gpu']:>14.1f}{r_gpu:>8.3f}"
+        )
+
+print()
+print("=" * 100)
+print("parallel geometric means (fused/baseline)")
+print("=" * 100)
+for name, pred in (
+    ("TP2 - qk_norm model", lambda r: r[0] == "qwen3-4b"),
+    ("TP2 - control", lambda r: r[0] == "qwen2.5-0.5b-control"),
+):
+    sel = [r for r in tp_rows if pred(r)]
+    if sel:
+        print(
+            f"  {name:<24s} n={len(sel):2d}  TPOT geo={geo([r[2] for r in sel]):.4f}  "
+            f"TPS/GPU geo={geo([r[3] for r in sel]):.4f}"
+        )
+for name, pred in (
+    ("DP2 - qk_norm model", lambda r: r[0] == "qwen3-4b"),
+    ("DP2 - control", lambda r: r[0] == "qwen2.5-0.5b-control"),
+):
+    sel = [r for r in dp_rows if pred(r)]
+    if sel:
+        print(
+            f"  {name:<24s} n={len(sel):2d}  TPS geo={geo([r[2] for r in sel]):.4f}  "
+            f"TPS/GPU geo={geo([r[3] for r in sel]):.4f}"
+        )

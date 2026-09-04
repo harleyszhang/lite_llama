@@ -1,0 +1,44 @@
+{
+  "config": {
+    "model": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct",
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "n_gpus": 2,
+    "mode": "scaling",
+    "scaling": "weak",
+    "batch_size": 8,
+    "gen_len": 64,
+    "iters": 2,
+    "load_balancer": "round_robin",
+    "quantization": null,
+    "timestamp": "2026-09-04T03:37:27"
+  },
+  "results": [
+    {
+      "latency_s": 0.14870539586991072,
+      "gen_tokens": 512,
+      "label": "LLM (in-process)",
+      "replicas": 1,
+      "batch": 8,
+      "tps": 3443.0,
+      "tps_per_gpu": 3443.0
+    },
+    {
+      "latency_s": 0.12343309074640274,
+      "gen_tokens": 512,
+      "label": "DataParallelEngine dp=1",
+      "replicas": 1,
+      "batch": 8,
+      "tps": 4148.0,
+      "tps_per_gpu": 4148.0
+    },
+    {
+      "latency_s": 0.12272816617041826,
+      "gen_tokens": 998,
+      "label": "DataParallelEngine dp=2",
+      "replicas": 2,
+      "batch": 16,
+      "tps": 8131.8,
+      "tps_per_gpu": 4065.9
+    }
+  ]
+}

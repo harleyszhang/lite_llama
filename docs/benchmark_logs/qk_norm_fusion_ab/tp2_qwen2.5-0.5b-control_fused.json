@@ -1,0 +1,86 @@
+{
+  "config": {
+    "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct",
+    "mode": "single",
+    "features": {
+      "cuda_graph": {
+        "use_cuda_graph": true
+      },
+      "lazy_graph": {
+        "use_cuda_graph": true,
+        "cuda_graph_lazy": true
+      },
+      "prefix_cache": {
+        "enable_prefix_cache": true
+      },
+      "chunked_prefill": {
+        "max_num_batched_tokens": 256
+      },
+      "pipeline": {
+        "pipeline": true
+      },
+      "async_tokenize": {
+        "async_tokenize": true
+      },
+      "fp8_kv": {
+        "kv_cache_dtype": "fp8"
+      },
+      "decode_window": {
+        "decode_window_steps": 2
+      }
+    },
+    "combos": null,
+    "workload": "short",
+    "batch": 8,
+    "max_gen_len": 64,
+    "max_seq_len": 2048,
+    "max_num_seqs": 16,
+    "kv_blocks": 40960,
+    "tp": 2,
+    "shared_sentences": 32,
+    "greedy": true,
+    "verify": true,
+    "json": "docs/benchmark_logs/qk_norm_fusion_ab/tp2_qwen2.5-0.5b-control_fused.json",
+    "gpu": "h100",
+    "baseline": {
+      "use_cuda_graph": false,
+      "enable_prefix_cache": false,
+      "kv_cache_dtype": "auto",
+      "cuda_graph_lazy": false,
+      "async_tokenize": false,
+      "pipeline": false,
+      "decode_window_steps": 0
+    },
+    "cells": [
+      "baseline",
+      "cuda_graph"
+    ],
+    "timestamp": "2026-09-04T03:30:30"
+  },
+  "results": [
+    {
+      "label": "baseline",
+      "features": [],
+      "ttft_ms": 30.35416267812252,
+      "tpot_ms": 23.34525196680001,
+      "tps": 341.0696846977591,
+      "gen_tokens": 512,
+      "latency_s": 1.5011595077812672,
+      "gpus": 2,
+      "tps_per_gpu": 170.5
+    },
+    {
+      "label": "cuda_graph",
+      "features": [
+        "cuda_graph"
+      ],
+      "ttft_ms": 28.377320617437363,
+      "tpot_ms": 2.770249598792621,
+      "tps": 2520.780983511905,
+      "gen_tokens": 512,
+      "latency_s": 0.2031116560101509,
+      "gpus": 2,
+      "tps_per_gpu": 1260.4
+    }
+  ]
+}

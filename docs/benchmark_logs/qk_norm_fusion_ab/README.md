@@ -33,8 +33,11 @@
 | Qwen3-30B-A3B-Instruct-2507 | qwen3_moe | 48 | 2048 | **True** | 受影响 |
 | Qwen2.5-0.5B-Instruct | qwen2 | 24 | 896 | False | **对照组**（不走融合分支，用于标定噪声） |
 
+并行档位覆盖：TP2 与 DP2 各测了两个模型（见第 9 节）。
+
 未覆盖：`qwen3_5`/`qwen3_5_moe`（Qwen3.6-27B / 35B-A3B）未注册进
-`models/registry.py`，本机无法加载；`qwen3_vl` 需图像输入，本轮未测。
+`models/registry.py`，本机无法加载；`qwen3_vl` 的唯一 checkpoint 是 235B
+FP8，2×H100 装不下。
 
 ## 4. 框架优化参数
 
@@ -45,6 +48,8 @@
 | 量化路径 | 无（全部 bf16 权重，避免量化差异混入比值） |
 | prefix cache / chunked prefill | 默认（离线 bench_e2e 口径） |
 | eager↔graph 一致性 | `--verify` 断言贪心输出一致，两侧各 8/8 通过 |
+| TP2 | `bench_optimizations --tp 2`，baseline cell = 全关（eager）+ cuda_graph cell |
+| DP2 | `bench_data_parallel --mode scaling --dp 2`，weak scaling，round_robin |
 
 ## 5. 运行命令
 
@@ -52,7 +57,9 @@
 LITE_LLAMA_AUTOTUNE=0 ./bench_qk_norm_ab.sh fused    docs/benchmark_logs/qk_norm_fusion_ab
 # 把 models/base.py 的 _project_qkv 切回两次 skip_rmsnorm 后：
 LITE_LLAMA_AUTOTUNE=0 ./bench_qk_norm_ab.sh baseline docs/benchmark_logs/qk_norm_fusion_ab
-.venv/bin/python summarize_qk_norm_ab.py     # 从 JSON 重算每格比值
+./benchmarks/bench_qk_norm_ab_parallel.sh fused    docs/benchmark_logs/qk_norm_fusion_ab
+./benchmarks/bench_qk_norm_ab_parallel.sh baseline docs/benchmark_logs/qk_norm_fusion_ab
+.venv/bin/python benchmarks/summarize_qk_norm_ab.py   # 从 JSON 重算每格比值
 ```
 
 单条离线命令口径：
@@ -65,10 +72,12 @@ CUDA_VISIBLE_DEVICES=1 LITE_LLAMA_AUTOTUNE=0 PYTHONPATH=. .venv/bin/python \
 
 ## 6. 结果日志
 
-本目录 20 个 JSON：`offline_<model>_b<batch>_{fused,baseline}.json`（16 个）+
-`online_<model>_{fused,baseline}.json`（4 个）。每个含 `config`（命令行参数与时间戳）
-与 `results`（TTFT / TPOT / TPOT p50 / TPS）。驱动脚本 `bench_qk_norm_ab.sh` 与汇总脚本
-`summarize_qk_norm_ab.py` 在仓库根目录。
+本目录归档：单卡 `offline_<model>_b<batch>_{fused,baseline}.json`（16 个）、
+`online_<model>_{fused,baseline}.json`（4 个）、TP2 `tp2_<model>_{fused,baseline}.json`
+（4 个）、DP2 `dp2_<model>_{fused,baseline}/`（各含带时间戳的 JSON）。每个含 `config`
+（命令行参数与时间戳）与 `results`（TTFT / TPOT / TPS，多卡时加 TPS/GPU）。
+驱动脚本 `bench_qk_norm_ab.sh`（单卡）、`bench_qk_norm_ab_parallel.sh`（TP/DP）与
+汇总脚本 `summarize_qk_norm_ab.py` 均在 `benchmarks/`。
 
 ## 7. 结果
 
@@ -144,7 +153,41 @@ launch-bound，少一次 launch 直接减 TPOT；batch 变大后 GEMM 转为带�
 一次 norm launch 的占比被摊薄到噪声以下。eager 的收益（−4.3%）明显大于 graph
 （−1.5%），因为 graph replay 已把每次 launch 的 CPU 开销压到 GPU 侧 ~1–2 µs。
 
-## 9. 精度
+## 9. TP2 / DP2（补齐并行档位）
+
+驱动脚本 `benchmarks/bench_qk_norm_ab_parallel.sh`，同样两侧各跑一遍。
+
+### TP2（bench_optimizations --tp 2，batch=8，greedy + --verify）
+
+| 模型 | cell | TPOT 基线→融合 (ms) | TPOT 比 | TPS/GPU 基线→融合 | 比 |
+|---|---|---|---|---|---|
+| qwen3-4b | baseline (eager) | 31.39 → 29.70 | 0.946 | 126.9 → 133.8 | 1.054 |
+| qwen3-4b | cuda_graph | 5.12 → 6.06 | 1.185 | 698.0 → 606.5 | 0.869 |
+| 对照 qwen2.5-0.5b | baseline (eager) | 18.30 → 23.35 | 1.276 | 216.4 → 170.5 | 0.788 |
+| 对照 qwen2.5-0.5b | cuda_graph | 2.74 → 2.77 | 1.010 | 1274.3 → 1260.4 | 0.989 |
+
+**TP2 这组数据不能用来判读收益或回退。** 对照组（`use_qk_norm=False`，两次运行代码完全相同）的 eager TPOT 自己就波动了 **+27.6%**（18.30→23.35），比受影响模型的波动更大——噪声底远超任何可能的融合收益。原因：测量时 GPU0 上有另一个进程占 3.8 GB、NCCL all-reduce 的 run-to-run 方差、以及 batch=8 下 TP2 由集合通信主导而非 kernel launch。所以受影响模型 cuda_graph 那个 1.185 落在噪声内，既不构成回退证据也不构成收益证据。`--verify` 两侧各 2/2 通过（greedy 文本与各自 baseline 一致）。
+
+### DP2（bench_data_parallel --mode scaling --dp 2，weak scaling）
+
+| 模型 | 行 | TPS 基线→融合 | TPS 比 | TPS/GPU 比 |
+|---|---|---|---|---|
+| qwen3-4b | LLM (in-process) | 1604.3 → 1630.4 | 1.016 | 1.016 |
+| qwen3-4b | DataParallelEngine dp=1 | 1475.3 → 1502.3 | 1.018 | 1.018 |
+| qwen3-4b | DataParallelEngine dp=2 | 2942.7 → 3020.2 | **1.026** | 1.026 |
+| 对照 qwen2.5-0.5b | LLM (in-process) | 3443.0 → 5342.8 | 1.552 | 1.552 |
+| 对照 qwen2.5-0.5b | DataParallelEngine dp=1 | 4148.0 → 4172.4 | 1.006 | 1.006 |
+| 对照 qwen2.5-0.5b | DataParallelEngine dp=2 | 8131.8 → 8076.1 | 0.993 | 0.993 |
+
+DP2 判读：对照组的 dp=1/dp=2 两行给出噪声底 **±1%**；受影响模型 dp=2 为 **+2.6%**，略超噪声，算弱正信号。但"LLM (in-process)"行对照组自己波动 +55%，该行不可用（单进程基线最受 GPU0 上其他进程干扰），不作为证据。两侧 dp=1 各 8/8 completions 与 baseline 一致。
+
+### 仍未覆盖
+
+- **`qwen3_vl`**（第三个 `use_qk_norm=True` 的模型）：本机唯一 VL checkpoint 是 Qwen3-VL-235B-A22B-Instruct-FP8，FP8 权重约 235 GB，2×H100 共 160 GB 装不下，无法测。
+- **TP4 及以上、DP4 及以上**：本机仅 2 卡。
+- TP2 需要多次重复才能压出可用噪声底，本轮只做了一对单次运行，故按"不可判读"处理而非补测。
+
+## 10. 精度
 
 融合 kernel 与两次 `skip_rmsnorm` **逐位一致**（`torch.equal`，8 个几何/dtype 组合，
 含非 2 幂 head_dim、奇数 head 数、MHA、decode tokens=1、2048 prefill、fp16/bf16）；
