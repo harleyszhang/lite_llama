@@ -73,7 +73,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 import torch.multiprocessing as mp
 
-from benchmarks.common import PROMPTS, checkpoint_dtype, dtype_tag, expand_prompts, gpu_tag
+from benchmarks.lib import PROMPTS, checkpoint_dtype, dtype_tag, expand_prompts, gpu_tag
 
 _MAX_GEN = 64
 _BATCH = 4
@@ -224,7 +224,7 @@ def _golden_texts(generate, cases, penalties) -> dict[str, list[str]]:
 
 def _measure_lite(payload: dict[str, Any]) -> dict[str, Any]:
     """Stream-timed measurement of one in-process engine (TP included)."""
-    from benchmarks.common import LiteBackend, footprint_stats
+    from benchmarks.lib import LiteBackend, footprint_stats
     from lite_llama import SamplingParams
 
     spec: RunSpec = payload["spec"]
@@ -320,7 +320,7 @@ def _measure_cb(payload: dict[str, Any]) -> dict[str, Any]:
     weights and its own allocator peak. The other rank holds a shard of the same
     size, so the figure is per-GPU rather than per-model.
     """
-    from benchmarks.common import footprint_stats, run_requests
+    from benchmarks.lib import footprint_stats, run_requests
     from lite_llama import SamplingParams
     from lite_llama.engine import ContinuousBatchingEngine
 
@@ -371,7 +371,7 @@ def _measure_cb(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _measure_hf(payload: dict[str, Any]) -> dict[str, Any]:
     """HuggingFace reference row, at the checkpoint's declared dtype."""
-    from benchmarks.common import HFBackend
+    from benchmarks.lib import HFBackend
 
     torch.cuda.reset_peak_memory_stats()
     backend = HFBackend(payload["model"])

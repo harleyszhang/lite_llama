@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.common import (
+from benchmarks.lib import (
     GREEDY_PARAMS,
     PROMPTS,
     BenchResult,

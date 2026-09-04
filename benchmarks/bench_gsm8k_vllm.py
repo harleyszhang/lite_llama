@@ -38,9 +38,7 @@ def evaluate_gsm8k_vllm(
     from vllm import LLM, SamplingParams
 
     train, test = load_gsm8k()
-    prompts, labels = build_prompts(
-        train, test, num_questions=num_questions, num_shots=num_shots
-    )
+    prompts, labels = build_prompts(train, test, num_questions=num_questions, num_shots=num_shots)
 
     llm = LLM(
         model=model_dir,

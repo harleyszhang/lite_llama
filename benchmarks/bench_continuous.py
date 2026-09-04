@@ -22,7 +22,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.common import (
+from benchmarks.lib import (
     PROMPTS,
     count_gen_tokens,
     expand_prompts,

@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 import torch.nn.functional as F
 
-from benchmarks.common import (
+from benchmarks.lib import (
     GREEDY_PARAMS,
     PROMPTS,
     HFBackend,

@@ -370,13 +370,13 @@ step():
 
 ## 七、基准测试体系
 
-结论要有出处。benchmarks/ 目录分两层：e2e 层测用户看得见的指标（TTFT / TPOT / 吞吐），kernel 层测单个算子对硬件上限的逼近程度。两层共用一条纪律：**先证明算得对，再谈快**。
+结论要有出处。benchmarks/ 目录三层：`lib/` 是共享库（指标口径、被测系统适配、落盘与打印，对标 vLLM 的 benchmarks/lib），场景层 `bench_*.py` 测用户看得见的指标（TTFT / TPOT / 吞吐），kernel 层测单个算子对硬件上限的逼近程度。三层共用一条纪律：**先证明算得对，再谈快**。
 
 ### 7.1 两层测量口径
 
-e2e 层（[common.py](../benchmarks/common.py)，口径对齐 vLLM/TensorRT-LLM）：
+e2e 层（口径定义在 [benchmarks/lib/](../benchmarks/lib/)，对齐 vLLM/TensorRT-LLM）：
 
-- **TTFT**（首 token 延迟）：prefill 提交到第一个 token 可见的墙钟时间。LiteBackend 靠 stream 每步回调直接打点；HF transformers 的 `generate()` 没有逐步回调，HFBackend 用两段式拆：先跑 1 token 测 TTFT，再跑全程（common.py:309）。
+- **TTFT**（首 token 延迟）：prefill 提交到第一个 token 可见的墙钟时间。LiteBackend 靠 stream 每步回调直接打点；HF transformers 的 `generate()` 没有逐步回调，HFBackend 用两段式拆：先跑 1 token 测 TTFT，再跑全程（lib/backends.py）。
 - **TPOT**（每 token 生成延迟）：稳态每步延迟，取首 token 之后所有步间隔的均值；batch 内 lockstep 推进，`gen_tokens = steps × batch`。
 - **TPS**：`gen_tokens / 总时间`。
 
@@ -414,12 +414,17 @@ benchmarks/ 全部脚本的分工：
 | 脚本 | 测什么 |
 |------|--------|
 | [bench_e2e.py](bench_e2e.py) | TTFT/TPOT/TPS 基线，eager vs CUDA graph，附贪心输出一致性断言；`--router-variant` 复用同一入口做 MoE 路由 GEMM 的进程级 A/B |
+| [bench_optimizations.py](bench_optimizations.py) | 特性矩阵：每个引擎开关单独一格再交叉组合，三个 workload 各对准特性的生效条件，`--verify` 逐格比对 greedy 文本 |
 | [bench_continuous.py](bench_continuous.py) | 连续批处理 vs 静态批处理，离线与偏斜到达两种场景 |
 | [bench_data_parallel.py](bench_data_parallel.py) | DP 两个实验：`--mode scaling` 吞吐扩展（weak/strong scaling，输出逐条 diff 防止速度掩盖错误）· `--mode prefix` 前缀缓存跨副本的命中率与路由质量 |
 | [bench_scheduler.py](../benchmarks/bench_scheduler.py) | 调度器基准入口：`matrix`（特性矩阵）· `serving`（在线量化 × TP/DP × graph，HTTP + SSE）· `diag-prefix` · `diag-preempt` |
 | [bench_quant.py](bench_quant.py) | 离线量化矩阵：每行同时带吞吐与输出偏移，缺一半就不是合格的量化表 |
 | [bench_overlap_l1.py](bench_overlap_l1.py) | L1 copy-stream 重叠开关 A/B，附 timeline 证据 |
 | [bench_observability.py](bench_observability.py) | 每个可观测开关的每 token 开销一行 |
+| [bench_gsm8k_vllm.py](bench_gsm8k_vllm.py) | vllm 侧 GSM8K 对照：同题同判分（复用 tests/evals），与 lite 侧精度直接可比 |
+| [bench_mla.py](bench_mla.py) | MLA KV 经济学：config 解析 KV 几何，同一 workload 量延迟与显存足迹 |
+| [bench_parser.py](bench_parser.py) | 推理/工具解析器的每 token CPU 成本（流式增量口径） |
+| [lib/](lib/) | 共享库：workloads（工作负载）· metrics（TTFT/TPOT/TPS 口径）· backends（被测系统 ABC + 工厂）· utils（显存足迹、JSON 落盘、表格）· dp（DP 脚手架） |
 | kernels/microbench.py | 微基准 harness：三种计时器 + 正确性门 + SOL 报告 |
 | kernels/kv_pool.py | 分页 KV 池 fixture（7.3 节的四个属性） |
 | kernels/bench_paged_decode.py / bench_kv_write.py / bench_flashinfer.py / bench_mla_decode.py / bench_fused_moe.py / bench_fused_mlp_silu.py / bench_quant_gemm.py / bench_softmax.py / bench_vocab_embedding.py / bench_dispatch.py | 各算子域的微基准，行名对齐 `KernelSpec.name` |
