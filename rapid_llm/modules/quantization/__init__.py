@@ -175,7 +175,6 @@ __all__ = [  # noqa: RUF022
     "SCALE_SUFFIX",
     "BASE_QUANTIZATION_METHODS",
     "RUNTIME_SCHEMES",
-    "adapt_int4_checkpoint",
     "e8m0_to_fp32",
     "repack_mxfp4_pairs",
     # Factories

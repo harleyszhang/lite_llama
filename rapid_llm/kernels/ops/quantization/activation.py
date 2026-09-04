@@ -36,15 +36,8 @@ from .scale_layout import (
     create_scale_output,
     infer_scale_layout,
 )
+from .w8a8 import _INT8_MAX
 
-#: Largest magnitude symmetric int8 stores. ``w8a8`` keeps its own private
-#: copy; this module states its own rather than importing a private name.
-_INT8_MAX = 127.0
-
-#: Elements one program of :func:`_per_token_group_quant_kernel` covers. Eight
-#: 128-wide groups: the same 1024-element footprint the per-token quantisers
-#: walk per pass, held as ``[groups, group_size]`` so one program amortises
-#: its launch over several scales.
 _QUANT_TILE = 1024
 
 
