@@ -46,6 +46,15 @@ class AttentionMetadata:
             contiguous run from this base, no per-token table lookup.
         max_chunk_len: Chunked prefill only — widest chunk in the grid,
             sizing the query-block grid.
+        b_seq_len_cpu: Host mirror of ``b_seq_len`` for the current decode
+            step, written by whoever drives the host-side loop (the one-shot
+            session's position arithmetic or the continuous batcher's
+            scheduler). Lets a per-step preparation hook read the lengths
+            without a device sync; ``None`` outside decode steps.
+        decode_plan: Per-step payload produced once by the winning backend's
+            preparation hook (``KernelSpec.step_prepare``) and read by every
+            layer's kernel in that step — attention metadata is
+            layer-invariant within a step. ``None`` unless a hook ran.
     """
 
     kv_buffer: list[torch.Tensor] = field(default_factory=list)
@@ -59,3 +68,5 @@ class AttentionMetadata:
     b_prefix_len: torch.Tensor | None = None
     b_kv_base: torch.Tensor | None = None
     max_chunk_len: int = 0
+    b_seq_len_cpu: torch.Tensor | None = None
+    decode_plan: object | None = None
