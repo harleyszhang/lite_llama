@@ -1,4 +1,4 @@
-"""O11 communication-RMSNorm fusion kernel benchmark (TP=2 required).
+"""All-reduce plus fused residual-add/RMSNorm benchmark (TP=2 required).
 
 Compares:
 - Baseline: all-reduce + skip_rmsnorm (NCCL collective + Triton kernel)
@@ -58,7 +58,7 @@ def main():
     ]
 
     if rank == 0:
-        print(f"O11 Benchmark (TP={world_size}, {torch.cuda.get_device_name()})")
+        print(f"Fused all-reduce RMSNorm benchmark (TP={world_size}, {torch.cuda.get_device_name()})")
         print("=" * 75)
         print("Baseline: all-reduce + skip_rmsnorm")
         print("Fused:    all-reduce + fused_add_rmsnorm")
@@ -95,7 +95,7 @@ def main():
         for _ in range(n_iters):
             x = partial.clone()
             dist.all_reduce(x, op=dist.ReduceOp.SUM)
-            y, _ = skip_rmsnorm(x, residual.clone(), weight, eps)
+            _y, _ = skip_rmsnorm(x, residual.clone(), weight, eps)
         torch.cuda.synchronize()
         t_baseline = (time.perf_counter() - t0) / n_iters * 1e6
 
@@ -105,7 +105,7 @@ def main():
         for _ in range(n_iters):
             x = partial.clone()
             dist.all_reduce(x, op=dist.ReduceOp.SUM)
-            y, _ = fused_add_rmsnorm(x, residual.clone(), weight, eps)
+            _y, _ = fused_add_rmsnorm(x, residual.clone(), weight, eps)
         torch.cuda.synchronize()
         t_fused = (time.perf_counter() - t0) / n_iters * 1e6
 
@@ -121,7 +121,7 @@ def main():
                 "speedup": round(speedup, 3),
             })
             print(
-                f"{str(shape):<20} {t_baseline:<15.3f} {t_fused:<15.3f} {speedup:<10.3f}x"
+                f"{shape!s:<20} {t_baseline:<15.3f} {t_fused:<15.3f} {speedup:<10.3f}x"
             )
 
     dist.destroy_process_group()
@@ -136,7 +136,7 @@ def main():
         print(f"Min speedup: {min_speedup:.3f}x")
 
         output = {
-            "benchmark": "fused_allreduce_rmsnorm_o11",
+            "benchmark": "fused_allreduce_rmsnorm",
             "description": "all-reduce + fused_add_rmsnorm vs all-reduce + skip_rmsnorm on TP=2",
             "tp_size": world_size,
             "gpu": torch.cuda.get_device_name(),
