@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 import rapid_llm.kernels.ops.moe.fused_moe as _fused_moe_mod
 from rapid_llm.kernels.ops.moe.fused_moe import (
