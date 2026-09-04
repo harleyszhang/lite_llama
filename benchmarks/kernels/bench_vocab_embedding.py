@@ -19,7 +19,7 @@ import triton
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from microbench import bench, metadata
+from microbench import bench, metadata, require_cuda
 
 from lite_llama.kernels import vocab_parallel_embedding
 
@@ -71,8 +71,7 @@ def bench_regime(label: str, sizes: list[int], weight: torch.Tensor) -> None:
 
 
 if __name__ == "__main__":
-    if not torch.cuda.is_available():
-        raise SystemExit("This benchmark requires a CUDA device.")
+    require_cuda()
 
     print(metadata())
     weight = torch.randn(LOCAL_VOCAB, HIDDEN, device="cuda", dtype=torch.float16)

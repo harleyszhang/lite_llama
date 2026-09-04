@@ -25,10 +25,9 @@ Usage:
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
+from microbench import run_perf_report
 
 # --------------------------------------------------------------------------- #
 # Router geometries: [num_experts, hidden] gate weights the checkpoints ship.
@@ -109,14 +108,9 @@ def benchmark_router_gemm(num_tokens: int, provider: str) -> float:
 
 
 if __name__ == "__main__":
-    if not torch.cuda.is_available():
-        raise SystemExit("This benchmark requires a CUDA device.")
-    save_path = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "../../images/benchmark_result")
+    run_perf_report(
+        benchmark_router_gemm,
+        verify,
+        verify_msg="Verifying topk parity between the two router-GEMM paths:",
+        run_msg=f"Running benchmark ({GEOM})",
     )
-    os.makedirs(save_path, exist_ok=True)
-
-    print("Verifying topk parity between the two router-GEMM paths:")
-    verify()
-    print(f"\nRunning benchmark ({GEOM}), saving plot to {save_path}")
-    benchmark_router_gemm.run(print_data=True, save_path=save_path)

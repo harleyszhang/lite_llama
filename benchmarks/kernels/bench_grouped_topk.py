@@ -16,10 +16,9 @@ Usage:
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
+from microbench import run_perf_report
 
 from lite_llama.kernels import grouped_topk, grouped_topk_torch
 
@@ -126,14 +125,9 @@ def benchmark_grouped_topk(num_tokens: int, provider: str) -> float:
 
 
 if __name__ == "__main__":
-    if not torch.cuda.is_available():
-        raise SystemExit("This benchmark requires a CUDA device.")
-    save_path = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "../../images/benchmark_result")
+    run_perf_report(
+        benchmark_grouped_topk,
+        verify,
+        verify_msg="Verifying the kernel against the torch reference:",
+        run_msg="Running benchmark (DeepSeek-V3 geometry)",
     )
-    os.makedirs(save_path, exist_ok=True)
-
-    print("Verifying the kernel against the torch reference:")
-    verify()
-    print(f"\nRunning benchmark (DeepSeek-V3 geometry), saving plot to {save_path}")
-    benchmark_grouped_topk.run(print_data=True, save_path=save_path)

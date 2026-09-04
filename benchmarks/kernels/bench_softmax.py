@@ -10,11 +10,10 @@ Usage:
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
 import triton.language as tl
+from microbench import run_perf_report
 
 
 def naive_softmax(x: torch.Tensor) -> torch.Tensor:
@@ -201,14 +200,6 @@ def benchmark_softmax(M: int, N: int, provider: str) -> float:
 
 
 if __name__ == "__main__":
-    if not torch.cuda.is_available():
-        raise SystemExit("This benchmark requires a CUDA device.")
-    save_path = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "../../images/benchmark_result")
+    run_perf_report(
+        benchmark_softmax, verify, verify_msg="Verifying correctness against torch.softmax:"
     )
-    os.makedirs(save_path, exist_ok=True)
-
-    print("Verifying correctness against torch.softmax:")
-    verify()
-    print(f"\nRunning benchmark, saving plot to {save_path}")
-    benchmark_softmax.run(print_data=True, save_path=save_path)
