@@ -14,7 +14,6 @@ Usage:
 """
 
 import torch
-import torch.distributed as dist
 import triton
 import triton.language as tl
 
@@ -281,65 +280,13 @@ def fused_add_rmsnorm(x, residual, weight, eps=1e-5):
     return Y.view(orig_shape), residual.view(orig_shape)
 
 
-@triton.jit()
-def fused_allreduce_add_rms_norm_kernel(
-    Y,      # output: normalised
-    P1,     # pointer to rank-local partial (own partial sum)
-    P2,     # pointer to peer partial (received via P2P)
-    R,      # residual (updated in place)
-    W,      # RMSNorm weight
-    y_stride_r, y_stride_c,
-    p1_stride_r, p1_stride_c,
-    p2_stride_r, p2_stride_c,
-    r_stride_r, r_stride_c,
-    N, eps,
-    BLOCK_SIZE: tl.constexpr,
-):
-    """Fuse all-reduce + residual-add + RMSNorm in one kernel.
-
-    Reads partial sums from TWO buffers (local + peer), sums them, adds the
-    residual, and normalises — all in a single kernel pass.  Compared to the
-    NCCL all-reduce + fused_add_rmsnorm baseline, this eliminates the
-    intermediate HBM write of the all-reduce result.
-    """
-    pid = tl.program_id(0)
-    Y += pid * y_stride_r
-    P1 += pid * p1_stride_r
-    P2 += pid * p2_stride_r
-    R += pid * r_stride_r
-
-    mask = tl.arange(0, BLOCK_SIZE) < N
-    cols = tl.arange(0, BLOCK_SIZE)
-
-    p1 = tl.load(P1 + cols * p1_stride_c, mask, other=0.0).to(tl.float32)
-    p2 = tl.load(P2 + cols * p2_stride_c, mask, other=0.0).to(tl.float32)
-    r = tl.load(R + cols * r_stride_c, mask, other=0.0).to(tl.float32)
-
-    x = p1 + p2 + r
-    tl.store(R + cols * r_stride_c, x, mask=mask)
-
-    var = tl.sum(x * x / N, axis=0)
-    rrms = 1 / tl.sqrt(var + eps)
-
-    w = tl.load(W + tl.arange(0, BLOCK_SIZE), mask=mask, other=0.0)
-    y = (x * rrms).to(Y.dtype.element_ty) * w
-    tl.store(Y + cols * y_stride_c, y, mask=mask)
-
-
 @torch.no_grad()
 def fused_allreduce_rmsnorm(partial, residual, weight, eps=1e-5):
-    """Fused all-reduce + residual-add + RMSNorm.
+    """Complete a TP all-reduce, then fuse residual-add and RMSNorm.
 
-    When FlashInfer is available, this calls ``flashinfer.comm.allreduce_fusion``
-    which fuses the all-reduce communication with the residual-add and RMSNorm
-    in a single CUDA kernel — eliminating the intermediate HBM write-back of
-    the all-reduce result.
-
-    Without FlashInfer, falls back to ``dist.all_reduce`` + ``fused_add_rmsnorm``
-    (two ops, but the norm kernel still saves one HBM read of the residual).
-
-    The caller must ensure the all-reduce in the preceding row-parallel linear
-    was skipped (see :func:`~rapid_llm.batch_overlap.comm_overlap.is_allreduce_skipped`).
+    RMSNorm needs the complete reduction. Until a backend provides a verified
+    communication epilogue, use the framework all-reduce followed by the
+    single-pass residual-add/RMSNorm kernel.
 
     Args:
         partial: ``(..., hidden)`` partial-sum activations (pre-all-reduce).
@@ -350,30 +297,13 @@ def fused_allreduce_rmsnorm(partial, residual, weight, eps=1e-5):
     Returns:
         ``(normalised, residual)`` — same contract as :func:`skip_rmsnorm`.
     """
-    from ....distributed.parallel_state import (
-        get_tensor_model_parallel_group,
-        get_tensor_model_parallel_world_size,
-    )
+    from ....distributed.parallel_state import get_tensor_model_parallel_world_size
 
-    world_size = get_tensor_model_parallel_world_size()
-    if world_size <= 1:
+    if get_tensor_model_parallel_world_size() <= 1:
         return fused_add_rmsnorm(partial, residual, weight, eps)
 
-    group = get_tensor_model_parallel_group()
-
-    # Try FlashInfer fused allreduce+norm (the real O11 win).
-    try:
-        from flashinfer.comm import allreduce_fusion, AllReduceFusionPattern
-        return _flashinfer_fused_allreduce_rmsnorm(
-            partial, residual, weight, eps, world_size, group,
-        )
-    except ImportError:
-        pass
-
-    # Fallback: NCCL all-reduce + fused_add_rmsnorm.
     from ....distributed.parallel_state import tensor_model_parallel_all_reduce
-    full = tensor_model_parallel_all_reduce(partial)
-    return fused_add_rmsnorm(full, residual, weight, eps)
+    return fused_add_rmsnorm(tensor_model_parallel_all_reduce(partial), residual, weight, eps)
 
 
 @torch.no_grad()
