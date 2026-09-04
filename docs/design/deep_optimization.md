@@ -29,6 +29,35 @@ kernel。根因是 prefill kernel 不读 cache，续传 chunk 只能走 EXTEND �
 48 层 × 2 个 all-reduce 走 NCCL ring over PCIe（batch 小 payload 小，延迟主导），
 加上数百次 kernel launch 的 Python 派发——batch=1 的 TPOT 里约 30–40% 是非计算开销。
 
+**Profiling 实证（Qwen2.5-0.5B, H100, batch=4 decode）。**
+`torch.profiler` 提取 kernel timeline（`scripts/gen_cuda_graph_launch_gif.py`）：
+
+| 指标 | eager | CUDA graph |
+|------|-------|------------|
+| 总 GPU kernel 数（全程 7 步） | 2647 | 2654 |
+| 每步 GPU kernel 数 | ~378 | ~379 |
+| 每步 GPU 计算时间 | ~1200 µs | ~1184 µs |
+| CPU 侧 launch 事件（全程） | 535 条 `cudaLaunchKernel` | 7 条 `cudaGraphLaunch`（1 条/步） |
+
+两种模式跑同一模型，GPU 计算量相同：kernel 总数差 0.3%、每步计算时间差
+1.3%，都在测量噪声内。区别只在派发方式——graph 每步 1 条 `cudaGraphLaunch`，
+一步的 ~379 个 kernel 一次性回放；eager 由 CPU 逐个派发，kernel 之间要等
+下一次派发。
+
+CPU 侧的口径要说清：torch.profiler 全程只记录到 535 条 `cudaLaunchKernel`
+（约 76 条/步），少于每步 ~378 个 kernel——CUPTI 不为每个 kernel 记一条
+launch 事件，所以这个计数只能作定性对比，不能读成「每步派发次数」。
+动态可视化：
+
+![eager vs graph kernel launch timeline](../images/cuda_graph_launch.gif)
+
+读法：上轨 eager 画的是按 >30 µs 间隙切出的**一个片段**（29 个 kernel、跨度
+505 µs），不是完整的一步（~378 个 kernel）；琥珀色是 CPU 的
+`cudaLaunchKernel`，蓝色是 1–2 µs 的 GPU kernel，暗红色间隙是 GPU 空等下一次
+派发。下轨 graph 是完整一步（285 个 kernel、跨度 1072 µs、1 条绿色
+`cudaGraphLaunch`）。**两轨可比的是 GPU 占用率：10% vs 83%**——同样的 kernel，
+eager 之间大量空等，graph 排满。kernel 条数不可直接对比（上轨是片段）。
+
 **A10 上 MoE 是带宽瓶颈，dequant 路径物化中间张量。**
 sm86 无 fp8 算力，fp8 权重解包成 fp16 再进 GEMM（ROADMAP P3 指出的问题），
 每步多一轮全量权重读写。
