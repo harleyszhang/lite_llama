@@ -543,20 +543,6 @@ def _dispatch_mode(world_size: int, deferred: bool, policy: CommOverlapPolicy, r
 def row_parallel_forward(layer: LinearBase, x: torch.Tensor) -> torch.Tensor:
     """One row-parallel GEMM plus its all-reduce, dispatched by the active mode.
 
-    This is the whole of :meth:`RowParallelLinear.forward
-    <rapid_llm.modules.linear.RowParallelLinear.forward>` — the layer owns the
-    shard maths, this owns when and where the reduction happens:
-
-    * a world of one passes through (no peer to reduce with);
-    * inside :func:`deferred_all_reduce`, the partial is returned unfenced
-      and the caller fences where it consumes (L2);
-    * under an enabled L3 policy with enough rows, the GEMM is split into row
-      chunks whose reductions overlap the next chunk's GEMM;
-    * under :func:`fused_allreduce_rmsnorm`, the all-reduce is skipped
-      entirely — the caller decomposes it into reduce-scatter + norm +
-      all-gather (O11 communication–RMSNorm fusion);
-    * otherwise, the blocking all-reduce every earlier test was written against.
-
     Args:
         layer: The row-parallel layer; only :meth:`apply_linear
             <rapid_llm.modules.linear.LinearBase.apply_linear>` is called.
