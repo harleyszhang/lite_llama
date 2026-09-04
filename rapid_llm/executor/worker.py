@@ -97,6 +97,10 @@ class ModelInput:
     block_writes: tuple[tuple[int, int, int, tuple[int, ...]], ...] = ()
     prompt_logprobs: tuple[int | None, ...] = ()
     prompt_targets: tuple[int, ...] = ()
+    # O5 speculative decoding: when True, execute() returns the full logits
+    # tensor alongside sampled tokens. The engine uses these for per-position
+    # draft verification. Default False keeps the normal path lean.
+    return_logits: bool = False
 
     def __post_init__(self) -> None:
         if not self.slots:
@@ -236,22 +240,59 @@ class ModelWorker:
             sequences all still owe tokens runs the model for its K/V and
             returns an empty tensor.
         """
+        tokens, records, _ = self._execute_inner(model_input)
+        return tokens, records
+
+    def execute_verify(
+        self, model_input: ModelInput
+    ) -> tuple[torch.Tensor, PassLogprobs | None, torch.Tensor | None]:
+        """O5 speculative decoding: run a verify pass, return tokens + logits.
+
+        Like :meth:`execute` but also returns the full ``[rows, vocab]`` logits
+        tensor (one row per input token, in sequence order). The engine uses
+        these for per-position draft verification. Returns ``None`` for the
+        logits when the model produced no output (all sequences owe tokens).
+        """
+        return self._execute_inner(model_input)
+
+    def _execute_inner(
+        self, model_input: ModelInput
+    ) -> tuple[torch.Tensor, PassLogprobs | None, torch.Tensor | None]:
         prepared = self.prepare(model_input)
         # Install block tables before the forward (so rows have pages) but after
         # prepare (which only gathered entries for rows the plan names).
         self._slot_batch.write_block_tables(model_input.block_writes)
         logits, prompt = self._forward(model_input, prepared)
+        all_logits: torch.Tensor | None = None
+        if model_input.return_logits and logits is not None:
+            # logits here is the sampled-row slice; for verify we need the
+            # full [rows, vocab] tensor. _forward already computed it; the
+            # caller set return_logits so _forward returned the full thing.
+            all_logits = logits
         sampled_records = None
         if logits is None:
             tokens = self._no_tokens
         else:
-            tokens, sampled_records = self._sample(model_input, logits)
+            # When return_logits is set, _forward returns the full [rows, vocab]
+            # tensor instead of the sampled-row slice. Sample from the last row
+            # per sequence (the normal path for EXTEND).
+            if model_input.return_logits and all_logits is not None:
+                # Re-derive the sampled-row logits for _sample.
+                # all_logits is [n_tokens, vocab] (2D); index with a list
+                # (not a tuple, which would be multi-dim indexing).
+                import itertools as _it
+                ends = list(_it.accumulate(model_input.chunk_lens))
+                row_list = [ends[index] - 1 for index in model_input.sampled]
+                sample_logits = all_logits[row_list] if row_list else all_logits[:0]
+                tokens, sampled_records = self._sample(model_input, sample_logits)
+            else:
+                tokens, sampled_records = self._sample(model_input, logits)
         if not any(prompt) and sampled_records is None:
-            return tokens, None
+            return tokens, None, all_logits
         return tokens, PassLogprobs(
             sampled=tuple(sampled_records) if sampled_records is not None else (),
             prompt=prompt,
-        )
+        ), all_logits
 
     # -------------------------------------------------------------- preparing #
     def prepare(self, plan: ModelInput) -> _PreparedPass:
@@ -408,12 +449,17 @@ class ModelWorker:
             # scoring is free — a sequence's rows are its prompt distributions.
             logits = self._runner.forward(prepared.input_ids, positions, None)
         # A sequence's next-token logits sit on the last row of its stretch.
-        ends = list(itertools.accumulate(plan.chunk_lens))
-        rows = tuple(ends[index] - 1 for index in plan.sampled)
         flat = logits[:, -1, :]
         prompt = (None,) * len(plan.slots)
         if any(k is not None for k in plan.prompt_logprobs):
             prompt = self._prompt_records(plan, flat, grid=False)
+        # O5 speculative decoding: return the full [num_tokens, vocab] logits
+        # for per-position verification instead of the sampled-row slice.
+        if plan.return_logits:
+            n_real = len(plan.tokens)
+            return flat[:n_real], prompt
+        ends = list(itertools.accumulate(plan.chunk_lens))
+        rows = tuple(ends[index] - 1 for index in plan.sampled)
         return self._pick(flat, rows, padded), prompt
 
     def _forward_decode(

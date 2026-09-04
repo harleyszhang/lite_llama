@@ -327,3 +327,73 @@ def test_fp8_cache_stays_within_e4m3_rounding_of_fp16():
 
     err = (out.float() - ref.float()).abs().max()
     assert err < 0.1 * ref.float().abs().max(), f"fp8 cache drifted {err} from fp16"
+
+
+# --------------------------------------------------------------------------- #
+# O8 adaptive split-kv policy — pure function of ints, so CPU-testable
+# --------------------------------------------------------------------------- #
+# A10-class device: 72 SMs x 16 resident one-warp blocks = 1152-block wave.
+_SMS = 72
+
+
+def _part(batch, heads, seq, **kw):
+    from rapid_llm.kernels.ops.attention.flashdecoding import adaptive_partition_size
+
+    return adaptive_partition_size(batch, heads, seq, _SMS, **kw)
+
+
+def test_adaptive_underfilled_splits_finer_than_baseline():
+    """batch=1 short context: 128 leaves the grid far below one wave, split finer.
+
+    1 * 32 * ceil(512/128) = 128 blocks << 1152, so the policy drops the
+    partition to the floor to raise occupancy — the measured 1.8x case.
+    """
+    p = _part(1, 32, 512)
+    assert p < 128
+    assert p % 16 == 0 and p >= 32  # block-N multiple, above the combine floor
+
+
+def test_adaptive_inside_band_keeps_baseline():
+    """Mid shapes where 128 already lands ~2-4k blocks must not be perturbed.
+
+    These are the cells a single linear block-target over-split and regressed;
+    keeping the baseline is what makes the policy no-worse there.
+    """
+    assert _part(1, 32, 8192) == 128  # 2048 blocks
+    assert _part(4, 32, 2048) == 128  # 2048 blocks
+    assert _part(16, 32, 1024) == 128  # 4096 blocks
+
+
+def test_adaptive_overfilled_keeps_baseline():
+    """An overfilled grid is left alone — coarsening was measured and dropped.
+
+    Large batch / long context already exceeds several waves at the baseline, so
+    the policy returns 128 rather than coarsening: the coarsen win flipped sign
+    with shape and sat inside noise, so keeping the baseline is the no-regression
+    choice (see the release doc's negative-result note).
+    """
+    assert _part(64, 32, 2048) == 128  # 32768 blocks at baseline
+    assert _part(16, 32, 4096) == 128  # 16384 blocks at baseline
+    assert _part(4, 32, 8192) == 128  # 8192 blocks at baseline
+
+
+def test_adaptive_is_deterministic_and_graph_safe():
+    """Same ints in, same int out — the property a captured graph relies on.
+
+    Under a decode graph ``batch`` and ``max_seq_len`` are baked in per bucket,
+    so the partition size must be a pure function of them with no hidden state.
+    """
+    assert _part(8, 32, 4096) == _part(8, 32, 4096)
+
+
+def test_adaptive_degenerate_shapes_are_safe():
+    assert _part(1, 32, 0) == 128  # empty history -> baseline, no divide-by-zero
+    assert _part(1, 32, 1) % 16 == 0  # single token still a legal partition
+
+
+def test_adaptive_partition_size_is_always_a_legal_block_multiple():
+    """Every output must satisfy the kernel's ``PARTITION_SIZE % BLOCK_N == 0``."""
+    for batch in (1, 4, 16, 64):
+        for seq in (17, 128, 512, 2048, 8192, 16384):
+            p = _part(batch, 32, seq)
+            assert p % 16 == 0 and p >= 16, (batch, seq, p)

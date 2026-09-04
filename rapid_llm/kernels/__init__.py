@@ -59,6 +59,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "w4a16_matmul": (".ops.quantization", "w4a16_matmul"),
     "w8a16_matmul": (".ops.quantization", "w8a16_matmul"),
     "qk_rmsnorm": (".ops.layernorm.skip_rmsnorm", "qk_rmsnorm"),
+    "fused_add_rmsnorm": (".ops.layernorm.skip_rmsnorm", "fused_add_rmsnorm"),
     "rope_emb_forward": (".ops.rope.rope_emb", "rope_emb_forward"),
 }
 
@@ -90,6 +91,7 @@ __all__ = [
     "flash_attention2_chunked",
     "flash_attention2_no_pad",
     "flash_decoding",
+    "fused_add_rmsnorm",
     "fused_moe",
     "fused_moe_w8a8_fp8",
     "fused_moe_w8a8_int8",

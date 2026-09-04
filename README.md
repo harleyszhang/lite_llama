@@ -15,6 +15,7 @@
          ✅ NVFP4 weight-only   ✅ FP8 W8A8 Fused MoE    ✅ TP + CUDA Graph
          ✅ Kernel Autotune     ✅ Fused MoE             ✅ Tensor Parallel         ✅ Data Parallel
          ✅ Comm-Compute Overlap ✅ Tile-Signaling       ✅ DP × CUDA Graph         ✅ DeepSeek V4 (mHC)
+         ✅ Ngram Speculative Decoding
 
 <b>Framework Design</b>
          ✅ Continuous batching ✅ OpenAI API server     ✅ Preemption              ✅ Ops Backend Registry
@@ -521,6 +522,52 @@ Each replica can also replay a captured decode graph. A replica is tp=1, so no c
 ![DP x CUDA graph](./docs/images/dp_cuda_graph.png)
 
 Qwen3-0.6B, batch 16 per replica, 128 steps: TPOT 25.9 → 5.2 ms per replica (**-80%**) and 618 → 6162 tok/s aggregate (**5.1×**) at DP2, with the +2.4 s capture cost and the per-GPU memory delta recorded in the log. `python benchmarks/bench_data_parallel.py --mode graph --model my_weight/Qwen3-0.6B` reproduces it; `tests/engine/test_dp_cuda_graph.py` asserts both replicas hold captured graphs and agree greedily.
+
+### MoE Dequant-Fused Grouped GEMM (v0.12)
+
+MoE expert weights stay quantised (fp8/int8/int4/mxfp4) through the GEMM: the dequantisation runs inside the k-loop (`dequant_fp8e4m3` bit-trick for fp8, shift-and-mask for int4, e2m1 LUT for mxfp4), so there is no intermediate fp16 weight materialisation. On A10, where MoE decode is pure bandwidth-bound, the saved HBM read goes straight to TPOT.
+
+This round also fixed two pre-existing kernel defects that the MXFP4 merge had introduced: int4 experts were misclassified as fp8 (the `_quant_mode` int4 branch was lost), and mxfp4's logical K was 4× too small (pack factor 2 applied where 8 was needed). Both are now correct — int4 and mxfp4 tests pass alongside bf16/fp8/int8.
+
+![MoE dequant-fused grouped GEMM benchmark](./docs/images/moe_o4.gif)
+
+The A10 autotune collect round (previously unmeasured — the PRE_HOPPER table was a guess) improved all 12 shape keys, best +37.8% (int4 M64), geomean +5.4%. Evidence in [docs/release-v0.12.0.md](docs/release-v0.12.0.md).
+
+### Split-KV Adaptive Decode Attention (v0.12)
+
+batch=1 decode has a structural weakness: without split-kv, one sequence's attention is pinned to a handful of SMs while the rest sit idle. At 8K context the KV read is ~750 MB/step — comparable to the MoE weight read — and the TPOT spike is real.
+
+The fix splits the KV dimension into partial softmax lanes that recombine via the numerically invariant online-softmax. The partition count is looked up from an autotune table keyed on `(batch, seq_len)`: large batches already have enough row-parallel work, so split=1 avoids the combine cost; batch=1 with long context opens the split wide.
+
+![Split-KV adaptive decode attention](./docs/images/splitkv_o8.gif)
+
+A10 result: geomean 1.07×, best case (batch=1, seq=512) 1.80× (27.65 µs → 15.36 µs). The GIF shows the SM occupancy grid — fixed 128 partitions vs adaptive 32 partitions — and the per-shape speedup sweep. Evidence in [docs/release-v0.12.0.md](docs/release-v0.12.0.md).
+
+### Paged KV + Radix Zero-Copy Sharing (v0.12)
+
+KV memory is paged in 16-token blocks — the allocation unit is a block, not a contiguous token range. Three layers make it work:
+
+1. **BlockPool** (`engine/block_pool.py`): block-granularity allocation with reference counting, LRU eviction (doubly-linked FreeBlockQueue), and hash-indexed block lookup (`cached_block_hash_to_block`).
+2. **PrefixCache** (`engine/prefix_cache.py`): hash-chained prefix reuse — blake2b chain hash (`iter_block_hashes`) over token blocks, with allocate/commit/free/lookup lifecycle. Blocks with zero references are auto-reclaimed.
+3. **SlotBatch** (`executor/slot_batch.py`): block table indirection — `b_req_tokens_table[slot, pos] = block_id * 16 + offset` maps logical token positions to physical block addresses.
+
+The consequence: requests sharing a system prompt prefill it once; later requests zero-copy reuse the cached blocks. 80 unit tests cover block allocation, prefix hit, and block-table address translation end-to-end.
+
+### fp8 KV Precision Gate (v0.12)
+
+fp8 KV cache (e4m3 + uint8 container + per-tensor scale) halves KV memory — but the quantisation error must be bounded. `tests/kernels/test_fp8_kv_accuracy.py` is the gate: 8 test scenarios covering decode/prefill shapes, heavy-tailed distributions, near-zero values, independent K/V quantisation, and scale sensitivity. The gate requires rel_err < 5% (normal) / < 10% (heavy-tailed) and cosine_sim > 0.999 — all 8 pass.
+
+End-to-end benchmark (`benchmarks/bench_fp8_kv.py`): fp16 0.784s vs fp8 0.812s — **3.6% throughput cost for 2× KV capacity**. Evidence in `docs/benchmark_logs/fp8_kv_o14_*.json`.
+
+### Ngram Speculative Decoding (v0.12)
+
+Decode normally produces one token per step, leaving the GPU underutilised. For repetitive workloads (code, templates), much of the output repeats patterns the model has already seen. Speculative decoding exploits this: an n-gram proposer scans the prompt + generated text for repeated patterns and drafts the next few tokens; a single EXTEND forward verifies them all at once.
+
+The proposer (`engine/ngram_proposer.py`) searches from the longest n-gram down to bigram, returning the continuation that followed the latest match. Verification is greedy: `argmax(logits[j]) == draft[j+1]` — accepted tokens plus one bonus from the model's own distribution are appended per step.
+
+Enabled via `LITE_LLAMA_SPECULATE=1` (off by default). The worker gains an `execute_verify` method that returns full `[tokens, vocab]` logits alongside sampled tokens; `ModelInput.return_logits` controls the path.
+
+Repetitive workload (Qwen3-0.6B, batch=4, gen=32): steps 32→11 (**-65.6%**), wall time 0.153s→0.083s (**1.85× speedup**). Evidence in `docs/benchmark_logs/speculative_o5_*.json`.
 
 ## Observability
 

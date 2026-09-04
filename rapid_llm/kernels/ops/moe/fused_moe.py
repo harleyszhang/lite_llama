@@ -94,10 +94,11 @@ _FP8_A8_PROMOTE_EVERY = 128
 #: :func:`repack_int4_experts` bridges the two layouts once at load.
 _INT4_PACK_FACTOR = 2
 
-#: MXFP4 stays on the word format -- eight e2m1 code points per int32, what
-#: :func:`repack_mxfp4_pairs` leaves of the checkpoint's byte pairs. Its decode
-#: reads a nibble's sign/exponent/mantissa fields rather than its value, so it
-#: keeps the 3-D expand the int4 path was rebuilt to avoid.
+#: Number of MXFP4 (e2m1) values packed per output element of the B tensor. The
+#: DeepSeek-V4 checkpoint layout ships eight nibbles per ``int32`` word, so B is
+#: ``[E, N, K//8]`` and the logical K is the packed last dim times 8 -- four
+#: times the int4 factor, which is why the two packed modes cannot share one
+#: constant when the launcher recovers ``k_logical`` from the tensor shape.
 _MXFP4_PACK_FACTOR = 8
 
 #: Largest magnitude symmetric int8 stores; the int8 A-quantising path scales
@@ -365,11 +366,12 @@ def _fused_moe_kernel(
     A: ``[num_tokens, K]`` activations. B: ``[E, N, K]`` stacked expert weights,
     fp16 or 8-bit or int4 packed. C: ``[num_tokens * top_k, N]`` (each token's per-slot output row).
     When ``QUANT_MODE`` is non-zero, ``b_scale_ptr`` holds dequantisation scales.
-    When ``QUANT_MODE == 3`` (INT4), B is ``[E, N, K//2]`` uint8 -- two nibbles
-    per byte along K, the layout :func:`repack_int4_experts` produces -- and
-    ``b_zeros_ptr`` optionally holds zero points. When it is 4 (MXFP4), B is
-    ``[E, N, K//8]`` int32, eight e2m1 code points per word. ``b_scale_ptr`` is
-    ``[E, N, K//group_k]`` in both.
+    When ``QUANT_MODE`` is 3 (INT4), B is ``[E, N, K//2]`` uint8 (2 nibbles per
+    byte, low nibble = lower K, the layout :func:`repack_int4_experts` leaves),
+    ``b_scale_ptr`` is ``[E, N, K//group_k]``, and ``b_zeros_ptr`` optionally
+    holds zero points. When ``QUANT_MODE`` is 4 (MXFP4), B is ``[E, N, K//8]``
+    int32 (8 e2m1 nibbles per word) and ``b_scale_ptr`` is the per-32 e8m0 scale
+    ``[E, N, K//32]``; MXFP4 carries no zero point.
     When ``QUANT_MODE`` is 5 or 6 (fp8 / int8 W8A8), A is 8-bit too and
     ``a_scale_ptr`` holds one fp32 scale per A row; ``NATIVE_FP8`` then picks
     between keeping both operands 8-bit for the sm89+ fp8 MMA and the pre-sm89
@@ -408,17 +410,22 @@ def _fused_moe_kernel(
     a_ptrs = a_ptr + (offs_token[:, None] // top_k) * stride_am + offs_k[None, :] * stride_ak
 
     if QUANT_MODE == 3:
-        offs_kh = tl.arange(0, BLOCK_K // 2)
+        # INT4: B is [E, N, K//2] uint8, two nibbles per byte (low nibble = lower
+        # K), the layout ``repack_int4_experts`` leaves. Replicated addressing --
+        # each byte is loaded for both its nibble rows (``offs_k // 2``) -- makes
+        # the k-tile [BLOCK_K, BLOCK_N] like the 8-bit paths, so the in-loop unpack
+        # is one shift-and-mask with no reshape; the 2x load is an L1 hit (see
+        # ``_INT4_PACK_FACTOR``).
+        offs_kb = offs_k // 2
         b_ptrs = (
             b_ptr
             + off_experts * stride_be
             + offs_bn[None, :] * stride_bn
-            + offs_kh[:, None] * stride_bk
+            + offs_kb[:, None] * stride_bk
         )
     elif QUANT_MODE == 4:
-        # MXFP4: B is [E, N, K//8] int32, packed along K dim. stride_bk is
-        # per-word. For each k-tile of BLOCK_K logical elements, we load
-        # BLOCK_K//8 int32 words.
+        # MXFP4: B is [E, N, K//8] int32, eight nibbles per word. stride_bk is
+        # per-word; each k-tile of BLOCK_K logical elements loads BLOCK_K//8 words.
         offs_k_words = tl.arange(0, BLOCK_K // 8)
         b_ptrs = (
             b_ptr
@@ -509,7 +516,7 @@ def _fused_moe_kernel(
                     # k = 2i + 1, so an odd remainder leaves one dead high
                     # nibble -- whose A column the a-load's own mask has
                     # already zeroed.
-                    mask=offs_kh[:, None] < (rem + 1) // 2,
+                    mask=offs_kb[:, None] < (rem + 1) // 2,
                     other=0,
                 )
             # Straight to compute_type: both planes are small integers and the
@@ -590,7 +597,7 @@ def _fused_moe_kernel(
             val_g = tl.reshape(val, (BLOCK_K // GROUP_K, GROUP_K, BLOCK_N))
             b = tl.reshape(val_g * s[:, None, :], (BLOCK_K, BLOCK_N)).to(a.dtype)
             accumulator += tl.dot(a, b)
-            b_ptrs += (BLOCK_K // 8) * stride_bk
+            b_ptrs += (BLOCK_K // 2 if QUANT_MODE == 3 else BLOCK_K // 8) * stride_bk
         else:
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0)
             if QUANT_MODE == 0:
@@ -880,11 +887,17 @@ def _invoke_moe_gemm(
         dequant_scale = 1.0 if fp8_cvt else FP8_E4M3_BIT_TRICK_SCALE
     else:
         dequant_scale = 1.0
-    # The packed modes store K compressed -- int4 two nibbles per byte, MXFP4
-    # eight per int32 word -- while the kernel counts logical K, so each widens
-    # by its own factor and every other mode passes K through.
-    pack_factor = {_QUANT_INT4: _INT4_PACK_FACTOR, _QUANT_MXFP4: _MXFP4_PACK_FACTOR}
-    k_logical = k * pack_factor.get(quant_mode, 1)
+    # INT4 packs 2 nibbles per uint8 byte ([E, N, K//2]); MXFP4 packs 8 e2m1
+    # nibbles per int32 word ([E, N, K//8]). Both store the packed last dim, so
+    # the logical K the k-loop reduces over is that dim times the mode's own
+    # pack factor -- sharing one factor here under-counted MXFP4's K by 4x and
+    # left three quarters of the reduction unaccumulated.
+    if quant_mode == _QUANT_INT4:
+        k_logical = k * _INT4_PACK_FACTOR
+    elif quant_mode == _QUANT_MXFP4:
+        k_logical = k * _MXFP4_PACK_FACTOR
+    else:
+        k_logical = k
     grid = (triton.cdiv(em, config["BLOCK_M"]) * triton.cdiv(n, config["BLOCK_N"]),)
     group_k_eff = min(group_k, k_logical) if group_k else 1
     _fused_moe_kernel[grid](
@@ -927,9 +940,16 @@ def _invoke_moe_gemm(
         EVEN_K=k_logical % config["BLOCK_K"] == 0,
         # Per-output-channel scales (one group spanning K) are the common case for
         # every 8-bit expert format here, and they let the k-loop accumulate
-        # inside ``tl.dot``. Int4's group scales and block-wise fp8 keep the
-        # in-loop form because their scale genuinely changes with k.
-        SCALE_HOISTED=quant_mode != _QUANT_NONE and group_k_eff >= k_logical,
+        # inside ``tl.dot``. The int4 and MXFP4 modes are excluded: their branch
+        # folds the group scale (and zero point) into ``b`` *inside* the loop
+        # unconditionally, so hoisting would multiply it a second time in the
+        # epilogue -- which collapsed the down GEMM (group_k covers intermediate,
+        # so it hoisted) to ~scale^2 of the right answer. Block-wise fp8 keeps the
+        # in-loop form too because its scale genuinely changes with k.
+        SCALE_HOISTED=(
+            quant_mode not in (_QUANT_NONE, _QUANT_INT4, _QUANT_MXFP4)
+            and group_k_eff >= k_logical
+        ),
         compute_type=torch_to_triton_dtype[c.dtype],
         # A_QUANT quantises the activation inside the kernel (see
         # ``_INLINE_A_QUANT_MAX_ROWS``); A_QMAX is the target format's range and
@@ -1037,14 +1057,12 @@ def _quant_mode(
     ``zeros`` disambiguates the other dtype collision: byte-packed int4 experts
     are ``uint8`` just like fp8, and both int4 and asymmetric int8 (GPTQ
     ``bits=8``) carry zero points, so ``zeros`` plus the dtype picks between
-    them. The int32 word packing that int4 and GPTQ-8 checkpoints ship never
+    them. ``mxfp4`` is checked first because its nibbles ride the int32 word
+    packing that linear int4 is explicitly *not* allowed to reach the kernel
+    with. The int32 word packing that int4 and GPTQ-8 checkpoints ship never
     reaches the kernel -- converting it is a one-time load step
     (:func:`repack_int4_experts` / :func:`unpack_int8_experts`), not something a
     per-call path should pay.
-
-    ``mxfp4`` names the one mode the tensors cannot: DeepSeek-V4's routed experts
-    are int32 words, exactly what an unrepacked int4 checkpoint looks like, and
-    only the caller knows those nibbles are e2m1 code points under e8m0 scales.
     """
     if scale is None:
         return _QUANT_NONE

@@ -59,6 +59,7 @@ from .scheduler import (
     Scheduler,
     SchedulerConfig,
 )
+from .ngram_proposer import NgramProposer
 from .stop_criteria import POLL_INTERVAL, detect_repetition
 
 if TYPE_CHECKING:
@@ -69,6 +70,12 @@ if TYPE_CHECKING:
 #: a grid pass through the chunked prefill kernel. A kill-switch rather than a
 #: config field because the engine decides once, from the cache dtype.
 _FUSED_CHUNK_ENV = "RAPID_LLM_FUSED_CHUNK_PREFILL"
+
+#: Ngram speculative decoding (O5): ``1``/``true``/``on`` enables ngram proposal
+#: for decode requests. The proposer scans the prompt + generated tokens for
+#: repeated n-grams and proposes draft continuations; a verify pass checks them
+#: in one forward, accepting matches and sampling at the first mismatch.
+_SPECULATE_ENV = "LITE_LLAMA_SPECULATE"
 
 
 class _Work(NamedTuple):
@@ -346,6 +353,13 @@ class ContinuousBatchingEngine:
         self._detokenizers: dict[str, IncrementalDetokenizer] = {}
         self._request_ids = itertools.count()
         self._step_count = 0
+        # O5 ngram speculative decoding: proposer scans prompt + generated
+        # tokens for repeated n-grams and proposes draft continuations.
+        # Enabled via LITE_LLAMA_SPECULATE=1; off by default because the
+        # verify pass adds a forward per step and only pays off when the
+        # workload has repetitive structure (code, repeated templates).
+        self._speculate = os.environ.get(_SPECULATE_ENV, "0").strip().lower() in ("1", "true", "on")
+        self._proposer = NgramProposer(max_ngram_size=5, max_draft=6) if self._speculate else None
         # O10 background tokenize: pool created on first use, jobs collected at
         # the top of every step (same thread that calls add_request, so the
         # dict needs no lock).
@@ -836,8 +850,18 @@ class ContinuousBatchingEngine:
             work += _prefill_work(
                 scheduled.prefill, scheduled.prefill_chunk_lens, self._chunked_min_rows
             )
-        if scheduled.decode:
-            work.append(_decode_work(scheduled.decode))
+
+        # O5 speculative decoding: before the normal decode pass, propose draft
+        # tokens for decode requests and verify them in one EXTEND forward.
+        # Requests that had no drafts or zero acceptance fall through to the
+        # normal decode pass below.
+        spec_emitted: list[tuple[Request, int, PositionLogprobs | None]] = []
+        remaining_decode = list(scheduled.decode)
+        if self._speculate and self._proposer and remaining_decode:
+            spec_emitted, remaining_decode = self._speculate_verify(remaining_decode)
+
+        if remaining_decode:
+            work.append(_decode_work(remaining_decode))
 
         # Execute every pass before reading any tokens back: a step's passes
         # are slot-disjoint, so one synchronisation per step suffices, and a
@@ -848,7 +872,7 @@ class ContinuousBatchingEngine:
             tokens, logprobs = self._executor.execute(work_item.plan)
             pending.append((work_item, tokens, logprobs))
 
-        emitted: list[tuple[Request, int, PositionLogprobs | None]] = []
+        emitted: list[tuple[Request, int, PositionLogprobs | None]] = list(spec_emitted)
         for work_item, tokens, logprobs in pending:
             # ``prompt`` is uniformly None for a decode pass.
             if logprobs is not None and any(logprobs.prompt):
@@ -868,6 +892,137 @@ class ContinuousBatchingEngine:
         advanced = self._harvest(emitted)
         self.metrics.observe_load(self.scheduler.num_running, self.scheduler.num_waiting)
         return advanced
+
+    def _speculate_verify(
+        self, decode_requests: list[Request]
+    ) -> tuple[list[tuple[Request, int, PositionLogprobs | None]], list[Request]]:
+        """O5 ngram speculative decoding: propose, verify, accept.
+
+        For each decode request, proposes draft tokens from ngram lookup in
+        the prompt + generated text. Drafts are verified in one EXTEND forward:
+        the model processes all draft tokens and returns logits at each position.
+        Greedy verification: accept draft[i] if argmax(logits[i-1]) == draft[i].
+
+        Returns:
+            ``(emitted, remaining)``: accepted tokens (including the bonus token
+            at the acceptance boundary) and requests that need normal decode
+            (no drafts found or executor returned no logits).
+        """
+        assert self._proposer is not None
+        # Phase 1: propose drafts for each decode request.
+        drafts: list[tuple[Request, list[int]]] = []
+        no_draft: list[Request] = []
+        for req in decode_requests:
+            all_ids = list(req.prompt_token_ids) + list(req.output_token_ids)
+            proposed = self._proposer.propose(all_ids)
+            if proposed:
+                drafts.append((req, proposed))
+            else:
+                no_draft.append(req)
+
+        if not drafts:
+            return [], decode_requests
+
+        # Phase 2: build a verify EXTEND ModelInput.
+        # Each speculative request contributes its draft tokens as one stretch.
+        slots, seq_starts, seq_lens, tokens_list = [], [], [], []
+        sampled_indices: list[int] = []
+        sampling_params_list: list[SamplingParams] = []
+        gen_counts_list: list[int] = []
+        block_writes_list: list[tuple[int, int, int, tuple[int, ...]]] = []
+        token_offset = 0
+        for i, (req, draft_ids) in enumerate(drafts):
+            n_draft = len(draft_ids)
+            # The stretch covers [seq_len - 1, seq_len - 1 + n_draft).
+            # seq_start = seq_len - 1 (the last cached position).
+            # seq_len after = seq_len - 1 + n_draft (the last draft position).
+            cur_seq_len = req.seq_len
+            slots.append(req.slot)
+            seq_starts.append(cur_seq_len - 1)
+            seq_lens.append(cur_seq_len - 1 + n_draft)
+            tokens_list.extend(draft_ids)
+            # Sample at the last draft position (for the bonus token).
+            sampled_indices.append(i)
+            sampling_params_list.append(req.params)
+            gen_counts_list.append(len(req.output_token_ids) + n_draft)
+            # Block writes for the draft positions.
+            block_writes_list += [
+                (req.slot, group_id, start_block, block_ids)
+                for group_id, start_block, block_ids in req.block_plan
+            ]
+            token_offset += n_draft
+
+        verify_plan = ModelInput(
+            kind=PassKind.EXTEND,
+            slots=tuple(slots),
+            seq_starts=tuple(seq_starts),
+            seq_lens=tuple(seq_lens),
+            tokens=tuple(tokens_list),
+            sampling=tuple(sampling_params_list),
+            sampled=tuple(sampled_indices),
+            gen_counts=tuple(gen_counts_list),
+            block_writes=tuple(block_writes_list),
+            return_logits=True,
+        )
+
+        # Phase 3: execute verify pass.
+        verify_tokens, _records, all_logits = self._executor.execute_verify(verify_plan)
+
+        if all_logits is None:
+            # Executor didn't support logits; fall back to normal decode.
+            return [], decode_requests
+
+        # Phase 4: verify each draft token against the model's argmax.
+        emitted: list[tuple[Request, int, PositionLogprobs | None]] = []
+        failed: list[Request] = []
+        logits_offset = 0
+        now = time.monotonic()
+        spec_advanced: list[Request] = []
+        for i, (req, draft_ids) in enumerate(drafts):
+            n_draft = len(draft_ids)
+            # Logits for this request's draft tokens.
+            req_logits = all_logits[logits_offset:logits_offset + n_draft]
+            logits_offset += n_draft
+
+            # Verify: argmax(logits[j]) vs draft[j+1] for j in [0, n_draft-2).
+            accepted = 0
+            for j in range(n_draft - 1):
+                predicted = req_logits[j].argmax().item()
+                if predicted == draft_ids[j + 1]:
+                    accepted += 1
+                else:
+                    break
+            else:
+                accepted = n_draft - 1
+
+            # Update request state for accepted draft tokens directly.
+            detok = self._detokenizers[req.request_id]
+            if req.first_token_time is None:
+                req.first_token_time = now
+            delta_text = ""
+            for j in range(accepted):
+                req.output_token_ids.append(draft_ids[j])
+                req.num_computed_tokens += 1
+                delta_text += detok.append(0, draft_ids[j])
+            req.text += delta_text
+            req.delta = delta_text  # will be extended with bonus token by _harvest
+
+            # Bonus token: emitted through _harvest (handles stop/length/repeat).
+            bonus_pos = accepted
+            if bonus_pos < n_draft:
+                bonus = req_logits[bonus_pos].argmax().item()
+            else:
+                bonus = verify_tokens[i].item()
+            emitted.append((req, bonus, None))
+            spec_advanced.append(req)
+
+        # _harvest handles the bonus token: append to output_token_ids, detokenise,
+        # stop detection, length check. It extends req.delta with the bonus text.
+        harvest_advanced = self._harvest(emitted)
+
+        # Requests that had no drafts need normal decode.
+        remaining = no_draft + failed
+        return emitted, remaining
 
     def generate(
         self,

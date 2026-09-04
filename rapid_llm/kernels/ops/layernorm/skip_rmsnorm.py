@@ -5,9 +5,15 @@ output in one launch; passing a zero residual degrades to plain RMSNorm.
 :func:`qk_rmsnorm` normalises a query and a key tensor in a single launch for
 the models that RMSNorm q and k per head before RoPE.
 
+:func:`fused_add_rmsnorm` is the communication–RMSNorm fusion (O11): after
+an all-reduce has completed in-place on ``x``, it adds ``residual`` and
+normalises in a single kernel pass — one fewer HBM read of the residual
+tensor compared to calling ``skip_rmsnorm`` separately.
+
 Usage:
     residual, y = skip_rmsnorm(x, residual, weight, eps)
     q, k = qk_rmsnorm(q, k, q_weight, k_weight, eps)
+    residual, y = fused_add_rmsnorm(x, residual, weight, eps)
 """
 
 import torch
@@ -190,6 +196,91 @@ def qk_rms_norm_kernel(
         _rms_norm_one_row(YQ + pid * N, XQ + pid * N, QW, N, eps, BLOCK_SIZE)
     else:
         _rms_norm_one_row(YK + (pid - q_rows) * N, XK + (pid - q_rows) * N, KW, N, eps, BLOCK_SIZE)
+
+
+@triton.jit()
+def fused_add_rms_norm_kernel(
+    Y,  # pointer to the normalised output
+    X,  # pointer to the all-reduced input (overwritten with residual + x)
+    R,  # pointer to the residual
+    W,  # pointer to the weights
+    y_stride_r,
+    y_stride_c,
+    x_stride_r,
+    x_stride_c,
+    r_stride_r,
+    r_stride_c,
+    N,
+    eps,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Add residual into the all-reduced tensor and RMSNorm in one pass.
+
+    Each program handles one row of ``[num_tokens, hidden_size]``. The kernel
+    loads ``x`` and ``r`` once, writes ``x + r`` back to both ``R`` (running
+    residual) and ``Y`` (pre-norm intermediate), computes the RMSNorm, and
+    overwrites ``Y`` with the normed output. Compared to the two-kernel
+    sequence (all-reduce → skip_rmsnorm), this saves one full read of the
+    residual tensor from HBM.
+    """
+    pid = tl.program_id(0)
+    Y += pid * y_stride_r
+    X += pid * x_stride_r
+    R += pid * r_stride_r
+
+    mask = tl.arange(0, BLOCK_SIZE) < N
+    cols = tl.arange(0, BLOCK_SIZE)
+    x = tl.load(X + cols * x_stride_c, mask, other=0.0).to(tl.float32)
+    r = tl.load(R + cols * r_stride_c, mask, other=0.0).to(tl.float32)
+
+    x += r
+    tl.store(R + cols * r_stride_c, x, mask=mask)
+
+    var = tl.sum(x * x / N, axis=0)
+    rrms = 1 / tl.sqrt(var + eps)
+
+    w = tl.load(W + tl.arange(0, BLOCK_SIZE), mask=mask, other=0.0)
+    y = (x * rrms).to(Y.dtype.element_ty) * w
+    tl.store(Y + cols * y_stride_c, y, mask=mask)
+
+
+@torch.no_grad()
+def fused_add_rmsnorm(x, residual, weight, eps=1e-5):
+    """Fused all-reduce-result + residual-add + RMSNorm (O11 communication–norm fusion).
+
+    After an all-reduce has completed in-place on ``x``, this adds ``residual``
+    and normalises in a single Triton kernel launch. The arithmetic is identical
+    to ``skip_rmsnorm(x, residual, weight, eps)``; the win is eliminating one
+    HBM read pass over the residual tensor that the separate path pays.
+
+    Under tensor parallelism the intended call pattern is::
+
+        partial = row_parallel_linear(x)          # all-reduce completes in-place
+        residual, y = fused_add_rmsnorm(partial, residual, weight, eps)
+
+    so the all-reduce's write and the norm's read hit the same cache line.
+
+    Args:
+        x: ``(..., hidden)`` all-reduced activations.
+        residual: ``(..., hidden)`` running residual, updated in place.
+        weight: ``(hidden,)`` learned scale.
+        eps: Added to the mean square before the reciprocal square root.
+
+    Returns:
+        ``(normalised, residual)`` — same contract as :func:`skip_rmsnorm`.
+    """
+    orig_shape = x.shape
+    x = x.contiguous().view(-1, orig_shape[-1])
+    M, N = x.shape
+    BLOCK_SIZE, num_warps = calculate_settings(N)
+    Y = torch.empty_like(x)
+    residual = residual.contiguous().view(-1, N)
+    fused_add_rms_norm_kernel[M,](
+        Y, x, residual, weight,
+        N, 1, N, 1, N, 1, N, eps,
+        BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps,
+    )
+    return Y.view(orig_shape), residual.view(orig_shape)
 
 
 @torch.no_grad()

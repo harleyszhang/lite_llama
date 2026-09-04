@@ -10,11 +10,106 @@ Usage:
                          max_actual_seq_len)
 """
 
+import os
+
 import torch
 import triton
 import triton.language as tl
 
 from ..quantization.w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
+
+#: Stage-1 inner block. ``PARTITION_SIZE`` must be a multiple of it (asserted below).
+_BLOCK_N_SIZE = 16
+
+#: Fixed split used before the adaptive policy (kept reachable for A/B and as the
+#: ``LITE_LLAMA_SPLITKV=fixed`` fallback).
+_FIXED_PARTITION_SIZE = 128
+
+
+def _splitkv_mode() -> str:
+    """Read ``LITE_LLAMA_SPLITKV``: ``adaptive`` (default) | ``fixed`` | an int.
+
+    An explicit integer pins ``PARTITION_SIZE`` to that value (rounded up to a
+    ``_BLOCK_N_SIZE`` multiple), which is what the on/off benchmark sweeps against.
+    """
+    raw = os.environ.get("LITE_LLAMA_SPLITKV", "adaptive").strip().lower()
+    return raw or "adaptive"
+
+
+def _num_sms(device: torch.device) -> int:
+    return torch.cuda.get_device_properties(device).multi_processor_count
+
+
+def adaptive_partition_size(
+    batch: int,
+    num_heads: int,
+    max_seq_len: int,
+    num_sms: int,
+    *,
+    blocks_per_sm: int = 16,
+    baseline: int = 128,
+    min_partition: int = 32,
+) -> int:
+    """Pick a KV partition size from the decode shape (O8 split-kv adaptivity).
+
+    The stage-1 grid is ``(batch, num_heads, num_partitions)`` with **one warp**
+    per program. On sm_86 an SM hosts at most ``blocks_per_sm`` (=16) concurrent
+    blocks, so one full wave is ``num_sms * blocks_per_sm`` blocks (1152 on A10).
+    ``batch * num_heads`` is the parallelism floor the shape already provides;
+    splitting the KV history supplies the rest.
+
+    The policy fixes the one case a fixed ``baseline`` measurably gets wrong:
+    when ``batch * heads * seq/baseline`` lands **below one wave** — batch=1
+    short/medium context, the single-request chat decode — the grid underfills
+    the SMs, so the history is split finer (down to ``min_partition`` tokens per
+    partition, which bounds the stage-2 combine) to raise occupancy. Measured on
+    A10: batch=1 seq=512 goes 128 -> 32 (128 -> 512 blocks), worth **1.8x**;
+    batch=1 seq=2048 goes 128 -> 64, worth ~1.13x.
+
+    Everywhere else the policy returns ``baseline`` untouched. Coarsening an
+    *overfilled* grid (large batch / long context) was measured and **dropped**:
+    its sign flips with ``(base, seq)`` — it helped batch=4 seq=8192 (~1.04x) but
+    hurt batch=64 seq=2048 (~0.95x) — and every magnitude sat inside ±5% noise,
+    so it bought no reliable win while risking regressions. Keeping the baseline
+    makes those cells exactly 1.0x. See ``docs/release-v0.12.0.md``.
+
+    A pure function of Python ints, so under a captured decode graph — where
+    ``batch`` and ``max_seq_len`` are baked in per bucket — it is deterministic
+    and graph-safe. Output is exact for any partition size (online-softmax
+    combine), so this only moves speed, never numerics.
+    """
+    if max_seq_len <= 0:
+        return baseline
+    base = max(1, batch * num_heads)
+    wave = max(1, num_sms * blocks_per_sm)
+    blocks_at_baseline = base * -(-max_seq_len // baseline)
+    if blocks_at_baseline >= wave:
+        # Already fills the GPU (or overfills it): the baseline is the measured
+        # best-or-neutral choice, so do not perturb it.
+        return max(_BLOCK_N_SIZE, -(-baseline // _BLOCK_N_SIZE) * _BLOCK_N_SIZE)
+
+    needed = -(-wave // base)  # partitions to reach one wave
+    max_parts = max(1, -(-max_seq_len // min_partition))
+    num_parts = max(1, min(needed, max_parts))
+    part = -(-max_seq_len // num_parts)  # ceil(seq / num_parts)
+    part = -(-part // _BLOCK_N_SIZE) * _BLOCK_N_SIZE
+    return max(min_partition, part)
+
+
+def _resolve_partition_size(
+    batch: int, num_heads: int, max_seq_len: int, device: torch.device
+) -> int:
+    """Resolve ``PARTITION_SIZE`` for one decode call per ``LITE_LLAMA_SPLITKV``."""
+    mode = _splitkv_mode()
+    if mode == "fixed":
+        return _FIXED_PARTITION_SIZE
+    if mode not in ("adaptive", "auto"):
+        try:
+            pinned = int(mode)
+        except ValueError:
+            return _FIXED_PARTITION_SIZE
+        return max(_BLOCK_N_SIZE, -(-pinned // _BLOCK_N_SIZE) * _BLOCK_N_SIZE)
+    return adaptive_partition_size(batch, num_heads, max_seq_len, _num_sms(device))
 
 
 @triton.jit
@@ -359,8 +454,14 @@ def flash_decoding(
     """
     # q.view(-1, num_heads, head_dim)
     assert q.shape[-1] == k_cache.shape[-1] == v_cache.shape[-1]
-    PARTITION_SIZE = 128  # 3090ti 显卡以上可设置为 256
     batchs, num_heads, head_dim = q.shape  # decode 阶段 q 的 seq_len = 1,
+
+    # O8: split the KV history by the decode shape rather than a fixed 128.
+    # batch=1 long context splits finer to fill the SMs; large batch splits
+    # coarser because batch*heads already saturates and the stage-2 combine is
+    # pure overhead. Exact for any partition size, and a pure function of Python
+    # ints so a captured graph bakes in one deterministic value per bucket.
+    PARTITION_SIZE = _resolve_partition_size(batchs, num_heads, max_actual_seq_len, q.device)
 
     kv_fp8 = k_cache.dtype == torch.uint8
     if kv_fp8:

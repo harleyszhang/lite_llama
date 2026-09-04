@@ -67,6 +67,50 @@ def test_align_no_padding_waste_when_full():
 
 
 # --------------------------------------------------------------------------- #
+# Launch-config fallback (the path an empty autotune store takes)
+# --------------------------------------------------------------------------- #
+def test_launch_config_fallback_runs_on_every_tier(monkeypatch):
+    """``_launch_config`` must evaluate on this device, store or no store.
+
+    Regression test. The PRE_HOPPER branch reads ``tile_tier``/``TileTier``; when
+    those names were missing from the module import the heuristic raised
+    ``NameError`` on every device, yet was only *reached* on GPUs whose autotune
+    store had no entry for the shape -- a populated H100 store never touched the
+    line, so the defect hid there and a fresh A10 crashed inside ``fused_moe``.
+    Forcing the env off guarantees the fallback runs here whatever the store
+    holds, across one rows-per-expert value per tier boundary and every mode.
+    """
+    monkeypatch.setenv("LITE_LLAMA_AUTOTUNE", "0")
+    from rapid_llm.kernels.ops.moe.fused_moe import _launch_config
+
+    device = torch.cuda.current_device()
+    for mode in range(7):
+        for rows in (1.0, 16.0, 33.0, 65.0):
+            cfg = _launch_config(64, mode, rows, device)
+            assert cfg["BLOCK_M"] > 0 and cfg["BLOCK_N"] > 0
+            assert cfg["BLOCK_K"] == 128
+            assert cfg["num_warps"] in (1, 2, 4, 8, 16)
+            assert cfg["num_stages"] in (2, 3)
+
+
+def test_fused_moe_runs_with_autotune_disabled(monkeypatch):
+    """The heuristic-only path (a new GPU's empty store) must produce output.
+
+    The companion to the test above: it pins the *names* the fallback needs, this
+    one pins that a full forward through both grouped GEMMs survives on it.
+    """
+    monkeypatch.setenv("LITE_LLAMA_AUTOTUNE", "0")
+    x = torch.randn(4, 64, device="cuda", dtype=torch.float16) / 8
+    w1 = torch.randn(4, 32, 64, device="cuda", dtype=torch.float16) / 8
+    w2 = torch.randn(4, 64, 16, device="cuda", dtype=torch.float16) / 4
+    ids = torch.randint(0, 4, (4, 2), device="cuda", dtype=torch.int32)
+    weights = torch.ones(4, 2, device="cuda", dtype=torch.float16)
+    out = fused_moe(x, w1, w2, weights, ids)
+    assert out.shape == (4, 64)
+    assert torch.isfinite(out).all()
+
+
+# --------------------------------------------------------------------------- #
 # fused_moe vs reference
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("num_tokens", [1, 3, 37, 128])
