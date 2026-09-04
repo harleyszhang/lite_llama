@@ -1,0 +1,277 @@
+{
+  "config": {
+    "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct",
+    "mode": "all",
+    "features": {
+      "cuda_graph": {
+        "use_cuda_graph": true
+      },
+      "lazy_graph": {
+        "use_cuda_graph": true,
+        "cuda_graph_lazy": true
+      },
+      "prefix_cache": {
+        "enable_prefix_cache": true
+      },
+      "chunked_prefill": {
+        "max_num_batched_tokens": 256
+      },
+      "pipeline": {
+        "pipeline": true
+      },
+      "async_tokenize": {
+        "async_tokenize": true
+      },
+      "fp8_kv": {
+        "kv_cache_dtype": "fp8"
+      },
+      "decode_window": {
+        "decode_window_steps": 2
+      }
+    },
+    "combos": null,
+    "workload": "shared",
+    "batch": 8,
+    "max_gen_len": 32,
+    "max_seq_len": 2048,
+    "max_num_seqs": 16,
+    "kv_blocks": 40960,
+    "tp": 1,
+    "shared_sentences": 32,
+    "greedy": true,
+    "verify": true,
+    "json": "/tmp/engine_features/features_qwen2.5-0.5b_shared.json",
+    "gpu": "h100",
+    "baseline": {
+      "use_cuda_graph": false,
+      "enable_prefix_cache": false,
+      "kv_cache_dtype": "auto",
+      "cuda_graph_lazy": false,
+      "async_tokenize": false,
+      "pipeline": false,
+      "decode_window_steps": 0
+    },
+    "cells": [
+      "baseline",
+      "cuda_graph",
+      "lazy_graph",
+      "prefix_cache",
+      "chunked_prefill",
+      "pipeline",
+      "async_tokenize",
+      "fp8_kv",
+      "decode_window",
+      "cuda_graph+prefix_cache",
+      "cuda_graph+chunked_prefill",
+      "cuda_graph+pipeline",
+      "cuda_graph+fp8_kv",
+      "cuda_graph+prefix_cache+chunked_prefill",
+      "cuda_graph+prefix_cache+chunked_prefill+pipeline"
+    ],
+    "timestamp": "2026-09-04T03:57:49"
+  },
+  "results": [
+    {
+      "label": "baseline",
+      "features": [],
+      "ttft_ms": 32.29262866079807,
+      "tpot_ms": 13.006312015932053,
+      "tps": 570.7414804371012,
+      "gen_tokens": 256,
+      "latency_s": 0.4485393278300762,
+      "gpus": 1,
+      "tps_per_gpu": 570.7
+    },
+    {
+      "label": "cuda_graph",
+      "features": [
+        "cuda_graph"
+      ],
+      "ttft_ms": 21.59225195646286,
+      "tpot_ms": 1.9746585167013109,
+      "tps": 3018.510379964037,
+      "gen_tokens": 256,
+      "latency_s": 0.0848100446164608,
+      "gpus": 1,
+      "tps_per_gpu": 3018.5
+    },
+    {
+      "label": "lazy_graph",
+      "features": [
+        "lazy_graph"
+      ],
+      "ttft_ms": 21.591637283563614,
+      "tpot_ms": 4.849170974921435,
+      "tps": 1448.0199748206542,
+      "gen_tokens": 256,
+      "latency_s": 0.17679314129054546,
+      "gpus": 1,
+      "tps_per_gpu": 1448.0
+    },
+    {
+      "label": "prefix_cache",
+      "features": [
+        "prefix_cache"
+      ],
+      "ttft_ms": 21.247347816824913,
+      "tpot_ms": 12.51968345604837,
+      "tps": 606.760295643733,
+      "gen_tokens": 256,
+      "latency_s": 0.421912906691432,
+      "gpus": 1,
+      "tps_per_gpu": 606.8
+    },
+    {
+      "label": "chunked_prefill",
+      "features": [
+        "chunked_prefill"
+      ],
+      "ttft_ms": 28.017062693834305,
+      "tpot_ms": 16.994241280136286,
+      "tps": 270.6861761327197,
+      "gen_tokens": 256,
+      "latency_s": 0.945744639262557,
+      "gpus": 1,
+      "tps_per_gpu": 270.7
+    },
+    {
+      "label": "pipeline",
+      "features": [
+        "pipeline"
+      ],
+      "ttft_ms": 21.430114284157753,
+      "tpot_ms": 12.210153865025324,
+      "tps": 586.3372394652027,
+      "gen_tokens": 256,
+      "latency_s": 0.43660880252718925,
+      "gpus": 1,
+      "tps_per_gpu": 586.3
+    },
+    {
+      "label": "async_tokenize",
+      "features": [
+        "async_tokenize"
+      ],
+      "ttft_ms": 1.263866201043129,
+      "tpot_ms": 0.5888348780803799,
+      "tps": 538.598905601327,
+      "gen_tokens": 256,
+      "latency_s": 0.47530731558799744,
+      "gpus": 1,
+      "tps_per_gpu": 538.6
+    },
+    {
+      "label": "fp8_kv",
+      "features": [
+        "fp8_kv"
+      ],
+      "ttft_ms": 23.61813560128212,
+      "tpot_ms": 15.586704423185438,
+      "tps": 490.02426494989436,
+      "gen_tokens": 256,
+      "latency_s": 0.5224231090396643,
+      "gpus": 1,
+      "tps_per_gpu": 490.0
+    },
+    {
+      "label": "decode_window",
+      "features": [
+        "decode_window"
+      ],
+      "ttft_ms": 20.78062854707241,
+      "tpot_ms": 12.459230259992182,
+      "tps": 610.2366813797846,
+      "gen_tokens": 256,
+      "latency_s": 0.41950936056673527,
+      "gpus": 1,
+      "tps_per_gpu": 610.2
+    },
+    {
+      "label": "cuda_graph+prefix_cache",
+      "features": [
+        "cuda_graph",
+        "prefix_cache"
+      ],
+      "ttft_ms": 20.63475362956524,
+      "tpot_ms": 1.8461478757672012,
+      "tps": 3210.4628967733947,
+      "gen_tokens": 256,
+      "latency_s": 0.0797392800450325,
+      "gpus": 1,
+      "tps_per_gpu": 3210.5
+    },
+    {
+      "label": "cuda_graph+chunked_prefill",
+      "features": [
+        "cuda_graph",
+        "chunked_prefill"
+      ],
+      "ttft_ms": 18.92392709851265,
+      "tpot_ms": 5.3136026900675555,
+      "tps": 836.9047496861797,
+      "gen_tokens": 256,
+      "latency_s": 0.3058890514075756,
+      "gpus": 1,
+      "tps_per_gpu": 836.9
+    },
+    {
+      "label": "cuda_graph+pipeline",
+      "features": [
+        "cuda_graph",
+        "pipeline"
+      ],
+      "ttft_ms": 21.617162972688675,
+      "tpot_ms": 1.820180017281981,
+      "tps": 3064.615389445477,
+      "gen_tokens": 256,
+      "latency_s": 0.0835341364145279,
+      "gpus": 1,
+      "tps_per_gpu": 3064.6
+    },
+    {
+      "label": "cuda_graph+fp8_kv",
+      "features": [
+        "cuda_graph",
+        "fp8_kv"
+      ],
+      "ttft_ms": 24.94179457426071,
+      "tpot_ms": 2.5417847209610045,
+      "tps": 2407.921545310135,
+      "gen_tokens": 256,
+      "latency_s": 0.10631575621664524,
+      "gpus": 1,
+      "tps_per_gpu": 2407.9
+    },
+    {
+      "label": "cuda_graph+prefix_cache+chunked_prefill",
+      "features": [
+        "cuda_graph",
+        "prefix_cache",
+        "chunked_prefill"
+      ],
+      "ttft_ms": 19.31891217827797,
+      "tpot_ms": 2.514652395620942,
+      "tps": 2134.305777161251,
+      "gen_tokens": 256,
+      "latency_s": 0.11994532495737076,
+      "gpus": 1,
+      "tps_per_gpu": 2134.3
+    },
+    {
+      "label": "cuda_graph+prefix_cache+chunked_prefill+pipeline",
+      "features": [
+        "cuda_graph",
+        "prefix_cache",
+        "chunked_prefill",
+        "pipeline"
+      ],
+      "ttft_ms": 19.109206274151802,
+      "tpot_ms": 2.6310977215568223,
+      "tps": 1974.2697070900654,
+      "gen_tokens": 256,
+      "latency_s": 0.12966820038855076,
+      "gpus": 1,
+      "tps_per_gpu": 1974.3
+    }
+  ]
+}
