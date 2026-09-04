@@ -35,6 +35,7 @@ from ..distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from ..executor.cuda_graph import DEFAULT_BATCH_SIZES
 from ..executor.executor import (
     Executor,
     MultiprocExecutor,
@@ -317,8 +318,22 @@ class ContinuousBatchingEngine:
         )
         # The replay cap reads the runner's live graph manager, so it is
         # settled after the executor; ``math.inf`` disables the chunked route.
+        #
+        # The cap falls back to the *configured* batch sizes when no manager
+        # exists (graphs off), so the threshold -- and therefore which kernel a
+        # resumed chunk takes -- is the same either way. That matters because
+        # the two routes are not numerically equivalent: EXTEND computes QK/PV
+        # as fp32 vector sums while the chunked kernel uses ``tl.dot`` on tensor
+        # cores, so a threshold that flipped with the graph switch made eager
+        # and graph disagree on the first token and diverge from there. Graph
+        # replay itself is bit-identical to eager (verified at capture), so a
+        # threshold that does not depend on the switch is enough to make the
+        # two agree. Measured cost is nil: on the shared-prefix workload this
+        # removed 9 output-mismatch cells at no TTFT/TPOT change, and on the
+        # long workload nothing moves because its resumed chunks are 256-394
+        # rows -- past either threshold, so the route was already the same.
         manager = self._graph_manager()
-        cap = max(manager.batch_sizes, default=0) if manager else 0
+        cap = max(manager.batch_sizes, default=0) if manager else max(DEFAULT_BATCH_SIZES)
         self._chunked_min_rows = cap + 1 if fused else math.inf
         # The executor owns the cache, so it decides how many requests can be in
         # flight; the scheduler hands out exactly those slots, and pages out of a

@@ -1,0 +1,86 @@
+{
+  "config": {
+    "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen3-30B-A3B-Instruct-2507",
+    "mode": "single",
+    "features": {
+      "cuda_graph": {
+        "use_cuda_graph": true
+      },
+      "lazy_graph": {
+        "use_cuda_graph": true,
+        "cuda_graph_lazy": true
+      },
+      "prefix_cache": {
+        "enable_prefix_cache": true
+      },
+      "chunked_prefill": {
+        "max_num_batched_tokens": 256
+      },
+      "pipeline": {
+        "pipeline": true
+      },
+      "async_tokenize": {
+        "async_tokenize": true
+      },
+      "fp8_kv": {
+        "kv_cache_dtype": "fp8"
+      },
+      "decode_window": {
+        "decode_window_steps": 2
+      }
+    },
+    "combos": null,
+    "workload": "short",
+    "batch": 8,
+    "max_gen_len": 32,
+    "max_seq_len": 1024,
+    "max_num_seqs": 16,
+    "kv_blocks": 40960,
+    "tp": 2,
+    "shared_sentences": 32,
+    "greedy": true,
+    "verify": true,
+    "json": "/tmp/engine_features/features_qwen3-30b-a3b_tp2.json",
+    "gpu": "h100",
+    "baseline": {
+      "use_cuda_graph": false,
+      "enable_prefix_cache": false,
+      "kv_cache_dtype": "auto",
+      "cuda_graph_lazy": false,
+      "async_tokenize": false,
+      "pipeline": false,
+      "decode_window_steps": 0
+    },
+    "cells": [
+      "baseline",
+      "cuda_graph"
+    ],
+    "timestamp": "2026-09-04T05:11:38"
+  },
+  "results": [
+    {
+      "label": "baseline",
+      "features": [],
+      "ttft_ms": 71.57333195209503,
+      "tpot_ms": 55.91288773763564,
+      "tps": 141.8345540950097,
+      "gen_tokens": 256,
+      "latency_s": 1.8049198351800442,
+      "gpus": 2,
+      "tps_per_gpu": 70.9
+    },
+    {
+      "label": "cuda_graph",
+      "features": [
+        "cuda_graph"
+      ],
+      "ttft_ms": 67.97325052320957,
+      "tpot_ms": 9.219925850629807,
+      "tps": 722.9892303190262,
+      "gen_tokens": 256,
+      "latency_s": 0.35408549569547176,
+      "gpus": 2,
+      "tps_per_gpu": 361.5
+    }
+  ]
+}
