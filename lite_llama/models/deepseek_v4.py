@@ -196,6 +196,27 @@ _DSPARK_TOP_KEYS: dict[str, str] = {
 _DSPARK_LAYER_PREFIX = re.compile(r"^layers\.(\d+)\.(.+)$")
 
 
+def adapt_dspark_key(key: str) -> str:
+    """Rewrite one DSpark checkpoint key into the loader's HF-style name.
+
+    The pure-rename half of :func:`_adapt_dspark_checkpoint`, shared with
+    :meth:`DeepseekV4Model.translate_weight_key` so key-level checks (the
+    checkpoint-index tests) see the same mapping a load performs.
+    """
+    expert = _DSPARK_EXPERT_KEY.match(key)
+    if expert is not None:
+        layer, index, proj, leaf = expert.groups()
+        suffix = "weight_scale_inv" if leaf == "scale" else "weight"
+        return f"layers.{layer}.mlp.experts.{index}.{_DSPARK_EXPERT_PROJ[proj]}.{suffix}"
+    mapped = _DSPARK_TOP_KEYS.get(key)
+    if mapped is not None:
+        return mapped
+    layer_key = _DSPARK_LAYER_PREFIX.match(key)
+    if layer_key is not None and layer_key.group(2) in _DSPARK_LAYER_KEYS:
+        return f"layers.{layer_key.group(1)}.{_DSPARK_LAYER_KEYS[layer_key.group(2)]}"
+    return key
+
+
 def _adapt_dspark_checkpoint(weights):
     """Rewrite a DSpark checkpoint stream into the loader's HF-style names.
 
@@ -208,20 +229,7 @@ def _adapt_dspark_checkpoint(weights):
     so every downstream loader sees the storage dtype it allocated.
     """
     for key, tensor in weights:
-        expert = _DSPARK_EXPERT_KEY.match(key)
-        if expert is not None:
-            layer, index, proj, leaf = expert.groups()
-            suffix = "weight_scale_inv" if leaf == "scale" else "weight"
-            mapped = f"layers.{layer}.mlp.experts.{index}.{_DSPARK_EXPERT_PROJ[proj]}.{suffix}"
-        else:
-            mapped = _DSPARK_TOP_KEYS.get(key)
-            if mapped is None:
-                layer_key = _DSPARK_LAYER_PREFIX.match(key)
-                mapped = (
-                    f"layers.{layer_key.group(1)}.{_DSPARK_LAYER_KEYS[layer_key.group(2)]}"
-                    if layer_key is not None and layer_key.group(2) in _DSPARK_LAYER_KEYS
-                    else key
-                )
+        mapped = adapt_dspark_key(key)
         if tensor.dtype == torch.float8_e4m3fn:
             # Ampere cannot compute on fp8; the w8a16 kernel widens the raw
             # bytes itself, and the parameters hold uint8.
@@ -474,11 +482,16 @@ class DeepseekV4Model(CausalLM):
     def translate_weight_key(self, key: str):
         """Map a checkpoint key onto this model's parameters.
 
-        transformers >= 5.9 nests the indexer's scorer projection one module
-        deeper (``indexer.scorer.weights_proj``) than the DSpark checkpoints
-        and lite_llama do; the rename keeps one parameter name serving both
+        A quantised checkpoint speaks DSpark's native vocabulary (``attn.wq_a``
+        paths, ``.scale`` leaves), so its keys get the same rewrite a load
+        applies before the translator sees them. transformers >= 5.9 nests the
+        indexer's scorer projection one module deeper
+        (``indexer.scorer.weights_proj``) than the DSpark checkpoints and
+        lite_llama do; the rename keeps one parameter name serving both
         layouts.
         """
+        if self.quant is not None:
+            key = adapt_dspark_key(key)
         return super().translate_weight_key(
             key.replace(".indexer.scorer.", ".indexer.")
         )
