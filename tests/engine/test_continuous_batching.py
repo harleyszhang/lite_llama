@@ -121,6 +121,7 @@ def build_engine(
     use_cuda_graph=False,
     max_seq_len=_MAX_SEQ_LEN,
     max_chunk_size=0,
+    pipeline=None,
 ):
     return ContinuousBatchingEngine(
         LLMEngine(
@@ -134,6 +135,7 @@ def build_engine(
             max_num_seqs=max_num_seqs,
             max_chunk_size=max_chunk_size,
         ),
+        pipeline=pipeline,
     )
 
 
@@ -264,6 +266,31 @@ def test_cuda_graph_replay_matches_eager(model_dir, reference):
     finally:
         del graphed
         _free()
+
+
+def test_the_launch_harvest_pipeline_matches_the_synchronous_loop(model_dir):
+    """Overlapping host work with compute must not change the tokens.
+
+    The pipeline harvests one step late, so a stop is seen a step later; the
+    token stream itself has to be identical. It was not while a staged readback
+    buffer re-entered the ring on its copy event alone: the next pass's copy
+    landed before the harvest read it, so every harvest saw the *following*
+    step's tokens -- the first one dropped and every later one shifted along.
+    """
+
+    def run(pipeline: bool) -> dict[str, str]:
+        engine = build_engine(model_dir, pipeline=pipeline)
+        try:
+            requests = [engine.add_request(prompt, GREEDY) for prompt in PROMPTS]
+            drain(engine)
+            return {request.prompt: request.text for request in requests}
+        finally:
+            del engine
+            _free()
+
+    synchronous, pipelined = run(False), run(True)
+    assert all(pipelined.values())
+    assert pipelined == synchronous
 
 
 # --------------------------------------------------------------------------- #

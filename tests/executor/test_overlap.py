@@ -222,6 +222,44 @@ def test_readbacks_in_flight_never_overwrite_each_other():
 
 
 @pytest.mark.gpu
+def test_a_readback_buffer_is_not_recycled_until_released():
+    """The copy event alone must not free a buffer its holder is still reading.
+
+    The launch/harvest loop issues the *next* pass's copy before it reads the
+    previous pass's tokens, so a buffer freed on its event would already carry
+    the wrong step's values by the time the harvest looked at it. Holding
+    handed-out buffers out of the ring is what makes the split safe.
+    """
+    pool = StreamPool("cuda", OverlapPolicy(enabled=True))
+    first, first_event = pool.readback_async(torch.full((4,), 1, device="cuda", dtype=torch.long))
+    first_event.synchronize()
+
+    # The copy has landed, so an event-only ring would call this buffer free.
+    second, second_event = pool.readback_async(torch.full((4,), 2, device="cuda", dtype=torch.long))
+    second_event.synchronize()
+    assert first.tolist() == [1] * 4, "the next readback overwrote a buffer still held"
+    assert second.tolist() == [2] * 4
+
+    # Releasing hands it back, and the next readback reuses that same storage --
+    # so the ring recycles instead of growing one buffer per step forever.
+    pool.release_readback(first)
+    third, third_event = pool.readback_async(torch.full((4,), 3, device="cuda", dtype=torch.long))
+    third_event.synchronize()
+    assert third.data_ptr() == first.data_ptr(), "a released buffer was not recycled"
+    assert third.tolist() == [3] * 4
+
+
+@pytest.mark.gpu
+def test_releasing_an_unstaged_view_is_a_no_op():
+    """Overlap off hands back a plain ``.cpu()`` tensor, which owns its own storage."""
+    pool = StreamPool("cuda", OverlapPolicy(enabled=False))
+    host, event = pool.readback_async(torch.arange(3, device="cuda", dtype=torch.long))
+    assert event is None
+    pool.release_readback(host)  # must not raise
+    pool.release_readback(torch.arange(3))  # nor a view it never handed out
+
+
+@pytest.mark.gpu
 def test_a_disabled_pool_falls_back_to_a_blocking_readback():
     pool = StreamPool("cuda", OverlapPolicy(enabled=False))
     device = torch.tensor([7, 8, 9], device="cuda", dtype=torch.long)

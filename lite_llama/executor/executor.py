@@ -101,6 +101,16 @@ class Executor(ABC):
         """
         return tokens.cpu(), None
 
+    def release_readback(  # noqa: B027 - optional hook, not abstract
+        self, host: torch.Tensor
+    ) -> None:
+        """Return a staged token buffer once the host has read it.
+
+        Default is a no-op, matching :meth:`readback_async`'s blocking
+        degradation: a ``.cpu()`` result owns its own storage, so there is no
+        ring buffer to give back. Real executors forward to their worker's pool.
+        """
+
     def timeline_summary(self) -> str:
         """Region table of the streams this executor ran on, for overlap diagnostics.
 
@@ -145,6 +155,9 @@ class UniProcExecutor(Executor):
 
     def readback_async(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.cuda.Event | None]:
         return self._worker.readback(tokens)
+
+    def release_readback(self, host: torch.Tensor) -> None:
+        self._worker.release_readback(host)
 
     def timeline_summary(self) -> str:
         return self._worker.timeline.summary()
@@ -202,6 +215,9 @@ class MultiprocExecutor(Executor):
         # Rank 0's copy is the only one that matters: followers discard their tokens
         # as they discard their sampled results.
         return self._worker.readback(tokens)
+
+    def release_readback(self, host: torch.Tensor) -> None:
+        self._worker.release_readback(host)
 
     def timeline_summary(self) -> str:
         """Only this rank's regions; the followers trace their own streams."""

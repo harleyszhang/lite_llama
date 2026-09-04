@@ -45,9 +45,10 @@ class _FakeTokenizer:
 class _ScriptedExecutor:
     """Returns scripted token rows; every execute is followed by a readback.
 
-    The readback hands back an independent host-side copy — like the pinned
-    buffer the real pool returns — so a later pass's tokens cannot overwrite
-    a buffer still awaiting its harvest.
+    The readback hands back a view of a ring buffer and counts both directions,
+    like the pinned pool the real worker owns. It deliberately does *not* hand
+    back an independent copy: a fake that did would let the loop pass while the
+    real pool recycled a buffer whose tokens had not been harvested yet.
     """
 
     def __init__(self, rows: list[list[int]]) -> None:
@@ -56,6 +57,8 @@ class _ScriptedExecutor:
         self.num_slots = 4
         self.num_kv_blocks = 0  # no real cache; the scheduler sizes its own pool
         self.readbacks = 0
+        self.releases = 0
+        self.in_use = 0
         self.plans: list = []
 
     def execute(self, plan) -> tuple:
@@ -69,7 +72,12 @@ class _ScriptedExecutor:
 
     def readback_async(self, tokens) -> tuple:
         self.readbacks += 1
+        self.in_use += 1
         return tokens.detach().clone(), None
+
+    def release_readback(self, host) -> None:
+        self.releases += 1
+        self.in_use -= 1
 
     def shutdown(self) -> None:
         pass
@@ -137,6 +145,25 @@ def test_pipeline_reports_the_same_tokens_one_step_late():
     assert request.pending_tokens == 0
     # Every launched pass asked for exactly one readback.
     assert executor.readbacks == len(executor.plans)
+
+
+def test_every_staged_buffer_is_handed_back():
+    """A buffer the loop never releases is a buffer the ring cannot reuse.
+
+    The real pool recycles on release, not on the copy event, because the next
+    pass's copy is issued before the previous pass's tokens are read. A missing
+    release would leave every step holding its own pinned buffer forever -- and
+    before that was fixed, it left each harvest reading the *wrong* step's
+    tokens. The counts are the cheap CPU-side half of that guarantee.
+    """
+    engine, executor = _build_engine([[_WORD], [_WORD], [_WORD], [_EOS]])
+    engine.add_request("hi")
+    _drain(engine)
+    engine.shutdown()
+
+    assert executor.readbacks == len(executor.plans)
+    assert executor.releases == executor.readbacks, "a staged buffer was never released"
+    assert executor.in_use == 0
 
 
 def test_pipeline_matches_the_synchronous_token_stream():

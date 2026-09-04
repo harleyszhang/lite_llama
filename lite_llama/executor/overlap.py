@@ -65,8 +65,9 @@ class StreamPool:
       stream waits on the event before its kernels read them.
     * **Readback** (:meth:`readback_async`): device results come back on D2H, ordered
       after the compute queue at issue time; the *host* waits on the event one step
-      later. The caller must finish reading the returned view before the next
-      readback recycles it — the engine's launch/harvest split guarantees that.
+      later. Its buffer is held out of the ring until :meth:`release_readback`,
+      because the copy event says only that the copy engine finished -- not that the
+      host has read the view handed out alongside it.
 
     Args:
         device: Device string the streams belong to.
@@ -87,6 +88,10 @@ class StreamPool:
         # direction so uploads and readbacks do not contend at crossed lifetimes.
         self._staging: deque[tuple[torch.Tensor, torch.cuda.Event | None]] = deque()
         self._spill: deque[tuple[torch.Tensor, torch.cuda.Event | None]] = deque()
+        # Readback buffers handed out and not yet released, keyed on the storage's
+        # address so a returned view can be matched back to its buffer. They sit
+        # outside ``_spill`` on purpose: see ``release_readback``.
+        self._in_use: dict[int, tuple[torch.Tensor, torch.cuda.Event | None]] = {}
 
     @property
     def copy_stream(self) -> torch.cuda.Stream:
@@ -133,9 +138,13 @@ class StreamPool:
         time (exactly the kernels that produced ``device_tensor``). The host does not
         wait: it reads the view later, after ``event.synchronize()``, by which point
         the copy landed under the next pass. Policy off: a plain blocking ``.cpu()``,
-        event ``None``. The returned view aliases a ring buffer; the holder must finish
-        reading before a readback recycles it (the ring's event check covers only the
-        copy engine) — the engine's harvest-N-1-before-launch-N pipeline guarantees it.
+        event ``None``.
+
+        The returned view aliases a ring buffer, and the holder owes a
+        :meth:`release_readback` once it has read it. Recycling on the copy event
+        alone would be wrong: the launch/harvest loop issues the *next* pass's copy
+        before it reads the previous pass's tokens, so an event-freed buffer would
+        already hold the wrong step's values by the time the harvest looked at it.
         """
         if not self._policy.enabled:
             return device_tensor.cpu(), None
@@ -153,8 +162,18 @@ class StreamPool:
             # its reference; without this the allocator could recycle the block and
             # the copy reads garbage — the mirror of consume()'s record_stream.
             flat.record_stream(self.copy_stream)
-        self._spill.append((pinned, event))
+        self._in_use[pinned.data_ptr()] = (pinned, event)
         return pinned[: flat.numel()].view(device_tensor.shape), event
+
+    def release_readback(self, host_view: torch.Tensor) -> None:
+        """Return a readback buffer to the ring once its holder has read it.
+
+        A view whose buffer was never handed out (overlap off, or an already
+        released one) is ignored, so the call is safe to make unconditionally.
+        """
+        entry = self._in_use.pop(host_view.data_ptr(), None)
+        if entry is not None:
+            self._spill.append(entry)
 
     def consume(self, event: torch.cuda.Event | None, *tensors: torch.Tensor | None) -> None:
         """Make the current stream wait for an :meth:`upload_async` event.
@@ -196,7 +215,7 @@ class StreamPool:
         """How many copies are in flight right now, either direction (test hook)."""
         return sum(
             1
-            for ring in (self._staging, self._spill)
+            for ring in (self._staging, self._spill, self._in_use.values())
             for _, event in ring
             if event is not None and not event.query()
         )

@@ -461,6 +461,15 @@ class ModelWorker:
         """
         return self._pool.readback_async(tokens, label="readback.tokens")
 
+    def release_readback(self, host: torch.Tensor) -> None:
+        """Hand a staged token buffer back once the host has read it.
+
+        See :meth:`~lite_llama.executor.overlap.StreamPool.release_readback`: the
+        buffer cannot rejoin the ring on its copy event alone, because the next
+        pass's copy is issued before this pass's tokens are harvested.
+        """
+        self._pool.release_readback(host)
+
     def _batched_sampling(self, params: tuple[SamplingParams, ...]) -> BatchedSamplingParams:
         """Device-side sampling knobs, rebuilt only when the sampled rows change.
 
