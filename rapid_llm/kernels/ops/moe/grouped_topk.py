@@ -1,34 +1,18 @@
 """Grouped top-k MoE routing: DeepSeek's grouped/biased router as one kernel.
 
-``grouped_topk`` is the semantic definer of DeepSeek's two grouped routing
-families — V2's ``group_limited_greedy`` and V2.5+/V3's ``noaux_tc``. The
-torch implementation (:func:`grouped_topk_torch`) is the reference the tests
-pin and the path CPU inputs take; on CUDA the wrapper launches
-:func:`_grouped_topk_kernel`, one program per token, which keeps every
-intermediate — scores, biased scores, group scores, the alive mask, the
-selection — in registers instead of paying the reference's chain of a dozen
-little kernels, each with its own launch and HBM round trip. At decode batch
-sizes the launches dominate: a 4-token route is ~10 launches of vectorised
-ops on tiny tensors; the kernel is one.
+``grouped_topk`` defines DeepSeek's two grouped routing families -- V2's
+``group_limited_greedy`` and V2.5+/V3's ``noaux_tc``. The torch reference
+(:func:`grouped_topk_torch`) is what the tests pin and what CPU inputs take; on
+CUDA the wrapper launches :func:`_grouped_topk_kernel`, one program per token,
+keeping every intermediate in registers instead of the reference's ~10 little
+kernels -- at decode batch sizes those launches dominate.
 
-Semantics (aligned with vLLM's ``grouped_topk``):
-
-1. Score every expert (softmax or sigmoid over the raw logits, fp32).
-2. Bias the scores when a correction bias exists: biased scores *choose*
-   the experts, original scores *weight* them.
-3. Score each group — the sum of its two best experts when a bias exists
-   (one outlier alone can't win a group), the plain max otherwise — keep
-   the ``topk_group`` strongest groups and mask every other expert out of
-   selection.
-4. Top-k over the survivors, renormalise the weights, apply the routed
-   scale.
-
-Exact score ties (fp32 sigmoid saturates to 1.0 past |logit| ~ 17) may
-resolve differently than ``torch.topk``: the kernel's argmax rounds take the
-lowest index, torch's CUDA top-k is unspecified. Real logits make exact ties
-measure-zero, and every rule that holds regardless of the tie-break — the
-weights are the winners' original scores, renormalised and scaled — is
-pinned by the tests.
+Semantics (aligned with vLLM): score every expert (softmax/sigmoid, fp32); biased
+scores *choose* experts while original scores *weight* them; score each group (sum
+of its two best when biased, else max), keep ``topk_group`` groups and mask the
+rest; top-k over survivors, renormalise, apply the routed scale. Exact fp32 ties
+may break differently than ``torch.topk`` (measure-zero on real logits); every
+tie-break-independent rule is pinned by the tests.
 
 Usage:
     from rapid_llm.kernels import grouped_topk

@@ -1,29 +1,20 @@
 """The two-batch-overlap executor primitives: op streams, stages, and state.
 
-sglang's ``srt/batch_overlap/operations.py`` discipline, ported one-for-one:
+sglang's ``operations.py`` discipline, ported one-for-one: an op stream is a list
+of ops separated by :class:`YieldOperation` markers, and ops between two yields
+form one indivisible *stage*; every op takes the micro-batch's :class:`StateDict`
+and mutates it, writing under a *new* key and popping what it consumes;
+:func:`execute_overlapped_operations` walks two streams in lockstep, the lead
+``delta_stages`` ahead, so A's GEMMs occupy the SMs while B sits in a comm op.
 
-* an op stream is a list of ops separated by :class:`YieldOperation` markers;
-  ops between two yields form one *stage* — indivisible, run to completion
-  before the other micro-batch resumes;
-* every op takes the micro-batch's :class:`StateDict` and mutates it, writing
-  its result under a *new* key and popping what it consumes;
-* :func:`execute_overlapped_operations` walks two streams in lockstep, the
-  lead ``delta_stages`` ahead, so micro-batch A's GEMMs occupy the SMs while
-  micro-batch B sits inside a communication op the NICs handle alone.
-
-:class:`StateDict` is the part worth porting: a key may be written once until
-it is popped, so an op that clobbers a predecessor's result raises instead of
-silently feeding stale data downstream — the class of bug the TBO closure
-snapshot produced, when every layer read the embedding output because the
-state had been captured at build time.
+:class:`StateDict` is the part worth porting: a key may be written once until it
+is popped, so an op that clobbers a predecessor's result raises instead of
+silently feeding stale data -- the bug the TBO closure snapshot produced, when
+every layer read the embedding output captured at build time.
 
 Usage:
     state = StateDict({"hidden_states": h, "residual": None})
-    execute_overlapped_operations(
-        [state_a, state_b],
-        [ops, ops],
-        delta_stages=[0, 2],
-    )
+    execute_overlapped_operations([state_a, state_b], [ops, ops], delta_stages=[0, 2])
 """
 
 from __future__ import annotations
