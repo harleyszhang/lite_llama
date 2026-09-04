@@ -312,17 +312,20 @@ class AllToAllDispatcher:
         """
         self._fence(handle)
         assert handle.recv_out is not None, "combine_b before combine_a"
-        n = handle.rows * handle.top_k
         # Gather drops the padding rows of the sorted layout in one step.
         results_sorted = handle.recv_out[handle.send_pos]
         results_flat = torch.empty_like(results_sorted)
         results_flat[handle.order] = results_sorted
         weighted = results_flat * handle.flat_weights.unsqueeze(-1)
-        out = torch.zeros(
-            handle.rows, handle.recv_out.shape[1],
-            dtype=weighted.dtype, device=weighted.device,
-        )
-        out.index_add_(0, torch.arange(n, device=out.device) // handle.top_k, weighted)
+        # Reduce the top-k slots per token with a shaped sum, NOT an index_add_: the
+        # scatter-add is CUDA atomics, whose arrival order varies run to run, and a
+        # bf16 atomic add re-rounds at every arrival — a ±1-ulp jitter per layer
+        # that twenty-seven layers amplify into a ~2-logit swing (the TP-graph
+        # parity gate then rightly rejects the grid). The layout already groups
+        # each token's slots contiguously (row = token*k + lane), so the sum is a
+        # fixed-order reduce over one axis: deterministic, and it accumulates in
+        # fp32, which is more precise than the atomics it replaces.
+        out = weighted.view(handle.rows, handle.top_k, -1).sum(dim=1)
         handle.events.clear()
         return out
 

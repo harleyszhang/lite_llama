@@ -11,8 +11,10 @@ Usage:
 
 from __future__ import annotations
 
+import contextlib
 import multiprocessing as mp
 import socket
+import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
@@ -371,7 +373,11 @@ def run_follower(
 
     Module-level so ``spawn`` can pickle it by name.
     """
-    from ..distributed.parallel_state import destroy_parallel, init_tensor_parallel
+    from ..distributed.parallel_state import (
+        abandon_parallel,
+        destroy_parallel,
+        init_tensor_parallel,
+    )
     from ..engine.llm_engine import LLMEngine
 
     torch.cuda.set_device(rank)
@@ -391,16 +397,33 @@ def run_follower(
         )
         _log.info("tp rank %d ready on cuda:%d", rank, rank)
         serve_plans(engine, max_num_seqs)
+    except BaseException:
+        # A follower that dies here would otherwise vanish silently: the spawn
+        # parent only reports an exception that propagates through
+        # ``Process._bootstrap``, so a crash whose cleanup below raises a
+        # second error (or that trips a native teardown path) prints nothing
+        # and the driver only sees a closed connection. Announce the failure
+        # on this rank's own stderr before the teardown gets a chance.
+        traceback.print_exc()
+        raise
     finally:
-        # Meet rank 0 at the destroy before running it: ncclCommAbort is collective in
-        # some NCCL versions, so ranks must abort together (a lone abort parks the peer
-        # forever). The deadline is the belt to that braces: a graph-captured
-        # communicator can park the abort in a futex, and a follower that cannot leave
-        # its teardown never exits to be reaped.
-        from ..distributed.parallel_state import (
-            abandon_parallel,
-            tensor_model_parallel_barrier,
-        )
+        # Release the captured graphs before the group: they hold NCCL kernels
+        # registered with the communicator, and destroy_parallel would block on
+        # them (this rank would then be terminated, hanging rank 0 in turn).
+        if engine is not None:
+            engine.model_runner.release_cuda_graph()
+        # Meet the driver's shutdown barrier before this process exits: the
+        # driver lines ranks up at the destroy itself (executor.shutdown), and
+        # a follower that exits first closes the gloo pair under that barrier
+        # — the driver reads it as a crashed peer. A driver already gone turns
+        # the barrier into an error of its own; the destroy still runs below.
+        from ..distributed.parallel_state import tensor_model_parallel_barrier
 
-        tensor_model_parallel_barrier()
+        with contextlib.suppress(Exception):
+            tensor_model_parallel_barrier()
+        # Same deadline the driver takes (``MultiprocExecutor.shutdown``): a
+        # communicator whose collectives a graph captured can wedge its abort
+        # forever, and a follower parked there gets SIGTERM'd by the driver's
+        # join timeout — the terminate is what surfaces as an interpreter
+        # abort. Abandoning keeps both sides' exits clean.
         _destroy_with_deadline(destroy_parallel, abandon_parallel)

@@ -145,6 +145,7 @@ def init_tensor_parallel(
     world_size: int = 1,
     master_port: int = 29500,
     backend: str | None = None,
+    enable_expert_parallel: bool = False,
 ) -> None:
     """Initialise a TP-only world: one replica whose ranks are ``[0, world_size)``.
 
@@ -156,6 +157,7 @@ def init_tensor_parallel(
         world_size: Number of TP ranks.
         master_port: TCP port for the rendezvous (rank 0 listens).
         backend: See :func:`init_parallel`.
+        enable_expert_parallel: See :func:`init_parallel`.
     """
     init_parallel(
         global_rank=rank,
@@ -163,6 +165,7 @@ def init_tensor_parallel(
         dp_size=1,
         master_port=master_port,
         backend=backend,
+        enable_expert_parallel=enable_expert_parallel,
     )
 
 

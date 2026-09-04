@@ -17,8 +17,6 @@ import torch
 import torch.nn as nn
 
 from ..kernels import qk_rmsnorm, rope_emb_forward, skip_rmsnorm
-from ..batch_overlap.two_batch_overlap import TboHalf, TwoBatchOverlap
-from ..kernels import rope_emb_forward, skip_rmsnorm
 from ..modules import (
     FusedMLP,
     LinearBase,
@@ -580,23 +578,3 @@ class CausalLM(nn.Module):
             rows = torch.arange(hidden_states.shape[0], device=hidden_states.device)
             hidden_states = hidden_states[rows, logits_positions]
         return self.lm_head(hidden_states)
-
-    def forward_tbo(self, halves: tuple[TboHalf, TboHalf]) -> torch.Tensor:
-        """Two-batch overlapped decode forward (L2).
-
-        Thin seam: the interleaving, the deferred all-reduces and their
-        fences are the executor's business
-        (:class:`~lite_llama.batch_overlap.two_batch_overlap.TwoBatchOverlap`); the model only
-        contributes the parts only it knows -- embeddings, the layer stack
-        (through its two-stage methods), the final norm and the vocabulary
-        head. The result matches what :meth:`forward` of the same step
-        returns, row for row, with both halves' reductions resolved.
-
-        Args:
-            halves: The split decode step, as
-                :class:`~lite_llama.batch_overlap.two_batch_overlap.TboSplitter.split` built it.
-
-        Returns:
-            ``[rows, 1, vocab]`` logits, rows in batch order.
-        """
-        return TwoBatchOverlap(self).forward(halves)

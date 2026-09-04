@@ -47,6 +47,9 @@ from ..tools.observability import Collective, CollectiveStats
 from ..utils.logger import get_logger
 from .overlap import Timeline
 
+# Temporary diagnostic: events deferred vs waited while a capture is open.
+CAPTURE_FENCE_STATS = {"deferred": 0, "fenced": 0}
+
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
     from ..modules.linear import LinearBase
 
@@ -256,11 +259,48 @@ class CommStreamPool:
             dist.all_reduce(tensor, group=group)
             CollectiveStats.record(Collective.ALL_REDUCE, payload)
             return None
+        if torch.cuda.is_current_stream_capturing():
+            mode = os.environ.get("LITE_LLAMA_CAPTURE_MODE", "fork")
+            if mode == "flatten":
+                dist.all_reduce(tensor, group=group)
+                CollectiveStats.record(Collective.ALL_REDUCE, payload)
+                return None
+            # Capture keeps the fork/join shape, not a flattened queue. While
+            # a capture is open PyTorch records kernels from *every* stream:
+            # a side stream that first waits an event the capture stream
+            # recorded becomes a branch of the graph, and the consumer's wait
+            # on the returned event becomes the join edge. Posting the
+            # collective on the capture stream itself would erase those edges
+            # — the graph would replay comm and compute strictly in issue
+            # order, and the overlap a TBO step exists to create would be
+            # gone. The fork itself is mandatory (an unordered side stream
+            # would race the capture stream), and the event is real: unlike
+            # eager, a capture cannot lean on the host to synchronise, only
+            # on the graph's own edges.
+            capture = torch.cuda.current_stream(self._device)
+            comm = self.stream
+            comm.wait_stream(capture)
+            with torch.cuda.stream(comm):
+                if mode == "bcast":
+                    dist.broadcast(tensor, src=dist.get_global_rank(group, 0), group=group)
+                else:
+                    dist.all_reduce(tensor, group=group)
+            event = torch.cuda.Event()
+            event.record(comm)
+            if mode == "immediate_join":
+                capture.wait_event(event)
+            tensor.record_stream(comm)
+            CAPTURE_FENCE_STATS["deferred"] += 1
+            CollectiveStats.record(Collective.ALL_REDUCE, payload)
+            return event
         compute = torch.cuda.current_stream(self._device)
         comm = self.stream
         comm.wait_stream(compute)
         with torch.cuda.stream(comm), self.timeline.region(label, "comm"):
-            dist.all_reduce(tensor, group=group)
+            if os.environ.get("LITE_LLAMA_CAPTURE_MODE") == "bcast":
+                dist.broadcast(tensor, src=dist.get_global_rank(group, 0), group=group)
+            else:
+                dist.all_reduce(tensor, group=group)
         event = torch.cuda.Event()
         event.record(comm)
         tensor.record_stream(comm)
@@ -305,6 +345,28 @@ class CommStreamPool:
             dist.all_to_all_single(output, input, group=group)
             CollectiveStats.record(Collective.ALL_TO_ALL, payload)
             return None
+        if torch.cuda.is_current_stream_capturing():
+            # Same capture rule as :meth:`all_reduce_async`: keep the
+            # fork/join edges the eager path builds. Flattening the exchange
+            # onto the capture stream would replay it between — not beside —
+            # the compute kernels, and a TBO or SBO graph would lose exactly
+            # the overlap it was captured for.
+            capture = torch.cuda.current_stream(self._device)
+            comm = self.stream
+            comm.wait_stream(capture)
+            with torch.cuda.stream(comm):
+                dist.all_to_all_single(output, input, group=group)
+            event = torch.cuda.Event()
+            event.record(comm)
+            # Both buffers belong to the exchange while it is in flight —
+            # under capture too: the caller may drop either reference the
+            # moment this returns, and a capture-time free would let the
+            # graph's pool reissue the block at the address the exchange is
+            # still reading. Recording defers that reuse past the branch.
+            input.record_stream(comm)
+            output.record_stream(comm)
+            CollectiveStats.record(Collective.ALL_TO_ALL, payload)
+            return event
         compute = torch.cuda.current_stream(self._device)
         comm = self.stream
         comm.wait_stream(compute)
@@ -391,6 +453,8 @@ class DeferredArContext:
         if not events:
             return
         stream = torch.cuda.current_stream(self._pool.device)
+        if torch.cuda.is_current_stream_capturing():
+            CAPTURE_FENCE_STATS["fenced"] += len(events)
         for event in events:
             stream.wait_event(event)
         events.clear()

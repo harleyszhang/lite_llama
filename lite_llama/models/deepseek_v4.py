@@ -546,15 +546,3 @@ class DeepseekV4Model(CausalLM):
             rows = torch.arange(batch, device=hidden_states.device)
             hidden_states = hidden_states[rows, logits_positions]
         return self.lm_head(hidden_states)
-
-    def forward_tbo(self, halves) -> torch.Tensor:
-        """TBO is not wired to V4 in v0.11.5.
-
-        The mHC block is a stream mixer, not the attention/MLP two-stage
-        split :class:`~lite_llama.batch_overlap.two_batch_overlap.TwoBatchOverlap` interleaves;
-        deferring its all-reduces needs a stream-aware design that is out of
-        scope for this version.
-        """
-        raise NotImplementedError(
-            "two-batch overlap does not support DeepSeek-V4's mHC stream stack in v0.11.5"
-        )

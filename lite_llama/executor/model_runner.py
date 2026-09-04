@@ -17,13 +17,16 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from ..batch_overlap.two_batch_overlap import TboSplitter, TwoBatchOverlap, tbo_policy
+from ..batch_overlap.two_batch_overlap import model_forward_maybe_tbo, tbo_policy
 from ..distributed.parallel_state import (
     divide,
+    expert_parallel_enabled,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce_min,
+    tensor_model_parallel_ranks_agree,
 )
 from ..kernels import update_kv_index
+from ..kernels.dispatcher import step_prepare_for
 from ..models.config import ModelConfig
 from ..models.registry import ModelRegistry, ModelSpec
 from ..utils.logger import get_logger
@@ -31,6 +34,7 @@ from .attention_metadata import AttentionMetadata
 from .cuda_graph import (
     DEFAULT_BATCH_SIZES,
     DEFAULT_SEQ_LEN_BUCKETS,
+    TP_GRAPH_PARITY_ATOL,
     CUDAGraphManager,
     estimate_capture_workspace,
 )
@@ -304,25 +308,8 @@ class ModelRunner:
         Multimodal models are supported: a capture only ever replays a decode
         step, and by then the vision tokens are ordinary KV-cache rows — the
         vision tower and DeepStack hooks run during prefill, which stays eager.
-
-        ``lazy`` (O13) captures only a seed pair now and lets
-        :meth:`CUDAGraphManager.try_replay` capture the remaining shapes the
-        first time a step needs them — the cold start stops paying for shapes
-        the workload may never produce. The KV profiler must have reserved
-        with ``cuda_graph_lazy`` too, or on-demand captures fight the cache for
-        the workspace that eager startup would have withheld.
-
-        ``tbo`` records eligible batches as the two-batch-overlap interleave
-        instead of the plain forward. The op stream is static, so the whole
-        ping-pong records like any other kernel sequence — halves' compute on
-        the capture stream, deferred all-reduces on the comm stream, event
-        fences between — and replay keeps the compute/comm overlap that eager
-        TBO pays its Python scheduling against a launch floor to achieve.
-        Eligibility still follows the TBO policy (its switch and its
-        ``min_rows`` floor), judged on each captured batch size, so small
-        batches keep the plain shape. Ranks stay in lockstep: the policy, the
-        grid and the world size are identical on every side.
         """
+
         if self._graph_manager is not None:
             return  # idempotent
 
@@ -333,6 +320,22 @@ class ModelRunner:
                 _TP_GRAPH_ENV,
             )
             return
+
+        # A captured graph replays the Python side of a kernel call verbatim, so
+        # a decode backend that assembles per-step inputs on the host would bake
+        # the capture-time lengths in and silently attend stale rows. vLLM runs
+        # the same gate (AttentionCGSupport) before its first capture.
+        from ..kernels.dispatcher import unsafe_for_graph
+
+        unsafe = unsafe_for_graph("attention.decode") + unsafe_for_graph("attention.mla_decode")
+        if unsafe:
+            raise ValueError(
+                "CUDA graph capture refused: the selected attention decode "
+                f"backend(s) {', '.join(unsafe)} assemble per-step inputs on the "
+                "host and would replay capture-time lengths forever. Pin the "
+                "native kernel (LITE_LLAMA_ATTENTION_DECODE_BACKEND=native) or "
+                "run without graphs."
+            )
 
         seq_len_buckets = tuple(b for b in seq_len_buckets if b <= self.max_seq_len)
         if not seq_len_buckets:
@@ -394,7 +397,62 @@ class ModelRunner:
             return
         if not captured:
             return
+
         self._graph_manager = manager
+
+    def _tp_graphs_are_safe(self, manager: CUDAGraphManager, captured: bool) -> bool:
+        """Whether this rank's captured graphs may serve traffic. Same answer everywhere.
+
+        Two checks, in this order because the first is what makes the second
+        well-defined:
+
+        1. **Grid agreement.** Every rank contributes a fingerprint of what it
+           captured, or ``0`` if it captured nothing. Ranks that disagree all
+           return ``False`` together — an asymmetric grid means one rank replays
+           where another runs eager, and the replayed all-reduce then waits
+           forever. A grid of ``0`` fails even when unanimous, so passing this
+           establishes that every rank *has* graphs and the parity check below is
+           entered by all of them or none.
+        2. **Numerical parity.** Each rank compares every captured graph against
+           an eager step on the same synthetic input and keeps the graphs only if
+           all ranks are within :data:`TP_GRAPH_PARITY_ATOL`. Reduced with a
+           minimum so one rank's failure retires the graphs everywhere; a group
+           where half the ranks replay is the hang again.
+
+        Both results are functions of a collective's output, which is why every
+        rank branches the same way without a second round of agreement.
+        """
+        fingerprint = manager.grid_fingerprint() if captured else 0
+        if not tensor_model_parallel_ranks_agree(fingerprint) or fingerprint == 0:
+            logger.warning(
+                "tensor-parallel ranks captured different CUDA graph grids "
+                "(this rank: %d); dropping graphs on every rank and decoding eager",
+                fingerprint,
+            )
+            return False
+
+        error = manager.max_parity_error(self.vocab_size)
+        # Phrased as ``error <= tol`` rather than ``not error > tol`` so that a NaN
+        # difference — the signature of a graph reading freed memory — fails the
+        # gate instead of slipping through a negated comparison.
+        local_ok = error <= TP_GRAPH_PARITY_ATOL
+        if tensor_model_parallel_all_reduce_min(int(local_ok)) != 1:
+            logger.warning(
+                "CUDA graph replay disagrees with eager decode by %.3e (tolerance %.1e) "
+                "on at least one rank; dropping graphs and decoding eager. "
+                "Per graph: %s",
+                error,
+                TP_GRAPH_PARITY_ATOL,
+                manager.parity_errors,
+            )
+            return False
+
+        logger.info(
+            "TP CUDA graphs verified: worst graph-vs-eager logit difference %.3e (tolerance %.1e)",
+            error,
+            TP_GRAPH_PARITY_ATOL,
+        )
+        return True
 
     @property
     def uses_cuda_graph(self) -> bool:
@@ -416,7 +474,7 @@ class ModelRunner:
         *,
         prefill: bool = False,
     ) -> torch.Tensor:
-        """The interleave itself: split into halves, ping-pong, concat back.
+        """The interleave itself, through the batch_overlap entry.
 
         One implementation behind both arms — the eager one
         (:meth:`forward_tbo`, metadata installed by ``begin_decode``) and the
@@ -428,13 +486,14 @@ class ModelRunner:
         ``prefill`` splits by sequence with a token-balanced cut and runs the
         prefill op stream; a decode step splits by row.
         """
-        splitter = TboSplitter()
-        halves = (
-            splitter.split_prefill(input_ids, position_ids, atten_info)
-            if prefill
-            else splitter.split(input_ids, position_ids, atten_info)
+        return model_forward_maybe_tbo(
+            self.model,
+            enable_tbo=True,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            atten_info=atten_info,
+            prefill=prefill,
         )
-        return TwoBatchOverlap(self.model).forward(halves, prefill=prefill)
 
     def _tbo_step(self) -> Callable[[torch.Tensor, torch.Tensor, AttentionMetadata], torch.Tensor]:
         """The step shape a TBO graph records: split, interleave, concat."""
@@ -450,24 +509,58 @@ class ModelRunner:
         """Per-batch decision on which step shape a captured graph records."""
         policy = tbo_policy()
         world_size = get_tensor_model_parallel_world_size()
+        expert_parallel = expert_parallel_enabled()
 
         def factory(batch_size: int) -> Callable | None:
-            if policy.capture_eligible(world_size=world_size, batch=batch_size):
+            if policy.capture_eligible(
+                world_size=world_size, batch=batch_size, expert_parallel=expert_parallel
+            ):
                 return self._tbo_step()
             return None
 
         return factory
+
+    def forward_maybe_tbo(
+        self, input_ids: torch.Tensor, position_ids: torch.Tensor, *, enable_tbo: bool
+    ) -> torch.Tensor:
+        """One decode step through the batch_overlap entry, overlapped or not.
+
+        sglang's shape: the caller (the worker, from :func:`tbo_policy`) answers
+        the policy question and hands it over as ``enable_tbo``; this method and
+        the module it delegates to own the execution. ``False`` runs the same
+        op stream serially (sglang's ``_model_forward_non_tbo``), so a decode
+        step's overlapped and plain arms share one definition of a layer.
+        The metadata must already be installed for the whole step
+        (``begin_decode``), which the decode path does before calling either arm.
+
+        Args:
+            input_ids: ``[rows, 1]`` the step's token ids.
+            position_ids: ``[rows, 1]`` absolute position per row.
+            enable_tbo: The policy's verdict for this step.
+
+        Returns:
+            ``[rows, 1, vocab]`` logits, rows in batch order -- the same
+            shape :meth:`forward` returns for the step.
+        """
+        return model_forward_maybe_tbo(
+            self.model,
+            enable_tbo=enable_tbo,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            atten_info=self.atten_info,
+        )
 
     def forward_tbo(self, input_ids: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
         """One decode step in two interleaved halves (L2 two-batch overlap).
 
         Splits the step with :class:`~lite_llama.batch_overlap.two_batch_overlap.TboSplitter`
         -- narrow views of the inputs plus per-half attention metadata over
-        the shared paged KV cache -- and runs the halves through
-        :class:`~lite_llama.batch_overlap.two_batch_overlap.TwoBatchOverlap`. The metadata must
+        the shared paged KV cache -- and runs the halves through the
+        batch_overlap entry's TBO arm: :func:`model_forward_maybe_tbo`
+        (``two_batch_overlap``) with ``enable_tbo=True``. The metadata must
         already be installed for the whole step (``begin_decode``), which
         the decode path does before choosing between this and
-        :meth:`forward`.
+        :meth:`forward_maybe_tbo`'s plain arm.
 
         Args:
             input_ids: ``[rows, 1]`` the step's token ids.
@@ -534,6 +627,16 @@ class ModelRunner:
             replayed = self._graph_manager.try_replay(input_ids, position_ids, self.atten_info)
             if replayed is not None:
                 return replayed
+
+        # Eager decode step: give the winning backend its once-per-step shot at
+        # hoisting per-layer host work (index assembly, wrapper planning) out
+        # of the layer loop — the role vLLM's build_metadata plays. Prefill
+        # passes and multimodal prefills never run it; the graph path needs no
+        # hook because its selected rows are all graph_safe by the gate above.
+        if multi_modal_inputs is None and input_ids.shape[-1] == 1:
+            prepare = step_prepare_for("attention.decode")
+            if prepare is not None:
+                prepare(self.atten_info, self)
 
         if self.spec.is_multimodal:
             return self.model(
