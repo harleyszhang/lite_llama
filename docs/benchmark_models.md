@@ -277,24 +277,26 @@ DeepSeek-V2/V3 的前若干层是 dense、之后才是 MoE（V2-Lite `first_k_de
 - **DeepSeek-V2-Lite（完整 27 层 = 1 dense + 26 MoE）**：30 GB 权重单张 A10（22 GiB）放不下，走 **TP2 跨两卡**；不剪层是因为 vLLM 0.21.0 的 DeepSeek 加载器无法跳过 `num_hidden_layers` 剪掉的层（对多出来的 `layers.N..26` 直接 `KeyError`），要拿到 vLLM 三方就必须跑完整模型。完整 27 层覆盖全部 26 个 MoE 层，稀疏路由被充分 exercise。
 - **DeepSeek-V3-4layers-MTP-BF16（4 层 = 3 dense + 1 MoE）**：官方剪裁 checkpoint，13 GB 单卡可放；完整 V3（61 层 / 256 专家 / 671B）两卡远放不下，故用这个 4 层 checkpoint、跑满 4 层覆盖到层 3 的 MoE；路由用 golden 门验证过的 regroup override（`n_group=2, topk_group=1, num_experts_per_tok=2`，把 8 专家 / 8 组重组成 2 组 × 4，恢复 noaux_tc 分组语义）。
 
-batch=8、gen_len=128、iters=2、bf16、解释器 `/home/honggao/projects/.venv/bin/python`（torch 2.11.0+cu129，含 transformers 5.8 / vLLM）。**并行口径按模型而定**：V2-Lite TP2（两卡，lite_llama 走 `ContinuousBatchingEngine`、transformers `device_map=auto`、vLLM `tensor_parallel_size=2`），V3-4layers 单卡；同一模型内三方并行一致、可直接比，跨模型（TP2 vs 单卡）不直接可比。
+batch=8、gen_len=128、iters=2、bf16。**每个框架在自己的 venv 下测**（双框架双环境口径）：lite_llama 与 transformers 在 `lite_llama/.venv`（torch 2.13.0+cu129、transformers 5.15），vLLM 在源码仓 venv（vllm 0.28.1rc1.dev、torch 2.13.0+cu129，PATH 需含其 bin——flashinfer JIT 要 ninja）。V2-Lite 行为历史共享 venv 口径（vLLM 0.21.0 / torch 2.11），V3 行为双 venv 重测值。**并行口径按模型而定**：V2-Lite TP2（两卡，lite_llama 走 `ContinuousBatchingEngine`、transformers `device_map=auto`、vLLM `tensor_parallel_size=2`），V3-4layers 单卡；同一模型内三方并行一致、可直接比，跨模型（TP2 vs 单卡）不直接可比。
 
-| 模型 | 层数（dense+MoE） | 并行 | 引擎 | TTFT (s) | TPOT (ms) | TGS (tok/s) | TPOT 加速比 |
-| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| DeepSeek-V2-Lite | 27（1+26） | TP2 | lite_llama | 0.0660 | 25.343 | 311.76 | 5.89× |
-| DeepSeek-V2-Lite | 27（1+26） | TP2 | transformers | 0.1197 | 149.287 | 53.68 | — |
-| DeepSeek-V2-Lite | 27（1+26） | TP2 | vLLM | 0.0988 | 24.439 | 318.82 | 0.96× |
-| DeepSeek-V3-4layers | 4（3+1） | 单卡 | lite_llama | 0.0237 | 15.506 | 513.83 | 1.48× |
-| DeepSeek-V3-4layers | 4（3+1） | 单卡 | transformers | 0.0244 | 22.902 | 349.1 | — |
-| DeepSeek-V3-4layers | 4（3+1） | 单卡 | vLLM | 0.0325 | 13.551 | 584.0 | 0.87× |
+| 模型 | 层数（dense+MoE） | 并行 | 引擎 | TTFT (s) | TPOT (ms) | TPS (tok/s) | TGS (tok/s) | 每卡 TGS (tok/s) | TPOT 加速比 | TGS 加速比 |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| DeepSeek-V2-Lite | 27（1+26） | TP2 | lite_llama | 0.0660 | 25.343 | 39.5 | 311.76 | 155.9 | 5.89× | 5.81× |
+| DeepSeek-V2-Lite | 27（1+26） | TP2 | transformers | 0.1197 | 149.287 | 6.7 | 53.68 | 26.8 | — | — |
+| DeepSeek-V2-Lite | 27（1+26） | TP2 | vLLM | 0.0988 | 24.439 | 40.9 | 318.82 | 159.4 | 0.96× | 0.98× |
+| DeepSeek-V3-4layers | 4（3+1） | 单卡 | lite_llama | 0.0230 | 15.372 | 65.1 | 518.41 | 518.41 | 1.54× | 1.53× |
+| DeepSeek-V3-4layers | 4（3+1） | 单卡 | transformers | 0.0248 | 23.621 | 42.3 | 338.55 | 338.55 | — | — |
+| DeepSeek-V3-4layers | 4（3+1） | 单卡 | vLLM | 0.0330 | 13.579 | 73.6 | 582.64 | 582.64 | 0.88× | 0.89× |
 
-（TPOT 加速比 = `对照 TPOT / lite_llama TPOT`，标在 lite_llama 行；vLLM 行是 `vLLM TPOT / lite_llama TPOT`，小于 1 即 vLLM 的 decode 更快。）
+（TPS = `1000 / TPOT` 每请求口径——V2/V3 的日志产生于 TPS 字段加入前的脚本版本，由 TPOT 折算，与同次 run 内实测等价；TGS = 总输出 token / latency 聚合口径；每卡 TGS：TP2 行按 TGS/2 折算，单卡行即 TGS 本身。加速比 = `对照指标 / lite_llama 指标`，标在 lite_llama 行；vLLM 行的 TPOT 加速比小于 1 即 vLLM 的 decode 更快，TGS 加速比同理是吞吐比。）
 
-结论（三项指标 TTFT / TPOT / TGS 齐报）：
+结果日志（`docs/benchmark_logs/`）：V2-Lite 的 lite_llama / transformers 行在 `bench_DeepSeek-V2-Lite_b8_g128_tp2_20260903_170619.json`，vLLM 行在 `bench_DeepSeek-V2-Lite_b8_g128_tp2_20260903_021325.json`（三方同次运行的 vLLM 数字；lite 行取 k-tile 修复与管线落地后的最新值，对比见下方结论）；V3 三方分别为 `bench_DeepSeek-V3-4layers-MTP-BF16_b8_g128_20260904_050014.json`（lite_llama）、`..._050117.json`（transformers）、`..._052340.json`（vLLM），双 venv 重测。
 
-- **lite_llama 的 decode 全面快过 transformers**：V2-Lite 27 层 TP2 TPOT **5.89×**、TGS 5.81×；V3 4 层 TPOT **1.48×**、TGS 1.47×（MLA 吸收 + 分页 KV，与主表规律一致）；TTFT 也领先（V2 1.81×、V3 1.03×）。
-- **vLLM 的稳态 decode 仅快 ~4%，两步修复后基本追平**：V2-Lite 27 层 TP2 上 vLLM 的 TPOT 是 lite_llama 的 **0.96×**（24.4 vs 25.3ms）、TGS 高 2%。TP CUDA graph（61.9→30.6ms）之后又落了两步：(1) **MoE grouped-GEMM 的 fp16 k-tile 提到整条 cache line 宽**（`_launch_config` 启发式：带宽主导的 M≤512 用 128、大 M 回落 64）——32 个 fp16 权重只有 64B，每行读半条 cache line，实测带宽效率 61%→81%、M 全程 -12%~-28%，TPOT 30.6→25.3ms；(2) **`LITE_LLAMA_PIPELINE=1`（O2 launch/harvest 管线，默认关）** 把 plan/readback 的 host 串行移出关键路径（decode 输入从 device 侧 token 网格 gather、索引走 pinned 异步上传），稳态 24.6ms/step（phase 计时口径，与 vLLM 持平）；此时 profile 确认 GPU kernel 已饱和（MoE 达 A10 实测带宽的 ~81%，专家权重读取是下限）。V3 4 层单卡上差距 **0.87×**（4 层里仅 1 层 MoE，k-tile 修复的影响被 dense 层稀释）。
-- **但 lite_llama 的 TTFT（prefill）反超 vLLM**：V2-Lite **1.50×**（0.0660 vs 0.0988 s）、V3 **1.37×**（0.0237 vs 0.0325 s），prefill 路径更轻。即 lite_llama 首 token 更快、且全面快过 transformers；vLLM 在完整 MoE 栈的稳态吞吐略高，各有胜负。
+结论（四项指标 TTFT / TPOT / TPS / TGS 齐报）：
+
+- **lite_llama 的 decode 全面快过 transformers**：V2-Lite 27 层 TP2 TPOT **5.89×**、TGS 5.81×；V3 4 层（双 venv 重测）TPOT **1.54×**、TGS 1.53×（MLA 吸收 + 分页 KV，与主表规律一致）；TTFT 也领先（V2 1.81×、V3 1.08×）。
+- **vLLM 的稳态 decode 仅快 ~4%，两步修复后基本追平**：V2-Lite 27 层 TP2 上 vLLM 的 TPOT 是 lite_llama 的 **0.96×**（24.4 vs 25.3ms）、TGS 高 2%。TP CUDA graph（61.9→30.6ms）之后又落了两步：(1) **MoE grouped-GEMM 的 fp16 k-tile 提到整条 cache line 宽**（`_launch_config` 启发式：带宽主导的 M≤512 用 128、大 M 回落 64）——32 个 fp16 权重只有 64B，每行读半条 cache line，实测带宽效率 61%→81%、M 全程 -12%~-28%，TPOT 30.6→25.3ms；(2) **`LITE_LLAMA_PIPELINE=1`（O2 launch/harvest 管线，默认关）** 把 plan/readback 的 host 串行移出关键路径（decode 输入从 device 侧 token 网格 gather、索引走 pinned 异步上传），稳态 24.6ms/step（phase 计时口径，与 vLLM 持平）；此时 profile 确认 GPU kernel 已饱和（MoE 达 A10 实测带宽的 ~81%，专家权重读取是下限）。V3 4 层单卡上差距 **0.88×**（4 层里仅 1 层 MoE，k-tile 修复的影响被 dense 层稀释）。
+- **但 lite_llama 的 TTFT（prefill）反超 vLLM**：V2-Lite **1.50×**（0.0660 vs 0.0988 s）、V3 **1.43×**（0.0230 vs 0.0330 s），prefill 路径更轻。即 lite_llama 首 token 更快、且全面快过 transformers；vLLM 在完整 MoE 栈的稳态吞吐略高，各有胜负。
 
 三处口径限制（如实记录）：
 
