@@ -54,11 +54,13 @@ FP8，2×H100 装不下。
 ## 5. 运行命令
 
 ```bash
-LITE_LLAMA_AUTOTUNE=0 ./bench_qk_norm_ab.sh fused    docs/benchmark_logs/qk_norm_fusion_ab
+# 单卡矩阵（离线 + 在线）；脚本内部已 export LITE_LLAMA_AUTOTUNE=0
+./benchmarks/bench_qk_norm_ab.sh fused    docs/benchmark_logs/qk_norm_fusion_ab single
 # 把 models/base.py 的 _project_qkv 切回两次 skip_rmsnorm 后：
-LITE_LLAMA_AUTOTUNE=0 ./bench_qk_norm_ab.sh baseline docs/benchmark_logs/qk_norm_fusion_ab
-./benchmarks/bench_qk_norm_ab_parallel.sh fused    docs/benchmark_logs/qk_norm_fusion_ab
-./benchmarks/bench_qk_norm_ab_parallel.sh baseline docs/benchmark_logs/qk_norm_fusion_ab
+./benchmarks/bench_qk_norm_ab.sh baseline docs/benchmark_logs/qk_norm_fusion_ab single
+# 并行侧矩阵（TP2 + DP2）；省略 scope 则一次跑完 single + parallel
+./benchmarks/bench_qk_norm_ab.sh fused    docs/benchmark_logs/qk_norm_fusion_ab parallel
+./benchmarks/bench_qk_norm_ab.sh baseline docs/benchmark_logs/qk_norm_fusion_ab parallel
 .venv/bin/python benchmarks/summarize_qk_norm_ab.py   # 从 JSON 重算每格比值
 ```
 
@@ -76,7 +78,7 @@ CUDA_VISIBLE_DEVICES=1 LITE_LLAMA_AUTOTUNE=0 PYTHONPATH=. .venv/bin/python \
 `online_<model>_{fused,baseline}.json`（4 个）、TP2 `tp2_<model>_{fused,baseline}.json`
 （4 个）、DP2 `dp2_<model>_{fused,baseline}/`（各含带时间戳的 JSON）。每个含 `config`
 （命令行参数与时间戳）与 `results`（TTFT / TPOT / TPS，多卡时加 TPS/GPU）。
-驱动脚本 `bench_qk_norm_ab.sh`（单卡）、`bench_qk_norm_ab_parallel.sh`（TP/DP）与
+驱动脚本 `bench_qk_norm_ab.sh`（scope=single 单卡 / parallel 并行 / all 两者）与
 汇总脚本 `summarize_qk_norm_ab.py` 均在 `benchmarks/`。
 
 ## 7. 结果
@@ -155,7 +157,7 @@ launch-bound，少一次 launch 直接减 TPOT；batch 变大后 GEMM 转为带�
 
 ## 9. TP2 / DP2（补齐并行档位）
 
-驱动脚本 `benchmarks/bench_qk_norm_ab_parallel.sh`，同样两侧各跑一遍。
+驱动脚本 `benchmarks/bench_qk_norm_ab.sh <variant> <out> parallel`，同样两侧各跑一遍。
 
 ### TP2（bench_optimizations --tp 2，batch=8，greedy + --verify）
 

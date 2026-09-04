@@ -6,22 +6,12 @@
 # 用法:
 #   ./benchmarks/run_benchmark_suite.sh              # 日志在 /tmp/models_bench
 #   PYTHON=/path/to/python ./benchmarks/run_benchmark_suite.sh   # 换解释器
-#
-# 前提:PYTHON 指向的解释器要有能跑 CUDA 的 torch 构建 —— 项目 .venv 若装的是
-# 比驱动新的 cu 版本,benchmark.py 会在加载模型时报 RuntimeError,这里提前拦下。
 set -u
-cd "$(dirname "$0")/.."
+. "$(dirname "$0")/lib/env.sh"
 
-PY="${PYTHON:-.venv/bin/python}"
 OUT="${1:-/tmp/models_bench}"
 mkdir -p "$OUT"
-
-if ! PYTHONPATH=. "$PY" -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
-    ver=$("$PY" -c "import torch; print(torch.__version__)" 2>/dev/null || echo "no torch")
-    echo "CUDA 不可用: $PY (torch $ver) 的构建与本机驱动不匹配。"
-    echo "换能跑 CUDA 的解释器,例如: PYTHON=/home/honggao/projects/.venv/bin/python $0"
-    exit 1
-fi
+require_cuda
 
 # run <name> "<batch:gen ...>" [benchmark.py 额外参数 ...]
 run() {

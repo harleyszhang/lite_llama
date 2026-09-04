@@ -127,7 +127,7 @@ def overlap_axes(out_dir: Path) -> None:
     ax.text(
         7.3,
         6.1,
-        "M7 combination matrix\nbenchmarks/bench_overlap_matrix.py\n"
+        "M7 combination matrix\npython -m benchmarks.overlap.policies\n"
         "eight cells, one load, switches only\ndemote proof: l2l3 == l2, all == l1l2",
         fontsize=9,
         va="center",
