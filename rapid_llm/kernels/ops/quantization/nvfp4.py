@@ -119,6 +119,7 @@ def _nvfp4_matmul_kernel(
     offs_blk = tl.arange(0, SCALE_COLS)
 
     a_ptrs = a_ptr + offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak
+    
     # B and its scales are indexed [n, k]: the nibble pair has to end up adjacent
     # in the last axis for the reshape below to land in k order, so the tile is
     # built row-major over N and transposed for the dot.

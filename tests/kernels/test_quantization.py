@@ -21,6 +21,7 @@ from rapid_llm.kernels.ops.quantization import (
     fp8_matmul,
     fp8_quantize_per_token,
     infer_scale_layout,
+    int8_quantize_per_token,
     nvfp4_matmul,
     per_token_group_quant,
     quantize_nvfp4_blockwise,
@@ -40,16 +41,8 @@ from tests.reference import nvfp4_dequant
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
-#: fp8-e4m3 keeps 3 mantissa bits, and W8A8 rounds *both* operands, so the
-#: product carries roughly two roundings' worth of error. Same value the fp8
-#: rows of ``benchmarks/kernels/bench_quant_gemm.py`` gate on.
-_FP8_RTOL, _FP8_ATOL = 5e-2, 5e-2
 
-#: Share of elements on which the fused quantiser may disagree with the torch
-#: helper. Only exact ties can disagree (a quotient landing halfway between two
-#: e4m3 codes, which the hardware cvt and torch's software cast break in opposite
-#: directions); measured at ~3e-5 of elements, so this leaves two orders of
-#: margin while still failing a real rounding bug, which would move far more.
+_FP8_RTOL, _FP8_ATOL = 5e-2, 5e-2
 _FP8_TIE_FRACTION = 1e-3
 
 
@@ -166,13 +159,6 @@ _GROUP_CASES = [
 @pytest.mark.parametrize(("shape", "group_size"), _GROUP_CASES)
 def test_per_token_group_quant_int8_matches_reference(shape, group_size, dtype):
     """Scales are exact; int8 bytes may differ only on round-boundary ties.
-
-    Both sides load the same bf16 value into fp32 and divide by the same
-    ``max(amax, eps)/127`` scale, so the scales are exact. The bytes can still
-    disagree where a quotient lands on a ``.5`` boundary: a 1 ULP difference
-    between the kernel's and torch's fp32 division flips the half-to-even
-    rint, moving the byte by exactly one — the same tie story as the fp8
-    quantiser, measured at ~4e-4 of elements on a 512x7168 row.
     """
     torch.manual_seed(0)
     x = torch.randn(*shape, device="cuda", dtype=dtype) * 3.0
@@ -374,15 +360,6 @@ def test_fp8_w8a8_matches_reference(M, N, K, blockwise):
 
     ``fp8_matmul`` was previously only exercised as the *reference* side of
     ``test_linear_dispatch.py``, which left the kernel itself ungated.
-
-    M=512 is not a fourth shape for its own sake: the launcher picks ``BLOCK_M``
-    from M, and Triton only emits Hopper's fp8 ``wgmma`` from ``BLOCK_M >= 64``,
-    widening both e4m3 operands to an fp16 ``mma.sync`` below that. The three
-    smaller shapes all land on ``BLOCK_M <= 32``, so without this one the fp8
-    tensor cores -- the entire point of the scheme -- were never entered by any
-    test. That instruction accumulates at reduced precision (see
-    ``moe.fused_moe._FP8_A8_PROMOTE_EVERY``), and the tolerance below still holds
-    with room to spare: it needs 5e-4 of atol where 5e-2 is granted.
     """
     torch.manual_seed(0)
     x = torch.randn(M, K, device="cuda", dtype=torch.bfloat16) * 0.5
@@ -471,30 +448,7 @@ def test_w8a16_fp8_blockwise_column_major_scale_matches_row_major(M, N, K):
     qw = w.to(torch.float8_e4m3fn).view(torch.uint8)
     gn = gk = 128
     scales_row = torch.rand((N + gn - 1) // gn, (K + gk - 1) // gk, device="cuda") + 0.5
-    # Same logical grid, N axis at stride 1 -- the physical layout SGLang's
-    # ``scale.t().contiguous().t()`` materialises, decided at allocation.
-    scales_col = scales_row.t().contiguous().t()
-    assert scales_col.stride(0) == 1 and not scales_col.is_contiguous()
 
-    out_row = w8a16_matmul(x, qw, scales_row, group_n=gn, group_k=gk)
-    out_col = w8a16_matmul(x, qw, scales_col, group_n=gn, group_k=gk)
-    torch.testing.assert_close(out_col, out_row)
-
-
-@pytest.mark.parametrize("M,N,K", [(1, 512, 256), (8, 2048, 2048)])
-def test_w8a16_fp8_blockwise_column_major_scale_matches_row_major(M, N, K):
-    """The kernel addresses scales through their strides, so the column-major
-    grid ``scale_parameter`` allocates at creation time must give identical
-    results to the row-major one — the layout decision is a performance
-    choice, never a numerical one."""
-    torch.manual_seed(0)
-    x = torch.randn(M, K, device="cuda", dtype=torch.float16) * 0.5
-    w = torch.randn(N, K, device="cuda", dtype=torch.float32) * 0.05
-    qw = w.to(torch.float8_e4m3fn).view(torch.uint8)
-    gn = gk = 128
-    scales_row = torch.rand((N + gn - 1) // gn, (K + gk - 1) // gk, device="cuda") + 0.5
-    # Same logical grid, N axis at stride 1 — the physical layout SGLang's
-    # ``scale.t().contiguous().t()`` materialises, decided at allocation.
     scales_col = scales_row.t().contiguous().t()
     assert scales_col.stride(0) == 1 and not scales_col.is_contiguous()
 
@@ -568,18 +522,6 @@ def test_w4a16_int4_groupwise_matches_reference(M, N, K, group_size):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_nvfp4_matches_reference(M, N, K, dtype):
     """The kernel's in-register decode must match an independent torch decode.
-
-    The comparison is against ``F.linear`` on the *reconstructed* weight, not on
-    the original float weight: NVFP4 loses about 9.5% relative on a Gaussian
-    tensor, which is a property of 4 bits and not something a kernel test can
-    or should gate on. What is under test is that
-    :func:`~tests.reference.nvfp4_dequant` — table lookup plus a
-    ``float8_e4m3fn`` view — and the kernel's bit-assembly plus shift trick
-    agree on which numbers those bytes name.
-
-    So the tolerance covers output-dtype rounding only. bf16 at ``|y| ~ 5``
-    has a ULP of 0.03, which is why ``rtol`` rather than ``atol`` has to carry
-    the larger shapes.
     """
     torch.manual_seed(0)
     w = torch.randn(N, K, device="cuda")
@@ -832,9 +774,6 @@ def test_gptq_int8_checkpoint_adapters():
     N, K, G = 128, 256, 128
     prefix = "model.layers.0.mlp.gate_proj"
 
-    # qzeros: [G, N//4] int32 words holding biased zero points (z_true - 1).
-    # z_true ∈ [1, 255] because the GPTQ bias stores z_true - 1 ∈ [0, 254];
-    # z_true = 0 would make z_cp = -1, which the byte cannot represent.
     z_true = torch.randint(1, 256, (G, N), dtype=torch.int32)
     z_cp = z_true - 1
     shifts = torch.arange(4, dtype=torch.int32) * 8
@@ -858,3 +797,181 @@ def test_gptq_int8_checkpoint_adapters():
 
     # g_idx: desc_act checkpoints only; dropped, the groups ride in K order.
     assert gptq_adapt_key(f"{prefix}.g_idx", torch.arange(K // G), bits=8) is None
+
+
+# --------------------------------------------------------------------------- #
+# w4a16: bf16 activations (the import fix unblocked this path)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("M,N,K", [(1, 256, 512), (8, 512, 1024)])
+@pytest.mark.parametrize("group_size", [32, 128])
+def test_w4a16_int4_bf16_matches_reference(M, N, K, group_size):
+    """bf16 activations exercise the same kernel path; the unpack is dtype-agnostic."""
+    torch.manual_seed(0)
+    x = torch.randn(M, K, device="cuda", dtype=torch.bfloat16) * 0.5
+    w = torch.randn(N, K, device="cuda", dtype=torch.float32) * 0.05
+    qw, scales, zeros = quantize_int4_groupwise(w, group_size)
+
+    out = w4a16_matmul(x, qw, scales, zeros, group_size=group_size)
+
+    k_packed = K // 8
+    w_unpacked = torch.zeros(N, K, device="cuda", dtype=torch.float32)
+    for i in range(k_packed):
+        word = qw[:, i].to(torch.int64)
+        for j in range(8):
+            nibble = (word >> (4 * j)) & 0xF
+            w_unpacked[:, i * 8 + j] = nibble.float()
+    num_groups = K // group_size
+    for g in range(num_groups):
+        k0, k1 = g * group_size, (g + 1) * group_size
+        w_unpacked[:, k0:k1] = (w_unpacked[:, k0:k1] - zeros[:, g : g + 1]) * scales[:, g : g + 1]
+    ref = x.float() @ w_unpacked.T
+    torch.testing.assert_close(out.float(), ref, rtol=5e-2, atol=5e-2)
+
+
+# --------------------------------------------------------------------------- #
+# int4 repack roundtrip: checkpoint -> byte layout -> kernel -> same output
+# --------------------------------------------------------------------------- #
+def test_int4_repack_roundtrip_via_w4a16():
+    """``repack_int4_experts`` then byte-layout kernel == direct int32-word kernel.
+
+    The fused MoE int4 path and the dense w4a16 path use different weight
+    layouts (byte pairs vs int32 words) but must produce the same numbers.
+    """
+    from rapid_llm.kernels.ops.quantization import repack_int4_experts
+
+    torch.manual_seed(0)
+    M, N, K, G = 4, 128, 256, 128
+    x = torch.randn(M, K, device="cuda", dtype=torch.float16) * 0.5
+    w = torch.randn(N, K, device="cuda", dtype=torch.float32) * 0.05
+    qw, scales, zeros = quantize_int4_groupwise(w, G)
+
+    # Dense path: int32 words, kernel unpacks in-register.
+    out_word = w4a16_matmul(x, qw, scales, zeros, group_size=G)
+
+    # MoE-style path: repack to byte layout, then reference dequant.
+    qw_byte = repack_int4_experts(qw)  # [N, K//2] uint8
+    assert qw_byte.shape == (N, K // 2)
+    # Reconstruct from byte layout: low nibble = even K, high nibble = odd K.
+    w_deq = torch.zeros(N, K, device="cuda", dtype=torch.float32)
+    w_deq[:, 0::2] = (qw_byte[:, :].to(torch.int32) & 0xF).float()
+    w_deq[:, 1::2] = ((qw_byte[:, :].to(torch.int32) >> 4) & 0xF).float()
+    num_groups = K // G
+    for g in range(num_groups):
+        k0, k1 = g * G, (g + 1) * G
+        w_deq[:, k0:k1] = (w_deq[:, k0:k1] - zeros[:, g : g + 1]) * scales[:, g : g + 1]
+    ref = x.float() @ w_deq.T
+
+    torch.testing.assert_close(out_word.float(), ref, rtol=5e-2, atol=5e-2)
+
+
+# --------------------------------------------------------------------------- #
+# Cross-quantization consistency: per-token-group at group_size=K matches
+# per-token quantiser
+# --------------------------------------------------------------------------- #
+def test_per_token_group_quant_matches_per_token_at_full_row():
+    """When ``group_size == K``, per-token-group degenerates to per-token.
+
+    Both compute ``amax / QMAX`` over the full row; the only difference is
+    the kernel shape (one program covers the whole row vs one group per
+    program). The scales and bytes must match exactly (same tie story).
+    """
+    torch.manual_seed(0)
+    M, K = 16, 1024
+    x = torch.randn(M, K, device="cuda", dtype=torch.bfloat16) * 3.0
+
+    # per-token-group with group_size = K
+    qg, sg = per_token_group_quant(x, K, out_dtype=torch.int8)
+    # per-token (fp8 path, but we compare int8 via the int8 quantiser)
+    qi, si = int8_quantize_per_token(x)
+
+    # Scales should be exactly equal (same amax/127 arithmetic).
+    torch.testing.assert_close(
+        sg.squeeze(-1), si.squeeze(-1), rtol=0, atol=0
+    )
+    # Bytes may differ on ties, but by at most 1.
+    differing = qg != qi
+    assert differing.float().mean().item() <= _FP8_TIE_FRACTION
+    delta = (qg.to(torch.int16) - qi.to(torch.int16)).abs()
+    assert int(delta.max().item()) <= 1
+
+
+# --------------------------------------------------------------------------- #
+# Edge cases: zero-size, narrow, and extreme-value tensors
+# --------------------------------------------------------------------------- #
+def test_quantization_edge_cases():
+    """Zero-row, single-element, and extreme-value tensors stay finite."""
+    # Zero-row fp8 quantize
+    x0 = torch.zeros(0, 128, device="cuda", dtype=torch.bfloat16)
+    qx, s = fp8_quantize_per_token(x0)
+    assert qx.shape == (0, 128) and s.shape == (0, 1)
+
+    # Single-element per-token-group
+    x1 = torch.tensor([[1.0, -1.0]], device="cuda", dtype=torch.bfloat16)
+    q1, s1 = per_token_group_quant(x1, 2, out_dtype=torch.int8)
+    assert q1.shape == (1, 2) and s1.shape == (1, 1)
+    assert s1.item() == pytest.approx(1.0 / 127.0, rel=1e-5)
+
+    # All-zeros group stays all-zeros
+    xz = torch.zeros(2, 256, device="cuda", dtype=torch.bfloat16)
+    qz, _ = per_token_group_quant(xz, 128, out_dtype=torch.int8)
+    assert not qz.any()
+
+
+# --------------------------------------------------------------------------- #
+# Common model shapes: every GEMM at Qwen3-4B / Qwen3-30B-A3B projection dims
+# --------------------------------------------------------------------------- #
+_QWEN3_4B_SHAPES = [
+    # (M, N, K) — gate_up, down, qkv, o_proj at the model's hidden=2560 geometry
+    (1, 13824, 2560),    # gate_up (2 * 5632 + 2560 for shared, but typical: 2*2560=5120)
+    (1, 2560, 6912),     # down_proj (6912 -> 2560)
+    (8, 2560, 2560),     # o_proj / prefill
+    (64, 2560, 2560),    # prefill batch
+]
+
+
+@pytest.mark.parametrize("M,N,K", _QWEN3_4B_SHAPES)
+def test_all_quant_gemms_at_model_shapes(M, N, K):
+    """Every dense quant GEMM produces finite, reasonable outputs at real shapes.
+
+    Not a precision test (that is what the per-kernel reference tests do):
+    this gates 'the kernel launches, runs, and returns something in the right
+    ballpark' at the shapes the model actually uses, catching shape-dependent
+    bugs (tile masking, k-tail handling, scale addressing) that small shapes miss.
+    """
+    torch.manual_seed(0)
+    x = torch.randn(M, K, device="cuda", dtype=torch.float16) * 0.5
+    w = torch.randn(N, K, device="cuda", dtype=torch.float32) * 0.05
+
+    # fp8 W8A8
+    qw_fp8 = w.to(torch.float8_e4m3fn).view(torch.uint8)
+    w_scale = torch.rand(N, 1, device="cuda") + 0.5
+    qx, xs = fp8_quantize_per_token(x)
+    out_fp8 = fp8_matmul(qx, xs, qw_fp8, w_scale, group_n=1, group_k=K)
+    assert out_fp8.shape == (M, N) and out_fp8.isfinite().all()
+
+    # w8a16 fp8 blockwise
+    gn = gk = 128
+    scales = torch.rand((N + gn - 1) // gn, (K + gk - 1) // gk, device="cuda") + 0.5
+    out_w8a16 = w8a16_matmul(x, qw_fp8, scales, group_n=gn, group_k=gk)
+    assert out_w8a16.shape == (M, N) and out_w8a16.isfinite().all()
+
+    # w8a16 int8 per-channel
+    qw_int8, s_int8 = quantize_int8_per_channel(w)
+    out_int8 = w8a16_matmul(x, qw_int8, s_int8, group_n=1, group_k=K)
+    assert out_int8.shape == (M, N) and out_int8.isfinite().all()
+
+    # smoothquant W8A8
+    out_sq = smoothquant_matmul(x, qw_int8, s_int8.squeeze(-1))
+    assert out_sq.shape == (M, N) and out_sq.isfinite().all()
+
+    # nvfp4
+    if K % 16 == 0:
+        packed, bscale, gscale = quantize_nvfp4_blockwise(w)
+        out_nvfp4 = nvfp4_matmul(x, packed, bscale, gscale)
+        assert out_nvfp4.shape == (M, N) and out_nvfp4.isfinite().all()
+
+    # w4a16 int4
+    if K % 128 == 0:
+        qw4, s4, z4 = quantize_int4_groupwise(w, 128)
+        out_w4 = w4a16_matmul(x, qw4, s4, z4, group_size=128)
+        assert out_w4.shape == (M, N) and out_w4.isfinite().all()

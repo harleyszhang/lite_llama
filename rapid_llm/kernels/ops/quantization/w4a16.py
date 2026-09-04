@@ -31,6 +31,8 @@ import torch
 import triton
 import triton.language as tl
 
+from ..tile_policy import TileTier, resolve_tiles, tile_tier
+
 _PACK_FACTOR = 8
 
 
@@ -220,6 +222,8 @@ def launch_config(m: int, device_index: int | None = None) -> dict[str, int]:
         "num_warps": 4,
         "num_stages": 3,
     }
+
+
 def _launch(
     a: torch.Tensor,
     qweight: torch.Tensor,
