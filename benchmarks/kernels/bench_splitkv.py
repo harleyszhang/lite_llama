@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kv_pool import PagedPool, paged_pool
 from microbench import bench, metadata, require_cuda, verify
 
-import rapid_llm.kernels  # noqa: F401  (importing the facade registers the spec rows)
+import rapid_llm.kernels
 from rapid_llm.kernels.ops.attention.flashdecoding import (
     _resolve_partition_size,
     flash_decoding,

@@ -24,11 +24,8 @@ from rapid_llm.distributed import parallel_state as ps
 from rapid_llm.distributed.sequence_parallel import (
     SequenceParallelPass,
     is_sequence_parallel,
+    sequence_parallel_eligible,
     sequence_parallel_enabled,
-)
-from rapid_llm.kernels.ops.layernorm.skip_rmsnorm import (
-    fused_add_rmsnorm,
-    sequence_parallel_allreduce_rmsnorm,
 )
 from tests.distributed.tp_harness import needs_gpus, run_on_tp_ranks
 
@@ -41,30 +38,16 @@ def _reset_grid():
 
 
 def _tiny_decoder_layer() -> nn.Module:
-    """A real ``DecoderLayer`` on the meta device, for pass-recognition tests.
+    """Minimal structural seam; pass recognition intentionally avoids imports."""
 
-    Built through the production class so the seam the pass looks for
-    (``forward_attn_stage`` + ``_post_attention_norm``) is the real one, not a
-    stand-in. Meta-device allocation keeps it free — no weights are materialised.
-    """
-    from transformers import LlamaConfig
+    class Seam(nn.Module):
+        def forward_attn_stage(self):
+            pass
 
-    from rapid_llm.executor.loader import init_empty_parameters
-    from rapid_llm.models.base import DecoderLayer
-    from rapid_llm.models.config import ModelConfig
+        def _post_attention_norm(self):
+            pass
 
-    hf = LlamaConfig(
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        vocab_size=128,
-        max_position_embeddings=128,
-    )
-    config = ModelConfig(hf, max_seq_len=128)
-    with init_empty_parameters():
-        return DecoderLayer(config)
+    return Seam()
 
 
 # --------------------------------------------------------------------------- #
@@ -98,11 +81,26 @@ def test_pass_disabled_by_env(monkeypatch):
     assert SequenceParallelPass().enabled is False
 
 
-def test_pass_enabled_by_default(monkeypatch):
-    """The pass is on unless explicitly disabled."""
+def test_pass_disabled_by_default(monkeypatch):
+    """Extra residual communication requires an explicit measured opt-in."""
     monkeypatch.delenv("RAPID_LLM_SEQUENCE_PARALLEL", raising=False)
-    assert sequence_parallel_enabled()
-    assert SequenceParallelPass().enabled is True
+    assert not sequence_parallel_enabled()
+    assert SequenceParallelPass().enabled is False
+
+
+@pytest.mark.parametrize(
+    ("tokens", "world", "overlap", "expected"),
+    [(8, 2, False, True), (7, 2, False, False), (8, 1, False, False), (8, 2, True, False)],
+)
+def test_runtime_eligibility_guards_shape_and_overlap(tokens, world, overlap, expected):
+    module = _tiny_decoder_layer()
+    module._sequence_parallel = True
+    assert (
+        sequence_parallel_eligible(
+            module, num_tokens=tokens, world_size=world, overlap_active=overlap
+        )
+        is expected
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -111,6 +109,11 @@ def test_pass_enabled_by_default(monkeypatch):
 @pytest.mark.gpu
 def test_sequence_parallel_degenerate_world_of_one():
     """With TP off the decomposition is exactly ``fused_add_rmsnorm``."""
+    from rapid_llm.kernels.ops.layernorm.skip_rmsnorm import (
+        fused_add_rmsnorm,
+        sequence_parallel_allreduce_rmsnorm,
+    )
+
     T, H = 8, 128
     partial = torch.randn(T, H, device="cuda", dtype=torch.float16)
     residual = torch.randn(T, H, device="cuda", dtype=torch.float16)
@@ -139,6 +142,8 @@ def test_sequence_parallel_decomposition_math():
     exercised by ``tests/distributed/test_parallel_state.py``; this isolates the
     decomposition arithmetic from the transport.
     """
+    from rapid_llm.kernels.ops.layernorm.skip_rmsnorm import fused_add_rmsnorm
+
     T, H, world = 8, 128, 2
     torch.manual_seed(0)
     # Two ranks' row-parallel partial sums (each rank holds its own).
@@ -188,6 +193,10 @@ def _sp_matches_reference_payload(rank: int) -> dict:
     import torch.distributed as dist
 
     from rapid_llm.distributed.parallel_state import get_tensor_model_parallel_group
+    from rapid_llm.kernels.ops.layernorm.skip_rmsnorm import (
+        fused_add_rmsnorm,
+        sequence_parallel_allreduce_rmsnorm,
+    )
 
     device = f"cuda:{rank}"
     T, H = 8, 256
@@ -234,7 +243,7 @@ def test_sequence_parallel_matches_allreduce_reference():
 def _pass_marks_under_tp_payload(rank: int) -> int:
     """Build a two-layer model under TP and run the pass; return the seam count."""
     model = nn.ModuleList([_tiny_decoder_layer() for _ in range(2)])
-    return SequenceParallelPass().apply(model)
+    return SequenceParallelPass(enabled=True).apply(model)
 
 
 @needs_gpus(2)

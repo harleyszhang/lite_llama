@@ -1,5 +1,5 @@
 {
-  "benchmark": "fused_add_rmsnorm_o11",
+  "benchmark": "fused_add_rmsnorm",
   "description": "fused_add_rmsnorm vs skip_rmsnorm on decode shapes",
   "results": [
     {

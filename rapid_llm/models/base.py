@@ -11,19 +11,27 @@ Usage:
 from __future__ import annotations
 
 from collections.abc import Iterable
-from contextlib import contextmanager
-from contextvars import ContextVar
 from typing import Any, ClassVar
 
 import torch
 import torch.nn as nn
 
-from ..distributed.sequence_parallel import SequenceParallelPass, is_sequence_parallel
+from ..batch_overlap.comm_overlap import (
+    comm_overlap_policy,
+    current_deferred_ar,
+    skip_row_parallel_all_reduce,
+)
+from ..distributed.parallel_state import get_tensor_model_parallel_world_size
+from ..distributed.sequence_parallel import (
+    SequenceParallelPass,
+    is_sequence_parallel,
+    sequence_parallel_eligible,
+)
 from ..kernels import (
     fused_add_rmsnorm,
-    fused_allreduce_rmsnorm,
     qk_rmsnorm,
     rope_emb_forward,
+    sequence_parallel_allreduce_rmsnorm,
     skip_rmsnorm,
 )
 from ..modules import (
@@ -40,22 +48,6 @@ from ..modules import (
 from ..modules.quantization import QuantizationConfig, adapt_packed_checkpoint
 from . import weights
 from .config import ModelConfig
-
-# O11 fusion: when TP>1, skip the o_proj all-reduce and decompose it into
-# reduce-scatter + RMSNorm + all-gather in _post_attention_norm.
-_O11_FUSION_ENABLED: ContextVar[bool] = ContextVar("o11_fusion", default=False)
-
-
-@contextmanager
-def _skip_allreduce_for_o11():
-    """Context: row-parallel all-reduces inside this block are skipped (O11)."""
-    # We use the batch_overlap infrastructure's skip flag.
-    from ..batch_overlap import comm_overlap as _co
-    token = _co._skip_allreduce.set(True)
-    try:
-        yield
-    finally:
-        _co._skip_allreduce.reset(token)
 
 
 class Attention(nn.Module):
@@ -209,6 +201,22 @@ class DecoderLayer(nn.Module):
         # the default is the dense SwiGLU.
         self.mlp = mlp if mlp is not None else FusedMLP(config, quant)
 
+    def _use_sequence_parallel(self, hidden_states: torch.Tensor) -> bool:
+        """Choose SP only when it does not replace an active overlap policy."""
+        if not is_sequence_parallel(self):
+            return False
+        tokens = hidden_states.shape[:-1].numel()
+        policy = comm_overlap_policy()
+        overlap_active = current_deferred_ar() is not None or (
+            policy.enabled and tokens >= policy.min_rows
+        )
+        return sequence_parallel_eligible(
+            self,
+            num_tokens=tokens,
+            world_size=get_tensor_model_parallel_world_size(),
+            overlap_active=overlap_active,
+        )
+
     def forward_attn_stage(
         self,
         hidden_states: torch.Tensor,
@@ -226,16 +234,16 @@ class DecoderLayer(nn.Module):
         at the head of :meth:`forward_mlp_stage`; everyone else keeps using
         :meth:`forward`, which runs the stages back to back.
 
-        Under sequence parallelism (the :class:`SequenceParallelPass` marked this
-        seam), the o_proj all-reduce is skipped here and decomposed into
-        reduce-scatter + RMSNorm + all-gather in :meth:`forward_mlp_stage`.
+        An eligible sequence-parallel call replaces that all-reduce at the
+        following norm. TBO and L3 keep precedence because they already overlap
+        the same communication.
 
         Returns the *un-normalised* attention output plus the running
         residual — :meth:`forward_mlp_stage`'s fused add-and-norm consumes
         the pair.
         """
-        if is_sequence_parallel(self):
-            with _skip_allreduce_for_o11():
+        if self._use_sequence_parallel(hidden_states):
+            with skip_row_parallel_all_reduce():
                 hidden_states, residual = skip_rmsnorm(
                     hidden_states, residual, self.input_layernorm_weight, self.rms_norm_eps
                 )
@@ -256,18 +264,13 @@ class DecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """The fused add-and-norm both MLP paths start with (dense and EP).
 
-        Under sequence parallelism (the :class:`SequenceParallelPass` marked this
-        seam), uses :func:`fused_allreduce_rmsnorm`: decomposes the all-reduce +
-        residual-add + RMSNorm into reduce-scatter → add+RMSNorm → all-gather,
-        norming only this rank's token segment and overlapping the norm with the
-        communication.
-
-        Otherwise uses :func:`fused_add_rmsnorm`: after the row-parallel
-        all-reduce completes in-place on ``hidden_states``, the residual
-        add and the RMSNorm run in a single Triton kernel pass.
+        Sequence parallelism uses a reduce-scatter/local-norm/all-gather rewrite
+        only for evenly sharded token counts and when TBO/L3 are inactive.
+        Otherwise the row-parallel dispatcher completes its reduction before
+        the fused residual-add/RMSNorm kernel.
         """
-        if is_sequence_parallel(self):
-            return fused_allreduce_rmsnorm(
+        if self._use_sequence_parallel(hidden_states):
+            return sequence_parallel_allreduce_rmsnorm(
                 hidden_states,
                 residual,
                 self.post_attention_layernorm_weight,
@@ -456,11 +459,7 @@ class CausalLM(nn.Module):
         self.rotary_emb = self.rotary_class(config.rope_config)
         self.rms_norm_eps = config.rms_norm_eps
 
-        # Sequence-parallelism graph pass: mark every AllReduce->RMSNorm seam
-        # (the o_proj output projection feeding the post-attention norm) to run
-        # the reduce-scatter -> local-norm -> all-gather decomposition under TP.
-        # A no-op when TP is off or RAPID_LLM_SEQUENCE_PARALLEL disables it; the
-        # blocks read the mark at their seam (see is_sequence_parallel).
+        # Optional module pass; runtime guards preserve TBO/L3 and odd batches.
         self.sequence_parallel_pass = SequenceParallelPass()
         self.sequence_parallel_pass.apply(self)
 

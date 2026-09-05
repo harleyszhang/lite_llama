@@ -18,7 +18,6 @@ import pytest
 import torch
 
 import rapid_llm.batch_overlap.comm_overlap as comm_overlap
-from rapid_llm.distributed import parallel_state as ps
 from rapid_llm.batch_overlap.comm_overlap import (
     COMM_OVERLAP_ENV,
     L3_CHUNKS_ENV,
@@ -31,6 +30,7 @@ from rapid_llm.batch_overlap.comm_overlap import (
     deferred_all_reduce,
     reset_comm_overlap_policy,
 )
+from rapid_llm.distributed import parallel_state as ps
 from rapid_llm.modules import RowParallelLinear
 from rapid_llm.tools.observability import Collective, CollectiveStats
 from tests.distributed.tp_harness import needs_gpus, run_on_tp_ranks
@@ -250,6 +250,7 @@ def _payload_collecting_routes_events_per_batch(rank: int) -> str:
         assert len(events) == 1, "one row-parallel forward defers exactly one reduce"
         ctx.fence(events)  # empties the collector
         assert events == []
+        assert ctx._events == [], "a consumed event must not be fenced again at context exit"
         assert torch.equal(partial, ps.tensor_model_parallel_all_reduce(layer.apply_linear(x)))
     return "ok"
 

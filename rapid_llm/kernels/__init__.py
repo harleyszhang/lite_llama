@@ -61,6 +61,10 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "qk_rmsnorm": (".ops.layernorm.skip_rmsnorm", "qk_rmsnorm"),
     "fused_add_rmsnorm": (".ops.layernorm.skip_rmsnorm", "fused_add_rmsnorm"),
     "fused_allreduce_rmsnorm": (".ops.layernorm.skip_rmsnorm", "fused_allreduce_rmsnorm"),
+    "sequence_parallel_allreduce_rmsnorm": (
+        ".ops.layernorm.skip_rmsnorm",
+        "sequence_parallel_allreduce_rmsnorm",
+    ),
     "rope_emb_forward": (".ops.rope.rope_emb", "rope_emb_forward"),
 }
 
@@ -114,6 +118,7 @@ __all__ = [
     "relu",
     "repack_int4_experts",
     "rope_emb_forward",
+    "sequence_parallel_allreduce_rmsnorm",
     "silu",
     "skip_rmsnorm",
     "smoothquant_matmul",

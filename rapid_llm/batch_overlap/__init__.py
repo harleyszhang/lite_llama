@@ -35,9 +35,9 @@ from .comm_overlap import (
     comm_overlap_policy,
     current_deferred_ar,
     deferred_all_reduce,
-    is_allreduce_skipped,
     reset_comm_overlap_policy,
     row_parallel_forward,
+    skip_row_parallel_all_reduce,
 )
 from .operations import (
     StateDict,
@@ -62,7 +62,7 @@ __all__ = [
     "deferred_all_reduce",
     "execute_operations",
     "execute_overlapped_operations",
-    "is_allreduce_skipped",
     "reset_comm_overlap_policy",
     "row_parallel_forward",
+    "skip_row_parallel_all_reduce",
 ]

@@ -42,6 +42,7 @@ from .parallel_state import (
 from .sequence_parallel import (
     SequenceParallelPass,
     is_sequence_parallel,
+    sequence_parallel_eligible,
     sequence_parallel_enabled,
 )
 
@@ -68,6 +69,7 @@ __all__ = [
     "recv",
     "reduce_scatter",
     "send",
+    "sequence_parallel_eligible",
     "sequence_parallel_enabled",
     "tensor_model_parallel_all_gather",
     "tensor_model_parallel_all_reduce",

@@ -76,8 +76,7 @@ def freeze_record(
             implementation measured under this key. The fastest becomes the
             entry's headline latency; all of them are kept so ranking can order
             the full candidate set.
-        gpu: Normalised GPU name the measurements are valid for
-            (``normalize_gpu_name(torch.cuda.get_device_name(0))``).
+        gpu: Normalised GPU name the measurements are valid for.
 
     Raises:
         ValueError: Empty measurement set — there is nothing to freeze.

@@ -20,9 +20,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-pytestmark = [pytest.mark.gpu]
-
 from rapid_llm.modules.quantization.utils import FP8_E4M3_MAX, quantize_fp8_per_tensor
+
+pytestmark = [pytest.mark.gpu]
 
 
 def _dequant_fp8(q: torch.Tensor, scale: float) -> torch.Tensor:

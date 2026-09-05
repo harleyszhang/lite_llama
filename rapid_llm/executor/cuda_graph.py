@@ -6,11 +6,9 @@ step fits one, else returns None so eager runs. Lazy mode (O13) captures only a
 seed pair at startup and the rest on first use, so cold start stays seconds-scale;
 a shape whose on-demand capture OOMs is blacklisted and runs eager.
 
-Under TP a captured region contains the blocks' all-reduce, so **every rank must
-choose the same graph every step** — a rank running eager while its peer replays
-hangs in a collective nobody issues. Three things make that safe: warmup_collectives
-before each capture (NCCL never initialises inside one), a grid fingerprint compared
-before graphs go live, and a replay decision reading only the broadcast ModelInput.
+Under TP a captured region contains collectives, so every rank must choose the
+same graph. Startup grids are fingerprinted, and lazy captures reach consensus
+before a newly captured shape can replay.
 
 Usage:
     mgr = CUDAGraphManager(model)
@@ -298,6 +296,12 @@ class CUDAGraphManager:
         self.b_req_tokens_table = b_req_tokens_table
         self.batch_sizes = tuple(sorted(set(batch_sizes)))
         self.seq_len_buckets = tuple(sorted(set(seq_len_buckets)))
+        if not self.batch_sizes or any(size < 1 for size in self.batch_sizes):
+            raise ValueError(f"CUDA graph batch sizes must be positive: {self.batch_sizes}")
+        if not self.seq_len_buckets or any(size < 1 for size in self.seq_len_buckets):
+            raise ValueError(
+                f"CUDA graph sequence-length buckets must be positive: {self.seq_len_buckets}"
+            )
         self.device = device
         self._lazy = lazy
         self._step_factory = step_factory
@@ -373,6 +377,7 @@ class CUDAGraphManager:
         """
         if key in self._failed or not self._on_grid(key):
             return None
+        runner: CUDAGraphRunner | None = None
         try:
             # The capture stream must be the only work in flight: pending readback
             # copies and kernels must land first.
@@ -380,6 +385,35 @@ class CUDAGraphManager:
             runner = self._new_runner(key)
             runner.capture(warmup_metadata=(atten_info.b_req_idx, atten_info.cur_select_index))
             self._runners[key] = runner
+        except (torch.cuda.OutOfMemoryError, torch.AcceleratorError) as exc:
+            if not isinstance(exc, torch.cuda.OutOfMemoryError) and "out of memory" not in str(
+                exc
+            ).lower():
+                raise
+            runner = None
+            self._failed.add(key)
+            logger.warning(
+                "Lazy capture of decode graph batch=%d bucket=%d ran out of "
+                "memory; that shape stays eager",
+                key.batch_size,
+                key.seq_len_bucket,
+            )
+        if get_tensor_model_parallel_world_size() > 1 and not tensor_model_parallel_ranks_agree(
+            int(runner is not None)
+        ):
+            # A peer OOM'd. Retire this rank's successful capture too: replaying
+            # it while the peer runs eager would deadlock at the first collective.
+            self._runners.pop(key, None)
+            self._failed.add(key)
+            runner = None
+            torch.cuda.empty_cache()
+            logger.warning(
+                "Lazy capture of decode graph batch=%d bucket=%d differed across "
+                "tensor-parallel ranks; that shape stays eager everywhere",
+                key.batch_size,
+                key.seq_len_bucket,
+            )
+        if runner is not None:
             logger.info(
                 "Lazy-captured decode graph batch=%d bucket=%d on first use "
                 "(%d/%d shapes captured)",
@@ -388,16 +422,7 @@ class CUDAGraphManager:
                 len(self._runners),
                 len(self.batch_sizes) * len(self.seq_len_buckets),
             )
-            return runner
-        except torch.cuda.OutOfMemoryError:
-            self._failed.add(key)
-            logger.warning(
-                "Lazy capture of decode graph batch=%d bucket=%d ran out of "
-                "memory; that shape stays eager",
-                key.batch_size,
-                key.seq_len_bucket,
-            )
-            return None
+        return runner
 
     def grid_fingerprint(self) -> int:
         """A number equal on two ranks exactly when their grids are.
@@ -506,8 +531,8 @@ class CUDAGraphManager:
 
         Lazy mode captures a missing shape here (not skips it), keeping the on-demand
         capture inside the decision every rank computes identically (the shape is a
-        function of the broadcast ``ModelInput``). A capture failing on one rank only
-        would split the group, so ``RAPID_LLM_TP_GRAPH_CHECK=1`` covers it.
+        function of the broadcast ``ModelInput``). A one-rank capture failure is
+        resolved by the miss path before either rank can replay.
         """
         batch_size, seq_len = input_ids.shape
         if seq_len != 1:

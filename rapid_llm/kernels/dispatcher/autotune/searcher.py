@@ -38,7 +38,7 @@ class AutotuneSearcher:
     @property
     def gpu(self) -> str:
         if self._gpu is None:
-            self._gpu = normalize_gpu_name(torch.cuda.get_device_name(0))
+            self._gpu = normalize_gpu_name(torch.cuda.get_device_name())
         return self._gpu
 
     def search(

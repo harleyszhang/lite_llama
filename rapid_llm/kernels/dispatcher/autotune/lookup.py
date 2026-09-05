@@ -35,7 +35,7 @@ def _get_gpu() -> str:
             import torch
 
             if torch.cuda.is_available():
-                _gpu_name = normalize_gpu_name(torch.cuda.get_device_name(0))
+                _gpu_name = normalize_gpu_name(torch.cuda.get_device_name())
             else:
                 _gpu_name = "unknown"
         except Exception:

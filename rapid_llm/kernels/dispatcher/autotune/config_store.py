@@ -10,9 +10,13 @@ Usage:
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import tempfile
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -53,8 +57,8 @@ class ConfigStore:
 
     def __init__(self, cache_dir: Path | None = None) -> None:
         self._cache_dir = Path(cache_dir) if cache_dir else _default_cache_dir()
-        # In-memory cache: op -> {TuneKey -> entry_dict}
         self._loaded: dict[str, dict[TuneKey, dict]] = {}
+        self._mutex = threading.RLock()
 
     @property
     def cache_dir(self) -> Path:
@@ -79,9 +83,8 @@ class ConfigStore:
         return self._ensure_loaded(key.op).get(key)
 
     def put(self, key: TuneKey, config: dict, latency_us: float) -> None:
-        """Insert or overwrite an entry and flush to disk."""
-        entries = self._ensure_loaded(key.op)
-        entries[key] = {
+        """Insert an entry without losing writes from another tuner process."""
+        entry = {
             "gpu": key.gpu,
             "shape_bucket": key.shape_bucket,
             "dtype": key.dtype,
@@ -89,7 +92,13 @@ class ConfigStore:
             "latency_us": latency_us,
             "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
         }
-        self._flush(key.op)
+        with self._write_lock(key.op):
+            # A prior lookup may have cached an older snapshot. Reload while
+            # holding the process lock, merge this key, then replace atomically.
+            entries = self._read(key.op)
+            entries[key] = entry
+            self._loaded[key.op] = entries
+            self._flush(key.op)
 
     def load_all(self, op: str) -> dict[TuneKey, dict]:
         """Return all entries for *op* (keyed by TuneKey)."""
@@ -106,6 +115,12 @@ class ConfigStore:
         """Lazy-load the op's JSON file into memory."""
         if op in self._loaded:
             return self._loaded[op]
+        entries = self._read(op)
+        self._loaded[op] = entries
+        return entries
+
+    def _read(self, op: str) -> dict[TuneKey, dict]:
+        """Read one operation's current on-disk entries."""
         entries: dict[TuneKey, dict] = {}
         path = self._json_path(op)
         if path.is_file():
@@ -118,8 +133,20 @@ class ConfigStore:
                     dtype=entry["dtype"],
                 )
                 entries[key] = entry
-        self._loaded[op] = entries
         return entries
+
+    @contextmanager
+    def _write_lock(self, op: str) -> Iterator[None]:
+        """Serialise writers in this process and across tuner processes."""
+        with self._mutex:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = self._cache_dir / f".{op}.lock"
+            with lock_path.open("a+b") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
 
     def _flush(self, op: str) -> None:
         """Serialise the op's entries to JSON (atomic write via rename)."""

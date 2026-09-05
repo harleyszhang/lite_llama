@@ -448,15 +448,19 @@ class Scheduler:
         place), because a row with nowhere to write is not a step it can take.
         """
         limit = self.config.max_seq_len
+        granted = list(prefill)
         for request in list(decode):
+            if request.status is not RequestStatus.RUNNING:
+                continue
             request.block_plan = ()
             # The token this step produces lands at position ``seq_len``, plus
             # whatever the pipeline launched and the host has not harvested.
             # Clamped: a request at the context limit writes no further row.
             reach = min(request.seq_len + request.pending_tokens + 1, limit)
-            if self._reserve(request, reach, prefill + decode, preempted):
+            if self._reserve(request, reach, granted, preempted):
                 self._map_blocks(request)
                 self._track_pending(request, min(request.seq_len, limit))
+                granted.append(request)
                 continue
             self._preempt(request)
             preempted.append(request)

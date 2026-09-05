@@ -1,10 +1,10 @@
 {
   "config": {
-    "optimization": "O4 MoE grouped-GEMM autotune collect (A10 tiles vs PRE_HOPPER heuristic)",
-    "switch": "LITE_LLAMA_AUTOTUNE=1(store)|0(heuristic)",
+    "optimization": "MoE grouped-GEMM autotune (A10 tiles vs PRE_HOPPER heuristic)",
+    "switch": "RAPID_LLM_AUTOTUNE=1(store)|0(heuristic)",
     "kernel": "native/fused_moe",
     "inference_mode": "offline kernel microbenchmark (no serving queue)",
-    "command": "benchmarks/kernels/bench_moe_o4.py --json docs/benchmark_logs/moe_o4_20260905_004218.json",
+    "command": "benchmarks/kernels/bench_moe_autotune.py --json docs/benchmark_logs/moe_autotune_20260905_004218.json",
     "geometry": {
       "label": "qwen3-30b-a3b",
       "hidden": 2048,

@@ -475,10 +475,8 @@ class ModelWorker:
         same row order, same downstream sampling -- the split is invisible
         past this method.
 
-        Under graphs the eager interleave stands down — but the step can
-        still be overlapped. Capture decides per batch size whether to record
-        the interleave itself (see :meth:`ModelRunner.enable_cuda_graph`), so
-        a replay carries the ping-pong instead of this method scheduling it.
+        A matching CUDA graph replays its captured policy. A graph miss keeps
+        this eager policy, so sparse capture grids do not disable overlap.
         """
         rows = len(plan.slots)
         self._slot_batch.begin_decode(plan.slots, plan.seq_lens)
@@ -487,25 +485,19 @@ class ModelWorker:
         positions = self._slot_batch.seq_lens.view(-1, 1) - 1
 
         with self.timeline.region("forward.decode", "compute"):
-            if self._runner.uses_cuda_graph:
-                # A captured step replays (or decodes eager) through the plain
-                # forward; capture already decided whether the recorded shape
-                # carries the interleave, so the policy is not re-asked here.
-                logits = self._runner.forward(prepared.input_ids, positions, None)
-            else:
-                # Both arms run the same op stream through the batch_overlap
-                # entry; the policy only decides whether two micro-batches
-                # interleave through it or one threads it alone.
-                logits = self._runner.forward_maybe_tbo(
-                    prepared.input_ids,
-                    positions,
-                    enable_tbo=tbo_policy().active(
-                        world_size=get_tensor_model_parallel_world_size(),
-                        rows=rows,
-                        graph_active=False,
-                        expert_parallel=expert_parallel_enabled(),
-                    ),
-                )
+            # Replay wins when this shape has a graph. A graph miss stays on
+            # the TBO-capable eager path instead of disabling overlap for every
+            # shape merely because some other graph exists.
+            logits = self._runner.forward_maybe_tbo(
+                prepared.input_ids,
+                positions,
+                enable_tbo=tbo_policy().active(
+                    world_size=get_tensor_model_parallel_world_size(),
+                    rows=rows,
+                    graph_active=False,
+                    expert_parallel=expert_parallel_enabled(),
+                ),
+            )
         # Decode never has prompt positions to score: they were all covered
         # during prefill, so the second element is uniformly empty.
         return self._pick(logits[:rows, -1, :], plan.sampled, rows), (None,) * len(plan.slots)

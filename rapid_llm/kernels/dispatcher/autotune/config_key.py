@@ -100,7 +100,7 @@ class TuneKey:
             import torch
 
             gpu = (
-                normalize_gpu_name(torch.cuda.get_device_name(0))
+                normalize_gpu_name(torch.cuda.get_device_name())
                 if torch.cuda.is_available()
                 else "unknown"
             )

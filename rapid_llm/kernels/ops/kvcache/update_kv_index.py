@@ -49,40 +49,24 @@ def _fwd_kernel_update_kv_index(
 
 @torch.no_grad()
 def update_kv_index(req_to_token_indexs, b_req_idx, b_seq_len, select_index):
-    """
-    根据每个 token 的请求索引 ID 和当前序列长度, 把这个 token 在 KV 缓存里的索引 (select_index)
-    存进输出张量 req_to_token_indexs 的正确位置
-    参数：
-        req_to_token_indexs (torch.Tensor): 输出张量，用于存储 KV 索引。形状为 (num_requests, max_seq_len)。
-        b_req_idx (torch.Tensor): 批次中每个请求的 ID, 形状为 (num_tokens,)。
-        b_seq_len (torch.Tensor): 每个请求的序列长度，形状为 (num_tokens,)。
-        select_index (torch.Tensor): 每个令牌的 KV 索引，形状为 (num_tokens,)。
-
-    该函数使用 Triton 内核来高效地执行复制操作。
-    """
-    # 获取序列长度，即令牌数量
-    seq_len = b_seq_len.shape[0]
-
-    # 确保所有输入张量在第一个维度上的大小相同
-    assert (
-        b_seq_len.shape[0] == select_index.shape[0] and b_req_idx.shape[0] == b_seq_len.shape[0]
-    ), "所有输入张量在第一个维度上的大小必须相同。"
-
-    # 定义 Triton 内核的网格大小（1D 网格）
+    """Write each token's cache row into its request table in place."""
+    if req_to_token_indexs.ndim != 2:
+        raise ValueError("req_to_token_indexs must be a 2-D tensor")
+    if b_req_idx.ndim != 1 or b_seq_len.ndim != 1 or select_index.ndim != 1:
+        raise ValueError("b_req_idx, b_seq_len, and select_index must be 1-D tensors")
+    seq_len = b_seq_len.numel()
+    if b_req_idx.numel() != seq_len or select_index.numel() != seq_len:
+        raise ValueError("b_req_idx, b_seq_len, and select_index must have the same length")
+    if seq_len == 0:
+        return
     grid = (seq_len,)
-
-    # 定义每个 block 使用的 warp 数量
-    num_warps = 1
-
-    # 启动 Triton 内核
     _fwd_kernel_update_kv_index[grid](
-        req_to_token_indexs,  # 输出张量的指针
-        b_req_idx,  # 请求索引张量的指针
-        b_seq_len,  # 序列长度张量的指针
-        select_index,  # 令牌索引张量的指针
-        req_to_token_indexs.stride(0),  # req_to_token_indexs 在第一个维度上的步幅
-        req_to_token_indexs.stride(1),  # req_to_token_indexs 在第二个维度上的步幅
-        num_warps=num_warps,  # 使用的 warp 数量
-        num_stages=1,  # 使用的流水线阶段数量
+        req_to_token_indexs,
+        b_req_idx,
+        b_seq_len,
+        select_index,
+        req_to_token_indexs.stride(0),
+        req_to_token_indexs.stride(1),
+        num_warps=1,
+        num_stages=1,
     )
-    return

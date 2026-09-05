@@ -1,5 +1,5 @@
 {
-  "benchmark": "fused_allreduce_rmsnorm_o11",
+  "benchmark": "fused_allreduce_rmsnorm",
   "description": "all-reduce + fused_add_rmsnorm vs all-reduce + skip_rmsnorm on TP=2",
   "tp_size": 2,
   "gpu": "NVIDIA A10",
@@ -42,5 +42,5 @@
     "max_speedup": 1.0,
     "min_speedup": 1.0
   },
-  "note": "The fused kernel saves one HBM read of the residual tensor but the all-reduce dominates latency. Real O11 win requires FlashInfer allreduce_fusion to fuse the communication with the norm."
+  "note": "The fused kernel saves one HBM read of the residual tensor, but the all-reduce dominates latency. Communication fusion needs a backend with a verified all-reduce norm epilogue."
 }

@@ -126,6 +126,27 @@ def test_manager_starts_with_empty_state(manager):
     assert manager._failed == set()
 
 
+@pytest.mark.parametrize(
+    ("batch_sizes", "seq_len_buckets"),
+    [
+        ((), (256,)),
+        ((0,), (256,)),
+        ((1,), ()),
+        ((1,), (-256,)),
+    ],
+)
+def test_manager_rejects_invalid_capture_grids(batch_sizes, seq_len_buckets):
+    with pytest.raises(ValueError, match="must be positive"):
+        CUDAGraphManager(
+            model=None,
+            kv_buffer=[],
+            b_req_tokens_table=torch.zeros(4, 64, dtype=torch.int32),
+            device="cpu",
+            batch_sizes=batch_sizes,
+            seq_len_buckets=seq_len_buckets,
+        )
+
+
 def test_on_grid_classifies_keys(manager):
     assert manager._on_grid(_GraphKey(1, 256))
     assert manager._on_grid(_GraphKey(128, 4096))
@@ -172,6 +193,25 @@ def test_blacklisted_shape_falls_back_to_eager_in_try_replay(fake_runner_cls):
 
     assert mgr.try_replay(ids, positions, attn) is None
     assert _GraphKey(2, 256) in mgr._failed
+
+
+def test_lazy_capture_mismatch_stays_eager_on_every_tp_rank(monkeypatch, fake_runner_cls):
+    """A peer OOM must retire this rank's successful graph before replay."""
+    monkeypatch.setattr(cuda_graph, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(cuda_graph, "tensor_model_parallel_ranks_agree", lambda _value: False)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    mgr = CUDAGraphManager(
+        model=None,
+        kv_buffer=[],
+        b_req_tokens_table=torch.zeros(4, 64, dtype=torch.int32),
+        device="cpu",
+        lazy=True,
+    )
+    key = _GraphKey(2, 512)
+
+    assert mgr._capture_on_miss(key, AttentionMetadata()) is None
+    assert key in mgr._failed
+    assert key not in mgr._runners
 
 
 # --------------------------------------------------------------------------- #
