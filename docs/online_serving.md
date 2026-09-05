@@ -5,7 +5,7 @@
 ## 快速开始
 
 ```bash
-pip install 'rapid-llm[serve]'          # fastapi + uvicorn，可选依赖
+pip install -e '.[serve,cuda]'         # 在仓库根目录安装 GPU 服务依赖
 rapid-llm serve --model-dir my_weight/Qwen2.5-1.5B-Instruct --port 8000
 ```
 
@@ -35,6 +35,8 @@ for chunk in client.chat.completions.create(
 
 ## 端点
 
+CPU 服务使用 `pip install -e '.[serve]'`，启动时加 `--device cpu --max-gpu-num-blocks 2048`。内存预算与能力限制见 [CPU 支持](cpu.md)。
+
 | 端点 | 说明 |
 | --- | --- |
 | `GET /health` | 存活探针 |
@@ -57,10 +59,11 @@ for chunk in client.chat.completions.create(
 | `--model-dir` | 环境变量 `RAPID_LLM_MODEL_DIR` | 权重目录 |
 | `--host` / `--port` | `0.0.0.0` / `8000` | 监听地址 |
 | `--served-model-name` | 目录名 | `/v1/models` 里报的名字 |
-| `--max-seq-len` | `2048` | 上下文窗口，同时也是每个槽位的 KV 容量 |
+| `--max-seq-len` | `2048` | 每条请求的上下文窗口；KV 从分页池分配 |
 | `--max-num-seqs` | `32` | 同时 decode 的请求数上限（DP 下是**每副本**的上限） |
 | `--max-num-batched-tokens` | `8192` | 一次 prefill 分组的 padded token 预算 |
-| `--max-gpu-num-blocks` | 自动 profile | 手动指定 KV cache 行数 |
+| `--max-gpu-num-blocks` | GPU 自动估算 / CPU 4096 | 指定 KV cache token 行数 |
+| `--device` | `cuda` | 执行设备；CPU 使用 `cpu` |
 | `--no-cuda-graph` | 关 | 用 eager decode 而不是 replay graph |
 | `--no-chat-template` | 关 | base 模型用：消息原样拼接，不套模板 |
 | `--tensor-parallel-size` | `1` | 一份权重的 TP 切分数（切权重，装得下大模型） |
@@ -98,7 +101,7 @@ rapid-llm serve --model-dir my_weight/Qwen2.5-1.5B-Instruct \
     --data-parallel-size 2 --load-balancer total_tokens
 ```
 
-设计与实测（weak scaling 2.00x 线性）见[数据并行](./data_parallel.md)。
+进程布局与历史实测见[数据并行](./data_parallel.md)。吞吐随工作负载和硬件变化，不保证线性扩展。
 
 ## 不经 HTTP 直接用
 

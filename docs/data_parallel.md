@@ -1,8 +1,21 @@
 # 数据并行（data parallelism）
 
-## 为什么需要它
+## 副本与请求路由
 
-张量并行（TP）把**一个权重矩阵**切到多张卡上，让放不下单卡的大模型跑起来，代价是每个 block 一次 all-reduce。数据并行（DP）解决的是另一个问题：模型单卡放得下，但**请求太多**，一张卡喂不饱吞吐。DP 不切权重，而是把**请求流**分给若干份完整模型副本，每个副本各占一张卡、各跑各的 batch，前向过程里**没有任何集合通信**。
+数据并行（DP）把请求分给独立模型副本，副本之间不交换前向张量。张量并行（TP）在副本内部切分权重，需要集合通信。两者可以组合，也都支持显式选择 CPU；CPU 副本共享主存带宽，不保证增加副本就提高吞吐。
+
+```python
+from rapid_llm import DataParallelEngine, SamplingParams
+
+if __name__ == "__main__":
+    with DataParallelEngine(
+        "my_weight/Qwen2.5-0.5B", device="cpu", data_parallel_size=2,
+        max_seq_len=512, max_num_seqs=2, max_gpu_num_blocks=2048,
+    ) as engine:
+        outputs = engine.generate(["Hello", "Good morning"], SamplingParams(max_gen_len=16))
+```
+
+多进程示例应保存为脚本执行，并使用 `__main__` 保护，避免 spawn 子进程重复创建引擎。
 
 因此两者是正交的、可组合的：`dp_size` 份副本，每份 `tp_size` 张卡，构成一个 `dp_size × tp_size` 的 rank 网格（见 `rapid_llm/distributed/parallel_state.py`）。 TP 用延迟换"装得下"，DP 用显存（每卡一份权重）换吞吐。
 
@@ -12,7 +25,7 @@
 
 ## 分层结构
 
-实现照搬 vLLM 与 SGLang 的分工，只是缩到 rapid_llm 的同步批处理 API 上。三者各司其职，互不知道对方的内部：
+副本执行、路由策略和进程协调分开实现：
 
 | 角色 | 本仓库 | vLLM | SGLang |
 | --- | --- | --- | --- |
@@ -32,9 +45,9 @@
   不会应答的 worker。
 - **协调器**（`DataParallelEngine`）本进程里**什么模型都不加载**——它只有 worker 进程和一个 balancer，所以它刻意**不是** `LLM` 的子类：没有权重、没有 KV cache、没有 sampler。
 
-## 请求怎么路由
+## 路由策略
 
-`dp_load_balancer.py` 里是三个纯策略对象，不碰队列、进程和张量，因此在 CPU 上毫秒级可测。名字直接沿用 SGLang 的 `LoadBalanceMethod` 拼写，认识一边就认识另一边：
+`dp_load_balancer.py` 中的策略不持有队列、进程或张量。基础策略如下，另有按前缀亲和选择副本的 `cache_aware` 策略：
 
 - **`round_robin`**（默认）：0,1,0,1… 轮流发，不管每个请求跑多久。离线批处理的正确默认—— 所有 prompt 一起到，没有哪条特别长。用条带式（0,2,4,… 给副本 0）而不是切连续区间，是为了把长短请求均匀打散，避免一个已排好序的列表把所有长 prompt 都堆给同一个副本。
 - **`total_requests`**：发给当前在飞**请求数**最少的副本。所有副本空闲时它退化成轮询（低下标优先），所以能安全地做默认的替身。
@@ -48,6 +61,8 @@
 
 ## 与张量并行的关系
 
+CUDA 的 TP 数据面使用 NCCL，CPU 使用 Gloo；控制面使用 Gloo。下文 NCCL 的描述针对 GPU 部署。
+
 网格坐标是纯函数 `grid_coordinates(global_rank, tp_size, dp_size) → (dp_rank, tp_rank)`，按 `global_rank = dp_rank * tp_size + tp_rank` 布局，让一个副本的 TP ranks 连续。 `init_parallel` 只有在 `tp_size > 1` 时才真正 rendezvous 建 NCCL 进程组——纯 DP 的副本之间不共享任何张量，没什么好同步的，NCCL 完全不碰。这也是为什么纯 DP 用普通的 `multiprocessing` 队列而不是 NCCL：worker 从不读另一个 worker 的张量。
 
 **进程数按 cell 算，队列数按副本算。** `tp_size > 1` 时 `init_parallel` rendezvous 的是 `dp_size × tp_size` 个 rank 的世界，所以只 spawn `dp_size` 个进程会**永久挂死**在等待从未启动的 rank 上——一个协调器的任何超时都解释不了的失败。所以协调器为每个 cell 起一个进程，但**请求队列只有 `dp_size` 个**：一条请求发给一个**副本**，而不是发给副本的每个 rank。副本内的 follower 不参与路由，它们跑什么由 leader 的控制面决定（每 step 一次 `SchedulerOutput` 广播，采样出的 token 再从 tp rank 0 广播回去）；只有 leader 回结果，因为协调器每个副本只等一条应答。
@@ -57,6 +72,8 @@
 这条网格约束在 CPU 上就能断言，不需要四张卡：把 `mp.get_context` 换成假的进程/队列，直接检查 4 个 cell 的 `(global_rank, dp_rank, tp_rank)`（`test_dp_times_tp_spawns_one_process_per_grid_cell`）以及一个副本的两个 rank 拿到的是**同一个**队列对象（`test_a_replica_shares_one_queue_across_its_ranks`）。
 
 ## 实测数据
+
+以下是早期 GPU 测量记录，保留用于复现比较，不代表当前版本或 CPU 的扩展效率。
 
 Qwen2.5-1.5B-Instruct，2× A10（23 GB），greedy，`max_gen_len=128`，round-robin。基线是 `data_parallel_size=1` 的协调器（隔离掉副本数以外的变量），另附一行进程内 `LLM` 用来显示协调器的 IPC 开销。
 
@@ -81,10 +98,7 @@ Qwen2.5-1.5B-Instruct，2× A10（23 GB），greedy，`max_gen_len=128`，round-
 | DataParallelEngine | 1 | 256 | 2.88 s | 11376 tok/s | 1.00x |
 | DataParallelEngine | 2 | 256 | 1.75 s | **18695 tok/s** | **1.64x** |
 
-两条结论：
-
-1. **weak scaling 拿到满格的 ×2.00（100% 线性）。** 每个副本干一份独立的活、无跨卡通信，这正是 DP 该有的形状：加一张卡，吞吐加一份。IPC 开销可忽略（进程内 `LLM` 与 dp=1 协调器差 2~3%）。
-2. **strong scaling ×1.64（82% 线性）。** 把一个批切成两半，每半仍要各自跑一遍 prefill，且墙钟由**较慢**的那个副本决定；256 条切成 128+128 后单副本已不在最省的工作点，所以拿不到满格的 2×。这不是缺陷，是"切分同一批"这件事的固有上限——想要满格加速就用 weak scaling 的口径（更多并发请求），而不是把小批越切越碎。
+这组数据中，weak scaling 的吞吐比为 2.00，strong scaling 为 1.64。两种口径回答不同问题，不能互换；复现时应保持每副本并发、prompt 和输出长度一致。
 
 复现：
 
@@ -95,7 +109,7 @@ python benchmarks/bench_data_parallel.py --model my_weight/Qwen2.5-1.5B-Instruct
     --dp 2 --batch-size 256 --scaling strong
 ```
 
-## 精度如何保证
+## 正确性检查
 
 上面两次运行里，dp=2 的输出与单卡**逐字节一致**（256/256、32/32 完全相同）。但这需要小心表述，和连续批处理是同一件事：**只有算术完全一致时"文本相同"才是合理预期**。batch 宽度是 GEMM 的 M 维，同一条 prompt 在 batch 32 里和在 batch 16 里 fp16 累加顺序不同，top-2 相差 ~1e-2 的 token 就可能翻转。
 
