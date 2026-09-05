@@ -1,8 +1,10 @@
 # 张量并行（tensor parallelism）
 
-## 为什么需要它
+## 权重分片
 
-数据并行（DP）复制整个模型、切请求流，解决的是"喂不饱一张卡"。张量并行（TP）反过来：切 **权重本身**，解决的是"一张卡装不下"。一个 30B 的 fp8 checkpoint 在 23 GB 的 A10 上没有第二条路——权重必须分头存放，每层的输出再靠一次集合通信合回来。代价是延迟：TP 把每个 block 的矩阵乘换成"更小的矩阵乘 + 一次 all-reduce"。
+张量并行（TP）把权重切分到多个 rank，减小每个 rank 的权重占用。行并行层通过 all-reduce 合并局部输出。是否降低延迟取决于矩阵规模、设备计算能力和通信开销。
+
+CPU 部署给 `ContinuousBatchingEngine.from_pretrained` 传入 `device="cpu"`，使用 Gloo 数据面。多进程调用应放在脚本的 `if __name__ == "__main__":` 下。CUDA Graph 和后文的 NCCL 测量仅适用于 GPU，CPU 使用 eager 执行。详见 [CPU 支持](cpu.md)。
 
 两者正交，构成 `dp_size × tp_size` 的 rank 网格，见[数据并行](./data_parallel.md)。
 
@@ -20,9 +22,9 @@ engine = ContinuousBatchingEngine.from_pretrained(
 )
 ```
 
-## 一条接缝：Executor
+## Executor
 
-这一版最重要的结构改动不是切权重（那是线性代数），而是**把"谁来跑一次前向"收敛成一个接口**。引擎不知道模型在本进程还是在八个进程里，它只做一件事：把一个 plan 交给 `Executor`，拿回采样出的 token。
+引擎将执行计划交给 `Executor`，由单进程或多进程执行器完成模型前向和采样。
 
 | 角色 | 本仓库 | vLLM |
 | --- | --- | --- |
@@ -46,15 +48,15 @@ follower 不持有 scheduler、不持有队列、不持有停止条件；它收 
 
 每个集合通信都假设所有 rank 会到场；一个 rank 死了，其余的**只是等**。静默挂死是多进程执行最坏的失败模式，所以 `execute()` 在提交昂贵的全局事实（broadcast）之前，先查一个廉价的本地事实：进程还活着吗（`ensure_followers_alive`）。同理，`shutdown()` 只在整个组还完整时才广播停止信号——向一个已经死掉的 rank 广播会永久阻塞。
 
-## 控制面走 gloo，不走 NCCL
+## 控制面与数据面
 
-plan 是 Python 对象，而 NCCL 只能搬**显存**：用它传 plan 就得把每个 plan 在 GPU 上中转一次。所以 `init_parallel` 在建 NCCL 组的同时，为同一批 rank 再建一个 **CPU（gloo）组**专门承载控制面，`tensor_model_parallel_broadcast_object_list` 把 pickle 后的字节从主存直接发出去。
+plan 是 Python 对象，使用 Gloo 控制组广播。GPU 张量集合通信使用 NCCL；CPU 张量集合通信使用 Gloo。`tensor_model_parallel_broadcast_object_list` 在主存传输序列化后的计划。
 
 分层的结果是：**数据面（NCCL，张量）与控制面（gloo，plan）互不知情**，而控制面因为不需要显卡，在 CPU 上就能整套测出来（`test_tp_control_plane.py`：广播语义 + follower 存活检测，7 个测试）。
 
 **rendezvous 端口自选。** 固定 29500 有两个都表现为"挂在 rendezvous"的坑：同机跑两个引擎会撞端口；崩溃残留的 socket 会毁掉下一次运行。所以 `free_port()` 向内核要一个空闲端口， `launch_tensor_parallel(master_port=None)` 默认走它。这个函数放在**生产代码**里、测试 harness 反过来 import 它，是为了让"怎么选端口"只有一处定义。
 
-## 权重怎么切
+## 分片维度
 
 | 模块 | 切的维度 | 每步通信 |
 | --- | --- | --- |
@@ -70,7 +72,7 @@ plan 是 Python 对象，而 NCCL 只能搬**显存**：用它传 plan 就得把
 
 `ParallelLMHead` 刻意**不 all-gather logits**：sampler 直接吃本地那一段，于是每步的传输量与词表大小**无关**，也从不实体化一个完整的 logits 张量。
 
-## 采样怎么做到不 diverge
+## 跨 rank 采样一致性
 
 每个 rank 只有词表的一段，而 top-p / temperature 都需要全局归一化。朴素做法是 all-gather logits——每步搬 `batch × vocab`，正好把上一节省下的东西还回去。
 
@@ -83,7 +85,7 @@ plan 是 Python 对象，而 NCCL 只能搬**显存**：用它传 plan 就得把
 
 非贪心采样从各 rank 自己的 RNG 抽签，所以最后还要把 rank 0 采出的 id 广播回去（`worker.py::_sync_tp`）——否则各 rank 对"刚生成的 token 是什么"意见不一，后面每一步都在放大这个分歧。这一层的数学在 CPU 上就能整套验证（`test_parallel_sampling.py`，9 个测试，同进程模拟分片）。
 
-## 精度：byte parity 到底能断言什么
+## 浮点误差与逐字节比较
 
 分片在**精确算术**下是恒等变换，所以"tp=2 与 tp=1 逐字节相同"看起来是理所当然的断言。它不是。 fp16 归约不满足结合律：row-parallel GEMM 加一次 all-reduce，是把同一批乘积**按另一个顺序**加起来。
 
@@ -114,7 +116,7 @@ batch-shape stable: 7/9; on a tie: [('batch6', 4), ('mixed', 1)]
 
 逐字节相等因此覆盖 9 个条目里的 7 个，且这个覆盖率本身被断言着。这是能同时抓住"off-by-one 的 shard offset""mask 漏进了别的 rank 的行"这类**产出看起来合理的数字**的失败的唯一检查——任何 "差值 < eps"的松散比较都不会察觉。
 
-## 观测：collective 记账
+## 集合通信统计
 
 上一节那条"每行两个标量"的主张，到这里之前一直只是 docstring 里的一段论证。问题在于它**没法从 profile 里看出来**：一个 all-gather logits 的采样器会通过 `tests/distributed/` 下**每一个**正确性测试——同样的 token、同样的 logprob——只是每步多搬几个数量级的字节。kernel 名字的火焰图也不会告诉你差别，因为两者都只是"一次 NCCL 调用"。
 

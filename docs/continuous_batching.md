@@ -1,6 +1,6 @@
 # 连续批处理（continuous batching）
 
-## 为什么需要它
+## 请求生命周期
 
 `LLMEngine.generate()` 在调用的那一刻就把 batch 定死了：所有序列同一步开始，整批一直保持满宽度推进，直到**最长**的那条结束。这带来两个无法在原路径里绕开的问题。
 
@@ -22,43 +22,39 @@ step  A B C D                        step  A B C D   等待队列
 
 ## 分层结构
 
-三个协作者各管一件事，边界按"host 决策 / device 状态"划分：
+调度、缓存映射和执行分别由以下模块负责：
 
 | 模块 | 职责 | 在哪一侧 |
 | --- | --- | --- |
 | [`Scheduler`](../rapid_llm/engine/scheduler.py) | 谁 prefill、谁 decode、谁拿哪个槽位 | 纯 host，无张量 |
-| [`SlotBatch`](../rapid_llm/executor/slot_batch.py) | KV 布局与每步 attention 元数据 | 纯 device |
+| [`SlotBatch`](../rapid_llm/executor/slot_batch.py) | 分页 KV 映射与每步 attention 元数据 | host / device |
 | [`ContinuousBatchingEngine`](../rapid_llm/engine/continuous_engine.py) | 串起 step 循环、采样、停止判定 | 两侧 |
 
-`Scheduler` 不持有任何张量，这是刻意的：调度策略因此可以在没有 GPU、没有权重的机器上完整单测（`tests/engine/test_scheduler.py` 25 个用例全部跑在 CPU 上）。
+`Scheduler` 不持有张量，调度测试无需 GPU 或模型权重。模型执行也可以选择 CPU，安装与限制见 [CPU 支持](cpu.md)。
 
 ## 每一步做什么
 
 ```python
-scheduled = scheduler.schedule()          # 1. host 侧决策
-if scheduled.prefill:                     # 2a. 新请求进来，跑一格 padded prefill
-    next_token = engine._prefill(scheduled.prefill)
-else:                                     # 2b. 否则给所有在跑的请求走一步 decode
-    next_token = engine._decode(scheduled.decode)
-engine._harvest(batch, next_token)        # 3. 读回 token、detokenize、退休已结束的
+# 对外由 engine.step() 执行；下面只表示阶段关系。
+scheduled = scheduler.schedule()
+# 分配并写入本步需要的块表。
+# 处理 scheduled.prefill 里的 prompt chunks，以及 scheduled.decode。
+# 采样后更新请求，释放已结束请求持有的块引用。
 ```
 
-**prefill 优先。** 队列里有请求时优先给它 prefill，这样 TTFT 不必等一整轮生成；代价是这一步 decode 停一拍。把 prefill 拼到 decode 步里（chunked prefill）需要混合阶段的 attention kernel，本框架暂时没有。
+一个调度步可以同时包含 prefill 和 decode。长 prompt 按 `max_chunk_size` 分块，`max_num_batched_tokens` 限制 padded prefill 的 token 数。执行器根据已有前缀和算子能力选择 prefill、extend 或 decode 路径；不能把续块当作没有历史 KV 的首块处理。
 
-## KV 布局：固定槽位
+## KV 布局：分页块池
 
-一次性批处理路径可以用 bump 指针分配 KV 行，因为它独占整个 cache 且只追加。连续批处理不行——请求中途来去，每步都会落到 `KVCacheManager.alloc_contiguous_kvcache`，那里一次 `nonzero` 全池扫描加两次 `.item()`，等于**每个 decode 步 3 次设备同步**。
+槽位是请求块表的行号，不是一整段固定物理 KV。`b_req_tokens_table[slot, position]` 指向对应的物理 token 行；块池按请求的实际进度分配并维护引用计数。并发同时受 `max_num_seqs`、可用槽位和物理块容量限制。
 
-所以 `SlotBatch` 把分配器整个从 decode 路径上移走：槽位 `s` 永久拥有 `[s * max_seq_len, (s + 1) * max_seq_len)` 这段行，于是 `b_req_tokens_table` 就是恒等映射，建好一次再也不变。
+启用 `enable_prefix_cache` 后，已完成的前缀块按哈希索引。命中请求共享物理块，执行器更新块表，不复制整段 KV。尚未完成的块不能提前供其他请求读取。
 
-- 申请一个请求的 cache = host 侧 pop 一个槽位号；
-- 释放 = host 侧 push 回去；
-- `update_kv_index` 这个 kernel 从 decode 路径上消失；
-- 永不碎片化，且**不需要抢占**：槽位容量等于上下文窗口，准入时保证 `prompt + 生成上限 ≤ max_seq_len`，所以在跑的请求绝不可能中途 KV 不够。
+`enable_preemption=True` 允许调度器驱逐请求后重计算；已生成 token 会并入恢复上下文。抢占增加计算量，并非免费的内存扩容。launch/harvest pipeline 不能与抢占同时启用，构造时会报错。
 
-代价写在明面上：一个槽位不管用不用都占满 `max_seq_len` 行，并发上限因此是 `gpu_num_blocks // max_seq_len`。分页分配器在显存密度上更优，一次性批处理路径（prompt 全部已知）继续用它。
+`max_gpu_num_blocks` 按 token 行设置物理缓存容量；`prefix_cache_blocks` 则按前缀块计数，不要混用单位。
 
-## decode 步为什么没有主机-设备传输
+## 稳态 decode 元数据
 
 `b_req_idx` 与 `b_seq_len` 只在**请求集合发生变化**时才从 host 重建。集合不变时：
 
@@ -102,6 +98,8 @@ k_loc = tl.load(b_req_tokens_table + stride_req_to_tokens_b * batch_pid + offs_n
 
 ## 实测数据
 
+以下保留早期版本的测量记录，反映当时的实现与测试环境，不代表当前版本或 CPU 性能。
+
 Qwen2.5-1.5B-Instruct，单卡 A10（23 GB），greedy，`max_gen_len=256`，16 个请求， `max_num_seqs=16`。原始日志：`docs/benchmark_logs/continuous_Qwen2.5-1.5B-Instruct_b16.json`。
 
 | 场景 | 策略 | 墙钟 | 有效吞吐 | 平均延迟 |
@@ -126,7 +124,7 @@ python benchmarks/bench_continuous.py --model-dir my_weight/Qwen2.5-1.5B-Instruc
     --scenario all --batch 16 --max-num-seqs 16 --interval 0.25
 ```
 
-## 精度如何保证
+## 正确性检查
 
 "改调度不改数值"这件事需要小心表述，因为**只有算术完全一致时"文本相同"才是合理预期**。 batch 宽度是 GEMM 的 M 维，batch 3 与 batch 4 的 fp16 累加顺序不同，top-2 logits 相差 ~1e-2 的 token 就可能翻转。这是批处理固有的，vLLM 同样如此。所以测试分两档：
 
@@ -147,8 +145,8 @@ python benchmarks/bench_continuous.py --model-dir my_weight/Qwen2.5-1.5B-Instruc
 ## 当前边界
 
 - **仅文本模型。** 视觉 prefill 需要逐请求的 processor 输出，padded prefill 网格放不下；多模态 checkpoint 在构造时就报 `NotImplementedError`。
-- **无前缀复用。** 槽位是独占的，共享系统提示的请求各存一份 KV。
-- **无抢占 / 无 chunked prefill。** 前者靠"槽位容量 = 上下文窗口"从设计上规避，后者需要混合阶段 attention kernel。
+- **前缀复用与抢占默认关闭。** 分块预填充默认启用，`max_chunk_size=0` 可关闭。
+- **功能组合有限制。** 抢占不能搭配 launch/harvest pipeline；FP8 KV 的续块采用能够解码量化缓存的路径。
 - **`n > 1` 采样未实现**，HTTP 层显式拒绝而不是静默返回一条。
 - **每步一次同步。** 读回采样 token 用于 detokenize 与停止判定。这换来精确的停止语义（EOS 的下一步就离开 batch），也正因为如此才划得来：腾出的槽位立刻给排队请求。
 
