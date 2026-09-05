@@ -205,6 +205,18 @@ class AllToAllDispatcher:
             A handle carrying the buffers and the fence events; finish the
             phase with :meth:`dispatch_b`.
         """
+        if x.ndim != 2 or topk_ids.ndim != 2 or topk_weights.shape != topk_ids.shape:
+            raise ValueError("EP dispatch expects x [tokens, hidden] and matching 2-D routing")
+        if topk_ids.shape[0] != x.shape[0]:
+            raise ValueError("routing rows must match token rows")
+        # Reading a CUDA predicate here would synchronize every MoE layer and
+        # is illegal during graph capture. CUDA ids come from the router.
+        if (
+            x.device.type == "cpu"
+            and topk_ids.numel()
+            and (torch.any(topk_ids < 0) or torch.any(topk_ids >= self.num_experts))
+        ):
+            raise ValueError(f"expert ids must be in [0, {self.num_experts})")
         rows, hidden = x.shape
         k = topk_ids.shape[1]
         n = rows * k
@@ -442,12 +454,6 @@ class SparseMoeBlock(nn.Module):
         self.quant_method = (
             quant.get_quant_method(self) if quant is not None else UnquantizedFusedMoEMethod()
         )
-        if self.ep_enabled and not isinstance(self.quant_method, UnquantizedFusedMoEMethod):
-            raise NotImplementedError(
-                "expert parallelism currently supports unquantised experts only; "
-                "fp8/int4 expert weights + EP are a follow-up"
-            )
-
         self.experts = nn.ParameterDict(self.quant_method.create_weights(self))
 
         for param in self.experts.values():
@@ -477,8 +483,8 @@ class SparseMoeBlock(nn.Module):
         rows; down fills a whole slice, sharded along the columns. Quantised
         scale grids follow the same rule — their axes count scale blocks, so
         the same proportional narrow applies. A checkpoint that ships experts
-        already stacked carries no shard id and is copied whole — supported
-        only without tensor parallelism.
+        already stacked carries no shard id. Without EP it requires one rank;
+        under EP its expert axis is sliced to the local rank before copying.
 
         Under EP the parameter is indexed by *local* expert and holds whole
         experts (no TP narrow): ids outside ``[expert_offset, expert_offset +
@@ -486,10 +492,12 @@ class SparseMoeBlock(nn.Module):
         contract wants the written view back, so they get an empty one.
         """
         if shard_id is None:
-            if get_tensor_model_parallel_world_size() > 1:
+            if self.ep_enabled:
+                loaded = loaded.narrow(0, self.expert_offset, self.num_local_experts)
+            elif get_tensor_model_parallel_world_size() > 1:
                 raise ValueError(
                     "a checkpoint with pre-stacked experts cannot be TP-sharded on "
-                    "load; use the per-expert layout"
+                    "load; use the per-expert layout or enable expert parallelism"
                 )
             if param.shape != loaded.shape:
                 raise ValueError(
@@ -725,12 +733,15 @@ class SparseMoeBlock(nn.Module):
         local_weights: torch.Tensor,
         down_overlap_args=None,
     ) -> torch.Tensor:
-        """The local grouped GEMM; EP is unquantised-only (enforced in init).
+        """Run the local experts with the block's quantization method.
 
         ``down_overlap_args`` splits the down projection into row chunks and
-        publishes an event per chunk, so the combine exchange can be posted
-        against chunk 0 while the remaining chunks are still computing.
+        publishes an event per chunk for the unquantized kernel. Quantized
+        kernels use their normal fused down projection.
         """
+        if down_overlap_args is None or type(self.quant_method) is not UnquantizedFusedMoEMethod:
+            return self.quant_method.apply(self, local_x, local_weights, local_ids)
+
         from ..kernels import fused_moe
 
         return fused_moe(

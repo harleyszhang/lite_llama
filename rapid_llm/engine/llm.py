@@ -116,9 +116,6 @@ class LLM(LLMEngine):
         spec = _resolve_spec(model)
         if use_cuda_graph is None:
             use_cuda_graph = True
-        # CUDA graphs are incompatible with TP (NCCL collectives inside the graph)
-        if tensor_parallel_size > 1:
-            use_cuda_graph = False
         # Architectures whose forward mutates Python-side per-step state (V4's
         # per-layer rolling caches) cannot be replayed from a capture.
         if use_cuda_graph and not spec.supports_cuda_graph:

@@ -99,20 +99,21 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     """
 
     def create_weights(self, block: nn.Module) -> dict[str, nn.Parameter]:
+        num_experts = getattr(block, "num_local_experts", block.num_experts)
         gate_up_n, gate_up_k = 2 * block.moe_intermediate_size, block.hidden_size
         down_n, down_k = block.hidden_size, block.moe_intermediate_size
         return {
             "gate_up_proj": RawParameter(
-                torch.empty(block.num_experts, gate_up_n, gate_up_k // 8, dtype=torch.int32)
+                torch.empty(num_experts, gate_up_n, gate_up_k // 8, dtype=torch.int32)
             ),
             "gate_up_proj_scale_inv": expert_scale_parameter(
-                block.num_experts, (gate_up_n, gate_up_k // MXFP4_GROUP)
+                num_experts, (gate_up_n, gate_up_k // MXFP4_GROUP)
             ),
             "down_proj": RawParameter(
-                torch.empty(block.num_experts, down_n, down_k // 8, dtype=torch.int32)
+                torch.empty(num_experts, down_n, down_k // 8, dtype=torch.int32)
             ),
             "down_proj_scale_inv": expert_scale_parameter(
-                block.num_experts, (down_n, down_k // MXFP4_GROUP)
+                num_experts, (down_n, down_k // MXFP4_GROUP)
             ),
         }
 

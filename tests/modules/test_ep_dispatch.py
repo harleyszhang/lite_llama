@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from rapid_llm.modules.moe import AllToAllDispatcher
@@ -97,8 +98,6 @@ def test_placement_that_does_not_tile_the_group_is_rejected():
 
     (Offset rebasing across a real split is exercised over gloo in
     ``tests/distributed/test_ep_moe.py``, where ``ep_size`` matches.)"""
-    import pytest
-
     torch.manual_seed(3)
     x = torch.randn(4, 6)
     ids = torch.randint(0, 6, (4, 2))
@@ -110,7 +109,39 @@ def test_placement_that_does_not_tile_the_group_is_rejected():
 
 
 def test_num_experts_not_divisible_is_rejected():
-    import pytest
-
     with pytest.raises(ValueError, match="do not split"):
         AllToAllDispatcher(7, 3, 0)
+
+
+@pytest.mark.parametrize(
+    "x,ids,weights,message",
+    [
+        (torch.randn(2, 3), torch.tensor([[0], [4]]), torch.ones(2, 1), "expert ids"),
+        (torch.randn(2, 3), torch.zeros(3, 1, dtype=torch.long), torch.ones(3, 1), "rows"),
+        (torch.randn(2, 3), torch.zeros(2, 1, dtype=torch.long), torch.ones(2), "2-D routing"),
+    ],
+)
+def test_invalid_routing_is_rejected(x, ids, weights, message):
+    with pytest.raises(ValueError, match=message):
+        AllToAllDispatcher(4, 4, 0).dispatch_a(x, ids, weights)
+
+
+def test_custom_unquantized_moe_method_is_not_bypassed():
+    """Model-specific epilogues must survive the EP local-expert path."""
+    from rapid_llm.modules.moe import SparseMoeBlock
+    from rapid_llm.modules.quantization import UnquantizedFusedMoEMethod
+
+    class CustomMethod(UnquantizedFusedMoEMethod):
+        def apply(self, block, x, topk_weights, topk_ids):
+            return x + 7
+
+    block = object.__new__(SparseMoeBlock)
+    block.quant_method = CustomMethod()
+    x = torch.randn(2, 4)
+    out = SparseMoeBlock._run_experts(
+        block,
+        x,
+        torch.zeros(2, 1, dtype=torch.long),
+        torch.ones(2, 1),
+    )
+    torch.testing.assert_close(out, x + 7)

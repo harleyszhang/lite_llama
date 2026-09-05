@@ -32,6 +32,9 @@ import torch.nn.functional as F
 
 from ..batch_overlap import current_deferred_ar
 from ..distributed.parallel_state import (
+    expert_parallel_enabled,
+    get_ep_rank,
+    get_ep_world_size,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -73,6 +76,21 @@ class DeepseekV4FusedMoEMethod(UnquantizedFusedMoEMethod):
         )
 
 
+def _load_ep_expert_stack(param, loaded) -> torch.Tensor | None:
+    """Load this EP rank's contiguous slice from a globally stacked tensor."""
+    if not expert_parallel_enabled() or get_ep_world_size() <= 1:
+        return None
+    local = param.shape[0]
+    loaded = loaded.narrow(0, get_ep_rank() * local, local)
+    if param.shape != loaded.shape:
+        raise ValueError(
+            f"expert stack of shape {tuple(loaded.shape)} does not fit "
+            f"parameter of shape {tuple(param.shape)}"
+        )
+    param.data.copy_(loaded)
+    return param.data
+
+
 def _stacked_gate_up_loader(param, loaded, shard_id) -> torch.Tensor:
     """Fill the fused gate/up expert stack from V4's 3D checkpoint tensor.
 
@@ -82,6 +100,9 @@ def _stacked_gate_up_loader(param, loaded, shard_id) -> torch.Tensor:
     intermediate dimension inside *both* halves, so its local view stays a
     contiguous ``[E, 2I_local, D]`` gate-then-up stack.
     """
+    ep_view = _load_ep_expert_stack(param, loaded)
+    if ep_view is not None:
+        return ep_view
     world = get_tensor_model_parallel_world_size()
     if world == 1:
         if param.shape != loaded.shape:
@@ -102,6 +123,9 @@ def _stacked_gate_up_loader(param, loaded, shard_id) -> torch.Tensor:
 
 def _stacked_down_loader(param, loaded, shard_id) -> torch.Tensor:
     """Fill the down-projection expert stack; TP narrows the contracted dim."""
+    ep_view = _load_ep_expert_stack(param, loaded)
+    if ep_view is not None:
+        return ep_view
     world = get_tensor_model_parallel_world_size()
     if world == 1:
         if param.shape != loaded.shape:
@@ -125,9 +149,7 @@ def _stacked_down_loader(param, loaded, shard_id) -> torch.Tensor:
 #: w3 the up half (the reference's chunk(2) read-back order), w2 the down
 #: projection. Output keys use the ``{gate,up,down}_proj`` names
 #: :func:`rapid_llm.models.weights.translate_text_key` stacks per expert.
-_DSPARK_EXPERT_KEY = re.compile(
-    r"^layers\.(\d+)\.ffn\.experts\.(\d+)\.w([123])\.(weight|scale)$"
-)
+_DSPARK_EXPERT_KEY = re.compile(r"^layers\.(\d+)\.ffn\.experts\.(\d+)\.w([123])\.(weight|scale)$")
 _DSPARK_EXPERT_PROJ = {"1": "gate_proj", "3": "up_proj", "2": "down_proj"}
 
 #: Layer-local paths, keyed after stripping ``layers.N.``. The fp8 projections
@@ -424,9 +446,9 @@ class DeepseekV4DecoderLayer(nn.Module):
             position_embeddings,
             valid,
         )
-        hidden_streams = post.to(dtype).unsqueeze(-1) * attn_output.unsqueeze(
-            -2
-        ) + torch.matmul(comb.to(dtype).transpose(-1, -2), hidden_streams)
+        hidden_streams = post.to(dtype).unsqueeze(-1) * attn_output.unsqueeze(-2) + torch.matmul(
+            comb.to(dtype).transpose(-1, -2), hidden_streams
+        )
 
         post, comb, collapsed = self.ffn_hc(hidden_streams)
         mlp_output = self.mlp(
@@ -492,9 +514,7 @@ class DeepseekV4Model(CausalLM):
         """
         if self.quant is not None:
             key = adapt_dspark_key(key)
-        return super().translate_weight_key(
-            key.replace(".indexer.scorer.", ".indexer.")
-        )
+        return super().translate_weight_key(key.replace(".indexer.scorer.", ".indexer."))
 
     def reset_v4_caches(self) -> None:
         """Clear every layer's sliding window and compressor state.

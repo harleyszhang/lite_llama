@@ -23,6 +23,7 @@ import json
 import os
 import tempfile
 
+import pytest
 import torch
 
 from rapid_llm.distributed import parallel_state as ps
@@ -135,6 +136,28 @@ def _weight_loader_partitions_experts(rank: int) -> bool:
     return bool(torch.equal(gu.data, expected_gu)) and bool(torch.equal(dp.data, expected_dp))
 
 
+def _stacked_loaders_partition_experts(rank: int) -> bool:
+    """Generic and DeepSeek-V4 stacked checkpoints slice the expert axis under EP."""
+    from rapid_llm.models.deepseek_v4 import _stacked_down_loader, _stacked_gate_up_loader
+    from rapid_llm.modules.moe import SparseMoeBlock
+
+    block = SparseMoeBlock(_make_config())
+    full = torch.arange(_NUM_EXPERTS * 8 * 4, dtype=torch.float32).reshape(_NUM_EXPERTS, 8, 4)
+    expected = full[block.expert_offset : block.expert_offset + block.num_local_experts]
+
+    generic = torch.empty_like(expected)
+    block._expert_loader(generic, full, None)
+    gate_up = torch.empty_like(expected)
+    down = torch.empty_like(expected)
+    _stacked_gate_up_loader(gate_up, full, None)
+    _stacked_down_loader(down, full, None)
+    return bool(
+        torch.equal(generic, expected)
+        and torch.equal(gate_up, expected)
+        and torch.equal(down, expected)
+    )
+
+
 def _dispatch_combine_routes_across_ranks(rank: int) -> bool:
     """The a2a exchange: tokens reach the owning rank, results return, weights apply.
 
@@ -171,6 +194,105 @@ def _dispatch_combine_routes_across_ranks(rank: int) -> bool:
     return bool(torch.allclose(out, ref, atol=1e-4, rtol=1e-4))
 
 
+def _ep_forward_matches_full_experts_cpu(rank: int) -> bool:
+    """Run the complete router, Gloo exchange and CPU expert implementation."""
+    from rapid_llm.kernels import fused_moe
+
+    block, gate_up, down, x = _build_ep_block("cpu")
+    with torch.no_grad():
+        out = block(x.clone())
+        weights, ids = block._route(x)
+        ref = fused_moe(x, gate_up, down, weights, ids)
+    return bool(torch.allclose(out.float(), ref.float(), atol=2e-2, rtol=2e-2))
+
+
+def _quantized_ep_forward(rank: int, scheme: str) -> bool:
+    """Compare sharded W8A8 experts with the same globally quantized experts."""
+    from rapid_llm import kernels
+    from rapid_llm.modules.moe import SparseMoeBlock
+    from rapid_llm.modules.quantization import W8A8Fp8Config, W8A8Int8Config
+    from rapid_llm.modules.quantization.utils import (
+        quantize_fp8_per_channel,
+        quantize_int8_per_channel,
+    )
+
+    quant, quantize = (
+        (W8A8Fp8Config(), quantize_fp8_per_channel)
+        if scheme == "fp8"
+        else (W8A8Int8Config(), quantize_int8_per_channel)
+    )
+    block = SparseMoeBlock(_make_config(), quant).to("cpu")
+    gate_up, down, gate_w = _global_expert_weights(torch.bfloat16, "cpu")
+    q1, s1 = quantize(gate_up)
+    q2, s2 = quantize(down)
+    offset = block.expert_offset
+    stop = offset + block.num_local_experts
+    block.gate_weight.data.copy_(gate_w)
+    block.experts["gate_up_proj"].data.copy_(q1[offset:stop])
+    block.experts["gate_up_proj_scale_inv"].data.copy_(s1[offset:stop])
+    block.experts["down_proj"].data.copy_(q2[offset:stop])
+    block.experts["down_proj_scale_inv"].data.copy_(s2[offset:stop])
+    torch.manual_seed(2025)
+    x = torch.randn(7, _HIDDEN, dtype=torch.bfloat16)
+    with torch.no_grad():
+        out = block(x.clone())
+        weights, ids = block._route(x)
+        operation = getattr(kernels, f"fused_moe_w8a8_{scheme}")
+        ref = operation(
+            x,
+            q1,
+            q2,
+            weights,
+            ids,
+            w1_scale=s1,
+            w2_scale=s2,
+            group_n=1,
+            group_k=max(_HIDDEN, _INTER),
+        )
+    return bool(torch.allclose(out.float(), ref.float(), atol=3e-2, rtol=3e-2))
+
+
+def _quantized_ep_fp8(rank: int) -> bool:
+    return _quantized_ep_forward(rank, "fp8")
+
+
+def _quantized_ep_int8(rank: int) -> bool:
+    return _quantized_ep_forward(rank, "int8")
+
+
+def _quantized_allocations_are_local(rank: int) -> bool:
+    """Every checkpoint layout allocates only the experts owned by this rank."""
+    from rapid_llm.modules.moe import SparseMoeBlock
+    from rapid_llm.modules.quantization import (
+        AWQConfig,
+        BlockInt8Config,
+        DeepseekV4Fp8Config,
+        Fp8Config,
+        GPTQConfig,
+        W8A8Fp8Config,
+        W8A8Int8Config,
+    )
+
+    configs = (
+        BlockInt8Config.per_channel(),
+        BlockInt8Config.groupwise(32),
+        Fp8Config(group_n=1, group_k=32),
+        W8A8Fp8Config(),
+        W8A8Int8Config(),
+        AWQConfig(group_size=32),
+        GPTQConfig(group_size=32, bits=4),
+        GPTQConfig(group_size=32, bits=8),
+        DeepseekV4Fp8Config(group_n=32, group_k=32),
+    )
+    for quant in configs:
+        block = SparseMoeBlock(_make_config(), quant)
+        if block.num_local_experts != _NUM_EXPERTS // 2:
+            return False
+        if any(param.shape[0] != block.num_local_experts for param in block.experts.values()):
+            return False
+    return True
+
+
 class TestExpertParallelGloo:
     """EP plumbing over a real two-rank gloo group — no device, no Triton."""
 
@@ -183,9 +305,41 @@ class TestExpertParallelGloo:
         )
         assert both == [True, True]
 
+    def test_stacked_checkpoint_loaders_partition_experts(self):
+        both = run_on_tp_ranks(
+            _stacked_loaders_partition_experts,
+            tp_size=2,
+            backend="gloo",
+            enable_expert_parallel=True,
+        )
+        assert both == [True, True]
+
     def test_dispatch_combine_routes_across_ranks(self):
         both = run_on_tp_ranks(
             _dispatch_combine_routes_across_ranks,
+            tp_size=2,
+            backend="gloo",
+            enable_expert_parallel=True,
+        )
+        assert both == [True, True]
+
+    def test_complete_cpu_forward_matches_full_experts(self):
+        both = run_on_tp_ranks(
+            _ep_forward_matches_full_experts_cpu,
+            tp_size=2,
+            backend="gloo",
+            enable_expert_parallel=True,
+        )
+        assert both == [True, True]
+
+    @pytest.mark.parametrize("payload", [_quantized_ep_fp8, _quantized_ep_int8])
+    def test_quantized_cpu_forward_matches_full_experts(self, payload):
+        both = run_on_tp_ranks(payload, tp_size=2, backend="gloo", enable_expert_parallel=True)
+        assert both == [True, True]
+
+    def test_all_quantized_layouts_allocate_local_experts_only(self):
+        both = run_on_tp_ranks(
+            _quantized_allocations_are_local,
             tp_size=2,
             backend="gloo",
             enable_expert_parallel=True,
