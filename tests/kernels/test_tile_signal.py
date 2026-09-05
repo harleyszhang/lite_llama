@@ -81,6 +81,19 @@ def test_pipelined_matches_torch_reference(m, n, k, dtype):
     torch.testing.assert_close(out, ref, rtol=_RTOL[dtype], atol=_ATOL[dtype])
 
 
+def test_up_weight_may_have_a_different_stride():
+    """The producer must index each weight with that weight's own strides."""
+    m, n, k = 67, 130, 97
+    a = torch.randn(m, k, dtype=torch.float16, device="cuda")
+    gate_w = torch.randn(k, n, dtype=torch.float16, device="cuda")
+    up_w = torch.randn(n, k, dtype=torch.float16, device="cuda").t()
+    assert up_w.shape == gate_w.shape and up_w.stride() != gate_w.stride()
+    buffer = TileSignalBuffer.for_problem(m, n, 64, 64)
+
+    out = pipelined_gemm_swiglu(a, gate_w, up_w, buffer)
+    torch.testing.assert_close(out, _reference(a, gate_w, up_w), rtol=3e-2, atol=3e-2)
+
+
 @pytest.mark.parametrize("m,n,k,dtype", _SHAPES)
 def test_serial_entry_is_the_bitwise_control_arm(m, n, k, dtype):
     """Same kernels, same grids: only the stream strategy differs.

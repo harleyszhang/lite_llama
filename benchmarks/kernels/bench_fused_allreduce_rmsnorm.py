@@ -11,13 +11,8 @@ residual-add with the RMSNorm in a single kernel pass. The sequence-parallel
 variant additionally norms only ``T/world`` rows per rank (``1/world`` the norm
 compute) and replaces the all-reduce with a reduce-scatter + all-gather pair.
 
-Note:
-    The REAL O11 win requires fusing the all-reduce COMMUNICATION with the norm
-    (eliminating the intermediate HBM write-back). This needs FlashInfer's
-    ``allreduce_fusion`` CUDA kernel. The sequence-parallel decomposition is the
-    framework-native path: it cuts the norm/residual compute to ``1/world`` and
-    exposes the reduce-scatter/all-gather seams a subsequent GEMM+communication
-    fusion absorbs.
+The benchmark does not claim communication fusion. Sequence parallel is a
+separate opt-in decomposition and includes the residual all-gather it requires.
 
 Usage:
     torchrun --nproc_per_node=2 benchmarks/kernels/bench_fused_allreduce_rmsnorm.py [--json path]
@@ -160,7 +155,7 @@ def main():
         print(f"Average seqpar/base speedup: {avg_seqpar:.3f}x")
 
         output = {
-            "benchmark": "fused_allreduce_rmsnorm_o11",
+            "benchmark": "fused_allreduce_rmsnorm",
             "description": (
                 "all-reduce + fused_add_rmsnorm and the sequence-parallel "
                 "reduce-scatter + local-norm + all-gather decomposition, "
@@ -174,10 +169,9 @@ def main():
                 "avg_seqpar_speedup": round(avg_seqpar, 3),
             },
             "note": (
-                "The fused kernel saves one HBM read of the residual tensor. The "
-                "sequence-parallel decomposition additionally norms only T/world "
-                "rows per rank and exposes the reduce-scatter/all-gather seams a "
-                "subsequent GEMM+communication fusion absorbs."
+                "The fused kernel saves one residual read. Sequence parallel norms "
+                "T/world rows but also gathers the updated residual, so it remains "
+                "opt-in until the target workload measures a benefit."
             ),
         }
 

@@ -112,16 +112,17 @@
 - Integration: `tensor_model_parallel_all_reduce()` 自动路由逻辑
 
 
-### O11 通信-RMSNorm 融合
+### All-reduce 后融合 residual-add/RMSNorm
 
 **问题：** all-reduce 完成后，`_post_attention_norm` 需要 residual add + RMSNorm。`skip_rmsnorm` 已经融合了 residual add 和 RMSNorm，但 all-reduce 的结果需要先写回 HBM，再被 norm kernel 读出来，多一次 HBM 遍历。
 
-**设计目标：** 将 all-reduce 通信本身与 RMSNorm 融合，消除中间 HBM 写回。vLLM 通过 FlashInfer 的 `allreduce_fusion` CUDA kernel 实现——在 all-reduce 的 epilogue 里直接做 residual add + RMSNorm，数据始终在 registers/shared memory 里。
+**设计目标：** 在不破坏通信调度的前提下，减少 all-reduce 后的逐元素访存和 kernel launch。
 
 **当前实现：**
-- `fused_add_rmsnorm` kernel：all-reduce 结果 + residual add + RMSNorm 在单个 Triton kernel 里完成，省一次 residual tensor 的 HBM 读取
-- `fused_allreduce_rmsnorm`：尝试 FlashInfer `allreduce_fusion`，无 FlashInfer 时 fallback 到 `all-reduce + fused_add_rmsnorm`
-- `DecoderLayer._post_attention_norm` 使用 `fused_allreduce_rmsnorm`
+- `fused_add_rmsnorm` 在一个 Triton kernel 中完成 residual add 和 RMSNorm。
+- row-parallel all-reduce 继续经过统一调度器，以保留 TBO 延迟通信和 L3 分块通信。
+- `fused_allreduce_rmsnorm` 是显式的阻塞组合 API，不宣称通信融合。
+- sequence-parallel rewrite 仅在 `RAPID_LLM_SEQUENCE_PARALLEL=1` 时启用；动态 token 数必须可被 TP 整除，且 TBO/L3 激活时自动让路。该路径多一次 residual all-gather，必须在目标负载实测为正收益后再启用。
 
 **Kernel benchmark 结果（TP=2, A10）：**
 
@@ -132,17 +133,17 @@
 | (32, 4096) | 4411.46 | 4411.38 | 1.000x |
 | (64, 8192) | 4415.56 | 4415.50 | 1.000x |
 
-**结论：** fused kernel 与 baseline 持平。all-reduce 通信延迟（~4.4ms）完全主导，norm kernel 的 HBM 节省可以忽略。真正的 O11 收益需要 FlashInfer `allreduce_fusion` 把通信本身和 norm 融合（消除 all-reduce 的中间 HBM 写回）。当前环境 NCCL P2P send/recv 不可用，FlashInfer 未安装，O11 的完整收益待后续 FlashInfer 集成后释放。
+**结论：** fused kernel 与 baseline 持平。all-reduce 通信延迟（~4.4ms）完全主导，norm kernel 的 HBM 节省可以忽略。当前实现优先保证与已有通信 overlap 策略组合时的正确性和性能。
 
 **证据：**
-- Benchmark: `docs/benchmark_logs/fused_allreduce_rmsnorm_o11_*.json`
+- Benchmark: `docs/benchmark_logs/fused_allreduce_rmsnorm_*.json`
 - Code: `rapid_llm/kernels/ops/layernorm/skip_rmsnorm.py::fused_add_rmsnorm`
 - Integration: `rapid_llm/models/base.py::DecoderLayer._post_attention_norm`
 
 
 ## 后续优化项状态
 
-O1、O3.1、O5、O11、O14 已完成。以下为剩余待实施项：
+O1、O3.1、O5、O14 已完成。以下为剩余待实施项：
 
 - **O7 prefill 桶化 CUDA graph：** PREFILL pass 按 `(batch桶, chunk桶)` 捕获，O1 页模型下 D2D 拷入 token/position 的路径已通。复杂度高，稍后实施。
 

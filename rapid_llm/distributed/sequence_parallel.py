@@ -1,4 +1,4 @@
-"""Sequence-parallelism graph pass: ``AllReduce->RMSNorm`` => ``ReduceScatter->RMSNorm->AllGather``.
+"""Optional sequence-parallel rewrite for all-reduce/RMSNorm seams.
 
 This framework runs eager + CUDA graphs and does not compile through inductor,
 so vLLM's ``SequenceParallelismPass`` — which matches the pattern on an FX graph
@@ -14,11 +14,10 @@ The transformation is the one vLLM performs::
     becomes
     Input -> ReduceScatter -> RMSNorm -> AllGather -> Output
 
-Each rank norms only its own token segment, and the reduce-scatter result enters
-the norm the moment its reduction lands, so the norm overlaps the communication.
-This lays the groundwork for subsequent GEMM+communication fusion (the
-reduce-scatter / all-gather seams are what a ``GEMM + ReduceScatter`` or
-``AllGather + GEMM`` fusion absorbs).
+The rewrite is opt-in because it adds a second all-gather for the residual and
+does not always outperform the standard all-reduce. Runtime eligibility also
+keeps it away from token counts that cannot be sharded evenly and from active
+TBO/L3 communication-overlap policies.
 
 Usage:
     SequenceParallelPass().apply(model)   # after the model is built, before capture
@@ -36,19 +35,16 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checke
 
 _log = get_logger(__name__)
 
-#: Environment variable switching the sequence-parallel pass on (``0`` disables).
-#: On by default: under TP the decomposition is strictly cheaper on norm/residual
-#: compute than the all-reduce it replaces, and a world of one degenerates to the
-#: plain fused norm anyway.
+#: Environment variable switching the sequence-parallel pass on.
 SP_ENV = "RAPID_LLM_SEQUENCE_PARALLEL"
 
 
 def sequence_parallel_enabled() -> bool:
     """Whether the sequence-parallel pass is active for this process.
 
-    Read from :data:`SP_ENV`; anything but ``0``/``false``/``off`` means on.
+    Disabled by default until a deployment opts in with a measured workload.
     """
-    raw = os.environ.get(SP_ENV, "1").strip().lower()
+    raw = os.environ.get(SP_ENV, "0").strip().lower()
     return raw not in ("", "0", "false", "off")
 
 
@@ -59,6 +55,19 @@ def is_sequence_parallel(module: nn.Module) -> bool:
     re-deriving the decision; a module the pass never visited is ``False``.
     """
     return bool(getattr(module, "_sequence_parallel", False))
+
+
+def sequence_parallel_eligible(
+    module: nn.Module, *, num_tokens: int, world_size: int, overlap_active: bool
+) -> bool:
+    """Whether this invocation can safely use the token-sharded rewrite."""
+    return (
+        is_sequence_parallel(module)
+        and world_size > 1
+        and num_tokens > 0
+        and num_tokens % world_size == 0
+        and not overlap_active
+    )
 
 
 class SequenceParallelPass:
@@ -76,9 +85,8 @@ class SequenceParallelPass:
     This is the eager-mode analogue of vLLM's ``SequenceParallelismPass``: the
     same pattern, recognised on the module graph rather than an FX graph.
 
-    The pass only *marks* seams — it moves no weights and changes no shapes — so
-    it is idempotent and safe to run before CUDA-graph capture. It is a no-op
-    when TP is off (a world of one has no peers to scatter across) or when
+    The pass only marks seams; each invocation still checks token divisibility
+    and conflicting overlap policies. It is a no-op when TP is off or when
     :data:`SP_ENV` disables it.
 
     Args:

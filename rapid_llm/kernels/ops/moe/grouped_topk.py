@@ -34,6 +34,25 @@ except ImportError:  # Triton is optional on CPU-only and macOS installs.
     tl = _TritonLanguageStub()
 
 
+def _validate_geometry(
+    n_experts: int, top_k: int, num_expert_group: int, topk_group: int
+) -> int:
+    """Validate routing geometry and return experts per group."""
+    if n_experts < 1:
+        raise ValueError("num_experts must be positive")
+    if num_expert_group < 1 or n_experts % num_expert_group:
+        raise ValueError(
+            f"num_experts {n_experts} must divide into num_expert_group {num_expert_group}"
+        )
+    if not 1 <= topk_group <= num_expert_group:
+        raise ValueError(f"topk_group must be in [1, {num_expert_group}], got {topk_group}")
+    per_group = n_experts // num_expert_group
+    if not 1 <= top_k <= topk_group * per_group:
+        raise ValueError(
+            f"top_k must be in [1, {topk_group * per_group}] for the selected groups, got {top_k}"
+        )
+    return per_group
+
 _jit = triton.jit if triton is not None else lambda function: function
 
 
@@ -79,11 +98,7 @@ def grouped_topk_torch(
             does not split into ``num_expert_group`` equal groups.
     """
     n_experts = router_logits.shape[-1]
-    if num_expert_group <= 0 or n_experts % num_expert_group:
-        raise ValueError(
-            f"num_experts {n_experts} must divide into num_expert_group "
-            f"{num_expert_group} equal groups"
-        )
+    per_group = _validate_geometry(n_experts, top_k, num_expert_group, topk_group)
     if scoring_func == "softmax":
         scores = torch.softmax(router_logits, dim=-1)
     elif scoring_func == "sigmoid":
@@ -97,7 +112,6 @@ def grouped_topk_torch(
     original_scores = scores
     if e_score_correction_bias is not None:
         scores = scores + e_score_correction_bias.unsqueeze(0)
-        per_group = n_experts // num_expert_group
         if per_group >= 2:
             group_scores = (
                 scores.view(num_tokens, num_expert_group, -1).topk(2, dim=-1)[0].sum(dim=-1)
@@ -245,9 +259,8 @@ def grouped_topk(
     Signature, semantics and error contract are :func:`grouped_topk_torch`'s;
     on CUDA with fp32 logits and a geometry the kernel serves, the work runs
     in one Triton program per token. Outside that contract — CPU tensors,
-    non-fp32 logits, a ``top_k`` larger than the surviving experts, or a bias
-    with one-expert groups (whose top-2 group score nothing computes, in any
-    implementation) — the call falls back to the torch reference, so the two
+    non-fp32 logits or a bias with one-expert groups — the call falls back to
+    the torch reference, so the two
     paths never disagree on what runs.
 
     Returns:
@@ -255,21 +268,13 @@ def grouped_topk(
         (the dtypes the torch reference returns).
     """
     n_experts = router_logits.shape[-1]
-    if num_expert_group <= 0 or n_experts % num_expert_group:
-        raise ValueError(
-            f"num_experts {n_experts} must divide into num_expert_group "
-            f"{num_expert_group} equal groups"
-        )
+    per_group = _validate_geometry(n_experts, top_k, num_expert_group, topk_group)
     if scoring_func not in ("softmax", "sigmoid"):
         raise ValueError(f"unsupported MoE scoring_func {scoring_func!r}")
-    per_group = n_experts // num_expert_group
     kernelable = (
         triton is not None
         and router_logits.is_cuda
         and router_logits.dtype == torch.float32
-        # the kernel picks one new expert per round; it cannot fill a row
-        # from fewer survivors than it owes columns.
-        and top_k <= topk_group * per_group
         # the biased group score is a top-2 sum — a one-expert group has none.
         and (e_score_correction_bias is None or per_group >= 2)
     )

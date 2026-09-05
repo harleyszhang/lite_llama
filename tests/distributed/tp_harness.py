@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import queue as queue_module
+import socket
 import time
 import traceback
 from collections.abc import Callable
@@ -22,7 +23,13 @@ import torch
 import torch.multiprocessing as mp
 
 from rapid_llm.distributed import parallel_state as ps
-from rapid_llm.executor.executor import free_port
+
+
+def _free_port() -> int:
+    """Return a local rendezvous port without importing the model executor."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 def needs_gpus(count: int):
@@ -116,7 +123,7 @@ def run_on_tp_ranks(
     context = mp.get_context("spawn")
     results: mp.Queue = context.Queue()
     acks: mp.Queue = context.Queue()  # workers park on it until results are drained
-    port = free_port()
+    port = _free_port()
     workers = [
         context.Process(
             target=_worker,

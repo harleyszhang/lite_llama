@@ -7,9 +7,8 @@ spin) before reading the tile. One intra-kernel pipeline is then
 ``x @ W_gate, x @ W_up -> silu(gate) * up`` — the MLP epilogue streams over
 tiles that the GEMM is still producing, on two CUDA streams of the same GPU.
 
-Synchronisation is a monotonic epoch per buffer rather than a reset between
-runs: the next run waits for ``flag >= epoch``, so stale values from earlier
-runs can never look ready and no clearing kernel is ever needed.
+Eager runs use a monotonic epoch, so stale flags never look ready. CUDA Graph
+capture records one flag clear because replay cannot advance a Python epoch.
 
 Deadlock freedom is a sizing property, not a hope: both kernels are
 persistent (fixed grid, work pulled through an atomic counter), and the
@@ -36,6 +35,18 @@ from .ops.activation.activations import silu
 #: spin near this bound already means a bug, and the count surfaces it.
 DEFAULT_MAX_SPIN = 1 << 20
 
+_producer_streams: dict[int, torch.cuda.Stream] = {}
+
+
+def _producer_stream(device: torch.device) -> torch.cuda.Stream:
+    """Reuse one tile producer stream per device."""
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    stream = _producer_streams.get(index)
+    if stream is None:
+        stream = torch.cuda.Stream(device=device)
+        _producer_streams[index] = stream
+    return stream
+
 
 @triton.jit
 def _tile_signal_gemm_kernel(
@@ -54,6 +65,8 @@ def _tile_signal_gemm_kernel(
     stride_ak,
     stride_wk,
     stride_wn,
+    stride_uwk,
+    stride_uwn,
     stride_om,
     stride_on,
     BLOCK_M: tl.constexpr,
@@ -84,7 +97,7 @@ def _tile_signal_gemm_kernel(
 
         a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
         gw_ptrs = gate_w_ptr + offs_k[:, None] * stride_wk + offs_n[None, :] * stride_wn
-        uw_ptrs = up_w_ptr + offs_k[:, None] * stride_wk + offs_n[None, :] * stride_wn
+        uw_ptrs = up_w_ptr + offs_k[:, None] * stride_uwk + offs_n[None, :] * stride_uwn
 
         acc_gate = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         acc_up = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
@@ -101,7 +114,7 @@ def _tile_signal_gemm_kernel(
             acc_up = tl.dot(a, up_w, acc_up)
             a_ptrs += BLOCK_K * stride_ak
             gw_ptrs += BLOCK_K * stride_wk
-            uw_ptrs += BLOCK_K * stride_wk
+            uw_ptrs += BLOCK_K * stride_uwk
 
         g_ptrs = gate_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on
         tl.store(
@@ -185,11 +198,9 @@ class TileSignalBuffer:
     """Device-side state shared by a tile-signaling producer/consumer pair.
 
     Holds the tile flags (one ``int32`` per tile, monotonically raised to the
-    current epoch by the producer), the two kernels' work counters, and the
-    consumer's dropped-tile counter. ``advance_epoch`` only bumps the host-side
-    integer; the producer/consumer entry points reset the work counters on the
-    streams the kernels themselves run on, so no cross-stream clearing is
-    needed between runs.
+    current epoch by the producer), the two work counters, and the consumer's
+    dropped-tile counter. Entry points reset the counters on their launch
+    streams; graph capture also records a flag clear for replay safety.
 
     The buffer is sized for one problem shape; reusing it for another shape
     with fewer tiles is fine (extra flags stay stale, below every future
@@ -290,6 +301,18 @@ def _launch_common(
     max_spin: int,
 ) -> tuple[int, int, torch.Tensor, torch.Tensor, torch.Tensor, int, int, int]:
     """Validate shapes, allocate intermediates, return launch parameters."""
+    if a.ndim != 2 or gate_w.ndim != 2 or up_w.ndim != 2:
+        raise ValueError("activations and weights must be 2-D tensors")
+    if not a.is_cuda or gate_w.device != a.device or up_w.device != a.device:
+        raise ValueError("activations, weights, and signal buffer must share one CUDA device")
+    if buffer.flags.device != a.device:
+        raise ValueError("activations, weights, and signal buffer must share one CUDA device")
+    if gate_w.dtype != a.dtype or up_w.dtype != a.dtype:
+        raise ValueError("activations and weights must have the same dtype")
+    if any(value < 1 or value & (value - 1) for value in (block_m, block_n, block_k)):
+        raise ValueError("block sizes must be positive powers of two")
+    if num_warps < 1 or num_stages < 1 or max_spin < 1:
+        raise ValueError("num_warps, num_stages, and max_spin must be positive")
     m, k = a.shape
     n = gate_w.shape[1]
     if up_w.shape != gate_w.shape:
@@ -355,8 +378,13 @@ def pipelined_gemm_swiglu(
     m, k = a.shape
     epoch = buffer.advance_epoch()
 
-    producer_stream = torch.cuda.Stream(device=a.device)
+    producer_stream = _producer_stream(a.device)
     current = torch.cuda.current_stream(a.device)
+    buffer.fail_count.zero_()
+    if torch.cuda.is_current_stream_capturing():
+        # Replay does not execute Python's epoch increment. Capturing this clear
+        # prevents a previous replay's flags from satisfying the fixed epoch.
+        buffer.flags.zero_()
 
     # Producer side: counter reset and kernel both on the producer stream;
     # the stream first waits for the caller's prior work on `a` and weights.
@@ -371,6 +399,7 @@ def pipelined_gemm_swiglu(
                     m, n, k,
                     a.stride(0), a.stride(1),
                     gate_w.stride(0), gate_w.stride(1),
+                    up_w.stride(0), up_w.stride(1),
                     gate.stride(0), gate.stride(1),
                     BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
                     num_warps=num_warps, num_stages=num_stages,
@@ -382,6 +411,7 @@ def pipelined_gemm_swiglu(
                 m, n, k,
                 a.stride(0), a.stride(1),
                 gate_w.stride(0), gate_w.stride(1),
+                up_w.stride(0), up_w.stride(1),
                 gate.stride(0), gate.stride(1),
                 BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
                 num_warps=num_warps, num_stages=num_stages,
@@ -449,6 +479,7 @@ def serial_gemm_swiglu(
     m, k = a.shape
     epoch = buffer.advance_epoch()
 
+    buffer.fail_count.zero_()
     buffer.producer_work.zero_()
     _tile_signal_gemm_kernel[(producer,)](
         a, gate_w, up_w, gate, up,
@@ -456,6 +487,7 @@ def serial_gemm_swiglu(
         m, n, k,
         a.stride(0), a.stride(1),
         gate_w.stride(0), gate_w.stride(1),
+        up_w.stride(0), up_w.stride(1),
         gate.stride(0), gate.stride(1),
         BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
         num_warps=num_warps, num_stages=num_stages,

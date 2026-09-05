@@ -311,12 +311,15 @@ def tensor_model_parallel_all_reduce(tensor: torch.Tensor) -> torch.Tensor:
     """
     if _TP_WORLD_SIZE <= 1:
         return tensor
-    if _TP_WORLD_SIZE == 2 and _TP_GROUP is not None:
-        try:
-            if dist.get_backend(_TP_GROUP) == "nccl" and tensor.numel() * tensor.element_size() <= 65536:
-                return p2p_all_reduce(tensor)
-        except (RuntimeError, ValueError):
-            pass
+    if (
+        _TP_WORLD_SIZE == 2
+        and _TP_GROUP is not None
+        and dist.get_backend(_TP_GROUP) == "nccl"
+        and tensor.numel() * tensor.element_size() <= 65536
+    ):
+        # Do not fall back after a P2P error: the peer may already have posted
+        # its half, so entering a different collective can deadlock.
+        return p2p_all_reduce(tensor)
     dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=_TP_GROUP)
     CollectiveStats.record(Collective.ALL_REDUCE, _payload(tensor))
     return tensor
@@ -548,9 +551,8 @@ def p2p_all_reduce(tensor: torch.Tensor) -> torch.Tensor:
     few KiB), a pair of send/recv completes in 5–8 µs versus 15–25 µs for the
     NCCL ring — the ring's fixed setup cost dominates at these sizes.
 
-    The call is graph-safe: ``dist.send`` and ``dist.recv`` are NCCL point-to-point
-    operations that CUDA graphs can capture, unlike the ring all-reduce which
-    may require communicator setup that breaks capture.
+    The paired nonblocking send and receive are posted together, so neither
+    peer waits before both receive operations exist.
 
     Falls back to ``dist.all_reduce`` when the group has more than two ranks or
     uses a non-NCCL backend.
@@ -566,11 +568,17 @@ def p2p_all_reduce(tensor: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=_TP_GROUP)
         CollectiveStats.record(Collective.ALL_REDUCE, _payload(tensor))
         return tensor
-    rank = dist.get_global_rank(_TP_GROUP, _TP_RANK)
-    peer = dist.get_global_rank(_TP_GROUP, 1 - _TP_RANK)
+    peer = 1 - _TP_RANK
+    send_buffer = tensor.contiguous()
     recv_buffer = torch.empty_like(tensor)
-    dist.send(tensor.contiguous(), dst=peer, group=_TP_GROUP)
-    dist.recv(recv_buffer, src=peer, group=_TP_GROUP)
+    requests = dist.batch_isend_irecv(
+        [
+            dist.P2POp(dist.isend, send_buffer, group_peer=peer, group=_TP_GROUP),
+            dist.P2POp(dist.irecv, recv_buffer, group_peer=peer, group=_TP_GROUP),
+        ]
+    )
+    for request in requests:
+        request.wait()
     tensor.add_(recv_buffer)
     CollectiveStats.record(Collective.ALL_REDUCE, _payload(tensor))
     return tensor

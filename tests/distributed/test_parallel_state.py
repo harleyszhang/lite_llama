@@ -161,6 +161,62 @@ def test_divide_names_the_dimension_that_does_not_fit():
         ps.divide(6, 4, "attention heads")
 
 
+def test_p2p_all_reduce_posts_send_and_receive_together(monkeypatch):
+    """Both peers must post receive work before waiting, or blocking sends deadlock."""
+    import torch
+
+    posted = []
+
+    class Work:
+        def wait(self):
+            return True
+
+    def p2p_op(op, tensor, *, group_peer, group):
+        entry = (op, tensor, group_peer, group)
+        posted.append(entry)
+        return entry
+
+    def batch(ops):
+        assert len(ops) == 2
+        ops[1][1].fill_(2)
+        return [Work(), Work()]
+
+    group = object()
+    monkeypatch.setattr(ps, "_TP_WORLD_SIZE", 2)
+    monkeypatch.setattr(ps, "_TP_RANK", 0)
+    monkeypatch.setattr(ps, "_TP_GROUP", group)
+    monkeypatch.setattr(ps.dist, "get_backend", lambda _group: "nccl")
+    monkeypatch.setattr(ps.dist, "P2POp", p2p_op)
+    monkeypatch.setattr(ps.dist, "batch_isend_irecv", batch)
+
+    tensor = torch.ones(4)
+    assert torch.equal(ps.p2p_all_reduce(tensor), torch.full((4,), 3.0))
+    assert [entry[2] for entry in posted] == [1, 1]
+    ps.abandon_parallel()
+
+
+def test_small_all_reduce_does_not_switch_collectives_after_p2p_error(monkeypatch):
+    """A partial P2P failure must propagate; fallback could deadlock its peer."""
+    import torch
+
+    monkeypatch.setattr(ps, "_TP_WORLD_SIZE", 2)
+    monkeypatch.setattr(ps, "_TP_GROUP", object())
+    monkeypatch.setattr(ps.dist, "get_backend", lambda _group: "nccl")
+    def fail_p2p(_tensor):
+        raise RuntimeError("p2p")
+
+    monkeypatch.setattr(ps, "p2p_all_reduce", fail_p2p)
+    monkeypatch.setattr(
+        ps.dist,
+        "all_reduce",
+        lambda *_args, **_kwargs: pytest.fail("must not enter a mismatched collective"),
+    )
+
+    with pytest.raises(RuntimeError, match="p2p"):
+        ps.tensor_model_parallel_all_reduce(torch.ones(4))
+    ps.abandon_parallel()
+
+
 # --------------------------------------------------------------------------- #
 # Two-rank gloo collectives: the tensor primitives over a real process group.
 # --------------------------------------------------------------------------- #

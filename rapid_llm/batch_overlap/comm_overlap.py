@@ -47,9 +47,6 @@ from ..tools.observability import Collective, CollectiveStats
 from ..utils.logger import get_logger
 from .overlap import Timeline
 
-# Temporary diagnostic: events deferred vs waited while a capture is open.
-CAPTURE_FENCE_STATS = {"deferred": 0, "fenced": 0}
-
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
     from ..modules.linear import LinearBase
 
@@ -260,11 +257,6 @@ class CommStreamPool:
             CollectiveStats.record(Collective.ALL_REDUCE, payload)
             return None
         if torch.cuda.is_current_stream_capturing():
-            mode = os.environ.get("RAPID_LLM_CAPTURE_MODE", "fork")
-            if mode == "flatten":
-                dist.all_reduce(tensor, group=group)
-                CollectiveStats.record(Collective.ALL_REDUCE, payload)
-                return None
             # Capture keeps the fork/join shape, not a flattened queue. While
             # a capture is open PyTorch records kernels from *every* stream:
             # a side stream that first waits an event the capture stream
@@ -281,26 +273,17 @@ class CommStreamPool:
             comm = self.stream
             comm.wait_stream(capture)
             with torch.cuda.stream(comm):
-                if mode == "bcast":
-                    dist.broadcast(tensor, src=dist.get_global_rank(group, 0), group=group)
-                else:
-                    dist.all_reduce(tensor, group=group)
+                dist.all_reduce(tensor, group=group)
             event = torch.cuda.Event()
             event.record(comm)
-            if mode == "immediate_join":
-                capture.wait_event(event)
             tensor.record_stream(comm)
-            CAPTURE_FENCE_STATS["deferred"] += 1
             CollectiveStats.record(Collective.ALL_REDUCE, payload)
             return event
         compute = torch.cuda.current_stream(self._device)
         comm = self.stream
         comm.wait_stream(compute)
         with torch.cuda.stream(comm), self.timeline.region(label, "comm"):
-            if os.environ.get("RAPID_LLM_CAPTURE_MODE") == "bcast":
-                dist.broadcast(tensor, src=dist.get_global_rank(group, 0), group=group)
-            else:
-                dist.all_reduce(tensor, group=group)
+            dist.all_reduce(tensor, group=group)
         event = torch.cuda.Event()
         event.record(comm)
         tensor.record_stream(comm)
@@ -452,12 +435,14 @@ class DeferredArContext:
         """
         if not events:
             return
+        pending = tuple(events)
         stream = torch.cuda.current_stream(self._pool.device)
-        if torch.cuda.is_current_stream_capturing():
-            CAPTURE_FENCE_STATS["fenced"] += len(events)
-        for event in events:
+        for event in pending:
             stream.wait_event(event)
         events.clear()
+        if events is not self._events:
+            completed = {id(event) for event in pending}
+            self._events[:] = [event for event in self._events if id(event) not in completed]
 
     def fence_pending_reads(self) -> None:
         """Fence what the innermost collector gathered — an in-stage read point.
@@ -472,30 +457,30 @@ class DeferredArContext:
         self.fence(self._collector if self._collector is not None else self._events)
 
     def drain(self) -> None:
-        """Fence every outstanding event — the context-exit backstop."""
+        """Fence events not already consumed by a stage collector."""
         self.fence(self._events)
 
 
 _deferred: ContextVar[DeferredArContext | None] = ContextVar(
     "rapid_llm_deferred_all_reduce", default=None
 )
-
-#: O11 fusion: when True, row_parallel_forward skips the all-reduce so the
-#: caller can decompose it into reduce-scatter + norm + all-gather.
-_skip_allreduce: ContextVar[bool] = ContextVar(
-    "rapid_llm_skip_allreduce", default=False
+_skip_row_parallel_reduce: ContextVar[bool] = ContextVar(
+    "rapid_llm_skip_row_parallel_reduce", default=False
 )
-
 
 def current_deferred_ar() -> DeferredArContext | None:
     """The deferred-AR context this call site runs in, if any."""
     return _deferred.get()
 
 
-def is_allreduce_skipped() -> bool:
-    """Whether row-parallel all-reduces should be skipped (O11 fusion)."""
-    return _skip_allreduce.get()
-
+@contextmanager
+def skip_row_parallel_all_reduce() -> Iterator[None]:
+    """Expose a row-parallel partial to an explicit replacement collective."""
+    token = _skip_row_parallel_reduce.set(True)
+    try:
+        yield
+    finally:
+        _skip_row_parallel_reduce.reset(token)
 
 @contextmanager
 def deferred_all_reduce(
@@ -550,7 +535,7 @@ def row_parallel_forward(layer: LinearBase, x: torch.Tensor) -> torch.Tensor:
     """
     world_size = get_tensor_model_parallel_world_size()
     rows = x.shape[:-1].numel()
-    if is_allreduce_skipped():
+    if _skip_row_parallel_reduce.get():
         return layer.apply_linear(x)
     mode = _dispatch_mode(world_size, _deferred.get() is not None, comm_overlap_policy(), rows)
     if mode == "passthrough":

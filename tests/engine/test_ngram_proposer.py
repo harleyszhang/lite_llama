@@ -9,8 +9,6 @@ Usage:
 
 from __future__ import annotations
 
-import pytest
-
 from rapid_llm.engine.ngram_proposer import NgramProposer
 
 

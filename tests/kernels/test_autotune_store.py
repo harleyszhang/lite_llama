@@ -202,6 +202,19 @@ class TestConfigStore:
         store2 = ConfigStore(cache_dir=tmp_path)
         assert store2.get(key) == config
 
+    def test_stale_instances_merge_writes(self, tmp_path: Path):
+        """A cached snapshot must not overwrite another process's newer key."""
+        first = ConfigStore(cache_dir=tmp_path)
+        second = ConfigStore(cache_dir=tmp_path)
+        key_a = TuneKey(gpu="gpu", op="op", shape_bucket="M16_N1_K1", dtype="fp16")
+        key_b = TuneKey(gpu="gpu", op="op", shape_bucket="M32_N1_K1", dtype="fp16")
+
+        assert first.load_all("op") == {}
+        second.put(key_b, {"BLOCK_M": 32}, latency_us=2.0)
+        first.put(key_a, {"BLOCK_M": 16}, latency_us=1.0)
+
+        assert ConfigStore(cache_dir=tmp_path).load_all("op").keys() == {key_a, key_b}
+
 
 # --------------------------------------------------------------------------- #
 # get_best_config (lookup module)

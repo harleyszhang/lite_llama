@@ -320,7 +320,6 @@ class ModelRunner:
                 _TP_GRAPH_ENV,
             )
             return
-
         # A captured graph replays the Python side of a kernel call verbatim, so
         # a decode backend that assembles per-step inputs on the host would bake
         # the capture-time lengths in and silently attend stale rows. vLLM runs
@@ -456,14 +455,7 @@ class ModelRunner:
 
     @property
     def uses_cuda_graph(self) -> bool:
-        """Whether a captured graph may serve the next decode step.
-
-        The two-batch overlap policy asks before every decode step: an eager
-        interleave would fight the graph for the step, so when this is true
-        the eager TBO stands down. The graph itself may still be *captured*
-        in the TBO shape (see :meth:`enable_cuda_graph`) — replay carries the
-        interleave, and the policy is only consulted for the eager fallback.
-        """
+        """Whether at least one decode CUDA graph is installed."""
         return self._graph_manager is not None
 
     def _run_tbo(
@@ -542,6 +534,14 @@ class ModelRunner:
             ``[rows, 1, vocab]`` logits, rows in batch order -- the same
             shape :meth:`forward` returns for the step.
         """
+        if self._graph_manager is not None:
+            replayed = self._graph_manager.try_replay(input_ids, position_ids, self.atten_info)
+            if replayed is not None:
+                return replayed
+
+        prepare = step_prepare_for("attention.decode")
+        if prepare is not None:
+            prepare(self.atten_info, self)
         return model_forward_maybe_tbo(
             self.model,
             enable_tbo=enable_tbo,

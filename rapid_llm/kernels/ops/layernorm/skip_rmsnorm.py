@@ -1,10 +1,9 @@
 """Fused residual-add + RMSNorm ("skip rmsnorm") in Triton.
 
-:func:`fused_allreduce_rmsnorm` is the full O11 communication–RMSNorm
-fusion: it decomposes the all-reduce + residual-add + RMSNorm sequence into
-reduce-scatter → residual-add + RMSNorm → all-gather. The norm runs on each
-rank's local chunk while the all-gather is in flight, overlapping compute
-with communication.
+:func:`fused_allreduce_rmsnorm` completes tensor-parallel reduction before
+running the fused residual-add/RMSNorm kernel. Model layers normally use the
+communication dispatcher directly so deferred and chunked overlap policies
+remain effective.
 
 Usage:
     residual, y = skip_rmsnorm(x, residual, weight, eps)
@@ -282,31 +281,11 @@ def fused_add_rmsnorm(x, residual, weight, eps=1e-5):
 
 @torch.no_grad()
 def sequence_parallel_allreduce_rmsnorm(partial, residual, weight, eps=1e-5):
-    """Sequence-parallel rewrite of all-reduce + residual-add + RMSNorm.
+    """Reduce-scatter a TP partial, norm its token shard, then all-gather.
 
-    Decomposes the ``AllReduce -> RMSNorm`` pattern into
-    ``ReduceScatter -> RMSNorm -> AllGather`` — the transformation vLLM's
-    ``SequenceParallelismPass`` performs on the FX graph, adapted here to this
-    framework's eager + CUDA-graph execution (a module-level seam rather than an
-    inductor pattern):
-
-    1. **Reduce-scatter** the row-parallel partial along tokens: each rank ends
-       up holding the *summed* values for its own segment ``[T/world, H]``, not
-       the whole ``[T, H]``.
-    2. **RMSNorm on the local segment only.** The residual add and the norm are
-       per-row, so norming ``T/world`` rows is bit-identical to norming all ``T``
-       and slicing, at ``1/world`` the work. The reduce-scatter result feeds the
-       norm directly — the full tensor is never materialised, so the segment
-       enters the norm the moment its reduction lands.
-    3. **All-gather** the normed segment (and the updated residual) back to the
-       full token set for the next op.
-
-    This is the sequence-parallel foundation: under TP it cuts the norm/residual
-    compute to ``1/world`` and exposes the reduce-scatter / all-gather seams a
-    subsequent GEMM+communication fusion absorbs into the adjacent projections.
-
-    The caller must ensure the all-reduce in the preceding row-parallel linear
-    was skipped (see :func:`~rapid_llm.batch_overlap.comm_overlap.is_allreduce_skipped`).
+    The caller must have skipped the preceding row-parallel all-reduce. Token
+    rows must divide evenly across ranks; an uneven shape safely falls back to
+    the canonical all-reduce plus fused norm.
 
     Args:
         partial: ``(..., hidden)`` this rank's row-parallel partial sum.
@@ -322,27 +301,30 @@ def sequence_parallel_allreduce_rmsnorm(partial, residual, weight, eps=1e-5):
         get_tensor_model_parallel_world_size,
         reduce_scatter,
         tensor_model_parallel_all_gather,
+        tensor_model_parallel_all_reduce,
     )
 
     if get_tensor_model_parallel_world_size() <= 1:
         return fused_add_rmsnorm(partial, residual, weight, eps)
 
-    rank = get_tensor_model_parallel_rank()
-    hidden = partial.shape[-1]
+    if residual is None:
+        raise ValueError("sequence-parallel RMSNorm requires a residual tensor")
 
-    # 1. Reduce-scatter along tokens: [T, H] -> [T/world, H], summed across ranks.
+    world_size = get_tensor_model_parallel_world_size()
+    hidden = partial.shape[-1]
     flat_partial = partial.reshape(-1, hidden)
+    if flat_partial.shape[0] % world_size:
+        reduced = tensor_model_parallel_all_reduce(partial)
+        return fused_add_rmsnorm(reduced, residual, weight, eps)
+
+    rank = get_tensor_model_parallel_rank()
     local_partial = reduce_scatter(flat_partial, dim=0)
     local_len = local_partial.shape[0]
 
-    # 2. Slice the running residual to this rank's segment, then fuse the
-    #    residual add + RMSNorm on it. Per-row arithmetic, so the shard norms
-    #    identically to the full tensor at 1/world the rows.
     flat_residual = residual.reshape(-1, hidden)
     local_residual = flat_residual[rank * local_len : (rank + 1) * local_len].contiguous()
     normed_local, residual_local = fused_add_rmsnorm(local_partial, local_residual, weight, eps)
 
-    # 3. All-gather the normed segment and the updated residual back to full.
     normed = tensor_model_parallel_all_gather(normed_local.contiguous(), dim=0)
     residual_out = tensor_model_parallel_all_gather(residual_local.contiguous(), dim=0)
 
@@ -352,14 +334,10 @@ def sequence_parallel_allreduce_rmsnorm(partial, residual, weight, eps=1e-5):
 
 @torch.no_grad()
 def fused_allreduce_rmsnorm(partial, residual, weight, eps=1e-5):
-    """Sequence-parallel all-reduce + residual-add + RMSNorm (see above).
+    """Complete a TP all-reduce, then fuse residual-add and RMSNorm."""
+    from ....distributed.parallel_state import tensor_model_parallel_all_reduce
 
-    Retained as the public seam name the decoder blocks call; it delegates to
-    :func:`sequence_parallel_allreduce_rmsnorm`, the reduce-scatter -> local-norm
-    -> all-gather decomposition. A world of one degenerates to the plain fused
-    add-and-norm.
-    """
-    return sequence_parallel_allreduce_rmsnorm(partial, residual, weight, eps)
+    return fused_add_rmsnorm(tensor_model_parallel_all_reduce(partial), residual, weight, eps)
 
 
 @torch.no_grad()

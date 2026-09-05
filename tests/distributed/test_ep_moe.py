@@ -23,7 +23,6 @@ import json
 import os
 import tempfile
 
-import pytest
 import torch
 
 from rapid_llm.distributed import parallel_state as ps
@@ -160,7 +159,7 @@ def _dispatch_combine_routes_across_ranks(rank: int) -> bool:
     w = torch.rand(rows, _TOP_K)
 
     dispatcher = AllToAllDispatcher(_NUM_EXPERTS, nl, off)
-    handle, local_x, local_ids, local_w = dispatcher.dispatch(x, ids, w)
+    handle, local_x, local_ids, _ = dispatcher.dispatch(x, ids, w)
     local_weight = weight[off : off + nl]
     local_out = torch.einsum("nh,nhe->ne", local_x, local_weight[local_ids.reshape(-1)])
     out = dispatcher.combine(handle, local_out)

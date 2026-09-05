@@ -1,35 +1,35 @@
-"""O4 MoE dequant-fused grouped GEMM: measured A10 tiles vs the shipped heuristic.
+"""Compare measured MoE grouped-GEMM tiles with the shipped heuristic.
 
 ``native/fused_moe`` already dequantises fp8/int8 expert tiles *inside* the GEMM
 mainloop (``dequant_fp8e4m3`` on the loaded k-tile), so there is no separate fp16
-weight materialisation to remove -- that half of O4 predates this round. What O4
-still owed on sm86 was the missing autotune collect round: with an empty store,
+weight materialisation. On sm86 the missing autotune collect round left an empty store,
 ``_launch_config`` falls back to ``_TILE_TABLE_PRE_HOPPER``, a conservative table
 the sweep never measured (H100-only), so every A10 MoE GEMM ran on a guess.
 
 This A/B times the same grouped GEMMs two ways on the same bytes:
 
-* ``tuned``     -- the autotune store populated by ``bench_fused_moe.py --tune``
-                   on this GPU (the O4 collect round);
-* ``heuristic`` -- ``LITE_LLAMA_AUTOTUNE=0``, i.e. the unmeasured PRE_HOPPER table
+* ``tuned``     -- the autotune store populated by ``bench_fused_moe.py --tune``;
+* ``heuristic`` -- ``RAPID_LLM_AUTOTUNE=0``, i.e. the PRE_HOPPER table
                    a machine without a collect round gets.
 
 Speedup > 1 means the collect round bought real time over the shipped guess.
 fp8 W8A8 is absent on purpose: Triton cannot emit ``tl.float8e4nv`` below sm89, so
 that row does not exist on A10 (see ``active_schemes``).
 
-Switch under test: ``LITE_LLAMA_AUTOTUNE`` = ``1`` (store) | ``0`` (heuristic).
+Switch under test: ``RAPID_LLM_AUTOTUNE`` = ``1`` (store) | ``0`` (heuristic).
 
 Usage:
-    python benchmarks/kernels/bench_moe_o4.py \
-        --json docs/benchmark_logs/moe_o4_<stamp>.json
+    python benchmarks/kernels/bench_moe_autotune.py \
+        --json docs/benchmark_logs/moe_autotune_<stamp>.json
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
+from functools import partial
 from pathlib import Path
 
 import torch
@@ -37,9 +37,6 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from microbench import bench, metadata, require_cuda
-
-import rapid_llm.kernels  # noqa: F401  (registers the spec rows)
 from bench_fused_moe import (
     BUILTIN_GEOMETRIES,
     MoeGeometry,
@@ -48,6 +45,9 @@ from bench_fused_moe import (
     _build_int8,
     routing,
 )
+from microbench import bench, metadata, require_cuda
+
+import rapid_llm.kernels
 from rapid_llm.kernels.ops.moe.fused_moe import _launch_config
 from rapid_llm.kernels.ops.tile_policy import resolve_tiles
 
@@ -77,9 +77,9 @@ def _tile_for(tokens: int, geo: MoeGeometry, dtype_label: str, top_k: int) -> di
 
 def _set_autotune(on: bool) -> None:
     if on:
-        os.environ.pop("LITE_LLAMA_AUTOTUNE", None)
+        os.environ.pop("RAPID_LLM_AUTOTUNE", None)
     else:
-        os.environ["LITE_LLAMA_AUTOTUNE"] = "0"
+        os.environ["RAPID_LLM_AUTOTUNE"] = "0"
 
 
 def main() -> int:
@@ -125,10 +125,11 @@ def main() -> int:
 
             _set_autotune(False)
             heur_tile = _tile_for(tokens, geo, dtype_label, geo.top_k)
-            heur_us = bench(lambda: call(x, weights, ids))
+            invoke = partial(call, x, weights, ids)
+            heur_us = bench(invoke)
             _set_autotune(True)
             tuned_tile = _tile_for(tokens, geo, dtype_label, geo.top_k)
-            tuned_us = bench(lambda: call(x, weights, ids))
+            tuned_us = bench(invoke)
             _set_autotune(False)
 
             speedup = heur_us / tuned_us if tuned_us else float("nan")
@@ -154,8 +155,6 @@ def main() -> int:
         del call
         torch.cuda.empty_cache()
 
-    import math
-
     geo_mean = math.exp(sum(math.log(r["speedup"]) for r in rows) / len(rows))
     changed = [r for r in rows if r["tile_changed"]]
     best = max(rows, key=lambda r: r["speedup"])
@@ -165,7 +164,7 @@ def main() -> int:
         f"={best['speedup']:.3f}x"
     )
     print(
-        "Read as: speedup > 1 means the O4 collect round's measured tile beats the\n"
+        "Read as: speedup > 1 means the measured tile beats the\n"
         "unmeasured PRE_HOPPER guess. Cells whose tile did not change are 1.0x by\n"
         "construction (same kernel, same config); their spread is run-to-run noise."
     )
@@ -176,8 +175,8 @@ def main() -> int:
         write_json_log(
             args.json,
             {
-                "optimization": "O4 MoE grouped-GEMM autotune collect (A10 tiles vs PRE_HOPPER heuristic)",
-                "switch": "LITE_LLAMA_AUTOTUNE=1(store)|0(heuristic)",
+                "optimization": "MoE grouped-GEMM autotune (A10 tiles vs PRE_HOPPER heuristic)",
+                "switch": "RAPID_LLM_AUTOTUNE=1(store)|0(heuristic)",
                 "kernel": "native/fused_moe",
                 "inference_mode": "offline kernel microbenchmark (no serving queue)",
                 "command": " ".join(sys.argv),

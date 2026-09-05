@@ -48,6 +48,7 @@ from ..models.registry import ModelRegistry
 from ..tools.observability import EngineMetrics, Tracer
 from ..utils.env_compat import getenv
 from .detokenizer import IncrementalDetokenizer
+from .ngram_proposer import NgramProposer
 from .outputs import CompletionOutput, RequestOutput
 from .sampler import PositionLogprobs, SamplingParams
 from .scheduler import (
@@ -59,7 +60,6 @@ from .scheduler import (
     Scheduler,
     SchedulerConfig,
 )
-from .ngram_proposer import NgramProposer
 from .stop_criteria import POLL_INTERVAL, detect_repetition
 
 if TYPE_CHECKING:
@@ -977,7 +977,6 @@ class ContinuousBatchingEngine:
         failed: list[Request] = []
         logits_offset = 0
         now = time.monotonic()
-        spec_advanced: list[Request] = []
         for i, (req, draft_ids) in enumerate(drafts):
             n_draft = len(draft_ids)
             # Logits for this request's draft tokens.
@@ -1014,11 +1013,10 @@ class ContinuousBatchingEngine:
             else:
                 bonus = verify_tokens[i].item()
             emitted.append((req, bonus, None))
-            spec_advanced.append(req)
 
         # _harvest handles the bonus token: append to output_token_ids, detokenise,
         # stop detection, length check. It extends req.delta with the bonus text.
-        harvest_advanced = self._harvest(emitted)
+        self._harvest(emitted)
 
         # Requests that had no drafts need normal decode.
         remaining = no_draft + failed

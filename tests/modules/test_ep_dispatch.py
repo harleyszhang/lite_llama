@@ -43,7 +43,7 @@ def test_world_of_one_roundtrip_matches_reference():
     weight = torch.randn(num_experts, hidden, dout)
 
     dispatcher = AllToAllDispatcher(num_experts, num_experts, 0)
-    handle, local_x, local_ids, local_weights = dispatcher.dispatch(x, ids, weights)
+    handle, local_x, local_ids, _ = dispatcher.dispatch(x, ids, weights)
     local_out = _grouped_expert(local_x, local_ids, weight)
     out = dispatcher.combine(handle, local_out)
 
@@ -80,12 +80,12 @@ def test_two_phase_api_matches_synchronous():
     dispatcher = AllToAllDispatcher(num_experts, num_experts, 0)
 
     handle = dispatcher.dispatch_a(x, ids, weights)
-    local_x, local_ids, local_weights = dispatcher.dispatch_b(handle)
+    local_x, local_ids, _ = dispatcher.dispatch_b(handle)
     local_out = _grouped_expert(local_x, local_ids, weight)
     handle = dispatcher.combine_a(handle, local_out)
     split_out = dispatcher.combine_b(handle)
 
-    sync_handle, sx, sid, sw = dispatcher.dispatch(x, ids, weights)
+    sync_handle, sx, sid, _ = dispatcher.dispatch(x, ids, weights)
     sync_out = dispatcher.combine(sync_handle, _grouped_expert(sx, sid, weight))
 
     torch.testing.assert_close(split_out, sync_out, atol=1e-6, rtol=1e-6)

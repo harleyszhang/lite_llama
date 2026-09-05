@@ -475,6 +475,31 @@ class TestPreemption:
         # Every request got at least one decode turn.
         assert all(count > 0 for count in decode_counts.values())
 
+    def test_block_pressure_preempts_the_youngest_unplanned_decode(self):
+        """A future decode row is a valid victim until it receives work."""
+        sched = Scheduler(
+            SchedulerConfig(
+                max_seq_len=40,
+                max_num_seqs=2,
+                max_num_batched_tokens=128,
+                max_chunk_size=0,
+                prefix_cache_blocks=3,
+                enable_preemption=True,
+            ),
+            num_slots=2,
+        )
+        requests = [make_request("old", prompt_len=15), make_request("young", prompt_len=15)]
+        for request in requests:
+            sched.add_request(request)
+        sched.schedule()
+        for request in requests:
+            request.output_token_ids.append(999)
+
+        out = sched.schedule()
+
+        assert out.preempted == [requests[1]]
+        assert out.decode == [requests[0]]
+
     def test_preemption_conserves_requests_and_slots(self):
         """Regression: a preempted victim used to leak out of both queues.
 

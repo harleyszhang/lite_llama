@@ -1,7 +1,6 @@
-"""Tests for fused_add_rmsnorm (O11 communication–RMSNorm fusion).
+"""Tests for the fused residual-add/RMSNorm kernel.
 
-Verifies that the fused kernel produces the same result as the reference
-(skip_rmsnorm) and that the P2P all-reduce routes correctly for TP=2.
+Verifies that the fused kernel matches the separate skip-RMSNorm reference.
 """
 
 import pytest
@@ -63,7 +62,7 @@ def test_fused_add_rmsnorm_3d_input(dtype):
     weight = torch.ones(shape[-1], dtype=dtype, device="cuda")
 
     y_fused, res_fused = fused_add_rmsnorm(x.clone(), residual.clone(), weight)
-    y_ref, res_ref = skip_rmsnorm(x.clone(), residual.clone(), weight)
+    y_ref, _ = skip_rmsnorm(x.clone(), residual.clone(), weight)
 
     assert y_fused.shape == shape
     assert res_fused.shape == shape

@@ -12,7 +12,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from pathlib import Path
@@ -60,10 +59,10 @@ def compare_generations(
     # Compare
     token_match = 0
     total_tokens = 0
-    for a, b in zip(outputs_fp16, outputs_fp8):
+    for a, b in zip(outputs_fp16, outputs_fp8, strict=True):
         toks_a = a.split()
         toks_b = b.split()
-        for ta, tb in zip(toks_a, toks_b):
+        for ta, tb in zip(toks_a, toks_b, strict=False):
             if ta == tb:
                 token_match += 1
             total_tokens += 1
@@ -105,11 +104,11 @@ def main():
     print(f"fp16 time: {results['time_fp16_s']:.3f}s")
     print(f"fp8  time: {results['time_fp8_s']:.3f}s")
     print(f"Token match rate: {results['token_match_rate']:.2%}")
-    print(f"KV capacity: fp8 = 2x fp16")
+    print("KV capacity: fp8 = 2x fp16")
 
     if args.json:
         from benchmarks.lib import write_json_log
-        write_json_log(args.json, results, {"benchmark": "fp8_kv_o14"})
+        write_json_log(args.json, results, {"benchmark": "fp8_kv"})
         print(f"\nResults saved to {args.json}")
 
 
