@@ -26,6 +26,8 @@ from safetensors.torch import save_file
 
 from rapid_llm.models.config import ModelConfig
 
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 #: Trimmed V4 at test size. Six layers = two passes over the three attention
 #: types; two of them route through the hash router, four through top-k.
 #: ``sliding_window=16`` keeps the rolling window exercised at prompt scale.
@@ -102,20 +104,18 @@ def _loaded_pair(tmp_path, seed: int = 0):
                 gate.e_score_correction_bias.normal_(0.0, 0.25)
             if hasattr(gate, "tid2eid"):
                 gate.tid2eid.copy_(
-                    torch.randint(
-                        0, _BODY["n_routed_experts"], gate.tid2eid.shape, generator=None
-                    )
+                    torch.randint(0, _BODY["n_routed_experts"], gate.tid2eid.shape, generator=None)
                 )
     state = {key: value.detach().clone() for key, value in hf_model.state_dict().items()}
     save_file(state, str(tmp_path / "model.safetensors"), metadata={"format": "pt"})
 
     model = ModelRegistry.resolve("deepseek_v4").load_class()(config)
-    materialise_parameters(model, "cuda", dtype=config.dtype)
+    materialise_parameters(model, DEVICE, dtype=config.dtype)
     model.load_weights(hf_weights_iterator(tmp_path, dequant_dtype=config.dtype))
     # Buffers were built on the CPU (materialise_parameters only moves
     # parameters); the engine's loader finishes with ``model.to(device)``.
-    model.cuda()
-    # Both sides on CUDA at the parity dtype, so per-test ``.to(...).cuda()``
+    model.to(DEVICE)
+    # Both sides on CUDA at the parity dtype, so per-test ``.to(...).to(DEVICE)``
     # calls degenerate to no-ops and every comparison runs like-for-like.
     # ``.to(dtype)`` would also narrow the reference's fp32 *buffers* — the
     # rope tables and the router's ``e_score_correction_bias`` — while the
@@ -146,11 +146,11 @@ def _loaded_pair(tmp_path, seed: int = 0):
             strict_fp32_params.extend(
                 (hc, name, p.detach().clone()) for name, p in hc.named_parameters()
             )
-    hf_model = hf_model.to(config.dtype).cuda()
+    hf_model = hf_model.to(config.dtype).to(DEVICE)
     for module, name, buf in fp32_buffers:
-        module.register_buffer(name, buf.cuda())
+        module.register_buffer(name, buf.to(DEVICE))
     for module, name, param in strict_fp32_params:
-        module._parameters[name].data = param.cuda()
+        module._parameters[name].data = param.to(DEVICE)
     return hf_model, model.eval(), config
 
 
@@ -170,21 +170,21 @@ def pair(tmp_path_factory):
     return _loaded_pair(tmp_path_factory.mktemp("v4"))
 
 
-@pytest.mark.usefixtures("cuda_available")
 def test_rotary_tables_match(pair):
     """Both theta tables and the interleaved layout against the reference."""
     hf_model, model, _ = pair
-    hidden = torch.randn(2, 7, _BODY["hidden_size"], device="cuda", dtype=model.config.dtype)
-    pos = torch.arange(7).unsqueeze(0).expand(2, -1).contiguous().cuda()
+    hidden = torch.randn(2, 7, _BODY["hidden_size"], device=DEVICE, dtype=model.config.dtype)
+    pos = torch.arange(7).unsqueeze(0).expand(2, -1).contiguous().to(DEVICE)
     with torch.no_grad():
         for layer_type in ("main", "compress"):
-            cos_h, sin_h = hf_model.model.rotary_emb(hidden, position_ids=pos, layer_type=layer_type)
+            cos_h, sin_h = hf_model.model.rotary_emb(
+                hidden, position_ids=pos, layer_type=layer_type
+            )
             cos_l, sin_l = model.rotary_emb(hidden, pos, layer_type)
             torch.testing.assert_close(cos_l.float(), cos_h.float())
             torch.testing.assert_close(sin_l.float(), sin_h.float())
 
 
-@pytest.mark.usefixtures("cuda_available")
 def test_hyper_connection_matches(pair):
     """mHC mapping: Sinkhorn comb, pre/post logits, and the stream collapse."""
     hf_model, model, _ = pair
@@ -193,7 +193,7 @@ def test_hyper_connection_matches(pair):
     # list) — the same storage lite uses — so no per-test cast happens here.
     hc_h = hf_model.model.layers[0].attn_hc
     streams = torch.randn(
-        2, 5, _BODY["hc_mult"], _BODY["hidden_size"], device="cuda", dtype=model.config.dtype
+        2, 5, _BODY["hc_mult"], _BODY["hidden_size"], device=DEVICE, dtype=model.config.dtype
     )
     with torch.no_grad():
         post, comb, collapsed = hc(streams)
@@ -203,7 +203,6 @@ def test_hyper_connection_matches(pair):
     torch.testing.assert_close(collapsed.float(), collapsed_h.float(), atol=2e-2, rtol=2e-2)
 
 
-@pytest.mark.usefixtures("cuda_available")
 def test_router_sqrtsoftplus_semantics(pair):
     """Selection follows ``scores + bias``; weights are the gathered raw scores."""
     hf_model, model, _ = pair
@@ -211,7 +210,7 @@ def test_router_sqrtsoftplus_semantics(pair):
     gate_h = hf_model.model.layers[2].mlp.gate  # fixture dtype: weight bf16, bias fp32
 
     torch.manual_seed(3)
-    x = torch.randn(11, _BODY["hidden_size"], dtype=moe.gate_weight.dtype, device="cuda")
+    x = torch.randn(11, _BODY["hidden_size"], dtype=moe.gate_weight.dtype, device=DEVICE)
     with torch.no_grad():
         weights, ids = moe._route(x)
         _, weights_h, ids_h = gate_h(x.clone())
@@ -225,7 +224,6 @@ def test_router_sqrtsoftplus_semantics(pair):
     )
 
 
-@pytest.mark.usefixtures("cuda_available")
 def test_hash_router_reads_the_table(pair):
     """``hash_moe`` layers pick experts through ``tid2eid`` — not the logits."""
     hf_model, model, _ = pair
@@ -233,8 +231,8 @@ def test_hash_router_reads_the_table(pair):
     gate_h = hf_model.model.layers[0].mlp.gate  # fixture dtype: weight bf16, table int64
 
     torch.manual_seed(4)
-    x = torch.randn(2, 6, _BODY["hidden_size"], dtype=moe.gate_weight.dtype, device="cuda")
-    input_ids = torch.randint(0, _BODY["vocab_size"], (2, 6), device="cuda")
+    x = torch.randn(2, 6, _BODY["hidden_size"], dtype=moe.gate_weight.dtype, device=DEVICE)
+    input_ids = torch.randint(0, _BODY["vocab_size"], (2, 6), device=DEVICE)
     with torch.no_grad():
         weights, ids = moe._route(x.reshape(-1, _BODY["hidden_size"]), input_ids)
         _, weights_h, ids_h = gate_h(x.clone(), input_ids)
@@ -245,7 +243,6 @@ def test_hash_router_reads_the_table(pair):
     )
 
 
-@pytest.mark.usefixtures("cuda_available")
 def test_moe_layer_matches_transformers(pair):
     """Whole MoE forward — routing, bias selection, clamped SwiGLU, shared."""
     hf_model, model, _ = pair
@@ -254,19 +251,14 @@ def test_moe_layer_matches_transformers(pair):
         moe_h = hf_model.model.layers[layer_index].mlp  # fixture already at parity dtype
 
         torch.manual_seed(5 + layer_index)
-        x = torch.randn(
-            2, 6, _BODY["hidden_size"], dtype=moe.gate_weight.dtype, device="cuda"
-        )
-        input_ids = torch.randint(0, _BODY["vocab_size"], (2, 6), device="cuda")
+        x = torch.randn(2, 6, _BODY["hidden_size"], dtype=moe.gate_weight.dtype, device=DEVICE)
+        input_ids = torch.randint(0, _BODY["vocab_size"], (2, 6), device=DEVICE)
         with torch.no_grad():
             actual = moe(x.clone(), input_ids=input_ids)
             expected = moe_h(x.clone(), input_ids=input_ids)
-        torch.testing.assert_close(
-            actual.float(), expected.float(), atol=2e-2, rtol=2e-2
-        )
+        torch.testing.assert_close(actual.float(), expected.float(), atol=2e-2, rtol=2e-2)
 
 
-@pytest.mark.usefixtures("cuda_available")
 def test_decoder_layer_matches_transformers(pair):
     """One full block — attention over the sliding/compressed KV plus the mHC mix."""
     from transformers.cache_utils import DynamicCache
@@ -276,10 +268,10 @@ def test_decoder_layer_matches_transformers(pair):
     batch, seq_len = 2, 7
     torch.manual_seed(6)
     hidden = torch.randn(
-        batch, seq_len, _BODY["hc_mult"], _BODY["hidden_size"], device="cuda", dtype=config.dtype
+        batch, seq_len, _BODY["hc_mult"], _BODY["hidden_size"], device=DEVICE, dtype=config.dtype
     )
-    input_ids = torch.randint(0, _BODY["vocab_size"], (batch, seq_len), device="cuda")
-    pos = torch.arange(seq_len).unsqueeze(0).expand(batch, -1).contiguous().cuda()
+    input_ids = torch.randint(0, _BODY["vocab_size"], (batch, seq_len), device=DEVICE)
+    pos = torch.arange(seq_len).unsqueeze(0).expand(batch, -1).contiguous().to(DEVICE)
     # transformers 5.15 passes both rope tables as a layer-type dict; lite's
     # layer takes the "main" pair alone (the compressor builds its own).
     position_embeddings = {
@@ -287,7 +279,7 @@ def test_decoder_layer_matches_transformers(pair):
         for layer_type in ("main", "compress")
     }
     main_pe = position_embeddings["main"]
-    valid = torch.ones(batch, seq_len, dtype=torch.bool, device="cuda")
+    valid = torch.ones(batch, seq_len, dtype=torch.bool, device=DEVICE)
 
     for layer_index in range(6):
         model.reset_v4_caches()
@@ -301,16 +293,14 @@ def test_decoder_layer_matches_transformers(pair):
         causal_mask = create_sliding_window_causal_mask(
             config=config.hf_config,
             inputs_embeds=torch.zeros(
-                batch, seq_len, _BODY["hidden_size"], device="cuda", dtype=config.dtype
+                batch, seq_len, _BODY["hidden_size"], device=DEVICE, dtype=config.dtype
             ),
             attention_mask=None,
             past_key_values=cache,
             position_ids=pos,
         )
         with torch.no_grad():
-            actual = layer(
-                hidden.clone(), pos, main_pe, input_ids, valid
-            )
+            actual = layer(hidden.clone(), pos, main_pe, input_ids, valid)
             expected = layer_h(
                 hidden.clone(),
                 input_ids=input_ids,
@@ -320,11 +310,13 @@ def test_decoder_layer_matches_transformers(pair):
                 past_key_values=cache,
             )
         torch.testing.assert_close(
-            actual.float(), expected.float(), atol=6e-2, rtol=6e-2,
+            actual.float(),
+            expected.float(),
+            atol=6e-2,
+            rtol=6e-2,
         )
 
 
-@pytest.mark.usefixtures("cuda_available")
 def test_end_to_end_greedy_parity(pair):
     """Greedy tokens from prefill + 12 decode steps match the reference."""
     from transformers.cache_utils import DynamicCache
@@ -332,7 +324,7 @@ def test_end_to_end_greedy_parity(pair):
     hf_model, model, config = pair
     torch.manual_seed(7)
     batch, prompt_len = 2, 9
-    input_ids = torch.randint(0, _BODY["vocab_size"], (batch, prompt_len), device="cuda")
+    input_ids = torch.randint(0, _BODY["vocab_size"], (batch, prompt_len), device=DEVICE)
     steps = 12
 
     # --- reference: manual greedy loop over the HF model ------------------ #
@@ -342,9 +334,12 @@ def test_end_to_end_greedy_parity(pair):
         for step in range(steps):
             ids = tokens_h[-1]
             past_len = 0 if step == 0 else prompt_len + step - 1
-            pos = torch.arange(past_len, past_len + ids.shape[1], device="cuda").unsqueeze(
-                0
-            ).expand(batch, -1).contiguous()
+            pos = (
+                torch.arange(past_len, past_len + ids.shape[1], device=DEVICE)
+                .unsqueeze(0)
+                .expand(batch, -1)
+                .contiguous()
+            )
             out = hf_model(
                 input_ids=ids,
                 position_ids=pos,
@@ -359,18 +354,13 @@ def test_end_to_end_greedy_parity(pair):
     tokens_l = [input_ids]
     with torch.no_grad():
         meta = _lite_metadata(batch, prompt_len, prefill=True)
-        pos = (
-            torch.arange(prompt_len, device="cuda")
-            .unsqueeze(0)
-            .expand(batch, -1)
-            .contiguous()
-        )
+        pos = torch.arange(prompt_len, device=DEVICE).unsqueeze(0).expand(batch, -1).contiguous()
         logits = model(input_ids, pos, meta)
         for step in range(steps):
             next_tok = logits[:, -1, :].argmax(dim=-1, keepdim=True)
             tokens_l.append(next_tok)
             meta = _lite_metadata(batch, 1, prefill=False)
-            pos = torch.full((batch, 1), prompt_len + step, device="cuda")
+            pos = torch.full((batch, 1), prompt_len + step, device=DEVICE)
             logits = model(next_tok, pos, meta)
     actual = torch.cat(tokens_l[1:], dim=1)
 
@@ -379,7 +369,6 @@ def test_end_to_end_greedy_parity(pair):
     )
 
 
-@pytest.mark.usefixtures("cuda_available")
 def test_incremental_equals_full_forward(pair):
     """Chunked prefill + decode must equal one whole-sequence forward.
 
@@ -397,14 +386,14 @@ def test_incremental_equals_full_forward(pair):
     _, model, _ = pair
     torch.manual_seed(8)
     batch, total_len = 2, 13
-    input_ids = torch.randint(0, _BODY["vocab_size"], (batch, total_len), device="cuda")
+    input_ids = torch.randint(0, _BODY["vocab_size"], (batch, total_len), device=DEVICE)
 
     def run_layers(chunk_ids: torch.Tensor, pos: torch.Tensor) -> list[torch.Tensor]:
         """One pass over the stream stack; returns each layer's output."""
         hidden = model.get_input_embeddings(chunk_ids)
         pe = model.rotary_emb(hidden, pos, "main")
         streams = hidden.unsqueeze(2).expand(-1, -1, model.hc_mult, -1).contiguous()
-        valid = torch.ones(batch, chunk_ids.shape[1], dtype=torch.bool, device="cuda")
+        valid = torch.ones(batch, chunk_ids.shape[1], dtype=torch.bool, device=DEVICE)
         outs = []
         for layer in model.layers:
             streams = layer(streams, pos, pe, chunk_ids, valid)
@@ -414,7 +403,7 @@ def test_incremental_equals_full_forward(pair):
     with torch.no_grad():
         # Whole sequence at once.
         model.reset_v4_caches()
-        pos = torch.arange(total_len, device="cuda").unsqueeze(0).expand(batch, -1).contiguous()
+        pos = torch.arange(total_len, device=DEVICE).unsqueeze(0).expand(batch, -1).contiguous()
         full_outs = run_layers(input_ids, pos)
 
         # 8-token prefill, then one token at a time.
@@ -425,7 +414,7 @@ def test_incremental_equals_full_forward(pair):
         step_outs = [[] for _ in model.layers]
         for chunk in chunks:
             pos = (
-                torch.arange(offset, offset + chunk.shape[1], device="cuda")
+                torch.arange(offset, offset + chunk.shape[1], device=DEVICE)
                 .unsqueeze(0)
                 .expand(batch, -1)
                 .contiguous()
@@ -440,6 +429,4 @@ def test_incremental_equals_full_forward(pair):
         if li == 0:  # the sliding layer carries no compressor: bit-exact
             assert torch.equal(incremental, full)
         else:
-            torch.testing.assert_close(
-                incremental.float(), full.float(), atol=0.15, rtol=0.15
-            )
+            torch.testing.assert_close(incremental.float(), full.float(), atol=0.15, rtol=0.15)

@@ -132,14 +132,34 @@ class DeepseekV2MLAAttention(nn.Module):
                 mscale = yarn_get_mscale(factor, float(mscale_all_dim))
                 self.scale = self.scale * mscale * mscale
 
-        # Native rows are not golden-verified yet, so default dispatch refuses them; naming
-        # the backend keeps the physical gates (dtype, layout) and drops only the golden one.
-        self._prefill = dispatch(
-            "attention.mla_prefill", dtype=dtype, layout=MLA_LATENT_TAGS, backend="native"
-        ).load()
-        self._decode = dispatch(
-            "attention.mla_decode", dtype=dtype, layout=MLA_LATENT_TAGS, backend="native"
-        ).load()
+        # Bind after weights and inputs have been placed on their execution device.
+        self._bound_device = None
+        self._params_dtype = dtype
+
+    def _bind_kernels(self, device_type: str) -> None:
+        if self._bound_device == device_type:
+            return
+        if device_type == "cpu":
+            from functools import partial
+
+            from ..kernels.backend import cpu
+
+            self._prefill = cpu.mla_prefill
+            self._decode = partial(cpu.mla_decode, qk_rope_head_dim=self.qk_rope_head_dim)
+        else:
+            self._prefill = dispatch(
+                "attention.mla_prefill",
+                dtype=self._params_dtype,
+                layout=MLA_LATENT_TAGS,
+                backend="native",
+            ).load()
+            self._decode = dispatch(
+                "attention.mla_decode",
+                dtype=self._params_dtype,
+                layout=MLA_LATENT_TAGS,
+                backend="native",
+            ).load()
+        self._bound_device = device_type
 
     @property
     def w_uk(self) -> torch.Tensor:
@@ -172,6 +192,7 @@ class DeepseekV2MLAAttention(nn.Module):
         layer_index: int,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
+        self._bind_kernels(x.device.type)
         batch, seq_len, _ = x.shape
         tokens = batch * seq_len
         flat = x.view(tokens, self.hidden_size)

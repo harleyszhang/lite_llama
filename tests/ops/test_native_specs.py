@@ -22,15 +22,24 @@ import torch.nn.functional as F
 
 import rapid_llm.kernels  # noqa: F401 — import side effect: spec registration
 import rapid_llm.kernels.ops as ops_pkg
-from rapid_llm.kernels.dispatcher import REGISTRY, dispatch
+from rapid_llm.kernels.dispatcher import REGISTRY
+from rapid_llm.kernels.dispatcher import dispatch as _dispatch
 from rapid_llm.kernels.dispatcher.dispatch import resolve_target
 from rapid_llm.kernels.ops import LOGICAL_OPS
 from rapid_llm.kernels.ops.gemm.linear import linear_torch
 from rapid_llm.modules.quantization.unquant import UnquantizedLinearMethod
+from rapid_llm.platform import PlatformInfo
 
 #: resolve_target imports the native Triton modules to prove they are callable;
 #: on a machine without Triton there is nothing to resolve.
 TRITON_AVAILABLE = importlib.util.find_spec("triton") is not None
+
+
+def dispatch(op, **kwargs):
+    """These catalogue checks describe GPU kernels, regardless of the test host."""
+    kwargs.setdefault("platform_info", PlatformInfo("cuda", 8, 6))
+    return _dispatch(op, **kwargs)
+
 
 #: scheme key -> spec name, the routing every quant method relies on.
 SCHEME_TO_ROW = {
@@ -200,7 +209,9 @@ class TestAttentionCatalogue:
 
     @pytest.mark.parametrize("op,rows", sorted(ATTENTION_EXTERNAL_ROWS.items()))
     def test_external_rows_are_registered(self, op: str, rows: set[str]) -> None:
-        external = {s.name for s in REGISTRY.implementations(op) if s.backend != "native"}
+        external = {
+            s.name for s in REGISTRY.implementations(op) if s.backend not in {"native", "cpu"}
+        }
         assert external == rows
 
     def test_flashinfer_rows_are_verified_with_golden_diffs(self) -> None:
@@ -256,7 +267,9 @@ class TestGlueCatalogue:
 
     @pytest.mark.parametrize("op,rows", sorted(GLUE_EXTERNAL_ROWS.items()))
     def test_external_rows_are_registered(self, op: str, rows: set[str]) -> None:
-        external = {s.name for s in REGISTRY.implementations(op) if s.backend != "native"}
+        external = {
+            s.name for s in REGISTRY.implementations(op) if s.backend not in {"native", "cpu"}
+        }
         assert external == rows
 
     @pytest.mark.parametrize("op,row", sorted(GLUE_NATIVE_ROWS.items()))
@@ -270,6 +283,8 @@ class TestGlueCatalogue:
         # runs these kernels at fp32, so declaring it would be an unbacked
         # promise dispatch would happily act on.
         for spec in REGISTRY.implementations(op):
+            if spec.backend == "cpu":
+                continue
             assert set(spec.dtypes) == {"bf16", "fp16"}, spec.name
         with pytest.raises(LookupError, match="dtype"):
             dispatch(op, dtype="fp32")

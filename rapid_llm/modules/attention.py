@@ -46,6 +46,7 @@ class PagedAttention(nn.Module):
         self.head_dim = head_dim
         self.scale = 1.0 / math.sqrt(head_dim)
         self.kv_cache_dtype = kv_cache_dtype
+        self.params_dtype = params_dtype
         self.kv_cache_method = get_kv_cache_method(kv_cache_dtype)
         # Scales live on the strategy, not this layer: the quantise-on-write and
         # dequantise-on-read halves are only correct as a pair.
@@ -53,18 +54,8 @@ class PagedAttention(nn.Module):
         self.k_scale = method.k_scale if method is not None else 1.0
         self.v_scale = method.v_scale if method is not None else 1.0
 
-        # One dispatch decision per op, held for the module's lifetime. kv_write carries
-        # no dtype window: with an fp8 cache the K/V arrive already quantised, so uint8
-        # rows are as legal as bf16. The decode op's scheme key encodes the cache dtype.
-        self._kv_write = dispatch("kv_write", dtype=kv_cache_dtype, layout=PAGED_KV_TAGS).load()
-        self._prefill = dispatch("attention.prefill", dtype=params_dtype).load()
-        self._chunked = dispatch("attention.chunked_prefill", dtype=params_dtype).load()
-        self._decode = dispatch(
-            "attention.decode",
-            dtype=params_dtype,
-            scheme="fp8_kv" if kv_cache_dtype == torch.uint8 else "unquantized",
-            layout=PAGED_KV_TAGS,
-        ).load()
+        # Bind after placement: construction may happen on the meta device.
+        self._bound_device = None
 
         # K/V halves of this layer's cache row, rebuilt only when the backing buffer
         # changes. The live buffers are allocated once (the executor owns them, the CUDA
@@ -76,6 +67,31 @@ class PagedAttention(nn.Module):
         self._kv_view_pair: tuple[torch.Tensor, torch.Tensor] | None = None
         self._kv_view_source: torch.Tensor | None = None
 
+    def _bind_kernels(self, device_type: str) -> None:
+        """Select from the actual input device, including CPU on CUDA hosts."""
+        if self._bound_device == device_type:
+            return
+        if device_type == "cpu":
+            from ..kernels.backend import cpu
+
+            self._kv_write = cpu.update_kv_buffer
+            self._prefill = cpu.flash_attention2_no_pad
+            self._chunked = cpu.flash_attention2_chunked
+            self._decode = cpu.flash_decoding
+        else:
+            self._kv_write = dispatch(
+                "kv_write", dtype=self.kv_cache_dtype, layout=PAGED_KV_TAGS
+            ).load()
+            self._prefill = dispatch("attention.prefill", dtype=self.params_dtype).load()
+            self._chunked = dispatch("attention.chunked_prefill", dtype=self.params_dtype).load()
+            self._decode = dispatch(
+                "attention.decode",
+                dtype=self.params_dtype,
+                scheme="fp8_kv" if self.kv_cache_dtype == torch.uint8 else "unquantized",
+                layout=PAGED_KV_TAGS,
+            ).load()
+        self._bound_device = device_type
+
     def _write_cache(
         self,
         xk: torch.Tensor,
@@ -84,6 +100,7 @@ class PagedAttention(nn.Module):
         layer_index: int,
     ) -> None:
         """Scatter this step's K/V into their allocated cache rows."""
+        self._bind_kernels(xk.device.type)
         if self.kv_cache_method is not None:
             xk, xv = self.kv_cache_method.quantize_kv(xk, xv)
 

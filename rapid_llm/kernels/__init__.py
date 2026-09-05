@@ -16,6 +16,7 @@ from typing import Any
 from . import backend as backend
 from . import dispatcher as dispatcher
 from . import ops as ops
+from .backend import cpu_specs as cpu_specs
 
 # Dispatch machinery: the ops with contenders go through these.
 from .dispatcher import Selected, dispatch, explain, invalidate_cache, op_backend_env
@@ -69,12 +70,54 @@ _EXPORTS: dict[str, tuple[str, str]] = {
 }
 
 
+_CPU_OPS = frozenset(
+    {
+        "skip_rmsnorm",
+        "fused_add_rmsnorm",
+        "fused_allreduce_rmsnorm",
+        "sequence_parallel_allreduce_rmsnorm",
+        "qk_rmsnorm",
+        "rope_emb_forward",
+        "vocab_parallel_embedding",
+        "update_kv_buffer",
+        "update_kv_index",
+        "flash_attention2_no_pad",
+        "flash_attention2_chunked",
+        "flash_decoding",
+        "fused_moe",
+        "repack_int4_experts",
+        "unpack_int8_experts",
+        "fused_moe_w8a8_fp8",
+        "fused_moe_w8a8_int8",
+    }
+)
+
+
 def __getattr__(name: str) -> Any:
     try:
         module_name, attribute = _EXPORTS[name]
     except KeyError as exc:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
-    value = getattr(import_module(module_name, __name__), attribute)
+    if name in _CPU_OPS:
+        implementations = {}
+
+        def value(*args, **kwargs):
+            if args:
+                tensor = args[0]
+            else:
+                from inspect import signature
+
+                cpu_impl = getattr(import_module(".backend.cpu", __name__), attribute)
+                tensor = kwargs[next(iter(signature(cpu_impl).parameters))]
+            device_type = tensor.device.type
+            if device_type not in implementations:
+                target = ".backend.cpu" if device_type == "cpu" else module_name
+                implementations[device_type] = getattr(import_module(target, __name__), attribute)
+            return implementations[device_type](*args, **kwargs)
+
+        value.__name__ = name
+    else:
+        value = getattr(import_module(module_name, __name__), attribute)
     globals()[name] = value
     return value
 
