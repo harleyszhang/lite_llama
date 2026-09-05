@@ -42,7 +42,7 @@ from ..executor.executor import (
     UniProcExecutor,
     launch_tensor_parallel,
 )
-from ..executor.worker import PIPELINE_ENV, ModelInput, PassKind, PassLogprobs, pipeline_enabled
+from ..executor.worker import ModelInput, PassKind, PassLogprobs, pipeline_enabled
 from ..models.config import read_model_type
 from ..models.registry import ModelRegistry
 from ..tools.observability import EngineMetrics, Tracer
@@ -505,11 +505,6 @@ class ContinuousBatchingEngine:
         }
 
         resolved_pipeline = pipeline_enabled() if pipeline is None else pipeline
-        if resolved_pipeline:
-            # Followers learn the driver's loop shape the way they learn
-            # everything else they never get told: from the environment they
-            # were spawned with. setdefault, so an explicit env never loses.
-            os.environ.setdefault(PIPELINE_ENV, "1")
 
         # Followers must exist before this rank builds its engine: sharded
         # layers read their width from the process group.
@@ -526,6 +521,8 @@ class ContinuousBatchingEngine:
                 engine_kwargs,
                 max_num_seqs,
                 enable_expert_parallel=enable_expert_parallel,
+                device=device,
+                pipeline=resolved_pipeline,
             )
 
         engine = LLMEngine(
@@ -980,7 +977,7 @@ class ContinuousBatchingEngine:
         for i, (req, draft_ids) in enumerate(drafts):
             n_draft = len(draft_ids)
             # Logits for this request's draft tokens.
-            req_logits = all_logits[logits_offset:logits_offset + n_draft]
+            req_logits = all_logits[logits_offset : logits_offset + n_draft]
             logits_offset += n_draft
 
             # Verify: argmax(logits[j]) vs draft[j+1] for j in [0, n_draft-2).
@@ -1088,7 +1085,7 @@ class ContinuousBatchingEngine:
         self._executor = None
         self.engine = None
         gc.collect()
-        if torch.cuda.is_available():
+        if torch.device(self.device).type == "cuda":
             torch.cuda.empty_cache()
 
     def timeline_summary(self) -> str:

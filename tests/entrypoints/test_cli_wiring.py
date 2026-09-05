@@ -293,6 +293,7 @@ class TestTensorParallelSurface:
         assert seen["enable_expert_parallel"] is False
 
     def test_serve_passes_expert_parallel_to_the_server_config(self, model_dir, monkeypatch):
+        pytest.importorskip("pydantic", reason="needs the serve extra")
         captured: dict = {}
         from rapid_llm.entrypoints import api_server
 

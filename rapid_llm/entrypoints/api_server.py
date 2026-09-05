@@ -555,6 +555,7 @@ def build_app(config: ServerConfig, engine: AsyncLLMEngine | AsyncDataParallelEn
                 )
                 state["engine"] = AsyncDataParallelEngine(
                     model=config.model_dir,
+                    **({"device": "cpu"} if config.device == "cpu" else {}),
                     data_parallel_size=config.data_parallel_size,
                     load_balancer=config.load_balancer,
                     max_seq_len=config.max_seq_len,

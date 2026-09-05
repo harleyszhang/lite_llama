@@ -40,26 +40,18 @@ _GPU_ONLY_DIRS = ("kernels",)
 _GPU_RUNTIME_FILES = frozenset(
     {
         "compile/test_cuda_graph.py",
-        "distributed/test_data_parallel.py",
-        "distributed/test_parallel_sampling.py",
-        "distributed/test_qkv_parallel.py",
-        "distributed/test_vocab_parallel.py",
-        "engine/test_async_engine.py",
         "engine/test_chunked_prefill.py",
         "engine/test_continuous_batching.py",
         "engine/test_continuous_perf.py",
         "engine/test_engine_e2e.py",
         "engine/test_llm_entrypoint.py",
-        "entrypoints/test_cli_wiring.py",
         "evals/test_gsm8k_correctness.py",
         "evals/test_gsm8k_scoring.py",
         "golden/test_deepseek_trimmed_parity.py",
         "golden/test_logprob_parity.py",
         "golden/test_token_parity.py",
-        "models/test_grouped_topk.py",
         "models/test_quant_methods.py",
         "models/test_qwen3_moe.py",
-        "models/test_weight_mapping.py",
         "multimodal/test_multimodal.py",
     }
 )

@@ -318,6 +318,8 @@ def launch_tensor_parallel(
     max_num_seqs: int,
     master_port: int | None = None,
     enable_expert_parallel: bool = False,
+    device: str = "cuda",
+    pipeline: bool | None = None,
 ) -> tuple[mp.process.BaseProcess, ...]:
     """Start ranks 1..``tp_size``-1 and join this process as rank 0.
 
@@ -346,7 +348,16 @@ def launch_tensor_parallel(
     followers = [
         context.Process(
             target=run_follower,
-            args=(rank, tp_size, engine_kwargs, max_num_seqs, master_port, enable_expert_parallel),
+            args=(
+                rank,
+                tp_size,
+                engine_kwargs,
+                max_num_seqs,
+                master_port,
+                enable_expert_parallel,
+                device,
+                pipeline,
+            ),
             name=f"rapid-llm-tp{rank}",
             daemon=True,
         )
@@ -357,13 +368,14 @@ def launch_tensor_parallel(
     init_tensor_parallel(
         rank=0,
         world_size=tp_size,
+        backend="gloo" if torch.device(device).type == "cpu" else "nccl",
         master_port=master_port,
         enable_expert_parallel=enable_expert_parallel,
     )
     return tuple(followers)
 
 
-def serve_plans(engine: LLMEngine, max_num_seqs: int) -> None:
+def serve_plans(engine: LLMEngine, max_num_seqs: int, *, pipeline: bool | None = None) -> None:
     """Run broadcast plans until the driver sends ``None``. The whole of a follower.
 
     A follower holds no scheduler, queue or stop criteria, and discards the tokens it
@@ -377,7 +389,7 @@ def serve_plans(engine: LLMEngine, max_num_seqs: int) -> None:
         max_num_seqs: Concurrency ceiling, so the scratch matches the driver's
             (``max_seq_len`` comes from the engine: it only sizes local scratch).
     """
-    worker = ModelWorker(engine, max_num_seqs, engine.max_seq_len)
+    worker = ModelWorker(engine, max_num_seqs, engine.max_seq_len, pipeline=pipeline)
     while (plan := tensor_model_parallel_broadcast_object_list()) is not None:
         # Records are discarded as the tokens are: every rank computed identical ones
         # and rank 0 reports them.
@@ -391,6 +403,8 @@ def run_follower(
     max_num_seqs: int,
     master_port: int,
     enable_expert_parallel: bool = False,
+    device: str = "cuda",
+    pipeline: bool | None = None,
 ) -> None:
     """Body of a non-driver tensor-parallel rank: rendezvous, build, serve plans.
 
@@ -403,23 +417,27 @@ def run_follower(
     )
     from ..engine.llm_engine import LLMEngine
 
-    torch.cuda.set_device(rank)
+    on_cpu = torch.device(device).type == "cpu"
+    if not on_cpu:
+        torch.cuda.set_device(rank)
+    device = "cpu" if on_cpu else f"cuda:{rank}"
     init_tensor_parallel(
         rank=rank,
         world_size=tp_size,
+        backend="gloo" if on_cpu else "nccl",
         master_port=master_port,
         enable_expert_parallel=enable_expert_parallel,
     )
     engine = None
     try:
         engine = LLMEngine(
-            device=f"cuda:{rank}",
+            device=device,
             tensor_parallel_size=tp_size,
             enable_expert_parallel=enable_expert_parallel,
             **engine_kwargs,
         )
-        _log.info("tp rank %d ready on cuda:%d", rank, rank)
-        serve_plans(engine, max_num_seqs)
+        _log.info("tp rank %d ready on %s", rank, device)
+        serve_plans(engine, max_num_seqs, pipeline=pipeline)
     except BaseException:
         # A follower that dies here would otherwise vanish silently: the spawn
         # parent only reports an exception that propagates through
