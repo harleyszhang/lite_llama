@@ -68,9 +68,9 @@ TBO_MIN_ROWS_ENV = "RAPID_LLM_TBO_MIN_ROWS"
 #: above which a GEMM is compute-bound rather than weight-read-bound. These are
 #: documented estimates, not measured specs; the gate only needs their ratio.
 _ROOFLINE: dict[tuple[int, int], tuple[float, float]] = {
-    (8, 6): (125e12, 600e9),     # GA10x: A10 / A16 / RTX 30
+    (8, 6): (125e12, 600e9),  # GA10x: A10 / A16 / RTX 30
     (8, 0): (312e12, 2.039e12),  # GA100: A100
-    (9, 0): (990e12, 3.35e12),   # GH100: H100
+    (9, 0): (990e12, 3.35e12),  # GH100: H100
 }
 _ROOFLINE_FALLBACK: tuple[float, float] = (200e12, 1.0e12)
 
@@ -102,9 +102,7 @@ def _ridge_rows() -> int:
     if _ridge_cache is None:
         if torch.cuda.is_available():
             props = torch.cuda.get_device_properties(torch.cuda.current_device())
-            peak_flops, mem_bw = _ROOFLINE.get(
-                (props.major, props.minor), _ROOFLINE_FALLBACK
-            )
+            peak_flops, mem_bw = _ROOFLINE.get((props.major, props.minor), _ROOFLINE_FALLBACK)
         else:
             peak_flops, mem_bw = _ROOFLINE_FALLBACK
         _ridge_cache = int(peak_flops / mem_bw * _RIDGE_SAFETY)
@@ -115,6 +113,7 @@ def reset_ridge_cache() -> None:
     """Forget the cached ridge point — test hook between device contexts."""
     global _ridge_cache
     _ridge_cache = None
+
 
 #: State keys that outlive the whole layer stack. Everything else is an
 #: intermediate, and :func:`_head` asserts none survived.
@@ -332,7 +331,9 @@ def _narrow_metadata(
     b_start_loc = None
     if meta.b_start_loc is not None:
         stride = int(meta.b_start_loc[1] - meta.b_start_loc[0]) if len(meta.b_start_loc) > 1 else 0
-        half_rows = torch.arange(padded_len, device=meta.b_start_loc.device, dtype=meta.b_start_loc.dtype)
+        half_rows = torch.arange(
+            padded_len, device=meta.b_start_loc.device, dtype=meta.b_start_loc.dtype
+        )
         b_start_loc = half_rows * stride
 
     return AttentionMetadata(
@@ -376,6 +377,8 @@ def model_forward_maybe_tbo(
         ``[rows, ..., vocab]`` logits — ``[rows, 1, vocab]`` for a decode step,
         the prefill grid's shape otherwise — rows in batch order.
     """
+    if input_ids.device.type == "cpu":
+        return model(input_ids, position_ids, atten_info)
     inputs = {"input_ids": input_ids, "position_ids": position_ids, "atten_info": atten_info}
     operations_strategy = OperationsStrategy.init_new_tbo(model.layers, prefill=prefill)
     if enable_tbo:

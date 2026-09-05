@@ -513,7 +513,7 @@ def tensor_model_parallel_all_reduce_min(value: int) -> int:
     # ``CUDA_VISIBLE_DEVICES`` the ordinal is remapped again. Asking torch which device
     # the process already selected is the only spelling that is right in every case;
     # the old ``cuda:{_TP_RANK}`` made replica 1 all-reduce from replica 0's card.
-    on_gpu = torch.cuda.is_available()
+    on_gpu = dist.get_backend(_TP_GROUP) == "nccl"
     device = torch.device("cuda", torch.cuda.current_device()) if on_gpu else None
     tensor = torch.tensor([value], dtype=torch.int64, device=device)
     dist.all_reduce(tensor, op=dist.ReduceOp.MIN, group=_TP_GROUP)
@@ -533,7 +533,7 @@ def tensor_model_parallel_ranks_agree(value: int) -> bool:
     """
     if _TP_WORLD_SIZE <= 1:
         return True
-    on_gpu = torch.cuda.is_available()
+    on_gpu = dist.get_backend(_TP_GROUP) == "nccl"
     device = torch.device("cuda", torch.cuda.current_device()) if on_gpu else None
     tensor = torch.tensor([value, -value], dtype=torch.int64, device=device)
     dist.all_reduce(tensor, op=dist.ReduceOp.MIN, group=_TP_GROUP)
@@ -605,7 +605,7 @@ def warmup_collectives() -> None:
     """
     if _TP_WORLD_SIZE <= 1:
         return
-    on_gpu = torch.cuda.is_available()
+    on_gpu = dist.get_backend(_TP_GROUP) == "nccl"
     device = torch.device("cuda", torch.cuda.current_device()) if on_gpu else None
     probe = torch.ones(1, dtype=torch.float32, device=device)
     dist.all_reduce(probe, op=dist.ReduceOp.SUM, group=_TP_GROUP)

@@ -31,11 +31,11 @@ jobs:
       - name: Install CPU-only PyTorch and the package
         run: |
           uv venv --python ${{ matrix.python-version }}
-          uv pip install torch --index-url https://download.pytorch.org/whl/cpu
-          uv pip install -e . --group dev
+          uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --python .venv/bin/python -e '.[serve]' --group dev
 
       - name: Import check
-        run: uv run python -c "import rapid_llm; print(rapid_llm.__version__)"
+        run: .venv/bin/python -c "from rapid_llm import LLM, ContinuousBatchingEngine; import importlib.util; assert importlib.util.find_spec('triton') is None"
 
       # GitHub-hosted runners have no GPU, so the Triton kernel and end-to-end
       # tests are deselected here; they run in the self-hosted `gpu-tests` job.
@@ -44,7 +44,7 @@ jobs:
       # a percentage.
       - name: Run CPU test subset
         run: >
-          uv run pytest -m "not gpu and not weights"
+          .venv/bin/python -m pytest -m "not gpu and not weights"
           --cov=rapid_llm --cov-report=term-missing --cov-fail-under=48
 
   gpu-tests:
@@ -62,7 +62,7 @@ jobs:
       - name: Install the package
         run: |
           uv venv --python 3.13
-          uv pip install -e . --group dev
+          uv pip install --python .venv/bin/python -e '.[cuda,serve]' --group dev
 
       - name: Show GPU
         run: nvidia-smi
@@ -71,4 +71,4 @@ jobs:
       # auto-skips (with a reason) when the runner has no converted checkpoint.
       # Mount one at my_weight/ and the end-to-end plus golden tiers run too.
       - name: Run GPU tests
-        run: uv run pytest
+        run: .venv/bin/python -m pytest

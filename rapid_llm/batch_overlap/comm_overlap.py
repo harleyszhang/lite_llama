@@ -468,6 +468,7 @@ _skip_row_parallel_reduce: ContextVar[bool] = ContextVar(
     "rapid_llm_skip_row_parallel_reduce", default=False
 )
 
+
 def current_deferred_ar() -> DeferredArContext | None:
     """The deferred-AR context this call site runs in, if any."""
     return _deferred.get()
@@ -481,6 +482,7 @@ def skip_row_parallel_all_reduce() -> Iterator[None]:
         yield
     finally:
         _skip_row_parallel_reduce.reset(token)
+
 
 @contextmanager
 def deferred_all_reduce(
@@ -537,6 +539,8 @@ def row_parallel_forward(layer: LinearBase, x: torch.Tensor) -> torch.Tensor:
     rows = x.shape[:-1].numel()
     if _skip_row_parallel_reduce.get():
         return layer.apply_linear(x)
+    if x.device.type == "cpu" and _deferred.get() is None:
+        return tensor_model_parallel_all_reduce(layer.apply_linear(x))
     mode = _dispatch_mode(world_size, _deferred.get() is not None, comm_overlap_policy(), rows)
     if mode == "passthrough":
         return layer.apply_linear(x)

@@ -327,7 +327,10 @@ def _dp_worker(
 
     engine: ContinuousBatchingEngine | None = None
     try:
-        torch.cuda.set_device(global_rank)
+        engine_kwargs = dict(engine_kwargs)
+        on_cpu = engine_kwargs.pop("device", "cuda") == "cpu"
+        if not on_cpu:
+            torch.cuda.set_device(global_rank)
         # The EP flag rides in engine_kwargs (it configures the replica's
         # engine too) but must reach the group state *before* any model is
         # built: expert placement is read at construction, not at forward.
@@ -337,8 +340,9 @@ def _dp_worker(
             tp_size=tp_size,
             dp_size=dp_size,
             enable_expert_parallel=ep_enabled,
+            backend="gloo" if on_cpu else "nccl",
         )
-        device = f"cuda:{global_rank}"
+        device = "cpu" if on_cpu else f"cuda:{global_rank}"
         if tp_rank == 0:
             # ``from_pretrained`` finds this process already in a TP group and
             # therefore spawns nothing: the grid is the coordinator's to own.
@@ -354,7 +358,9 @@ def _dp_worker(
                 **{k: v for k, v in engine_kwargs.items() if k != "enable_expert_parallel"},
             )
         else:
-            follower = LLM(device=device, **engine_kwargs)
+            follower = LLM(
+                device=device, **{k: v for k, v in engine_kwargs.items() if k != "pipeline"}
+            )
         result_queue.put(("ready", global_rank, None))
     except Exception:
         result_queue.put(("error", global_rank, traceback.format_exc()))
@@ -363,7 +369,7 @@ def _dp_worker(
     if engine is None:
         # Exits when the leader broadcasts its stop signal, which is what makes
         # shutting a replica down a single message to its leader.
-        serve_plans(follower, max_num_seqs)
+        serve_plans(follower, max_num_seqs, pipeline=engine_kwargs.get("pipeline"))
         return
 
     try:
@@ -437,10 +443,9 @@ class DataParallelEngine:
             raise ValueError(f"data_parallel_size must be >= 1, got {data_parallel_size}")
         if tensor_parallel_size < 1:
             raise ValueError(f"tensor_parallel_size must be >= 1, got {tensor_parallel_size}")
-        if "device" in engine_kwargs:
+        if "device" in engine_kwargs and engine_kwargs["device"] != "cpu":
             raise ValueError(
-                "device is derived from the replica's rank; pass data_parallel_size "
-                "and tensor_parallel_size instead"
+                "CUDA device is derived from the replica's rank; use device='cpu' for CPU workers"
             )
         if load_balancer not in LOAD_BALANCERS:
             raise ValueError(
@@ -448,7 +453,7 @@ class DataParallelEngine:
             )
         needed = data_parallel_size * tensor_parallel_size
         visible = torch.cuda.device_count()
-        if needed > visible:
+        if engine_kwargs.get("device") != "cpu" and needed > visible:
             raise ValueError(
                 f"data_parallel_size={data_parallel_size} x "
                 f"tensor_parallel_size={tensor_parallel_size} needs {needed} GPUs, "

@@ -84,7 +84,9 @@ class ModelRunner:
             self.kv_row = (1, config.head_dim)
         else:
             # Heads are dealt across TP ranks, so this rank caches only its own K/V.
-            kv_heads = divide(config.num_kv_heads, get_tensor_model_parallel_world_size(), "key/value heads")
+            kv_heads = divide(
+                config.num_kv_heads, get_tensor_model_parallel_world_size(), "key/value heads"
+            )
             self.kv_row = (2 * kv_heads, config.head_dim)
         self.vocab_size = config.vocab_size
         self.max_seq_len = config.max_seq_len
@@ -310,6 +312,9 @@ class ModelRunner:
         vision tower and DeepStack hooks run during prefill, which stays eager.
         """
 
+        if torch.device(self.device).type != "cuda":
+            logger.info("CUDA Graph is unavailable on %s; using eager execution", self.device)
+            return
         if self._graph_manager is not None:
             return  # idempotent
 
@@ -326,7 +331,14 @@ class ModelRunner:
         # the same gate (AttentionCGSupport) before its first capture.
         from ..kernels.dispatcher import unsafe_for_graph
 
-        unsafe = unsafe_for_graph("attention.decode") + unsafe_for_graph("attention.mla_decode")
+        for module in self.model.modules():
+            bind = getattr(module, "_bind_kernels", None)
+            if bind is not None:
+                bind("cuda")
+
+        unsafe = unsafe_for_graph("attention.decode", device_type="cuda") + unsafe_for_graph(
+            "attention.mla_decode", device_type="cuda"
+        )
         if unsafe:
             raise ValueError(
                 "CUDA graph capture refused: the selected attention decode "
@@ -384,9 +396,10 @@ class ModelRunner:
             # than the dense estimate the KV profiler reserved, so capturing a
             # full EP grid beside a profiled KV pool lands here. Anything that
             # is not an OOM is a real capture bug and must not be swallowed.
-            if not isinstance(exc, torch.cuda.OutOfMemoryError) and "out of memory" not in str(
-                exc
-            ).lower():
+            if (
+                not isinstance(exc, torch.cuda.OutOfMemoryError)
+                and "out of memory" not in str(exc).lower()
+            ):
                 raise
             logger.warning("CUDA graph capture ran out of memory; falling back to eager decode")
             captured = False
@@ -539,7 +552,7 @@ class ModelRunner:
             if replayed is not None:
                 return replayed
 
-        prepare = step_prepare_for("attention.decode")
+        prepare = step_prepare_for("attention.decode") if input_ids.is_cuda else None
         if prepare is not None:
             prepare(self.atten_info, self)
         return model_forward_maybe_tbo(
@@ -633,7 +646,7 @@ class ModelRunner:
         # of the layer loop — the role vLLM's build_metadata plays. Prefill
         # passes and multimodal prefills never run it; the graph path needs no
         # hook because its selected rows are all graph_safe by the gate above.
-        if multi_modal_inputs is None and input_ids.shape[-1] == 1:
+        if input_ids.is_cuda and multi_modal_inputs is None and input_ids.shape[-1] == 1:
             prepare = step_prepare_for("attention.decode")
             if prepare is not None:
                 prepare(self.atten_info, self)

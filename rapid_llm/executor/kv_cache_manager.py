@@ -93,7 +93,7 @@ class MemoryProfiler:
         Falls back to a small fixed budget on CPU (profiling APIs do not apply),
         keeping unit tests runnable without a GPU.
         """
-        if not torch.cuda.is_available() or self.device == "cpu":
+        if torch.device(self.device).type == "cpu":
             logger.warning("CUDA unavailable; using a minimal KV cache for CPU execution")
             return 4096
 

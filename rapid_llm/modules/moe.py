@@ -267,9 +267,7 @@ class AllToAllDispatcher:
             events=events,
         )
 
-    def dispatch_b(
-        self, handle: DispatchHandle
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def dispatch_b(self, handle: DispatchHandle) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fence the dispatch exchange; return this rank's expert batch.
 
         Returns:
@@ -279,9 +277,7 @@ class AllToAllDispatcher:
             :meth:`combine_b`.
         """
         self._fence(handle)
-        local_ids = (handle.recv_ids - self.expert_offset).clamp(
-            0, self.num_local_experts - 1
-        )
+        local_ids = (handle.recv_ids - self.expert_offset).clamp(0, self.num_local_experts - 1)
         ones = torch.ones(
             handle.recv_x.shape[0], 1, dtype=handle.recv_x.dtype, device=handle.recv_x.device
         )
@@ -424,7 +420,9 @@ class SparseMoeBlock(nn.Module):
             self.num_local_experts = config.num_experts
             self.expert_offset = 0
             self.moe_intermediate_size = divide(
-                config.moe_intermediate_size, get_tensor_model_parallel_world_size(), "MoE intermediate"
+                config.moe_intermediate_size,
+                get_tensor_model_parallel_world_size(),
+                "MoE intermediate",
             )
         self.quant = quant
         # The model dtype drives every unquantised tensor this block owns (the router and
@@ -623,7 +621,11 @@ class SparseMoeBlock(nn.Module):
         """
         assert self.dispatcher is not None
         rows = x.shape[0]
-        if self.shared_experts is None or not SboFlags.enable_dispatch_shared_overlap(rows):
+        if (
+            not x.is_cuda
+            or self.shared_experts is None
+            or not SboFlags.enable_dispatch_shared_overlap(rows)
+        ):
             handle, local_x, local_ids, local_weights = self.dispatcher.dispatch(x, ids, weights)
             out = self.dispatcher.combine(
                 handle, self._run_experts(local_x, local_ids, local_weights)
