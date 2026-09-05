@@ -32,6 +32,14 @@ finally:
 
 `max_gpu_num_blocks` 是保留的参数名，单位是 KV token 行，CPU 也使用它。CPU 默认分配 4096 行，不会探测可用主存。加载大模型前应设置明确预算：普通注意力的 KV 字节数约为 `行数 × 层数 × 2 × 本地 KV 头数 × head_dim × 每元素字节数`，另需权重、激活和临时缓冲区。MLA 的缓存布局不同。
 
+## 执行原理
+
+CPU 和 GPU 使用同一套模型、调度器、分页 KV 缓存和采样逻辑。模型先在 `meta` 设备搭建结构，再把 checkpoint 权重直接装入目标设备；运行时根据输入 tensor 的设备选择算子后端。因此 `device="cpu"` 不会导入或模拟 Triton kernel，而是调用等价的 PyTorch 实现。
+
+一次推理仍分为 prefill 和 decode：prefill 批量写入每层 KV cache，decode 每步只追加新 token，并通过页表读取历史 KV。CPU 注意力按请求处理不同长度的序列，归一化、softmax、MoE 和量化反算通常使用 FP32 累加，再转回模型 dtype。低比特权重能减少存储，但当前 CPU 路径会先反量化或构造临时张量，不等价于原生低比特 GEMM。
+
+并行语义也保持一致。TP、EP 和 DP 使用 Gloo；collective 在 CPU 上同步完成。CUDA Graph、CUDA stream overlap、Tile-Signaling 和 kernel autotune 没有 CPU 对应收益，框架会走 eager 或同步路径。CPU 后端的目标是让功能、接口和数值回归可用，不是预测 GPU kernel 的性能。
+
 ## 功能边界
 
 | 路径 | CPU 行为 |

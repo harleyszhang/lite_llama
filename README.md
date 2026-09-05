@@ -79,6 +79,7 @@ The model registry includes LLaMA, Qwen2, Qwen3, Qwen3-MoE, LLaVA, Qwen3-VL, and
 | Feature | Behavior |
 | --- | --- |
 | Tensor parallelism | Shards projections, attention heads, and the vocabulary across ranks |
+| Expert parallelism | Assigns whole MoE experts within the TP group and routes tokens with all-to-all |
 | Data parallelism | Routes requests between independent replicas; can combine with TP |
 | CPU parallelism | Uses Gloo; select `device="cpu"` |
 | CUDA Graph | Captures supported decode shapes; requires matching choices across TP ranks |

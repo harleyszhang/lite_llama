@@ -158,6 +158,7 @@ class GPTQMoEMethod(FusedMoEMethodBase):
 
     def create_weights(self, block: nn.Module) -> dict[str, nn.Parameter]:
         config: GPTQConfig = block.quant  # type: ignore[assignment]
+        num_experts = getattr(block, "num_local_experts", block.num_experts)
         gate_up_n = 2 * block.moe_intermediate_size
         gate_up_k = block.hidden_size
         down_n = block.hidden_size
@@ -167,25 +168,15 @@ class GPTQMoEMethod(FusedMoEMethodBase):
         num_groups_d = (down_k + config.group_k - 1) // config.group_k
         return {
             "gate_up_proj": RawParameter(
-                torch.empty(
-                    block.num_experts, gate_up_n, gate_up_k // pack_factor, dtype=torch.int32
-                )
+                torch.empty(num_experts, gate_up_n, gate_up_k // pack_factor, dtype=torch.int32)
             ),
-            "gate_up_proj_scale": expert_scale_parameter(
-                block.num_experts, (gate_up_n, num_groups_gu)
-            ),
-            "gate_up_proj_zeros": expert_scale_parameter(
-                block.num_experts, (gate_up_n, num_groups_gu)
-            ),
+            "gate_up_proj_scale": expert_scale_parameter(num_experts, (gate_up_n, num_groups_gu)),
+            "gate_up_proj_zeros": expert_scale_parameter(num_experts, (gate_up_n, num_groups_gu)),
             "down_proj": RawParameter(
-                torch.empty(block.num_experts, down_n, down_k // pack_factor, dtype=torch.int32)
+                torch.empty(num_experts, down_n, down_k // pack_factor, dtype=torch.int32)
             ),
-            "down_proj_scale": expert_scale_parameter(
-                block.num_experts, (down_n, num_groups_d)
-            ),
-            "down_proj_zeros": expert_scale_parameter(
-                block.num_experts, (down_n, num_groups_d)
-            ),
+            "down_proj_scale": expert_scale_parameter(num_experts, (down_n, num_groups_d)),
+            "down_proj_zeros": expert_scale_parameter(num_experts, (down_n, num_groups_d)),
         }
 
     def process_weights_after_loading(self, block: nn.Module) -> None:

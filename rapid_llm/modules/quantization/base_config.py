@@ -177,18 +177,15 @@ def allocate_expert_weights(block: nn.Module) -> dict[str, nn.Parameter]:
     same one-value-per-element restriction.
     """
     config: QuantizationConfig = block.quant  # type: ignore[assignment]
+    num_experts = getattr(block, "num_local_experts", block.num_experts)
     shapes = {
         "gate_up_proj": (2 * block.moe_intermediate_size, block.hidden_size),
         "down_proj": (block.hidden_size, block.moe_intermediate_size),
     }
     weights: dict[str, nn.Parameter] = {}
     for name, (n, k) in shapes.items():
-        weights[name] = RawParameter(
-            torch.empty(block.num_experts, n, k, dtype=config.storage_dtype)
-        )
-        weights[f"{name}_scale_inv"] = expert_scale_parameter(
-            block.num_experts, config.scale_shape(n, k)
-        )
+        weights[name] = RawParameter(torch.empty(num_experts, n, k, dtype=config.storage_dtype))
+        weights[f"{name}_scale_inv"] = expert_scale_parameter(num_experts, config.scale_shape(n, k))
     return weights
 
 
