@@ -902,92 +902,6 @@ wheels = [
 ]
 
 [[package]]
-name = "rapid-llm"
-version = "0.11.0"
-source = { editable = "." }
-dependencies = [
-    { name = "numpy" },
-    { name = "pillow" },
-    { name = "requests" },
-    { name = "rich" },
-    { name = "safetensors" },
-    { name = "torch" },
-    { name = "tqdm" },
-    { name = "transformers" },
-    { name = "triton", marker = "sys_platform == 'linux'" },
-]
-
-[package.optional-dependencies]
-bench = [
-    { name = "matplotlib" },
-    { name = "pandas" },
-]
-eval = [
-    { name = "pyyaml" },
-    { name = "sentence-transformers" },
-]
-flashinfer = [
-    { name = "flashinfer-python" },
-]
-serve = [
-    { name = "fastapi" },
-    { name = "pydantic" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-trace = [
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-sdk" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "accelerate" },
-    { name = "httpx" },
-    { name = "pre-commit" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "pyyaml" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fastapi", marker = "extra == 'serve'", specifier = ">=0.110" },
-    { name = "flashinfer-python", marker = "extra == 'flashinfer'", specifier = ">=0.2" },
-    { name = "matplotlib", marker = "extra == 'bench'", specifier = ">=3.8" },
-    { name = "numpy", specifier = ">=1.24" },
-    { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'trace'", specifier = ">=1.25" },
-    { name = "opentelemetry-sdk", marker = "extra == 'trace'", specifier = ">=1.25" },
-    { name = "pandas", marker = "extra == 'bench'", specifier = ">=2.0" },
-    { name = "pillow", specifier = ">=10.0" },
-    { name = "pydantic", marker = "extra == 'serve'", specifier = ">=2.0" },
-    { name = "pyyaml", marker = "extra == 'eval'", specifier = ">=6.0" },
-    { name = "requests", specifier = ">=2.31" },
-    { name = "rich", specifier = ">=13.0" },
-    { name = "safetensors", specifier = ">=0.4" },
-    { name = "sentence-transformers", marker = "extra == 'eval'", specifier = ">=4.0" },
-    { name = "torch", specifier = ">=2.4" },
-    { name = "tqdm", specifier = ">=4.65" },
-    { name = "transformers", specifier = ">=4.51" },
-    { name = "triton", marker = "sys_platform == 'linux'", specifier = ">=3.0" },
-    { name = "uvicorn", extras = ["standard"], marker = "extra == 'serve'", specifier = ">=0.27" },
-]
-provides-extras = ["eval", "serve", "trace", "flashinfer", "bench"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "accelerate", specifier = ">=1.14.0" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "pre-commit", specifier = ">=4.0" },
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-asyncio", specifier = ">=0.24" },
-    { name = "pytest-cov", specifier = ">=5.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "ruff", specifier = "==0.16.3" },
-]
-
-[[package]]
 name = "markdown-it-py"
 version = "4.2.0"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
@@ -1973,6 +1887,94 @@ wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/da/92/1446574745d74df0c92e6aa4a7b0b3130706a4142b2d1a5869f2eaa423c6/pyyaml-6.0.3-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:16249ee61e95f858e83976573de0f5b2893b3677ba71c9dd36b9cf8be9ac6d65", size = 829923, upload-time = "2025-09-25T21:32:54.537Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/f0/7a/1c7270340330e575b92f397352af856a8c06f230aa3e76f86b39d01b416a/pyyaml-6.0.3-cp314-cp314t-win_amd64.whl", hash = "sha256:4ad1906908f2f5ae4e5a8ddfce73c320c2a1429ec52eafd27138b7f1cbe341c9", size = 174062, upload-time = "2025-09-25T21:32:55.767Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/f1/12/de94a39c2ef588c7e6455cfbe7343d3b2dc9d6b6b2f40c4c6565744c873d/pyyaml-6.0.3-cp314-cp314t-win_arm64.whl", hash = "sha256:ebc55a14a21cb14062aa4162f906cd962b28e2e9ea38f9b4391244cd8de4ae0b", size = 149341, upload-time = "2025-09-25T21:32:56.828Z" },
+]
+
+[[package]]
+name = "rapid-llm"
+version = "0.11.0"
+source = { editable = "." }
+dependencies = [
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "requests" },
+    { name = "rich" },
+    { name = "safetensors" },
+    { name = "torch" },
+    { name = "tqdm" },
+    { name = "transformers" },
+]
+
+[package.optional-dependencies]
+bench = [
+    { name = "matplotlib" },
+    { name = "pandas" },
+]
+cuda = [
+    { name = "triton", marker = "sys_platform == 'linux'" },
+]
+eval = [
+    { name = "pyyaml" },
+    { name = "sentence-transformers" },
+]
+flashinfer = [
+    { name = "flashinfer-python" },
+]
+serve = [
+    { name = "fastapi" },
+    { name = "pydantic" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+trace = [
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "accelerate" },
+    { name = "httpx" },
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "pyyaml" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", marker = "extra == 'serve'", specifier = ">=0.110" },
+    { name = "flashinfer-python", marker = "extra == 'flashinfer'", specifier = ">=0.2" },
+    { name = "matplotlib", marker = "extra == 'bench'", specifier = ">=3.8" },
+    { name = "numpy", specifier = ">=1.24" },
+    { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'trace'", specifier = ">=1.25" },
+    { name = "opentelemetry-sdk", marker = "extra == 'trace'", specifier = ">=1.25" },
+    { name = "pandas", marker = "extra == 'bench'", specifier = ">=2.0" },
+    { name = "pillow", specifier = ">=10.0" },
+    { name = "pydantic", marker = "extra == 'serve'", specifier = ">=2.0" },
+    { name = "pyyaml", marker = "extra == 'eval'", specifier = ">=6.0" },
+    { name = "requests", specifier = ">=2.31" },
+    { name = "rich", specifier = ">=13.0" },
+    { name = "safetensors", specifier = ">=0.4" },
+    { name = "sentence-transformers", marker = "extra == 'eval'", specifier = ">=4.0" },
+    { name = "torch", specifier = ">=2.4" },
+    { name = "tqdm", specifier = ">=4.65" },
+    { name = "transformers", specifier = ">=4.51" },
+    { name = "triton", marker = "sys_platform == 'linux' and extra == 'cuda'", specifier = ">=3.0" },
+    { name = "uvicorn", extras = ["standard"], marker = "extra == 'serve'", specifier = ">=0.27" },
+]
+provides-extras = ["cuda", "eval", "serve", "trace", "flashinfer", "bench"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "accelerate", specifier = ">=1.14.0" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pre-commit", specifier = ">=4.0" },
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "pytest-cov", specifier = ">=5.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "ruff", specifier = "==0.16.3" },
 ]
 
 [[package]]

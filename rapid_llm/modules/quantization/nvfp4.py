@@ -159,6 +159,8 @@ class NVFP4LinearMethod(LinearMethodBase):
         )
 
     def quantize_from_fp16(self, layer: nn.Module, config: QuantizationConfig) -> None:
+        if layer.weight.device.type == "cpu":
+            raise NotImplementedError("NVFP4 runtime quantization requires CUDA; use int4 on CPU")
         from ...kernels.ops.quantization import quantize_nvfp4_blockwise
 
         packed, block_scale, global_scale = quantize_nvfp4_blockwise(layer.weight.data)

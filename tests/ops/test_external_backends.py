@@ -194,7 +194,7 @@ class TestExternalRowsStayOptional:
 
     def test_backend_families_are_the_declared_ones(self) -> None:
         families = {spec.backend for spec in REGISTRY.specs()}
-        assert families <= {"native", *EXTERNAL_BACKENDS}
+        assert families <= {"native", "cpu", *EXTERNAL_BACKENDS}
 
     def test_every_external_row_has_a_working_availability_check(self) -> None:
         for spec in REGISTRY.specs():

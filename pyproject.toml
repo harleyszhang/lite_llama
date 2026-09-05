@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rapid-llm"
 version = "0.11.0"
-description = "RapidLLM (Registry · Attention · Pipeline · Inference · Dispatch): a production-grade LLM inference serving framework with pluggable Triton/CUDA kernels for LLaMA / Qwen / LLaVA / Qwen3-VL"
+description = "LLM inference with continuous batching, CPU execution, and pluggable GPU kernels"
 readme = "README.md"
 requires-python = ">=3.13"
 license = "Apache-2.0"
@@ -27,7 +27,6 @@ dependencies = [
   # build that fails at runtime with torch.cuda.is_available() == False:
   #   uv pip install torch --index-url https://download.pytorch.org/whl/cu129
   "torch>=2.4",
-  "triton>=3.0; platform_system == 'Linux'",
   "transformers>=4.51",
   # Weights are read straight from HuggingFace *.safetensors shards.
   "safetensors>=0.4",
@@ -39,6 +38,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cuda = ["triton>=3.0; platform_system == 'Linux'"]
 # Accuracy evaluation: the harness under examples/evaluator (sentence embeddings)
 # and the benchmark suite under tests/evals (YAML model configs).
 eval = ["sentence-transformers>=4.0", "pyyaml>=6.0"]

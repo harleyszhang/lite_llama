@@ -13,11 +13,8 @@ Usage:
 its return is bytes, not FLOPs.
 """
 
-from .activation import per_token_group_quant
-from .fp8 import fp8_matmul, fp8_quantize_per_token
-from .int4_repack import repack_int4_experts
-from .int8_repack import unpack_int8_experts
-from .nvfp4 import NVFP4_BLOCK, nvfp4_matmul, quantize_nvfp4_blockwise
+from importlib import import_module
+
 from .scale_layout import (
     COLUMN_MAJOR,
     COLUMN_MAJOR_TMA,
@@ -27,9 +24,30 @@ from .scale_layout import (
     create_scale_output,
     infer_scale_layout,
 )
-from .w4a16 import w4a16_matmul
-from .w8a8 import int8_quantize_per_token, smoothquant_matmul
-from .w8a16 import w8a16_matmul
+
+_MODULES = {
+    "per_token_group_quant": "activation",
+    "fp8_matmul": "fp8",
+    "fp8_quantize_per_token": "fp8",
+    "repack_int4_experts": "int4_repack",
+    "unpack_int8_experts": "int8_repack",
+    "NVFP4_BLOCK": "nvfp4",
+    "nvfp4_matmul": "nvfp4",
+    "quantize_nvfp4_blockwise": "nvfp4",
+    "w4a16_matmul": "w4a16",
+    "int8_quantize_per_token": "w8a8",
+    "smoothquant_matmul": "w8a8",
+    "w8a16_matmul": "w8a16",
+}
+
+
+def __getattr__(name):
+    if name not in _MODULES:
+        raise AttributeError(name)
+    value = getattr(import_module(f".{_MODULES[name]}", __name__), name)
+    globals()[name] = value
+    return value
+
 
 __all__ = [
     "COLUMN_MAJOR",

@@ -347,7 +347,9 @@ def dispatch(
     return decision
 
 
-def unsafe_for_graph(op: str, registry: OpRegistry = REGISTRY) -> tuple[str, ...]:
+def unsafe_for_graph(
+    op: str, registry: OpRegistry = REGISTRY, *, device_type: str | None = None
+) -> tuple[str, ...]:
     """Names of ``op``'s selected implementations that must not be graph-captured.
 
     A FULL CUDA-graph capture records the Python side of a kernel call once and
@@ -363,7 +365,9 @@ def unsafe_for_graph(op: str, registry: OpRegistry = REGISTRY) -> tuple[str, ...
             {
                 decision.spec.name
                 for key, decision in registry._decisions.items()
-                if key.op == op and not decision.spec.graph_safe
+                if key.op == op
+                and not decision.spec.graph_safe
+                and (device_type is None or key.platform.device_type == device_type)
             }
         )
     )
@@ -409,6 +413,8 @@ def step_prepare_for(op: str, registry: OpRegistry = REGISTRY) -> Callable | Non
     best: tuple[tuple, KernelSpec] | None = None
     for spec in registry.implementations(op):
         if forced is not None and spec.backend != forced:
+            continue
+        if not capabilities_match(spec.capability, key.platform):
             continue
         if spec.available is not None:
             ok, _detail = _check_available(spec.available)

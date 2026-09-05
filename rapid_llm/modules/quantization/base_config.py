@@ -23,9 +23,7 @@ from .parameter import RawParameter
 # --------------------------------------------------------------------------- #
 
 
-def scale_parameter(
-    shape: tuple[int, ...], dtype: torch.dtype = torch.float32
-) -> RawParameter:
+def scale_parameter(shape: tuple[int, ...], dtype: torch.dtype = torch.float32) -> RawParameter:
     """Allocate a 2-D scale grid in the physical layout the kernels read.
 
     Every blockwise dequant kernel addresses scales as ``scale_ptr +
@@ -53,9 +51,7 @@ def expert_scale_parameter(
     kernels do.
     """
     n_blocks, k_blocks = shape
-    return RawParameter(
-        torch.empty(num_experts, k_blocks, n_blocks, dtype=dtype).transpose(1, 2)
-    )
+    return RawParameter(torch.empty(num_experts, k_blocks, n_blocks, dtype=dtype).transpose(1, 2))
 
 
 def column_major_scale(scale: torch.Tensor) -> torch.Tensor:
@@ -354,6 +350,21 @@ def run_quant_linear(
     and the selected kernel sits behind the common :class:`LinearOp` signature.
     """
     from rapid_llm.kernels.dispatcher import dispatch, dtype_label
+
+    if x.device.type == "cpu":
+        from ...kernels.backend.cpu import linear
+
+        return linear(
+            scheme,
+            x,
+            weight,
+            bias=bias,
+            weight_scale=weight_scale,
+            weight_zeros=weight_zeros,
+            weight_global_scale=weight_global_scale,
+            group_n=group_n,
+            group_k=group_k,
+        )
 
     # For a sub-byte format this ``k`` is the *storage* width, not the logical
     # one. It only feeds the perf-lookup key, which needs consistency rather
